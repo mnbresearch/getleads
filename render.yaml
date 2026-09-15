@@ -11,7 +11,7 @@ services:
     name: getleads-api
     runtime: node
     plan: free
-    buildCommand: npm ci && npm run build -w packages/core -w packages/db -w packages/sdk -w apps/api
+    buildCommand: npm ci --include=dev && npm run build -w packages/core -w packages/db -w packages/sdk -w apps/api
     startCommand: node apps/api/dist/server.js
     healthCheckPath: /health
     envVars:
