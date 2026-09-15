@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, companies, desc, inArray, enqueue, eq, getDb, icps, leads, sql } from "@getleads/db";
-import { createAiProvider, scoreLeadRules, scoreLeadWithAi, hasAi, type IcpCriteria } from "@getleads/core";
+import { and, companies, desc, inArray, enqueue, eq, getDb, icps, leads, sql } from "@prospex/db";
+import { createAiProvider, scoreLeadRules, scoreLeadWithAi, hasAi, type IcpCriteria } from "@prospex/core";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 

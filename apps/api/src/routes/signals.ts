@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, desc, enqueue, eq, getDb, inArray, monitorResults, monitors, or, signalMatches, signalSubscriptions, signals, sql } from "@getleads/db";
+import { and, desc, enqueue, eq, getDb, inArray, monitorResults, monitors, or, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { runSubscription } from "../services/signals.js";
@@ -32,7 +32,7 @@ signalRoutes.get("/types", (c) => c.json({ types: SIGNAL_TYPES }));
 /** Trigger a global scan now (no subscription needed) - useful for demos and agents. */
 signalRoutes.post("/scan", zValidator("json", z.object({ types: z.array(z.enum(SIGNAL_TYPES)).default(["funding", "acquisition"]), keywords: z.array(z.string()).default([]), industries: z.array(z.string()).default([]), locations: z.array(z.string()).default([]), days: z.number().int().min(1).max(30).default(7) })), async (c) => {
   const b = c.req.valid("json");
-  const { scanSignals } = await import("@getleads/core");
+  const { scanSignals } = await import("@prospex/core");
   const { storeSignals } = await import("../services/signals.js");
   const parsed = await scanSignals({ ...b, maxPerQuery: 20 });
   const stored = await storeSignals(parsed, null);

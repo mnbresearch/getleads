@@ -1,6 +1,6 @@
 import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
-import { QuotaExceededError } from "@getleads/db";
+import { QuotaExceededError } from "@prospex/db";
 import { ZodError } from "zod";
 
 export class ApiError extends Error {

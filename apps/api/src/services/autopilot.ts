@@ -1,5 +1,5 @@
-import { and, autopilots, campaigns, consume, consumeLead, eq, getDb, listLeads, remainingPremiumBudget, type Autopilot } from "@getleads/db";
-import { createAiProvider, runLeadPipeline, type IcpCriteria } from "@getleads/core";
+import { and, autopilots, campaigns, consume, consumeLead, eq, getDb, listLeads, remainingPremiumBudget, type Autopilot } from "@prospex/db";
+import { createAiProvider, runLeadPipeline, type IcpCriteria } from "@prospex/core";
 import { env } from "../env.js";
 import { pipelineLeadToInput, upsertLead } from "./leads.js";
 import { enrollLeads } from "./campaigns.js";

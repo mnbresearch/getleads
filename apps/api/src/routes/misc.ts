@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import Stripe from "stripe";
-import { and, desc, enqueue, eq, events, getDb, getUsage, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@getleads/db";
+import { and, desc, enqueue, eq, events, getDb, getUsage, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
 import { env } from "../env.js";
 import { encryptJson, randomToken } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";

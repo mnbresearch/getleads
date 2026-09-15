@@ -1,4 +1,4 @@
-# GetLeads - Compiled Deployment Guide
+# Prospex - Compiled Deployment Guide
 
 This is the single document you need. Part A lists exactly what to give me (or paste into the env). Part B is the deploy procedure. Part C is the feature map so you know what each key unlocks.
 
@@ -19,8 +19,8 @@ Create these accounts and send me the values (or fill `.env` yourself). Items ma
 | 1 | Postgres database | **neon.tech** → New project (free, 0.5GB, autoscaling branch-per-env) → Dashboard → Connection Details → pick the **pooled connection** string | Neon's free compute suspends when idle but never deletes data or breaks the app - reconnects automatically on the next request. Supabase's free tier instead pauses the *entire project* (including auth) after 7 days idle and needs a manual dashboard click to restore, which is a bad look mid-demo. Upgrading later (Neon Launch, ~$19/mo) is a plan change, not a migration. | `DATABASE_URL` |
 | 2 | API + worker hosting | **render.com** → New → Web Service (free tier) → connect the GitHub repo. Sign up with GitHub | Free web services get 750 instance-hours/month (enough for one always-on service) and sleep after 15 min with no traffic (~1 min cold start on wake) - fully solved with a free uptime pinger (step B3 below), so it behaves like an always-on service at $0. Fly.io no longer has a free tier for new accounts as of 2026 (legacy-only), so it's not a genuinely free option anymore - worth revisiting once you're paying anyway and want real SMTP verification (see A4/A5 note). | Confirm the repo is on GitHub; I can deploy from this session |
 | 3 | Dashboard hosting | **vercel.com** (free, generous static/SPA hosting, painless custom domains). Sign up with GitHub | Free tier has no practical limit for a dashboard's traffic level; upgrading is a billing toggle, not a migration | Confirm account exists (I have a Vercel connector in this session and can deploy it) |
-| 4 | GitHub repo | Create an empty private repo, e.g. `mnb-research/getleads` | - | Repo URL + push access, or I hand you the zip to push |
-| 5 | A domain (optional but recommended) | e.g. `getleads.mnbresearch.com` for the app, `api.getleads.mnbresearch.com` for the API | - | Domain + DNS access (Cloudflare recommended) |
+| 4 | GitHub repo | Create an empty private repo, e.g. `mnb-research/prospex` | - | Repo URL + push access, or I hand you the zip to push |
+| 5 | A domain (optional but recommended) | e.g. `prospex.mnbresearch.com` for the app, `api.prospex.mnbresearch.com` for the API | - | Domain + DNS access (Cloudflare recommended) |
 
 ### A2. AI (REQUIRED for personalization, ICP building, query parsing; at least one)
 
@@ -58,7 +58,7 @@ For the production path, only Apollo and Hunter need the paid tier to start - PD
 
 | # | Provider | Free tier | Where | Send |
 |---|---|---|---|---|
-| 17 | Resend (recommended) | 3,000 emails/month, 100/day | resend.com → API Keys; Domains → add + verify your sending domain (DNS records) | `RESEND_API_KEY`, `MAIL_FROM` (e.g. `GetLeads <hello@getleads.mnbresearch.com>`) |
+| 17 | Resend (recommended) | 3,000 emails/month, 100/day | resend.com → API Keys; Domains → add + verify your sending domain (DNS records) | `RESEND_API_KEY`, `MAIL_FROM` (e.g. `Prospex <hello@prospex.mnbresearch.com>`) |
 | 18 | Brevo SMTP (alternative) | 300 emails/day | brevo.com → SMTP & API | `SMTP_HOST=smtp-relay.brevo.com`, `SMTP_PORT=587`, `SMTP_USER`, `SMTP_PASS` |
 
 Inbound replies (so sequences stop on reply): in Resend → Webhooks, or via Zapier/Make Gmail trigger, POST `{from, subject, text}` to `https://<api>/v1/campaigns/inbound` with the customer's API key.
@@ -74,10 +74,10 @@ Inbound replies (so sequences stop on reply): in Resend → Webhooks, or via Zap
 Without Stripe configured, the dashboard still shows all plans but no "Upgrade" button renders - so this is the one item that turns "free demo" into "customers can actually pay you." No data-provider spend is needed to set this up; it only touches Stripe and your own database.
 
 1. dashboard.stripe.com → Product catalog → New product, four times, each with one **recurring monthly** price:
-   - "GetLeads Starter" - $99.00/month
-   - "GetLeads Growth" - $329.00/month
-   - "GetLeads Scale" - $1,099.00/month
-   - "GetLeads Enterprise" - $2,999.00/month (usually custom-quoted in practice, but a real Stripe price still needs to exist for the checkout button to work)
+   - "Prospex Starter" - $99.00/month
+   - "Prospex Growth" - $329.00/month
+   - "Prospex Scale" - $1,099.00/month
+   - "Prospex Enterprise" - $2,999.00/month (usually custom-quoted in practice, but a real Stripe price still needs to exist for the checkout button to work)
 2. Copy each price's ID (starts `price_...`) into `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_GROWTH`, `STRIPE_PRICE_SCALE`, `STRIPE_PRICE_ENTERPRISE` respectively - these map 1:1 to the plan ids already in `packages/db/src/plans.ts`, no code change needed if the names match exactly.
 3. Developers → API keys → copy the **secret key** → `STRIPE_SECRET_KEY`.
 4. Developers → Webhooks → Add endpoint → `https://<your-api>/v1/billing/webhook` → select events `checkout.session.completed` and `customer.subscription.deleted` → copy the **signing secret** → `STRIPE_WEBHOOK_SECRET`.
@@ -103,9 +103,9 @@ You can start in Stripe **test mode** (test-mode keys, e.g. `sk_test_...`) to ve
 
 ### B1. Push the code
 ```bash
-unzip getleads.zip && cd getleads
-git init && git add -A && git commit -m "GetLeads v2"
-git remote add origin git@github.com:<you>/getleads.git && git push -u origin main
+unzip prospex.zip && cd prospex
+git init && git add -A && git commit -m "Prospex v2"
+git remote add origin git@github.com:<you>/prospex.git && git push -u origin main
 ```
 
 ### B2. Database
@@ -121,11 +121,11 @@ Paste the Neon pooled connection string into `DATABASE_URL`. Migrations run auto
 ```bash
 fly launch --no-deploy --copy-config
 fly secrets set DATABASE_URL=... JWT_SECRET=$(openssl rand -hex 32) ENCRYPTION_KEY=$(openssl rand -hex 32) INTERNAL_TOKEN=$(openssl rand -hex 24) \
-  GROQ_API_KEY=... GOOGLE_CSE_API_KEY=... GOOGLE_CSE_CX=... RESEND_API_KEY=... MAIL_FROM="GetLeads <hello@yourdomain>" \
-  APP_URL=https://getleads.vercel.app API_URL=https://getleads-api.fly.dev SMTP_PROBE_ENABLED=true
+  GROQ_API_KEY=... GOOGLE_CSE_API_KEY=... GOOGLE_CSE_CX=... RESEND_API_KEY=... MAIL_FROM="Prospex <hello@yourdomain>" \
+  APP_URL=https://prospex.vercel.app API_URL=https://prospex-api.fly.dev SMTP_PROBE_ENABLED=true
 fly deploy
 ```
-Then open a support ticket: "please unblock outbound port 25 for app getleads-api (email verification, no bulk sending)". Until approved, set `SMTP_PROBE_ENABLED=false`.
+Then open a support ticket: "please unblock outbound port 25 for app prospex-api (email verification, no bulk sending)". Until approved, set `SMTP_PROBE_ENABLED=false`.
 
 Verify: `curl https://<api>/health` → `{"ok":true,"db":"up"}`; open `https://<api>/docs`.
 
@@ -133,7 +133,7 @@ Verify: `curl https://<api>/health` → `{"ok":true,"db":"up"}`; open `https://<
 Import the repo → Root directory `apps/web` → Framework Vite → Env `VITE_API_URL=https://<api>`. `apps/web/vercel.json` handles SPA routing. Then set `APP_URL` on the API to the Vercel URL (CORS + links in emails).
 
 ### B5. Domains (optional)
-CNAME `getleads.<yourdomain>` → Vercel; `api.getleads.<yourdomain>` → Render. Update `APP_URL`, `API_URL`, `VITE_API_URL`. The visitor pixel and tracking links use `API_URL`, so set it before customers install pixels.
+CNAME `prospex.<yourdomain>` → Vercel; `api.prospex.<yourdomain>` → Render. Update `APP_URL`, `API_URL`, `VITE_API_URL`. The visitor pixel and tracking links use `API_URL`, so set it before customers install pixels.
 
 ### B6. Post-deploy checks (5 minutes)
 1. Sign up at the dashboard → you get an API key. On the production path this lands you on the `free` plan (1 seat, 50 leads) like any real customer would - bump your own test org up first so the rest of this checklist isn't blocked by free-tier limits: `curl -X POST https://<api>/v1/admin/orgs/<orgId>/plan -H "x-internal-token: $INTERNAL_TOKEN" -H 'content-type: application/json' -d '{"plan":"growth"}'`.

@@ -1,5 +1,5 @@
-import { consume, eq, getDb, monitorResults, monitors, type Monitor } from "@getleads/db";
-import { companyNews, detectHiring, fetchGoogleNews, linkedinPostEngagers, webSearch } from "@getleads/core";
+import { consume, eq, getDb, monitorResults, monitors, type Monitor } from "@prospex/db";
+import { companyNews, detectHiring, fetchGoogleNews, linkedinPostEngagers, webSearch } from "@prospex/core";
 import { upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
 

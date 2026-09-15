@@ -1,5 +1,5 @@
 {
-  "name": "@getleads/db",
+  "name": "@prospex/db",
   "version": "0.1.0",
   "private": true,
   "type": "module",

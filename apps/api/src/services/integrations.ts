@@ -1,8 +1,8 @@
-import { and, companies, eq, getDb, integrations, leads, type Integration, type Lead } from "@getleads/db";
+import { and, companies, eq, getDb, integrations, leads, type Integration, type Lead } from "@prospex/db";
 import { decryptJson } from "../lib/crypto.js";
 
 /**
- * Outbound CRM sync. Each provider maps a GetLeads lead to its contact object.
+ * Outbound CRM sync. Each provider maps a Prospex lead to its contact object.
  * All of these have free tiers: HubSpot (free CRM), Pipedrive (trial), Zoho (free 3 users),
  * Google Sheets (via Apps Script webhook), Cortex / any custom endpoint (generic webhook).
  */
@@ -58,7 +58,7 @@ async function zoho(cfg: Cfg, lead: Lead, company: { name?: string | null } | nu
   const res = await fetch(`${cfg.apiDomain ?? "https://www.zohoapis.in"}/crm/v2/Leads`, {
     method: "POST",
     headers: { authorization: `Zoho-oauthtoken ${cfg.accessToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ data: [{ Last_Name: lead.lastName ?? lead.fullName ?? "Unknown", First_Name: lead.firstName, Email: lead.email, Company: company?.name ?? "Unknown", Designation: lead.title, Lead_Source: "GetLeads" }] }),
+    body: JSON.stringify({ data: [{ Last_Name: lead.lastName ?? lead.fullName ?? "Unknown", First_Name: lead.firstName, Email: lead.email, Company: company?.name ?? "Unknown", Designation: lead.title, Lead_Source: "Prospex" }] }),
   });
   const data = (await res.json()) as { data?: { details?: { id: string }; message?: string }[] };
   return { ok: res.ok, externalId: data.data?.[0]?.details?.id, error: data.data?.[0]?.message };
@@ -69,7 +69,7 @@ async function webhook(cfg: Cfg, lead: Lead, company: unknown) {
   const res = await fetch(cfg.url, {
     method: "POST",
     headers: { "content-type": "application/json", ...(cfg.authHeader ? { authorization: cfg.authHeader } : {}) },
-    body: JSON.stringify({ source: "getleads", lead, company }),
+    body: JSON.stringify({ source: "prospex", lead, company }),
   });
   return { ok: res.ok, error: res.ok ? undefined : `HTTP ${res.status}` };
 }

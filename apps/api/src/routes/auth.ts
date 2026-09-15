@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, apiKeys, desc, eq, getDb, limitsFor, organizations, users } from "@getleads/db";
+import { and, apiKeys, desc, eq, getDb, limitsFor, organizations, users } from "@prospex/db";
 import { env } from "../env.js";
 import { checkPassword, generateApiKey, hashPassword, issueJwt } from "../lib/auth.js";
 import { ApiError, badRequest } from "../lib/errors.js";

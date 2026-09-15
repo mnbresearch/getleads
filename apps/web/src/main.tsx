@@ -18,6 +18,7 @@ import { TasksPage } from "./pages/Tasks";
 import { AutopilotPage } from "./pages/Autopilot";
 import { ToolsPage } from "./pages/Tools";
 import { JoinPage } from "./pages/Join";
+import { LandingPage } from "./pages/Landing";
 
 function Protected({ children }: { children: React.ReactNode }) {
   return auth.token ? <>{children}</> : <Navigate to="/login" replace />;
@@ -30,13 +31,13 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <Route path="/login" element={<AuthPage mode="login" />} />
         <Route path="/signup" element={<AuthPage mode="signup" />} />
         <Route path="/join" element={<JoinPage />} />
+        <Route path="/" element={auth.token ? <Protected><Shell><Dashboard /></Shell></Protected> : <LandingPage />} />
         <Route
           path="/*"
           element={
             <Protected>
               <Shell>
                 <Routes>
-                  <Route path="/" element={<Dashboard />} />
                   <Route path="/leads" element={<LeadsPage />} />
                   <Route path="/search" element={<SearchPage />} />
                   <Route path="/icps" element={<IcpPage />} />

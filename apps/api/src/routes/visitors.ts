@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, companies, consume, desc, eq, getDb, pixels, sql, visitorCompanies, visits } from "@getleads/db";
-import { findPeople } from "@getleads/core";
+import { and, companies, consume, desc, eq, getDb, pixels, sql, visitorCompanies, visits } from "@prospex/db";
+import { findPeople } from "@prospex/core";
 import { env } from "../env.js";
 import { randomToken } from "../lib/crypto.js";
 import { notFound } from "../lib/errors.js";

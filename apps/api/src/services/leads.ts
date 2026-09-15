@@ -1,6 +1,6 @@
-import { and, companies, eq, getDb, leads, sql, type Company, type Lead, type NewLead } from "@getleads/db";
-import type { CompanyProfile, PipelineLead } from "@getleads/core";
-import { inferDepartment, inferSeniority, splitName } from "@getleads/core";
+import { and, companies, eq, getDb, leads, sql, type Company, type Lead, type NewLead } from "@prospex/db";
+import type { CompanyProfile, PipelineLead } from "@prospex/core";
+import { inferDepartment, inferSeniority, splitName } from "@prospex/core";
 import { emitEvent } from "../lib/events.js";
 
 export async function upsertCompany(orgId: string, domain: string, data: Partial<CompanyProfile> & { name?: string | null }): Promise<Company> {

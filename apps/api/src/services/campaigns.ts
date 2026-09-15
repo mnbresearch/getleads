@@ -1,7 +1,7 @@
-import { and, asc, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, getDb, integrations, leads, lte, messages, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount } from "@getleads/db";
-import { createAiProvider, generateOutreach, leadVars, renderTemplate, textToHtml, normalizePhone, sendWhatsApp } from "@getleads/core";
+import { and, asc, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, getDb, integrations, leads, lte, messages, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount } from "@prospex/db";
+import { createAiProvider, generateOutreach, leadVars, renderTemplate, textToHtml, normalizePhone, sendWhatsApp } from "@prospex/core";
 import { decryptJson as decryptCfg } from "../lib/crypto.js";
-import { consume } from "@getleads/db";
+import { consume } from "@prospex/db";
 import { env } from "../env.js";
 import { decryptJson, randomToken } from "../lib/crypto.js";
 import { sendMail, type MailerConfig } from "../lib/mailer.js";
@@ -213,7 +213,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     text,
     html,
     replyTo: account.replyTo ?? account.fromEmail,
-    headers: { "X-GetLeads-Message": msg.id, "List-Unsubscribe": `<${env.apiUrl}/t/u/${token}>` },
+    headers: { "X-Prospex-Message": msg.id, "List-Unsubscribe": `<${env.apiUrl}/t/u/${token}>` },
   });
 
   const today = new Date().toISOString().slice(0, 10);

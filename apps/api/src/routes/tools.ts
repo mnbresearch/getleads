@@ -1,12 +1,12 @@
 /**
- * Enrichment tools that mirror the GetLeads.ai catalog:
+ * Enrichment tools that mirror the Prospex.ai catalog:
  * LinkedIn URL → email, email → LinkedIn, colleagues, decision makers, batch enrich, domain health, saved searches, tasks, team, autopilot.
  */
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, autopilots, campaignContacts, companies, consume, desc, enqueue, eq, getDb, invites, leads, limitsFor, listLeads, remainingPremiumBudget, savedSearches, sql, tasks, users } from "@getleads/db";
-import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@getleads/core";
+import { and, autopilots, campaignContacts, companies, consume, desc, enqueue, eq, getDb, invites, leads, limitsFor, listLeads, remainingPremiumBudget, savedSearches, sql, tasks, users } from "@prospex/db";
+import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
 import { env } from "../env.js";
 import { hashPassword, issueJwt } from "../lib/auth.js";
 import { randomToken } from "../lib/crypto.js";
@@ -164,7 +164,7 @@ toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json
   const { db } = getDb();
   let company = await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) });
   if (!company || !company.enrichedAt) {
-    const { crawlCompanyWebsite } = await import("@getleads/core");
+    const { crawlCompanyWebsite } = await import("@prospex/core");
     const prof = await crawlCompanyWebsite(domain).catch(() => null);
     company = await upsertCompany(oid, domain, prof ?? {});
   }
@@ -283,7 +283,7 @@ toolRoutes.post("/team/invite", requireUser, zValidator("json", z.object({ email
   const token = randomToken(24);
   const [inv] = await db.insert(invites).values({ orgId: a.org.id, email: b.email.toLowerCase(), role: b.role, token, invitedBy: a.user!.id }).returning();
   const link = `${env.appUrl}/join?token=${token}`;
-  await sendMail(null, { from: env.mailFrom, to: b.email, subject: `${a.user!.name || a.user!.email} invited you to ${a.org.name} on GetLeads`, text: `Join ${a.org.name} on GetLeads: ${link}` });
+  await sendMail(null, { from: env.mailFrom, to: b.email, subject: `${a.user!.name || a.user!.email} invited you to ${a.org.name} on Prospex`, text: `Join ${a.org.name} on Prospex: ${link}` });
   return c.json({ id: inv.id, email: inv.email, role: inv.role, link }, 201);
 });
 toolRoutes.delete("/team/:userId", requireUser, async (c) => {

@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { sign, verify } from "hono/jwt";
-import { apiKeys, eq, getDb, organizations, users, type ApiKey, type Organization, type User } from "@getleads/db";
+import { apiKeys, eq, getDb, organizations, users, type ApiKey, type Organization, type User } from "@prospex/db";
 import { env } from "../env.js";
 import { randomToken, sha256 } from "./crypto.js";
 
@@ -50,6 +50,6 @@ export async function authenticate(header: string | undefined): Promise<AuthCont
 }
 
 export function generateApiKey() {
-  const raw = `gl_live_${randomToken(24)}`;
+  const raw = `px_live_${randomToken(24)}`;
   return { raw, prefix: raw.slice(0, 12), hash: sha256(raw) };
 }

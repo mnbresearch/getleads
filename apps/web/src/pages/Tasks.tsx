@@ -24,12 +24,12 @@ export function TasksPage() {
           {rows.map((t) => (
             <div key={t.id} className="card p-4">
               <div className="flex flex-wrap items-start gap-3">
-                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-50 text-xs font-bold text-brand-700">{ICON[t.type] ?? "☐"}</span>
+                <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-500/10 text-xs font-bold text-brand-300">{ICON[t.type] ?? "☐"}</span>
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{t.title}</div>
-                  {t.lead && <div className="text-xs text-slate-500">{t.lead.title} · {t.lead.company?.name ?? t.lead.company?.domain} {t.lead.linkedinUrl && <a className="ml-2 text-brand-600" href={t.lead.linkedinUrl} target="_blank" rel="noreferrer">Open LinkedIn ↗</a>}{t.lead.phone && <span className="ml-2">{t.lead.phone}</span>}{t.type === "whatsapp" && (t.lead.whatsapp ?? t.lead.phone) && <a className="ml-2 text-emerald-700" href={`https://wa.me/${(t.lead.whatsapp ?? t.lead.phone ?? "").replace(/\D/g, "")}?text=${encodeURIComponent(t.body ?? "")}`} target="_blank" rel="noreferrer">Open WhatsApp ↗</a>}</div>}
-                  {t.body && <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-slate-50 p-3 font-sans text-sm text-slate-700">{t.body}</pre>}
-                  <div className="mt-1 text-xs text-slate-400">Due {fmtDate(t.dueAt)}</div>
+                  {t.lead && <div className="text-xs text-ink-400">{t.lead.title} · {t.lead.company?.name ?? t.lead.company?.domain} {t.lead.linkedinUrl && <a className="ml-2 text-brand-300" href={t.lead.linkedinUrl} target="_blank" rel="noreferrer">Open LinkedIn ↗</a>}{t.lead.phone && <span className="ml-2">{t.lead.phone}</span>}{t.type === "whatsapp" && (t.lead.whatsapp ?? t.lead.phone) && <a className="ml-2 text-emerald-300" href={`https://wa.me/${(t.lead.whatsapp ?? t.lead.phone ?? "").replace(/\D/g, "")}?text=${encodeURIComponent(t.body ?? "")}`} target="_blank" rel="noreferrer">Open WhatsApp ↗</a>}</div>}
+                  {t.body && <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-base p-3 font-sans text-sm text-ink-200">{t.body}</pre>}
+                  <div className="mt-1 text-xs text-ink-500">Due {fmtDate(t.dueAt)}</div>
                 </div>
                 {t.status === "pending" && <div className="flex gap-2"><button className="btn-secondary" onClick={() => t.body && navigator.clipboard.writeText(t.body).then(() => toast("Copied"))}>Copy</button><button className="btn-secondary" onClick={() => done(t, "skipped")}>Skip</button><button className="btn-primary" onClick={() => done(t, "done")}>Mark done</button></div>}
               </div>

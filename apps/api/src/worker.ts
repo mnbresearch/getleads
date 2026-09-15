@@ -1,4 +1,4 @@
-import { getDb, runMigrations, startWorker } from "@getleads/db";
+import { getDb, runMigrations, startWorker } from "@prospex/db";
 import "./env.js";
 import { ensureRecurringJobs, handlers } from "./jobs.js";
 

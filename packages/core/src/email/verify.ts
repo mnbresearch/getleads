@@ -67,7 +67,7 @@ export async function smtpProbe(email: string, mxHost: string, opts: { timeoutMs
 
 async function smtpProbeRaw(email: string, mxHost: string, opts: { timeoutMs?: number; heloDomain?: string; from?: string } = {}): Promise<SmtpProbeResult> {
   const timeoutMs = opts.timeoutMs ?? 5000;
-  const helo = opts.heloDomain ?? "mail.getleads.dev";
+  const helo = opts.heloDomain ?? "mail.prospex.dev";
   const from = opts.from ?? `verify@${helo}`;
   return new Promise((resolve) => {
     const socket = net.createConnection({ host: mxHost, port: 25 });

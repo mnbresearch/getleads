@@ -1,5 +1,5 @@
 {
-  "name": "@getleads/api",
+  "name": "@prospex/api",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -13,8 +13,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@getleads/core": "*",
-    "@getleads/db": "*",
+    "@prospex/core": "*",
+    "@prospex/db": "*",
     "@hono/node-server": "^1.13.7",
     "@hono/zod-validator": "^0.4.1",
     "bcryptjs": "^2.4.3",

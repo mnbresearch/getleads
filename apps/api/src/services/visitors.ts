@@ -1,5 +1,5 @@
-import { and, eq, getDb, pixels, sql, visitorCompanies, visits, enqueue } from "@getleads/db";
-import { cleanOrgName, identifyIp, pageIntentWeight, resolveCompanyDomain } from "@getleads/core";
+import { and, eq, getDb, pixels, sql, visitorCompanies, visits, enqueue } from "@prospex/db";
+import { cleanOrgName, identifyIp, pageIntentWeight, resolveCompanyDomain } from "@prospex/core";
 import { sha256 } from "../lib/crypto.js";
 import { env } from "../env.js";
 import { upsertCompany } from "./leads.js";
@@ -8,7 +8,7 @@ import { emitEvent } from "../lib/events.js";
 /** The JS snippet customers embed. Tiny, no cookies beyond a session id in sessionStorage. */
 export function pixelScript(key: string) {
   const endpoint = `${env.apiUrl}/px/${key}/collect`;
-  return `(function(){try{var s=sessionStorage.getItem("__gl_sid");if(!s){s=Math.random().toString(36).slice(2)+Date.now().toString(36);sessionStorage.setItem("__gl_sid",s)}var t0=Date.now();function send(extra){var d={sid:s,p:location.pathname+location.search,r:document.referrer,t:document.title,d:Date.now()-t0};for(var k in extra)d[k]=extra[k];var b=JSON.stringify(d);if(navigator.sendBeacon){navigator.sendBeacon("${endpoint}",new Blob([b],{type:"application/json"}))}else{fetch("${endpoint}",{method:"POST",body:b,keepalive:true,headers:{"content-type":"application/json"}})}}send({e:"view"});var last=location.pathname;setInterval(function(){if(location.pathname!==last){last=location.pathname;t0=Date.now();send({e:"view"})}},800);addEventListener("pagehide",function(){send({e:"leave"})});window.getleads={identify:function(o){send({e:"identify",id:o})}}}catch(e){}})();`;
+  return `(function(){try{var s=sessionStorage.getItem("__gl_sid");if(!s){s=Math.random().toString(36).slice(2)+Date.now().toString(36);sessionStorage.setItem("__gl_sid",s)}var t0=Date.now();function send(extra){var d={sid:s,p:location.pathname+location.search,r:document.referrer,t:document.title,d:Date.now()-t0};for(var k in extra)d[k]=extra[k];var b=JSON.stringify(d);if(navigator.sendBeacon){navigator.sendBeacon("${endpoint}",new Blob([b],{type:"application/json"}))}else{fetch("${endpoint}",{method:"POST",body:b,keepalive:true,headers:{"content-type":"application/json"}})}}send({e:"view"});var last=location.pathname;setInterval(function(){if(location.pathname!==last){last=location.pathname;t0=Date.now();send({e:"view"})}},800);addEventListener("pagehide",function(){send({e:"leave"})});window.prospex={identify:function(o){send({e:"identify",id:o})}}}catch(e){}})();`;
 }
 
 export interface CollectInput {

@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { getDb, runMigrations, startWorker } from "@getleads/db";
+import { getDb, runMigrations, startWorker } from "@prospex/db";
 import { env } from "./env.js";
 import { createApp } from "./app.js";
 import { ensureRecurringJobs, handlers } from "./jobs.js";
@@ -17,7 +17,7 @@ async function main() {
   }
 
   const server = serve({ fetch: app.fetch, port: env.port }, (info) => {
-    console.log(`[api] GetLeads API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop}`);
+    console.log(`[api] Prospex API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop}`);
   });
   const shutdown = async () => {
     console.log("[api] shutting down");

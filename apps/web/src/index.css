@@ -1,16 +1,32 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
+@layer base {
+  html {
+    color-scheme: dark;
+  }
+  body {
+    @apply bg-base text-ink-100 antialiased;
+    background-image: radial-gradient(circle at 15% 0%, rgba(124, 92, 252, 0.12), transparent 45%), radial-gradient(circle at 85% 15%, rgba(34, 211, 238, 0.08), transparent 40%);
+    background-attachment: fixed;
+  }
+  ::selection {
+    @apply bg-brand-500/30 text-white;
+  }
+}
+
 @layer components {
   .btn { @apply inline-flex items-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition disabled:opacity-50 disabled:cursor-not-allowed; }
-  .btn-primary { @apply btn bg-brand-600 text-white hover:bg-brand-700 shadow-sm; }
-  .btn-secondary { @apply btn bg-white text-slate-700 border border-slate-200 hover:bg-slate-50; }
-  .btn-danger { @apply btn bg-red-50 text-red-700 border border-red-200 hover:bg-red-100; }
-  .input { @apply w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm shadow-sm focus:border-brand-500 focus:outline-none focus:ring-2 focus:ring-brand-100; }
-  .label { @apply block text-xs font-semibold uppercase tracking-wide text-slate-500 mb-1; }
-  .card { @apply rounded-xl border border-slate-200 bg-white shadow-sm; }
+  .btn-primary { @apply btn bg-brand-600 text-white hover:bg-brand-500 shadow-sm shadow-brand-900/40; }
+  .btn-secondary { @apply btn bg-white/5 text-ink-100 border border-white/10 hover:bg-white/10; }
+  .btn-danger { @apply btn bg-red-500/10 text-red-300 border border-red-500/20 hover:bg-red-500/20; }
+  .input { @apply w-full rounded-lg border border-white/10 bg-white/5 px-3 py-2 text-sm text-ink-50 placeholder:text-ink-500 shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-500/30; }
+  .label { @apply block text-xs font-semibold uppercase tracking-wide text-ink-400 mb-1; }
+  .card { @apply rounded-xl border border-white/10 bg-surface shadow-sm; }
   .badge { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium; }
-  .th { @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-slate-500; }
-  .td { @apply px-3 py-2 text-sm align-top; }
+  .th { @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-ink-400; }
+  .td { @apply px-3 py-2 text-sm align-top text-ink-200; }
 }

@@ -44,24 +44,24 @@ export function IcpPage() {
   };
 
   return (
-    <Page title="Ideal customer profiles" subtitle="Describe your best customers (or give example domains) and GetLeads builds lookalike criteria to score every lead." actions={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>New ICP</button>}>
+    <Page title="Ideal customer profiles" subtitle="Describe your best customers (or give example domains) and Prospex builds lookalike criteria to score every lead." actions={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>New ICP</button>}>
       {Toast}
       {icps.length === 0 ? <Empty title="No ICPs yet" hint="Create one from a description like 'B2B SaaS founders in India with 20-200 employees' or from 3-5 of your best customers' websites." action={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>Create ICP</button>} /> : (
         <div className="grid gap-4 md:grid-cols-2">
           {icps.map((i) => (
             <div key={i.id} className="card p-5">
               <div className="flex items-start justify-between gap-2">
-                <div><div className="font-semibold">{i.name}</div><div className="text-xs text-slate-500">{i.leadCount} leads assigned</div></div>
+                <div><div className="font-semibold">{i.name}</div><div className="text-xs text-ink-400">{i.leadCount} leads assigned</div></div>
                 <div className="flex gap-2"><button className="btn-secondary" onClick={() => score(i)}>Score leads</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button></div>
               </div>
-              {i.aiProfile?.summary ? <p className="mt-3 text-sm text-slate-600">{i.aiProfile.summary}</p> : i.description ? <p className="mt-3 text-sm text-slate-600">{i.description}</p> : null}
+              {i.aiProfile?.summary ? <p className="mt-3 text-sm text-ink-300">{i.aiProfile.summary}</p> : i.description ? <p className="mt-3 text-sm text-ink-300">{i.description}</p> : null}
               <div className="mt-3 space-y-1 text-xs">
                 {FIELDS.filter(([k]) => i.criteria[k]?.length).map(([k, label]) => (
-                  <div key={k} className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-slate-500">{label}</span>{i.criteria[k]!.map((v) => <span key={v} className="badge bg-slate-100 text-slate-700">{v}</span>)}</div>
+                  <div key={k} className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-ink-400">{label}</span>{i.criteria[k]!.map((v) => <span key={v} className="badge bg-surface/5 text-ink-200">{v}</span>)}</div>
                 ))}
-                {i.seedDomains.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-slate-500">Seed customers</span>{i.seedDomains.map((v) => <span key={v} className="badge bg-brand-50 text-brand-700">{v}</span>)}</div>}
+                {i.seedDomains.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-ink-400">Seed customers</span>{i.seedDomains.map((v) => <span key={v} className="badge bg-brand-500/10 text-brand-300">{v}</span>)}</div>}
               </div>
-              {!i.aiProfile && (i.description || i.seedDomains.length > 0) && <div className="mt-3 text-xs text-amber-600">AI profile building… (needs an AI key configured on the server; otherwise your manual criteria are used as-is)</div>}
+              {!i.aiProfile && (i.description || i.seedDomains.length > 0) && <div className="mt-3 text-xs text-amber-300">AI profile building… (needs an AI key configured on the server; otherwise your manual criteria are used as-is)</div>}
             </div>
           ))}
         </div>

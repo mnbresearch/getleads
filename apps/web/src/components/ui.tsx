@@ -6,7 +6,7 @@ export function Page({ title, actions, children, subtitle }: { title: string; su
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
-          {subtitle && <p className="mt-1 text-sm text-slate-500">{subtitle}</p>}
+          {subtitle && <p className="mt-1 text-sm text-ink-400">{subtitle}</p>}
         </div>
         {actions && <div className="flex flex-wrap gap-2">{actions}</div>}
       </div>
@@ -18,20 +18,20 @@ export function Page({ title, actions, children, subtitle }: { title: string; su
 export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
   return (
     <div className="card p-4">
-      <div className="text-xs font-semibold uppercase tracking-wide text-slate-500">{label}</div>
+      <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">{label}</div>
       <div className="mt-1 text-2xl font-semibold">{value}</div>
-      {hint && <div className="mt-1 text-xs text-slate-500">{hint}</div>}
+      {hint && <div className="mt-1 text-xs text-ink-400">{hint}</div>}
     </div>
   );
 }
 
 export function EmailStatusBadge({ status }: { status?: string | null }) {
   const map: Record<string, string> = {
-    valid: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
-    catch_all: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
-    risky: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
-    invalid: "bg-red-50 text-red-700 ring-1 ring-red-200",
-    unknown: "bg-slate-100 text-slate-600",
+    valid: "bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/20",
+    catch_all: "bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20",
+    risky: "bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20",
+    invalid: "bg-red-500/10 text-red-300 ring-1 ring-red-500/20",
+    unknown: "bg-surface/5 text-ink-300",
   };
   const s = status ?? "unknown";
   return <span className={`badge ${map[s] ?? map.unknown}`}>{s.replace("_", " ")}</span>;
@@ -39,13 +39,13 @@ export function EmailStatusBadge({ status }: { status?: string | null }) {
 
 export function ScoreBar({ score }: { score?: number | null }) {
   const s = Math.max(0, Math.min(100, Math.round(score ?? 0)));
-  const color = s >= 70 ? "bg-emerald-500" : s >= 40 ? "bg-amber-500" : "bg-slate-300";
+  const color = s >= 70 ? "bg-emerald-500/100" : s >= 40 ? "bg-amber-500/100" : "bg-surface/20";
   return (
     <div className="flex items-center gap-2" title={`${s}/100`}>
-      <div className="h-1.5 w-16 rounded-full bg-slate-100">
+      <div className="h-1.5 w-16 rounded-full bg-surface/5">
         <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${s}%` }} />
       </div>
-      <span className="text-xs tabular-nums text-slate-600">{s}</span>
+      <span className="text-xs tabular-nums text-ink-300">{s}</span>
     </div>
   );
 }
@@ -59,11 +59,11 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
   }, [open, onClose]);
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-slate-900/40 p-4 pt-16" onClick={onClose}>
+    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-16" onClick={onClose}>
       <div className={`card w-full ${wide ? "max-w-3xl" : "max-w-lg"} p-5`} onClick={(e) => e.stopPropagation()}>
         <div className="mb-4 flex items-center justify-between">
           <h2 className="text-lg font-semibold">{title}</h2>
-          <button onClick={onClose} className="text-slate-400 hover:text-slate-700" aria-label="Close">✕</button>
+          <button onClick={onClose} className="text-ink-500 hover:text-ink-100" aria-label="Close">✕</button>
         </div>
         {children}
       </div>
@@ -75,7 +75,7 @@ export function Empty({ title, hint, action }: { title: string; hint?: string; a
   return (
     <div className="card flex flex-col items-center justify-center gap-2 p-12 text-center">
       <div className="text-base font-medium">{title}</div>
-      {hint && <div className="max-w-md text-sm text-slate-500">{hint}</div>}
+      {hint && <div className="max-w-md text-sm text-ink-400">{hint}</div>}
       {action && <div className="mt-2">{action}</div>}
     </div>
   );
@@ -83,8 +83,8 @@ export function Empty({ title, hint, action }: { title: string; hint?: string; a
 
 export function Spinner({ label }: { label?: string }) {
   return (
-    <div className="flex items-center gap-2 text-sm text-slate-500">
-      <span className="h-4 w-4 animate-spin rounded-full border-2 border-slate-300 border-t-brand-600" />
+    <div className="flex items-center gap-2 text-sm text-ink-400">
+      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-brand-600" />
       {label}
     </div>
   );
@@ -98,7 +98,7 @@ export function useToast() {
     return () => clearTimeout(t);
   }, [msg]);
   const Toast = msg ? (
-    <div className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm shadow-lg ${msg.kind === "ok" ? "bg-slate-900 text-white" : "bg-red-600 text-white"}`}>{msg.text}</div>
+    <div className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm shadow-lg ${msg.kind === "ok" ? "bg-black text-white" : "bg-red-600 text-white"}`}>{msg.text}</div>
   ) : null;
   return { toast: (text: string, kind: "ok" | "err" = "ok") => setMsg({ text, kind }), Toast };
 }
@@ -113,9 +113,9 @@ export function TagInput({ value, onChange, placeholder }: { value: string[]; on
   return (
     <div className="input flex flex-wrap items-center gap-1 py-1">
       {value.map((v) => (
-        <span key={v} className="badge bg-brand-50 text-brand-700">
+        <span key={v} className="badge bg-brand-500/10 text-brand-300">
           {v}
-          <button className="ml-1 text-brand-400 hover:text-brand-700" onClick={() => onChange(value.filter((x) => x !== v))}>×</button>
+          <button className="ml-1 text-brand-300 hover:text-brand-300" onClick={() => onChange(value.filter((x) => x !== v))}>×</button>
         </span>
       ))}
       <input

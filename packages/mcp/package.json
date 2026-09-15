@@ -1,9 +1,9 @@
 {
-  "name": "@getleads/mcp",
+  "name": "@prospex/mcp",
   "version": "0.1.0",
-  "description": "MCP server exposing GetLeads to AI agents (Claude Desktop, Claude Code, Cursor, Cortex...)",
+  "description": "MCP server exposing Prospex to AI agents (Claude Desktop, Claude Code, Cursor, Cortex...)",
   "type": "module",
-  "bin": { "getleads-mcp": "./dist/server.js" },
+  "bin": { "prospex-mcp": "./dist/server.js" },
   "main": "./dist/server.js",
   "scripts": {
     "build": "tsc -p tsconfig.json && chmod +x dist/server.js",
@@ -12,7 +12,7 @@
     "dev": "tsx src/server.ts"
   },
   "dependencies": {
-    "@getleads/sdk": "*",
+    "@prospex/sdk": "*",
     "@modelcontextprotocol/sdk": "^1.12.0",
     "zod": "^3.23.8"
   },

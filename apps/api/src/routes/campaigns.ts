@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, asc, inArray, campaignContacts, campaigns, companies, consume, desc, emailAccounts, enqueue, eq, getDb, leads, listLeads, messages, sequenceSteps, sql } from "@getleads/db";
-import { createAiProvider, generateOutreach, classifyReply } from "@getleads/core";
+import { and, asc, inArray, campaignContacts, campaigns, companies, consume, desc, emailAccounts, enqueue, eq, getDb, leads, listLeads, messages, sequenceSteps, sql } from "@prospex/db";
+import { createAiProvider, generateOutreach, classifyReply } from "@prospex/core";
 import { env } from "../env.js";
 import { encryptJson } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";

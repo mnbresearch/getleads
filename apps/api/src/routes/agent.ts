@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { consume, consumeLead, getDb, remainingPremiumBudget } from "@getleads/db";
-import { createAiProvider, generateOutreach, runLeadPipeline } from "@getleads/core";
+import { consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
+import { createAiProvider, generateOutreach, runLeadPipeline } from "@prospex/core";
 import { env } from "../env.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { pipelineLeadToInput, upsertLead } from "../services/leads.js";
@@ -77,10 +77,10 @@ agentRoutes.post(
 /** Capability discovery for agents. */
 agentRoutes.get("/capabilities", (c) =>
   c.json({
-    name: "GetLeads",
+    name: "Prospex",
     version: "1.0.0",
     capabilities: ["prospect", "find_people", "find_companies", "enrich_company", "find_email", "verify_email", "score_icp", "generate_email", "run_sequence", "crm_sync", "webhooks"],
     openapi: `${env.apiUrl}/openapi.json`,
-    mcp: "npx @getleads/mcp (set GETLEADS_API_KEY, GETLEADS_API_URL)",
+    mcp: "npx @prospex/mcp (set PROSPEX_API_KEY, PROSPEX_API_URL)",
   }),
 );

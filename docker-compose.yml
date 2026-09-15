@@ -2,15 +2,15 @@ services:
   db:
     image: postgres:16-alpine
     environment:
-      POSTGRES_USER: getleads
-      POSTGRES_PASSWORD: getleads
-      POSTGRES_DB: getleads
+      POSTGRES_USER: prospex
+      POSTGRES_PASSWORD: prospex
+      POSTGRES_DB: prospex
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U getleads"]
+      test: ["CMD-SHELL", "pg_isready -U prospex"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -20,7 +20,7 @@ services:
     command: node apps/api/dist/server.js
     env_file: .env
     environment:
-      DATABASE_URL: postgres://getleads:getleads@db:5432/getleads
+      DATABASE_URL: postgres://prospex:prospex@db:5432/prospex
       JOB_MODE: worker
     ports:
       - "8080:8080"
@@ -33,7 +33,7 @@ services:
     command: node apps/api/dist/worker.js
     env_file: .env
     environment:
-      DATABASE_URL: postgres://getleads:getleads@db:5432/getleads
+      DATABASE_URL: postgres://prospex:prospex@db:5432/prospex
     depends_on:
       db:
         condition: service_healthy

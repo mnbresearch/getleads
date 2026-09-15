@@ -1,5 +1,5 @@
-import { and, companies, consume, eq, getDb, inArray, signalMatches, signalSubscriptions, signals, sql, type SignalSubscription } from "@getleads/db";
-import { companyNews, domainHintFromUrl, findPeople, resolveCompanyDomain, scanSignals, scoreLeadRules, type IcpCriteria, type ParsedSignal, type SignalType } from "@getleads/core";
+import { and, companies, consume, eq, getDb, inArray, signalMatches, signalSubscriptions, signals, sql, type SignalSubscription } from "@prospex/db";
+import { companyNews, domainHintFromUrl, findPeople, resolveCompanyDomain, scanSignals, scoreLeadRules, type IcpCriteria, type ParsedSignal, type SignalType } from "@prospex/core";
 import { upsertCompany, upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
 import { enrollLeads } from "./campaigns.js";

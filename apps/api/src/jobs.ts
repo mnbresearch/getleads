@@ -1,5 +1,5 @@
-import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, webhooks, sql as dsql, type JobHandler } from "@getleads/db";
-import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, runLeadPipeline, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@getleads/core";
+import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, webhooks, sql as dsql, type JobHandler } from "@prospex/db";
+import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, runLeadPipeline, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
 import { pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
@@ -50,7 +50,7 @@ export const handlers: Record<string, JobHandler> = {
         ids.push(lead.id);
       }
       if (job.payload.listId && ids.length) {
-        const { listLeads } = await import("@getleads/db");
+        const { listLeads } = await import("@prospex/db");
         for (const leadId of ids) await db.insert(listLeads).values({ listId: String(job.payload.listId), leadId }).onConflictDoNothing();
       }
       await db.update(searches).set({ status: "done", resultCount: ids.length, completedAt: new Date() }).where(eq(searches.id, searchId));
@@ -158,7 +158,7 @@ export const handlers: Record<string, JobHandler> = {
     const ts = String(Date.now());
     const res = await fetch(hook.url, {
       method: "POST",
-      headers: { "content-type": "application/json", "x-getleads-signature": hmacSign(hook.secret, `${ts}.${body}`), "x-getleads-timestamp": ts, "x-getleads-event": ev.type },
+      headers: { "content-type": "application/json", "x-prospex-signature": hmacSign(hook.secret, `${ts}.${body}`), "x-prospex-timestamp": ts, "x-prospex-event": ev.type },
       body,
       signal: AbortSignal.timeout(10_000),
     }).catch((e) => ({ ok: false, status: 0, statusText: (e as Error).message }));
@@ -198,7 +198,7 @@ export const handlers: Record<string, JobHandler> = {
     if (!co) return { skipped: true };
     const prof = await crawlCompanyWebsite(co.domain, { maxPages: 4 }).catch(() => null);
     if (prof) await upsertCompany(co.orgId, co.domain, { ...prof, name: prof.name ?? co.name ?? undefined });
-    const { detectHiring } = await import("@getleads/core");
+    const { detectHiring } = await import("@prospex/core");
     const h = await detectHiring(co.domain, prof?.name ?? co.name ?? undefined).catch(() => null);
     if (h) await db.update(companies).set({ openRoles: h.openRoles, hiring: { byFunction: h.byFunction, source: h.source, careersUrl: h.careersUrl } }).where(eq(companies.id, co.id));
     const n = await refreshCompanySignals(co.orgId, co.domain, prof?.name ?? co.name).catch(() => 0);
@@ -276,20 +276,20 @@ export const handlers: Record<string, JobHandler> = {
         fresh++;
         names.push(`${lead.fullName ?? ""} - ${lead.title ?? ""}`);
         if (ss.listId) {
-          const { listLeads } = await import("@getleads/db");
+          const { listLeads } = await import("@prospex/db");
           await db.insert(listLeads).values({ listId: ss.listId, leadId: lead.id }).onConflictDoNothing();
         }
       }
     }
     await db.update(savedSearches).set({ lastRunAt: new Date(), lastNewCount: fresh }).where(eq(savedSearches.id, ss.id));
-    if (ss.alert && fresh > 0 && ss.alertEmail) await sendMail(null, { from: env.mailFrom, to: ss.alertEmail, subject: `${fresh} new leads for "${ss.name}"`, text: `GetLeads found ${fresh} new leads matching "${ss.name}":\n\n${names.join("\n")}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
+    if (ss.alert && fresh > 0 && ss.alertEmail) await sendMail(null, { from: env.mailFrom, to: ss.alertEmail, subject: `${fresh} new leads for "${ss.name}"`, text: `Prospex found ${fresh} new leads matching "${ss.name}":\n\n${names.join("\n")}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
     return { results: results.length, fresh };
   },
 
   /** Housekeeping: prune old done jobs, reset nothing else. */
   "system.cleanup": async (job, ctx) => {
     const { db } = ctx;
-    const { lt, sql } = await import("@getleads/db");
+    const { lt, sql } = await import("@prospex/db");
     await db.delete(jobs).where(and(eq(jobs.status, "done"), lt(jobs.updatedAt, new Date(Date.now() - 7 * 86_400_000))));
     await db.execute(sql`DELETE FROM events WHERE created_at < now() - interval '90 days'`);
     if (job.payload.recurring) await enqueue(db, "system.cleanup", { recurring: true }, { runAt: new Date(Date.now() + 6 * 3600_000), maxAttempts: 1 });

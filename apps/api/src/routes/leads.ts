@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, asc, companies, consume, desc, enqueue, eq, getDb, ilike, inArray, leads, listLeads, lists, or, sql, suppressions } from "@getleads/db";
-import { verifyEmail, findEmail, extractDomain } from "@getleads/core";
+import { and, asc, companies, consume, desc, enqueue, eq, getDb, ilike, inArray, leads, listLeads, lists, or, sql, suppressions } from "@prospex/db";
+import { verifyEmail, findEmail, extractDomain } from "@prospex/core";
 import { env } from "../env.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";

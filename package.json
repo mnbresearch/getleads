@@ -1,8 +1,8 @@
 {
-  "name": "getleads",
+  "name": "prospex",
   "private": true,
   "version": "0.1.0",
-  "description": "GetLeads - open, zero-cost B2B lead generation infrastructure for sales teams and AI agents",
+  "description": "Prospex - open, zero-cost B2B lead generation infrastructure for sales teams and AI agents",
   "workspaces": [
     "packages/*",
     "apps/*"

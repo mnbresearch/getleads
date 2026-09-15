@@ -25,8 +25,8 @@ async function main() {
     // password: demo1234 (bcrypt handled in API; here we store a marker the API knows how to upgrade)
     const { default: bcrypt } = await import("bcryptjs");
     const hash = await bcrypt.hash("demo1234", 10);
-    await db.insert(users).values({ orgId: org.id, email: "demo@getleads.local", passwordHash: hash, name: "Demo User", role: "owner" });
-    const raw = `gl_live_${randomBytes(24).toString("base64url")}`;
+    await db.insert(users).values({ orgId: org.id, email: "demo@prospex.local", passwordHash: hash, name: "Demo User", role: "owner" });
+    const raw = `px_live_${randomBytes(24).toString("base64url")}`;
     await db.insert(apiKeys).values({
       orgId: org.id,
       name: "Seed key",
@@ -34,7 +34,7 @@ async function main() {
       keyHash: createHash("sha256").update(raw).digest("hex"),
     });
     console.log("[seed] demo org created");
-    console.log("       login:   demo@getleads.local / demo1234");
+    console.log("       login:   demo@prospex.local / demo1234");
     console.log(`       api key: ${raw}`);
   } finally {
     await sql.end();

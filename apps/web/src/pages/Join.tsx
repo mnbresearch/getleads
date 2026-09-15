@@ -18,10 +18,10 @@ export function JoinPage() {
   return (
     <div className="mx-auto mt-24 max-w-md p-6">
       <form onSubmit={submit} className="card space-y-3 p-6">
-        <h1 className="text-lg font-semibold">Join your team on GetLeads</h1>
+        <h1 className="text-lg font-semibold">Join your team on Prospex</h1>
         <div><label className="label">Your name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
         <div><label className="label">Choose a password</label><input className="input" type="password" minLength={8} required value={f.password} onChange={(e) => setF({ ...f, password: e.target.value })} /></div>
-        {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-700">{err}</div>}
+        {err && <div className="rounded-lg bg-red-500/10 p-2 text-sm text-red-300">{err}</div>}
         <button className="btn-primary w-full justify-center">Join</button>
       </form>
     </div>

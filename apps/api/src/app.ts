@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
-import { drainJobs, getDb } from "@getleads/db";
+import { drainJobs, getDb } from "@prospex/db";
 import { env } from "./env.js";
 import { errorHandler } from "./lib/errors.js";
 import type { Env } from "./middleware.js";
@@ -37,7 +37,7 @@ export function createApp() {
     }),
   );
 
-  app.get("/", (c) => c.json({ name: "GetLeads API", version: "1.0.0", docs: `${env.apiUrl}/docs`, openapi: `${env.apiUrl}/openapi.json`, health: `${env.apiUrl}/health` }));
+  app.get("/", (c) => c.json({ name: "Prospex API", version: "1.0.0", docs: `${env.apiUrl}/docs`, openapi: `${env.apiUrl}/openapi.json`, health: `${env.apiUrl}/health` }));
   app.get("/health", async (c) => {
     try {
       const { sql } = getDb();

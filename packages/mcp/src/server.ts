@@ -1,22 +1,22 @@
 #!/usr/bin/env node
 /**
- * GetLeads MCP server (stdio). Config for Claude Desktop / Cursor:
+ * Prospex MCP server (stdio). Config for Claude Desktop / Cursor:
  * {
- *   "mcpServers": { "getleads": { "command": "npx", "args": ["-y", "@getleads/mcp"],
- *     "env": { "GETLEADS_API_KEY": "gl_live_...", "GETLEADS_API_URL": "https://api.yourdomain.com" } } }
+ *   "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
+ *     "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "https://api.yourdomain.com" } } }
  * }
  */
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { GetLeads, GetLeadsError } from "@getleads/sdk";
+import { Prospex, ProspexError } from "@prospex/sdk";
 
-const gl = new GetLeads();
-const server = new McpServer({ name: "getleads", version: "0.1.0" });
+const gl = new Prospex();
+const server = new McpServer({ name: "prospex", version: "0.1.0" });
 
 const text = (v: unknown) => ({ content: [{ type: "text" as const, text: typeof v === "string" ? v : JSON.stringify(v, null, 2) }] });
 const wrap = <T>(fn: () => Promise<T>) =>
-  fn().then(text, (e) => ({ isError: true, ...text(e instanceof GetLeadsError ? { error: e.code, message: e.message, status: e.status, details: e.details } : { error: String(e) }) }));
+  fn().then(text, (e) => ({ isError: true, ...text(e instanceof ProspexError ? { error: e.code, message: e.message, status: e.status, details: e.details } : { error: String(e) }) }));
 
 const sender = z.object({ name: z.string(), company: z.string(), title: z.string().optional(), valueProp: z.string(), signature: z.string().optional(), tone: z.enum(["friendly", "direct", "formal", "casual"]).optional() });
 
@@ -64,7 +64,7 @@ server.tool("usage", "Current month's usage vs plan limits.", {}, () => wrap(() 
 server.tool("analytics", "Workspace analytics overview.", {}, () => wrap(() => gl.account.analytics()));
 
 // ── v2: visitors, signals, monitors, tools, autopilot ──
-server.tool("website_visitors", "Companies identified visiting the customer's website (via the GetLeads pixel), sorted by buying intent.", { days: z.number().int().default(30), status: z.string().optional(), limit: z.number().int().default(50) }, (a) => wrap(() => gl.visitors.companies(a)));
+server.tool("website_visitors", "Companies identified visiting the customer's website (via the Prospex pixel), sorted by buying intent.", { days: z.number().int().default(30), status: z.string().optional(), limit: z.number().int().default(50) }, (a) => wrap(() => gl.visitors.companies(a)));
 server.tool("visitor_decision_makers", "Find decision makers at a company that visited the website and save them as leads.", { domain: z.string(), titles: z.array(z.string()).optional(), limit: z.number().int().default(5), save: z.boolean().default(true) }, (a) => wrap(() => gl.visitors.decisionMakers(a.domain, a)));
 server.tool("signals_feed", "Recent intent signals: funding rounds, acquisitions, hiring surges, leadership changes, expansions (from public news).", { type: z.string().optional(), q: z.string().optional(), days: z.number().int().default(14), limit: z.number().int().default(50) }, (a) => wrap(() => gl.signals.feed(a)));
 server.tool("signals_scan", "Scan news now for fresh signals matching keywords/industries/locations.", { types: z.array(z.string()).default(["funding", "acquisition"]), keywords: z.array(z.string()).optional(), industries: z.array(z.string()).optional(), locations: z.array(z.string()).optional(), days: z.number().int().default(7) }, (a) => wrap(() => gl.signals.scan(a)));

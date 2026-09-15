@@ -1,4 +1,4 @@
-import { and, enqueue, eq, events, getDb, webhooks } from "@getleads/db";
+import { and, enqueue, eq, events, getDb, webhooks } from "@prospex/db";
 
 /** Record an event and fan out to active webhooks (delivered by the job queue). */
 export async function emitEvent(orgId: string, type: string, data: Record<string, unknown> = {}, entity?: { type: string; id: string }) {

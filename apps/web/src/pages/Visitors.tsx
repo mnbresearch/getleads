@@ -42,12 +42,12 @@ export function VisitorsPage() {
   return (
     <Page title="Website visitors" subtitle="Identify the companies browsing your site, see what they looked at, and pull their decision makers into your pipeline." actions={<><button className="btn-secondary" onClick={() => setSetup(true)}>Install pixel</button><button className="btn-primary" onClick={createPixel}>New website</button></>}>
       {Toast}
-      {pixels.length === 0 && <div className="mb-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">No pixel yet. Click "New website" to get a one-line script for your site.</div>}
+      {pixels.length === 0 && <div className="mb-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-200">No pixel yet. Click "New website" to get a one-line script for your site.</div>}
       {totals && (
         <div className="mb-4 grid grid-cols-3 gap-3">
-          <div className="card p-3"><div className="text-xs uppercase text-slate-500">Page views</div><div className="text-xl font-semibold">{totals.visits}</div></div>
-          <div className="card p-3"><div className="text-xs uppercase text-slate-500">Identified as business</div><div className="text-xl font-semibold">{totals.identified} <span className="text-xs font-normal text-slate-500">{totals.visits ? Math.round((totals.identified / totals.visits) * 100) : 0}%</span></div></div>
-          <div className="card p-3"><div className="text-xs uppercase text-slate-500">Filtered (ISP / hosting)</div><div className="text-xl font-semibold">{totals.isp}</div></div>
+          <div className="card p-3"><div className="text-xs uppercase text-ink-400">Page views</div><div className="text-xl font-semibold">{totals.visits}</div></div>
+          <div className="card p-3"><div className="text-xs uppercase text-ink-400">Identified as business</div><div className="text-xl font-semibold">{totals.identified} <span className="text-xs font-normal text-ink-400">{totals.visits ? Math.round((totals.identified / totals.visits) * 100) : 0}%</span></div></div>
+          <div className="card p-3"><div className="text-xs uppercase text-ink-400">Filtered (ISP / hosting)</div><div className="text-xl font-semibold">{totals.isp}</div></div>
         </div>
       )}
       <div className="mb-3 flex flex-wrap gap-2">
@@ -57,15 +57,15 @@ export function VisitorsPage() {
       {loading ? <Spinner /> : rows.length === 0 ? <Empty title="No identified companies yet" hint="Once the pixel is installed, business visitors appear here within seconds of their visit. Consumer ISPs and cloud/hosting IPs are filtered out." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[800px]">
-            <thead className="border-b border-slate-200 bg-slate-50"><tr><th className="th">Company</th><th className="th">Intent</th><th className="th">Top pages</th><th className="th">Visits</th><th className="th">Last seen</th><th className="th">Status</th><th className="th"></th></tr></thead>
+            <thead className="border-b border-white/10 bg-base"><tr><th className="th">Company</th><th className="th">Intent</th><th className="th">Top pages</th><th className="th">Visits</th><th className="th">Last seen</th><th className="th">Status</th><th className="th"></th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((v) => (
-                <tr key={v.id} className="hover:bg-slate-50">
-                  <td className="td cursor-pointer" onClick={() => setDetail(v)}><div className="font-medium">{v.company?.name ?? v.name ?? v.domain}</div><div className="text-xs text-slate-500">{v.domain}{v.company?.industry ? ` · ${v.company.industry}` : ""}{v.company?.location ? ` · ${v.company.location}` : ""}</div></td>
+                <tr key={v.id} className="hover:bg-surface/5">
+                  <td className="td cursor-pointer" onClick={() => setDetail(v)}><div className="font-medium">{v.company?.name ?? v.name ?? v.domain}</div><div className="text-xs text-ink-400">{v.domain}{v.company?.industry ? ` · ${v.company.industry}` : ""}{v.company?.location ? ` · ${v.company.location}` : ""}</div></td>
                   <td className="td"><ScoreBar score={v.intentScore} /></td>
-                  <td className="td text-xs text-slate-600">{Object.entries(v.pages).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([p, n]) => <div key={p}>{p} <span className="text-slate-400">×{n}</span></div>)}</td>
-                  <td className="td tabular-nums">{v.visits} <span className="text-xs text-slate-400">/ {v.sessions} sessions</span></td>
-                  <td className="td text-xs text-slate-500">{fmtDate(v.lastSeenAt)}</td>
+                  <td className="td text-xs text-ink-300">{Object.entries(v.pages).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([p, n]) => <div key={p}>{p} <span className="text-ink-500">×{n}</span></div>)}</td>
+                  <td className="td tabular-nums">{v.visits} <span className="text-xs text-ink-500">/ {v.sessions} sessions</span></td>
+                  <td className="td text-xs text-ink-400">{fmtDate(v.lastSeenAt)}</td>
                   <td className="td"><select className="input py-1 text-xs" value={v.status} onChange={(e) => setStat(v, e.target.value)}>{["new", "reviewed", "contacted", "ignored"].map((s) => <option key={s}>{s}</option>)}</select></td>
                   <td className="td text-right"><button className="btn-primary py-1" disabled={busy} onClick={() => findPeople(v)}>{v.leadsFound ? `+${v.leadsFound} leads · more` : "Find decision makers"}</button></td>
                 </tr>
@@ -75,18 +75,18 @@ export function VisitorsPage() {
         </div>
       )}
       <Modal open={setup} onClose={() => setSetup(false)} title="Install the visitor pixel" wide>
-        <p className="mb-3 text-sm text-slate-600">Paste before <code>&lt;/head&gt;</code> on every page (or in Google Tag Manager as a Custom HTML tag). It is cookieless and under 1KB. Optionally call <code>window.getleads.identify({"{"}email, company{"}"})</code> after a login or form submit to identify visitors exactly.</p>
-        {pixels.map((p) => <div key={p.id} className="mb-3"><div className="text-sm font-medium">{p.name}</div><pre className="overflow-x-auto rounded-lg bg-slate-900 p-3 text-xs text-emerald-200">{p.snippet}</pre><button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied"))}>Copy</button></div>)}
+        <p className="mb-3 text-sm text-ink-300">Paste before <code>&lt;/head&gt;</code> on every page (or in Google Tag Manager as a Custom HTML tag). It is cookieless and under 1KB. Optionally call <code>window.prospex.identify({"{"}email, company{"}"})</code> after a login or form submit to identify visitors exactly.</p>
+        {pixels.map((p) => <div key={p.id} className="mb-3"><div className="text-sm font-medium">{p.name}</div><pre className="overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-200">{p.snippet}</pre><button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied"))}>Copy</button></div>)}
         {pixels.length === 0 && <button className="btn-primary" onClick={createPixel}>Create your first pixel</button>}
       </Modal>
       <Modal open={!!detail} onClose={() => setDetail(null)} title={detail?.company?.name ?? detail?.domain ?? ""} wide>
         {detail && <div className="space-y-2 text-sm">
-          <div className="text-slate-600">{detail.company?.description}</div>
-          <div className="text-xs text-slate-500">{[detail.company?.industry, detail.company?.location, detail.company?.openRoles ? `${detail.company.openRoles} open roles` : null].filter(Boolean).join(" · ")}</div>
-          {detail.company?.techStack?.length ? <div className="flex flex-wrap gap-1">{detail.company.techStack.map((t) => <span key={t} className="badge bg-slate-100 text-slate-600">{t}</span>)}</div> : null}
+          <div className="text-ink-300">{detail.company?.description}</div>
+          <div className="text-xs text-ink-400">{[detail.company?.industry, detail.company?.location, detail.company?.openRoles ? `${detail.company.openRoles} open roles` : null].filter(Boolean).join(" · ")}</div>
+          {detail.company?.techStack?.length ? <div className="flex flex-wrap gap-1">{detail.company.techStack.map((t) => <span key={t} className="badge bg-surface/5 text-ink-300">{t}</span>)}</div> : null}
           <div className="mt-2 font-medium">Pages viewed</div>
-          <ul className="text-xs">{Object.entries(detail.pages).sort((a, b) => b[1] - a[1]).map(([p, n]) => <li key={p} className="flex justify-between border-b border-slate-100 py-1"><span>{p}</span><span className="text-slate-400">{n}</span></li>)}</ul>
-          <div className="text-xs text-slate-500">First seen {fmtDate(detail.firstSeenAt)} · last seen {fmtDate(detail.lastSeenAt)}</div>
+          <ul className="text-xs">{Object.entries(detail.pages).sort((a, b) => b[1] - a[1]).map(([p, n]) => <li key={p} className="flex justify-between border-b border-white/5 py-1"><span>{p}</span><span className="text-ink-500">{n}</span></li>)}</ul>
+          <div className="text-xs text-ink-400">First seen {fmtDate(detail.firstSeenAt)} · last seen {fmtDate(detail.lastSeenAt)}</div>
         </div>}
       </Modal>
     </Page>

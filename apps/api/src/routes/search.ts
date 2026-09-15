@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, consume, consumeLead, desc, drainJobs, enqueue, eq, getDb, getJob, jobs, remainingPremiumBudget, searches } from "@getleads/db";
-import { crawlCompanyWebsite, extractDomain, findCompanies, findEmail, findPeople, resolveCompanyDomain, runLeadPipeline, createAiProvider, verifyEmail, parseQuery, pMap } from "@getleads/core";
+import { and, consume, consumeLead, desc, drainJobs, enqueue, eq, getDb, getJob, jobs, remainingPremiumBudget, searches } from "@prospex/db";
+import { crawlCompanyWebsite, extractDomain, findCompanies, findEmail, findPeople, resolveCompanyDomain, runLeadPipeline, createAiProvider, verifyEmail, parseQuery, pMap } from "@prospex/core";
 import { env } from "../env.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";

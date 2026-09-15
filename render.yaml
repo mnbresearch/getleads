@@ -8,7 +8,7 @@
 # everything-free pilot behavior with no billing.
 services:
   - type: web
-    name: getleads-api
+    name: prospex-api
     runtime: node
     plan: free
     buildCommand: npm ci --include=dev && npm run build -w packages/core -w packages/db -w packages/sdk -w apps/api

@@ -1,6 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { apiFetch, auth } from "../lib/api";
+import { Logo } from "./Logo";
 
 const nav = [
   { to: "/", label: "Overview", icon: "▦" },
@@ -25,26 +26,35 @@ export function Shell({ children }: { children: ReactNode }) {
     apiFetch<typeof me>("GET", "/v1/auth/me").then(setMe).catch(() => navigate("/login"));
   }, [navigate]);
   return (
-    <div className="flex min-h-screen">
-      <aside className={`fixed inset-y-0 left-0 z-40 w-60 transform border-r border-slate-200 bg-white transition sm:static sm:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
-        <div className="flex h-14 items-center gap-2 border-b border-slate-200 px-4">
-          <div className="grid h-7 w-7 place-items-center rounded-md bg-brand-600 text-sm font-bold text-white">G</div>
-          <div className="font-semibold">GetLeads</div>
-          <span className="ml-auto badge bg-brand-50 text-brand-700">{me?.org.plan ?? ""}</span>
+    <div className="flex min-h-screen bg-base">
+      <aside className={`fixed inset-y-0 left-0 z-40 w-60 transform border-r border-white/10 bg-surface/90 backdrop-blur transition sm:static sm:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
+        <div className="flex h-14 items-center gap-2 border-b border-white/10 px-4">
+          <Logo size={26} textClassName="text-base" />
+          <span className="ml-auto badge bg-brand-500/10 text-brand-300 capitalize">{me?.org.plan ?? ""}</span>
         </div>
         <nav className="flex flex-col gap-0.5 p-2">
           {nav.map((n) => (
-            <NavLink key={n.to} to={n.to} end={n.to === "/"} onClick={() => setOpen(false)} className={({ isActive }) => `flex items-center gap-3 rounded-lg px-3 py-2 text-sm ${isActive ? "bg-brand-50 font-medium text-brand-700" : "text-slate-600 hover:bg-slate-50"}`}>
-              <span className="w-4 text-center text-slate-400">{n.icon}</span>
+            <NavLink
+              key={n.to}
+              to={n.to}
+              end={n.to === "/"}
+              onClick={() => setOpen(false)}
+              className={({ isActive }) =>
+                `flex items-center gap-3 rounded-lg px-3 py-2 text-sm transition ${
+                  isActive ? "bg-gradient-to-r from-brand-500/20 to-transparent font-medium text-white ring-1 ring-inset ring-brand-500/30" : "text-ink-300 hover:bg-white/5 hover:text-ink-50"
+                }`
+              }
+            >
+              <span className="w-4 text-center text-ink-500">{n.icon}</span>
               {n.label}
             </NavLink>
           ))}
         </nav>
-        <div className="absolute bottom-0 w-full border-t border-slate-200 p-3 text-xs text-slate-500">
-          <div className="truncate font-medium text-slate-700">{me?.org.name}</div>
+        <div className="absolute bottom-0 w-full border-t border-white/10 p-3 text-xs text-ink-400">
+          <div className="truncate font-medium text-ink-100">{me?.org.name}</div>
           <div className="truncate">{me?.user.email}</div>
           <button
-            className="mt-2 text-brand-600 hover:underline"
+            className="mt-2 text-brand-300 hover:text-brand-100 hover:underline"
             onClick={() => {
               auth.set(null);
               navigate("/login");
@@ -55,9 +65,9 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center gap-3 border-b border-slate-200 bg-white px-4 sm:hidden">
-          <button onClick={() => setOpen((o) => !o)} className="text-xl">☰</button>
-          <div className="font-semibold">GetLeads</div>
+        <header className="flex h-14 items-center gap-3 border-b border-white/10 bg-surface/90 px-4 backdrop-blur sm:hidden">
+          <button onClick={() => setOpen((o) => !o)} className="text-xl text-ink-100">☰</button>
+          <Logo size={22} textClassName="text-sm" />
         </header>
         <main className="flex-1">{children}</main>
       </div>

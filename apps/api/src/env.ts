@@ -38,7 +38,7 @@ export const env = {
     pass: process.env.SMTP_PASS,
     secure: bool(process.env.SMTP_SECURE, false),
   },
-  mailFrom: process.env.MAIL_FROM ?? "GetLeads <no-reply@localhost>",
+  mailFrom: process.env.MAIL_FROM ?? "Prospex <no-reply@localhost>",
   hunterApiKey: process.env.HUNTER_API_KEY,
   abstractEmailApiKey: process.env.ABSTRACT_EMAIL_API_KEY,
   smtpProbeEnabled: bool(process.env.SMTP_PROBE_ENABLED, true),

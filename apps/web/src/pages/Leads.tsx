@@ -71,27 +71,27 @@ export function LeadsPage() {
         <select className="input w-40" value={q.seniority ?? ""} onChange={(e) => set("seniority", e.target.value)}><option value="">Any seniority</option>{["c_level", "vp", "director", "manager", "senior", "individual", "entry"].map((s) => <option key={s} value={s}>{s}</option>)}</select>
         <select className="input w-40" value={q.listId ?? ""} onChange={(e) => set("listId", e.target.value)}><option value="">All lists</option>{lists.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.count})</option>)}</select>
         <input className="input w-28" placeholder="Min score" type="number" defaultValue={q.minScore ?? ""} onKeyDown={(e) => e.key === "Enter" && set("minScore", (e.target as HTMLInputElement).value)} />
-        {q.tag && <span className="badge bg-brand-50 text-brand-700">tag: {q.tag} <button className="ml-1" onClick={() => set("tag", "")}>×</button></span>}
+        {q.tag && <span className="badge bg-brand-500/10 text-brand-300">tag: {q.tag} <button className="ml-1" onClick={() => set("tag", "")}>×</button></span>}
         <select className="input ml-auto w-40" value={`${q.sort ?? "created"}:${q.order ?? "desc"}`} onChange={(e) => { const [s, o] = e.target.value.split(":"); const p = new URLSearchParams(params); p.set("sort", s); p.set("order", o); setParams(p); }}>
           <option value="created:desc">Newest</option><option value="score:desc">Highest score</option><option value="updated:desc">Recently updated</option><option value="name:asc">Name A-Z</option>
         </select>
       </div>
 
       {sel.size > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-brand-50 px-3 py-2 text-sm">
-          <span className="font-medium text-brand-700">{sel.size} selected</span>
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-brand-500/10 px-3 py-2 text-sm">
+          <span className="font-medium text-brand-300">{sel.size} selected</span>
           <button className="btn-secondary" onClick={() => bulk("enrich")}>Enrich</button>
           <button className="btn-secondary" onClick={() => bulk("tag")}>Tag</button>
           <select className="input w-44" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }}><option value="">Add to list…</option>{lists.map((l) => <option key={l.id} value={`list:${l.id}`}>{l.name}</option>)}<option value="newlist">+ New list</option></select>
           <button className="btn-danger" onClick={() => bulk("delete")}>Delete</button>
-          <button className="ml-auto text-slate-500" onClick={() => setSel(new Set())}>Clear</button>
+          <button className="ml-auto text-ink-400" onClick={() => setSel(new Set())}>Clear</button>
         </div>
       )}
 
       {loading ? <Spinner label="Loading leads…" /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[900px]">
-            <thead className="border-b border-slate-200 bg-slate-50">
+            <thead className="border-b border-white/10 bg-base">
               <tr>
                 <th className="th w-8"><input type="checkbox" checked={sel.size === rows.length} onChange={(e) => setSel(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set())} /></th>
                 <th className="th">Name</th><th className="th">Company</th><th className="th">Email</th><th className="th">Score</th><th className="th">Location</th><th className="th">Added</th>
@@ -99,19 +99,19 @@ export function LeadsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((l) => (
-                <tr key={l.id} className="cursor-pointer hover:bg-slate-50" onClick={() => setDetail(l)}>
+                <tr key={l.id} className="cursor-pointer hover:bg-surface/5" onClick={() => setDetail(l)}>
                   <td className="td" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={sel.has(l.id)} onChange={(e) => { const s = new Set(sel); e.target.checked ? s.add(l.id) : s.delete(l.id); setSel(s); }} /></td>
-                  <td className="td"><div className="font-medium">{l.fullName ?? "-"}</div><div className="text-xs text-slate-500">{l.title ?? ""}</div></td>
-                  <td className="td"><div>{l.company?.name ?? l.company?.domain ?? "-"}</div><div className="text-xs text-slate-500">{l.company?.industry ?? l.company?.domain ?? ""}</div></td>
-                  <td className="td">{l.email ? <div className="text-sm">{l.email}</div> : <span className="text-slate-400">-</span>}<EmailStatusBadge status={l.emailStatus} /></td>
+                  <td className="td"><div className="font-medium">{l.fullName ?? "-"}</div><div className="text-xs text-ink-400">{l.title ?? ""}</div></td>
+                  <td className="td"><div>{l.company?.name ?? l.company?.domain ?? "-"}</div><div className="text-xs text-ink-400">{l.company?.industry ?? l.company?.domain ?? ""}</div></td>
+                  <td className="td">{l.email ? <div className="text-sm">{l.email}</div> : <span className="text-ink-500">-</span>}<EmailStatusBadge status={l.emailStatus} /></td>
                   <td className="td"><ScoreBar score={l.score} /></td>
-                  <td className="td text-slate-600">{l.location ?? l.company?.location ?? "-"}</td>
-                  <td className="td whitespace-nowrap text-xs text-slate-500">{fmtDate(l.createdAt)}</td>
+                  <td className="td text-ink-300">{l.location ?? l.company?.location ?? "-"}</td>
+                  <td className="td whitespace-nowrap text-xs text-ink-400">{fmtDate(l.createdAt)}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-          <div className="flex items-center justify-between border-t border-slate-200 px-3 py-2 text-sm text-slate-500">
+          <div className="flex items-center justify-between border-t border-white/10 px-3 py-2 text-sm text-ink-400">
             <span>{offset + 1}-{Math.min(offset + limit, total)} of {total}</span>
             <div className="flex gap-2">
               <button className="btn-secondary" disabled={offset === 0} onClick={() => { const p = new URLSearchParams(params); p.set("offset", String(Math.max(0, offset - limit))); setParams(p); }}>Prev</button>
@@ -141,34 +141,34 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
     <Modal open={!!lead} onClose={onClose} title={lead.fullName ?? "Lead"} wide>
       <div className="grid gap-5 sm:grid-cols-2">
         <div className="space-y-2 text-sm">
-          <div className="text-slate-500">{lead.title}</div>
-          <div><span className="text-slate-500">Email:</span> {lead.email ?? "-"} <EmailStatusBadge status={lead.emailStatus} /> <span className="text-xs text-slate-400">{Math.round((lead.emailConfidence ?? 0) * 100)}%</span></div>
-          {lead.phone && <div><span className="text-slate-500">Phone:</span> {lead.phone}</div>}
-          {lead.linkedinUrl && <div><a className="text-brand-600 hover:underline" href={lead.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn profile ↗</a></div>}
-          <div><span className="text-slate-500">Location:</span> {lead.location ?? "-"}</div>
-          <div><span className="text-slate-500">Source:</span> {lead.source}</div>
-          <div className="flex flex-wrap gap-1">{lead.tags.map((t) => <span key={t} className="badge bg-slate-100 text-slate-600">{t}</span>)}</div>
-          <div className="pt-2"><ScoreBar score={lead.score} /><ul className="mt-1 text-xs text-slate-500">{lead.scoreReasons.map((r, i) => <li key={i}>{r}</li>)}</ul></div>
+          <div className="text-ink-400">{lead.title}</div>
+          <div><span className="text-ink-400">Email:</span> {lead.email ?? "-"} <EmailStatusBadge status={lead.emailStatus} /> <span className="text-xs text-ink-500">{Math.round((lead.emailConfidence ?? 0) * 100)}%</span></div>
+          {lead.phone && <div><span className="text-ink-400">Phone:</span> {lead.phone}</div>}
+          {lead.linkedinUrl && <div><a className="text-brand-300 hover:underline" href={lead.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn profile ↗</a></div>}
+          <div><span className="text-ink-400">Location:</span> {lead.location ?? "-"}</div>
+          <div><span className="text-ink-400">Source:</span> {lead.source}</div>
+          <div className="flex flex-wrap gap-1">{lead.tags.map((t) => <span key={t} className="badge bg-surface/5 text-ink-300">{t}</span>)}</div>
+          <div className="pt-2"><ScoreBar score={lead.score} /><ul className="mt-1 text-xs text-ink-400">{lead.scoreReasons.map((r, i) => <li key={i}>{r}</li>)}</ul></div>
         </div>
         <div className="space-y-2 text-sm">
           <div className="font-medium">{lead.company?.name ?? lead.company?.domain ?? "No company"}</div>
           {lead.company && <>
-            <div><a className="text-brand-600 hover:underline" href={`https://${lead.company.domain}`} target="_blank" rel="noreferrer">{lead.company.domain} ↗</a> {lead.company.linkedinUrl && <a className="ml-2 text-brand-600 hover:underline" href={lead.company.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}</div>
-            <div className="text-slate-600">{lead.company.description ?? ""}</div>
-            <div className="text-xs text-slate-500">{[lead.company.industry, lead.company.size, lead.company.location].filter(Boolean).join(" · ")}</div>
-            {lead.company.techStack?.length > 0 && <div className="flex flex-wrap gap-1">{lead.company.techStack.map((t) => <span key={t} className="badge bg-slate-100 text-slate-600">{t}</span>)}</div>}
-            {lead.company.emailPattern && <div className="text-xs text-slate-500">Email pattern: <code>{lead.company.emailPattern}</code></div>}
+            <div><a className="text-brand-300 hover:underline" href={`https://${lead.company.domain}`} target="_blank" rel="noreferrer">{lead.company.domain} ↗</a> {lead.company.linkedinUrl && <a className="ml-2 text-brand-300 hover:underline" href={lead.company.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}</div>
+            <div className="text-ink-300">{lead.company.description ?? ""}</div>
+            <div className="text-xs text-ink-400">{[lead.company.industry, lead.company.size, lead.company.location].filter(Boolean).join(" · ")}</div>
+            {lead.company.techStack?.length > 0 && <div className="flex flex-wrap gap-1">{lead.company.techStack.map((t) => <span key={t} className="badge bg-surface/5 text-ink-300">{t}</span>)}</div>}
+            {lead.company.emailPattern && <div className="text-xs text-ink-400">Email pattern: <code>{lead.company.emailPattern}</code></div>}
           </>}
         </div>
       </div>
-      <div className="mt-5 flex flex-wrap gap-2 border-t border-slate-100 pt-4">
+      <div className="mt-5 flex flex-wrap gap-2 border-t border-white/5 pt-4">
         <button className="btn-secondary" disabled={!!busy} onClick={() => act("enrich", () => apiFetch("POST", `/v1/leads/${lead.id}/enrich`).then(() => toast("Enrichment queued")))}>{busy === "enrich" ? "…" : "Enrich"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.email} onClick={() => act("verify", () => apiFetch("POST", `/v1/leads/${lead.id}/verify`).then(() => toast("Verified")))}>{busy === "verify" ? "…" : "Verify email"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>
         <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
         <button className="btn-danger ml-auto" onClick={() => act("del", () => apiFetch("DELETE", `/v1/leads/${lead.id}`).then(onClose))}>Delete</button>
       </div>
-      {draft && <div className="mt-4 rounded-lg bg-slate-50 p-3 text-sm"><div className="font-medium">{draft.subject}</div><pre className="mt-2 whitespace-pre-wrap font-sans text-slate-700">{draft.body}</pre><button className="btn-secondary mt-2" onClick={() => navigator.clipboard.writeText(`Subject: ${draft.subject}\n\n${draft.body}`).then(() => toast("Copied"))}>Copy</button></div>}
+      {draft && <div className="mt-4 rounded-lg bg-base p-3 text-sm"><div className="font-medium">{draft.subject}</div><pre className="mt-2 whitespace-pre-wrap font-sans text-ink-200">{draft.body}</pre><button className="btn-secondary mt-2" onClick={() => navigator.clipboard.writeText(`Subject: ${draft.subject}\n\n${draft.body}`).then(() => toast("Copied"))}>Copy</button></div>}
     </Modal>
   );
 }
@@ -209,7 +209,7 @@ function ImportModal({ open, onClose, onDone, toast }: { open: boolean; onClose:
   };
   return (
     <Modal open={open} onClose={onClose} title="Import CSV" wide>
-      <p className="mb-2 text-sm text-slate-600">Paste CSV or choose a file. Recognized headers: name / first name / last name, title, email, company, website / domain, linkedin, phone, location. Extra columns are kept as custom fields. Duplicates (by email or LinkedIn) are merged.</p>
+      <p className="mb-2 text-sm text-ink-300">Paste CSV or choose a file. Recognized headers: name / first name / last name, title, email, company, website / domain, linkedin, phone, location. Extra columns are kept as custom fields. Duplicates (by email or LinkedIn) are merged.</p>
       <input type="file" accept=".csv,text/csv" className="mb-2 text-sm" onChange={(e) => { const f = e.target.files?.[0]; if (f) f.text().then(setText); }} />
       <textarea className="input h-48 font-mono text-xs" value={text} onChange={(e) => setText(e.target.value)} placeholder={"Name,Title,Company,Website,Email\nJane Doe,VP Sales,Acme,acme.com,jane@acme.com"} />
       <button className="btn-primary mt-3 w-full justify-center" disabled={busy || !text.trim()} onClick={submit}>{busy ? "Importing…" : "Import"}</button>

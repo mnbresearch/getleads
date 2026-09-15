@@ -24,7 +24,7 @@ export function AgentPage() {
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
   const curl = `curl -X POST ${API_URL}/v1/agent/prospect \\
-  -H "x-api-key: gl_live_..." -H "content-type: application/json" \\
+  -H "x-api-key: px_live_..." -H "content-type: application/json" \\
   -d '{"query": ${JSON.stringify(query || "CTOs at Series A SaaS startups in Pune")}, "limit": ${limit}${gen ? `, "generateEmails": true, "sender": ${JSON.stringify(sender)}` : ""}}'`;
   return (
     <Page title="Agent console" subtitle="The same single-call workflow your AI agents use: describe → discover → enrich → verify → score → (draft). Also available as an MCP server.">
@@ -39,22 +39,22 @@ export function AgentPage() {
           </div>
           {gen && <div className="grid gap-2 sm:grid-cols-3"><input className="input" placeholder="Your name" value={sender.name} onChange={(e) => setSender({ ...sender, name: e.target.value })} /><input className="input" placeholder="Your company" value={sender.company} onChange={(e) => setSender({ ...sender, company: e.target.value })} /><input className="input" placeholder="Value proposition" value={sender.valueProp} onChange={(e) => setSender({ ...sender, valueProp: e.target.value })} /></div>}
         </div>
-        <div className="card p-4"><div className="label">Equivalent API call</div><pre className="overflow-x-auto rounded-lg bg-slate-900 p-3 text-[11px] leading-relaxed text-emerald-200">{curl}</pre><div className="mt-2 text-xs text-slate-500">MCP: <code>npx @getleads/mcp</code> with <code>GETLEADS_API_KEY</code>. Docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">{API_URL}/docs</a></div></div>
+        <div className="card p-4"><div className="label">Equivalent API call</div><pre className="overflow-x-auto rounded-lg bg-black p-3 text-[11px] leading-relaxed text-emerald-200">{curl}</pre><div className="mt-2 text-xs text-ink-400">MCP: <code>npx @prospex/mcp</code> with <code>PROSPEX_API_KEY</code>. Docs at <a className="text-brand-300" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">{API_URL}/docs</a></div></div>
       </div>
       {res && (
         <div className="mt-6">
-          <div className="mb-2 text-sm text-slate-500">{res.length} leads in {elapsed}s · saved to your Leads (tag: agent)</div>
+          <div className="mb-2 text-sm text-ink-400">{res.length} leads in {elapsed}s · saved to your Leads (tag: agent)</div>
           <div className="grid gap-3 md:grid-cols-2">
             {res.map((r, i) => (
               <div key={i} className="card p-4">
-                <div className="flex items-start justify-between gap-2"><div><div className="font-semibold">{r.name}</div><div className="text-sm text-slate-600">{r.title} {r.company && <>· {r.company}</>}</div></div><ScoreBar score={r.score} /></div>
-                <div className="mt-2 text-sm">{r.email ? <>{r.email} <EmailStatusBadge status={r.emailStatus} /></> : <span className="text-slate-400">no email found</span>}</div>
-                {r.linkedinUrl && <a className="text-xs text-brand-600" href={r.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}
-                {r.companyDescription && <p className="mt-2 line-clamp-2 text-xs text-slate-500">{r.companyDescription}</p>}
-                {r.draftEmail && <div className="mt-3 rounded-lg bg-slate-50 p-3 text-xs"><div className="font-medium">{r.draftEmail.subject}</div><pre className="mt-1 whitespace-pre-wrap font-sans">{r.draftEmail.body}</pre></div>}
+                <div className="flex items-start justify-between gap-2"><div><div className="font-semibold">{r.name}</div><div className="text-sm text-ink-300">{r.title} {r.company && <>· {r.company}</>}</div></div><ScoreBar score={r.score} /></div>
+                <div className="mt-2 text-sm">{r.email ? <>{r.email} <EmailStatusBadge status={r.emailStatus} /></> : <span className="text-ink-500">no email found</span>}</div>
+                {r.linkedinUrl && <a className="text-xs text-brand-300" href={r.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}
+                {r.companyDescription && <p className="mt-2 line-clamp-2 text-xs text-ink-400">{r.companyDescription}</p>}
+                {r.draftEmail && <div className="mt-3 rounded-lg bg-base p-3 text-xs"><div className="font-medium">{r.draftEmail.subject}</div><pre className="mt-1 whitespace-pre-wrap font-sans">{r.draftEmail.body}</pre></div>}
               </div>
             ))}
-            {res.length === 0 && <div className="card p-6 text-sm text-slate-500 md:col-span-2">No results. From datacenter IPs the keyless engines are often blocked; add a free Brave Search API key (2,000 queries/month) or Google CSE key in the server .env for reliable discovery.</div>}
+            {res.length === 0 && <div className="card p-6 text-sm text-ink-400 md:col-span-2">No results. From datacenter IPs the keyless engines are often blocked; add a free Brave Search API key (2,000 queries/month) or Google CSE key in the server .env for reliable discovery.</div>}
           </div>
         </div>
       )}

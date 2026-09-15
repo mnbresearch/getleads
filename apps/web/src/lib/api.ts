@@ -1,4 +1,4 @@
-import { GetLeads, GetLeadsError } from "@getleads/sdk";
+import { Prospex, ProspexError } from "@prospex/sdk";
 
 export const API_URL = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? "http://localhost:8080";
 
@@ -19,10 +19,10 @@ export const auth = {
 };
 
 export function client() {
-  return new GetLeads({ baseUrl: API_URL, token: auth.token ?? undefined });
+  return new Prospex({ baseUrl: API_URL, token: auth.token ?? undefined });
 }
 
-export { GetLeadsError };
+export { ProspexError };
 
 export async function apiFetch<T = unknown>(method: string, path: string, body?: unknown, raw?: { contentType: string; body: string }): Promise<T> {
   const res = await fetch(`${API_URL}${path}`, {
@@ -38,7 +38,7 @@ export async function apiFetch<T = unknown>(method: string, path: string, body?:
   if (!res.ok) {
     const err = (data as { error?: { code?: string; message?: string } })?.error;
     if (res.status === 401) auth.set(null);
-    throw new GetLeadsError(res.status, err?.code ?? "http_error", err?.message ?? `HTTP ${res.status}`, data);
+    throw new ProspexError(res.status, err?.code ?? "http_error", err?.message ?? `HTTP ${res.status}`, data);
   }
   return data as T;
 }

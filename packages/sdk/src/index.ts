@@ -1,18 +1,18 @@
 /**
- * GetLeads SDK - zero-dependency client for Node 18+ / browsers / edge runtimes.
+ * Prospex SDK - zero-dependency client for Node 18+ / browsers / edge runtimes.
  *
- *   const gl = new GetLeads({ apiKey: "gl_live_...", baseUrl: "https://api.yourdomain.com" });
+ *   const gl = new Prospex({ apiKey: "px_live_...", baseUrl: "https://api.yourdomain.com" });
  *   const { leads } = await gl.agent.prospect({ query: "CTOs at Series A SaaS in Pune", limit: 5 });
  */
 
-export interface GetLeadsOptions {
+export interface ProspexOptions {
   apiKey?: string;
   token?: string;
   baseUrl?: string;
   fetch?: typeof fetch;
 }
 
-export class GetLeadsError extends Error {
+export class ProspexError extends Error {
   constructor(public status: number, public code: string, message: string, public details?: unknown) {
     super(message);
   }
@@ -64,14 +64,14 @@ export interface Sender {
   tone?: "friendly" | "direct" | "formal" | "casual";
 }
 
-export class GetLeads {
+export class Prospex {
   private baseUrl: string;
   private headers: Record<string, string>;
   private f: typeof fetch;
 
-  constructor(opts: GetLeadsOptions = {}) {
-    this.baseUrl = (opts.baseUrl ?? (typeof process !== "undefined" ? process.env.GETLEADS_API_URL : undefined) ?? "http://localhost:8080").replace(/\/$/, "");
-    const key = opts.apiKey ?? (typeof process !== "undefined" ? process.env.GETLEADS_API_KEY : undefined);
+  constructor(opts: ProspexOptions = {}) {
+    this.baseUrl = (opts.baseUrl ?? (typeof process !== "undefined" ? process.env.PROSPEX_API_URL : undefined) ?? "http://localhost:8080").replace(/\/$/, "");
+    const key = opts.apiKey ?? (typeof process !== "undefined" ? process.env.PROSPEX_API_KEY : undefined);
     this.headers = { "content-type": "application/json", ...(key ? { "x-api-key": key } : {}), ...(opts.token ? { authorization: `Bearer ${opts.token}` } : {}) };
     this.f = opts.fetch ?? fetch;
   }
@@ -86,7 +86,7 @@ export class GetLeads {
     } catch {}
     if (!res.ok) {
       const err = (data as { error?: { code?: string; message?: string; details?: unknown } })?.error;
-      throw new GetLeadsError(res.status, err?.code ?? "http_error", err?.message ?? `HTTP ${res.status}`, err?.details ?? data);
+      throw new ProspexError(res.status, err?.code ?? "http_error", err?.message ?? `HTTP ${res.status}`, err?.details ?? data);
     }
     return data as T;
   }
@@ -97,7 +97,7 @@ export class GetLeads {
     for (;;) {
       const j = await this.request<{ id: string; status: string; progress: number; result: unknown; error: string | null }>("GET", `/v1/search/jobs/${jobId}`);
       if (j.status === "done" || j.status === "failed") return j;
-      if (Date.now() - start > (opts.timeoutMs ?? 5 * 60_000)) throw new GetLeadsError(408, "timeout", "Job did not finish in time");
+      if (Date.now() - start > (opts.timeoutMs ?? 5 * 60_000)) throw new ProspexError(408, "timeout", "Job did not finish in time");
       await new Promise((r) => setTimeout(r, opts.intervalMs ?? 2000));
     }
   }
@@ -113,7 +113,7 @@ export class GetLeads {
       const r = await this.request<{ search: { id: string }; jobId: string }>("POST", "/v1/search", q);
       if (!wait) return { searchId: r.search.id, jobId: r.jobId, leads: [] };
       const j = await this.waitForJob(r.jobId);
-      if (j.status === "failed") throw new GetLeadsError(500, "search_failed", j.error ?? "search failed");
+      if (j.status === "failed") throw new ProspexError(500, "search_failed", j.error ?? "search failed");
       const ids = ((j.result as { leadIds?: string[] })?.leadIds ?? []);
       const leads = await Promise.all(ids.map((id) => this.leads.get(id)));
       return { searchId: r.search.id, jobId: r.jobId, leads };
@@ -236,4 +236,4 @@ export async function verifyWebhookSignature(secret: string, timestamp: string, 
   return hex === signature;
 }
 
-export default GetLeads;
+export default Prospex;

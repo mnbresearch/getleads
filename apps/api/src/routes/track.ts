@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { eq, getDb, messages, suppressions, campaignContacts, and } from "@getleads/db";
+import { eq, getDb, messages, suppressions, campaignContacts, and } from "@prospex/db";
 import { bumpEngagement, bumpStat } from "../services/campaigns.js";
 import { emitEvent } from "../lib/events.js";
 

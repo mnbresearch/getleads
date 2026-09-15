@@ -1,4 +1,4 @@
-# GetLeads
+# Prospex
 
 Open, zero-cost B2B lead generation infrastructure for sales teams and AI agents.
 
@@ -28,7 +28,7 @@ npm run dev:api                  # http://localhost:8080  (docs at /docs), worke
 npm run dev:web                  # http://localhost:5173
 ```
 
-Login: `demo@getleads.local` / `demo1234`.
+Login: `demo@prospex.local` / `demo1234`.
 
 ## What is built
 
@@ -66,20 +66,20 @@ curl -X POST $API/v1/auth/signup -H 'content-type: application/json' \
   -d '{"email":"you@co.com","password":"********","orgName":"Your Co"}'
 
 # 2. one-call prospecting for agents
-curl -X POST $API/v1/agent/prospect -H "x-api-key: gl_live_..." -H 'content-type: application/json' \
+curl -X POST $API/v1/agent/prospect -H "x-api-key: px_live_..." -H 'content-type: application/json' \
   -d '{"query":"Heads of Sales at fintech startups in Bengaluru","limit":5,"generateEmails":true,
        "sender":{"name":"Mridul","company":"MNB Research","valueProp":"AI automation for SMEs"}}'
 
 # 3. verify any email
-curl -X POST $API/v1/search/verify -H "x-api-key: gl_live_..." -H 'content-type: application/json' \
+curl -X POST $API/v1/search/verify -H "x-api-key: px_live_..." -H 'content-type: application/json' \
   -d '{"email":"someone@company.com"}'
 ```
 
 ## MCP for Claude / Cursor
 
 ```json
-{ "mcpServers": { "getleads": { "command": "npx", "args": ["-y", "@getleads/mcp"],
-  "env": { "GETLEADS_API_KEY": "gl_live_...", "GETLEADS_API_URL": "https://your-api.onrender.com" } } } }
+{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
+  "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "https://your-api.onrender.com" } } } }
 ```
 
 ## Tests

@@ -1,7 +1,7 @@
 {
-  "name": "@getleads/sdk",
+  "name": "@prospex/sdk",
   "version": "0.1.0",
-  "description": "TypeScript SDK for the GetLeads API",
+  "description": "TypeScript SDK for the Prospex API",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

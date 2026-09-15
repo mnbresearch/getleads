@@ -1,4 +1,4 @@
-# Deploying GetLeads for $0/month
+# Deploying Prospex for $0/month
 
 Everything below is a genuinely free tier as of September 2026 - checked directly against each provider's current pricing page, not carried over from an older stack. Two things changed since the original build: **Fly.io no longer offers a free tier to new accounts** (legacy-only, now pay-as-you-go from the first machine), and **Brave Search API dropped its free tier in February 2026** (now $5/1,000 queries, no free quota). Both are removed from the recommended path below.
 

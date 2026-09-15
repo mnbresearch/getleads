@@ -28,10 +28,10 @@ export function openapi(apiUrl: string) {
   return {
     openapi: "3.1.0",
     info: {
-      title: "GetLeads API",
+      title: "Prospex API",
       version: "1.0.0",
       description:
-        "Lead generation infrastructure for sales teams and AI agents: real-time B2B discovery, company enrichment, email finding + verification, ICP lookalike scoring, AI-personalized outreach, sequences, tracking, webhooks and CRM sync.\n\nAuthenticate with `x-api-key: gl_live_...` (recommended for agents) or `Authorization: Bearer <jwt>`.\n\nLong-running operations return `202` with a `jobId`; poll `GET /v1/search/{id}` or `GET /v1/search/jobs/{jobId}`.",
+        "Lead generation infrastructure for sales teams and AI agents: real-time B2B discovery, company enrichment, email finding + verification, ICP lookalike scoring, AI-personalized outreach, sequences, tracking, webhooks and CRM sync.\n\nAuthenticate with `x-api-key: px_live_...` (recommended for agents) or `Authorization: Bearer <jwt>`.\n\nLong-running operations return `202` with a `jobId`; poll `GET /v1/search/{id}` or `GET /v1/search/jobs/{jobId}`.",
     },
     servers: [{ url: apiUrl }],
     components: {
@@ -136,7 +136,7 @@ export function openapi(apiUrl: string) {
 }
 
 export const docsHtml = (specUrl: string) => `<!doctype html>
-<html><head><meta charset="utf-8"><title>GetLeads API Docs</title>
+<html><head><meta charset="utf-8"><title>Prospex API Docs</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"></head>
 <body><div id="ui"></div>
 <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
