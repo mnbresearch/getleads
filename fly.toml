@@ -1,0 +1,25 @@
+# Fly.io - allows outbound port 25 on request (real SMTP verification). Free allowance covers one shared-cpu-1x VM.
+app = "getleads-api"
+primary_region = "sin"   # Singapore - closest to India
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  NODE_ENV = "production"
+  JOB_MODE = "worker"
+  EMBED_WORKER = "true"
+  WORKER_CONCURRENCY = "2"
+  PORT = "8080"
+  PILOT_MODE = "true"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = false   # keep the worker alive
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "256mb"

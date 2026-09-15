@@ -1,0 +1,77 @@
+# Render Blueprint - free tier. One web service runs API + embedded worker.
+# Database: Neon (recommended, free compute suspends but never loses data) or Supabase (free,
+# but the whole project pauses after 7 days idle). Paste the pooled connection string as DATABASE_URL.
+# This blueprint is set for the PRODUCTION path: PILOT_MODE=false + DEFAULT_PLAN=free, so new
+# signups land on the free plan and Stripe "Upgrade" buttons are live on paid tiers (Starter/
+# Growth/Scale/Enterprise) the moment STRIPE_* vars are filled in - no prepaid data-provider keys
+# required to open paid signups. Set PILOT_MODE back to "true" instead if you want the old
+# everything-free pilot behavior with no billing.
+services:
+  - type: web
+    name: getleads-api
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build -w packages/core -w packages/db -w packages/sdk -w apps/api
+    startCommand: node apps/api/dist/server.js
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JOB_MODE
+        value: worker
+      - key: EMBED_WORKER
+        value: "true"
+      - key: WORKER_CONCURRENCY
+        value: "2"
+      - key: SMTP_PROBE_ENABLED
+        value: "false"     # Render blocks outbound port 25
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ENCRYPTION_KEY
+        generateValue: true
+      - key: INTERNAL_TOKEN
+        generateValue: true
+      - key: APP_URL
+        sync: false
+      - key: API_URL
+        sync: false
+      # AI - both free, second one is automatic fallback if the first is rate-limited
+      - key: GROQ_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      # Search - Google CSE is the primary free key (100/day); Brave has no free tier since
+      # Feb 2026 so it's left unset here on purpose (add it later as a paid top-up if needed)
+      - key: GOOGLE_CSE_API_KEY
+        sync: false
+      - key: GOOGLE_CSE_CX
+        sync: false
+      # Email
+      - key: RESEND_API_KEY
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+      # Optional verification boost (free tier)
+      - key: HUNTER_API_KEY
+        sync: false
+      # Production path: paid plans open, no pre-purchased data-provider credits needed to start
+      - key: PILOT_MODE
+        value: "false"
+      - key: DEFAULT_PLAN
+        value: "free"
+      # Billing - required for the production path; leave unset to keep billing off (upgrade
+      # buttons simply won't render) until Stripe is ready
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_STARTER
+        sync: false
+      - key: STRIPE_PRICE_GROWTH
+        sync: false
+      - key: STRIPE_PRICE_SCALE
+        sync: false
+      - key: STRIPE_PRICE_ENTERPRISE
+        sync: false

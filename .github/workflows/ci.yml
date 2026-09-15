@@ -1,0 +1,28 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env: { POSTGRES_USER: getleads, POSTGRES_PASSWORD: getleads, POSTGRES_DB: getleads }
+        ports: ["5432:5432"]
+        options: --health-cmd pg_isready --health-interval 5s --health-timeout 3s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22, cache: npm }
+      - run: npm ci
+      - run: npm run build -w packages/core -w packages/db -w packages/sdk
+      - run: npm run typecheck
+      - run: npm test -w packages/core
+      - name: API smoke test
+        env:
+          DATABASE_URL: postgres://getleads:getleads@localhost:5432/getleads
+          JWT_SECRET: ci
+          SMTP_PROBE_ENABLED: "false"
+        run: |
+          (cd apps/api && npx tsx src/server.ts > api.log 2>&1 &)
+          for i in $(seq 1 30); do curl -sf localhost:8080/health && break; sleep 1; done
+          API=http://localhost:8080 ./scripts/smoke.sh

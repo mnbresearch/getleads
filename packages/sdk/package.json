@@ -1,0 +1,15 @@
+{
+  "name": "@getleads/sdk",
+  "version": "0.1.0",
+  "description": "TypeScript SDK for the GetLeads API",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": { ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" } },
+  "files": ["dist"],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "license": "MIT"
+}
