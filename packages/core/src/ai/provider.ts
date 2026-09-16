@@ -36,9 +36,11 @@ class GeminiProvider implements AiProvider {
   name = "gemini";
   constructor(
     private apiKey: string,
-    // gemini-2.0-flash was retired as of Sep 2026 (Gemini API now points callers at
-    // gemini-3.6-flash) - override via GEMINI_MODEL if Google renames the line again.
-    public model = "gemini-3.6-flash",
+    // gemini-2.0-flash was retired as of Sep 2026. gemini-3.6-flash (Google's own suggested
+    // replacement) is GA but was returning 503 "high demand" under free-tier load when this
+    // was checked; gemini-3.5-flash-lite is Google's purpose-built high-volume/low-cost tier,
+    // a better fit here and less capacity-constrained. Override via GEMINI_MODEL if needed.
+    public model = "gemini-3.5-flash-lite",
   ) {}
   async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
     meter("gemini");
