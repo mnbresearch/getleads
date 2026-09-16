@@ -11,6 +11,7 @@ export * from "./email/find.js";
 export * from "./icp/score.js";
 export * from "./icp/priority.js";
 export * from "./icp/learn.js";
+export * from "./outreach/experiment.js";
 export * from "./email/sendingHealth.js";
 export * from "./outreach/template.js";
 export * from "./outreach/generate.js";

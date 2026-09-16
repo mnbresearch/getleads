@@ -248,7 +248,7 @@ export function CampaignDetail() {
           ))}
         </div>
       )}
-      {stats?.variants && stats.variants.length > 1 && <div className="card mb-4 p-3 text-sm"><div className="mb-1 font-medium">A/B results</div><div className="flex flex-wrap gap-3">{stats.variants.map((v, i) => <div key={i} className="rounded-lg bg-cream px-3 py-2 text-xs">Step {(c.steps ?? []).findIndex((st) => (st as unknown as { id: string }).id === v.stepId) + 1 || "?"} · Variant {String.fromCharCode(65 + v.variant)}: {v.sent} sent · {v.sent ? Math.round((v.opened / v.sent) * 100) : 0}% open · {v.sent ? Math.round((v.replied / v.sent) * 100) : 0}% reply</div>)}</div></div>}
+      <ExperimentsPanel campaignId={c.id} />
       <div className="mb-3 flex gap-2 border-b border-black/10">{(["contacts", "messages"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}</button>)}</div>
       {tab === "contacts" ? (
         <div className="card overflow-x-auto">
@@ -290,6 +290,64 @@ export function CampaignDetail() {
       <EnrollModal open={enrollOpen} onClose={() => setEnrollOpen(false)} campaign={c} lists={lists} onDone={() => { setEnrollOpen(false); load(); }} toast={toast} />
       <CampaignModal open={editOpen} onClose={() => setEditOpen(false)} accounts={accounts} lists={lists} icps={icps} existing={c} onDone={() => { setEditOpen(false); load(); }} toast={toast} />
     </Page>
+  );
+}
+
+interface Experiment {
+  stepId: string;
+  stepNo: number;
+  subjects: string[];
+  result: {
+    winner: number | null;
+    confident: boolean;
+    totalSent: number;
+    summary: string;
+    allocation: Record<number, number>;
+    ranked: { variant: number; sent: number; positives: number; rate: number }[];
+  };
+}
+
+/**
+ * A/B results with an actual verdict. Raw per-variant reply rates are easy to over-read,
+ * so the winner is only named once the difference is statistically separable, and the
+ * traffic split in force is shown either way.
+ */
+function ExperimentsPanel({ campaignId }: { campaignId: string }) {
+  const [rows, setRows] = useState<Experiment[]>([]);
+  useEffect(() => {
+    apiFetch<{ experiments: Experiment[] }>("GET", `/v1/campaigns/${campaignId}/experiments`).then((r) => setRows(r.experiments ?? [])).catch(() => setRows([]));
+  }, [campaignId]);
+  if (rows.length === 0) return null;
+  return (
+    <div className="card mb-4 p-4">
+      <div className="mb-1 font-medium">A/B results</div>
+      <div className="mb-3 text-xs text-ink-400">Winners are only called once the gap is bigger than the noise. Until then traffic stays evenly split.</div>
+      <div className="space-y-3">
+        {rows.map((e) => (
+          <div key={e.stepId} className="rounded-lg border border-black/10 p-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="text-sm font-medium">Step {e.stepNo}</span>
+              <span className={`badge ${e.result.confident ? "bg-emerald-50 text-emerald-700" : "bg-black/[0.05] text-ink-300"}`}>
+                {e.result.confident ? `Variant ${String.fromCharCode(65 + (e.result.winner ?? 0))} wins` : "Inconclusive"}
+              </span>
+            </div>
+            <div className="mt-1 text-xs text-ink-300">{e.result.summary}</div>
+            <div className="mt-2 grid gap-2 sm:grid-cols-2">
+              {e.result.ranked.map((v) => (
+                <div key={v.variant} className={`rounded-md px-3 py-2 text-xs ${e.result.confident && v.variant === e.result.winner ? "bg-emerald-50" : "bg-cream"}`}>
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium">Variant {String.fromCharCode(65 + v.variant)}</span>
+                    <span className="text-ink-400">{Math.round((e.result.allocation[v.variant] ?? 0) * 100)}% of new sends</span>
+                  </div>
+                  <div className="truncate text-ink-400" title={e.subjects[v.variant]}>{e.subjects[v.variant]}</div>
+                  <div className="mt-0.5">{v.positives}/{v.sent} replied ({Math.round(v.rate * 100)}%)</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
   );
 }
 

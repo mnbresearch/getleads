@@ -1,5 +1,5 @@
 import { and, asc, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, getDb, integrations, leads, lte, messages, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount } from "@prospex/db";
-import { createAiProvider, evaluateSendingHealth, generateOutreach, leadVars, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type SendingHealth } from "@prospex/core";
+import { allocateVariant, createAiProvider, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type SendingHealth } from "@prospex/core";
 import { decryptJson as decryptCfg } from "../lib/crypto.js";
 import { consume } from "@prospex/db";
 import { env } from "../env.js";
@@ -226,7 +226,11 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   const prevMsg = cc.lastMessageId ? await db.query.messages.findFirst({ where: eq(messages.id, cc.lastMessageId) }) : null;
   const leadForTpl = { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null };
 
-  const variant = pickVariant(step, cc.variant);
+  // Once an A/B test has a statistically clear winner, most new sends go to it instead of
+  // continuing an even round-robin against a variant already known to lose.
+  const experiment = await experimentForStep(db, step);
+  const variantIdx = experiment?.confident ? allocateVariant(experiment.allocation, cc.variant) : cc.variant;
+  const variant = pickVariant(step, variantIdx);
   let subject: string;
   let body: string;
   if (step.aiPersonalize) {
@@ -357,6 +361,36 @@ export async function advanceContact(contactId: string) {
   await db.update(campaignContacts).set({ currentStep: cc.currentStep + 1, status: next ? "active" : "completed", nextSendAt: next ? new Date(Date.now() + next.delayDays * 86_400_000) : null, updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
   await bumpStat(cc.campaignId, "sent");
   if (next && next.delayDays === 0) await tickCampaign(cc.campaignId).catch(() => {}); // fire the next step promptly
+}
+
+/**
+ * Live A/B results for one sequence step, from real sends and replies.
+ *
+ * Returns null when the step has no variants, so callers fall back to the contact's
+ * round-robin index unchanged.
+ */
+export async function experimentForStep(
+  db: ReturnType<typeof getDb>["db"],
+  step: { id: string; variants: { subjectTemplate: string; bodyTemplate: string }[] },
+): Promise<ExperimentResult | null> {
+  const variantCount = 1 + (step.variants?.length ?? 0);
+  if (variantCount < 2) return null;
+  const rows = await db
+    .select({
+      variant: messages.variant,
+      sent: sql<number>`count(*) FILTER (WHERE ${messages.sentAt} IS NOT NULL)::int`,
+      positives: sql<number>`count(*) FILTER (WHERE ${messages.repliedAt} IS NOT NULL)::int`,
+    })
+    .from(messages)
+    .where(and(eq(messages.stepId, step.id), eq(messages.direction, "outbound")))
+    .groupBy(messages.variant);
+  const byVariant = new Map(rows.map((r) => [r.variant, r]));
+  const stats = Array.from({ length: variantCount }, (_, i) => ({
+    variant: i,
+    sent: byVariant.get(i)?.sent ?? 0,
+    positives: byVariant.get(i)?.positives ?? 0,
+  }));
+  return pickVariantWinner(stats);
 }
 
 /** Pick an A/B variant for a step (round-robin by contact variant index). */

@@ -6,6 +6,7 @@ import { scoreLeadRules } from "./icp/score.js";
 import { computeLeadPriority } from "./icp/priority.js";
 import { learnFromOutcomes, wilsonInterval } from "./icp/learn.js";
 import { evaluateSendingHealth, rampCapFor } from "./email/sendingHealth.js";
+import { pickVariantWinner, allocateVariant } from "./outreach/experiment.js";
 import { renderTemplate, leadVars } from "./outreach/template.js";
 import { extractDomain, isSocialOrAggregator, normalizeLinkedinUrl, rootDomain } from "./util/domain.js";
 import { inferDepartment, inferSeniority, splitName } from "./util/names.js";
@@ -214,6 +215,46 @@ describe("sending health", () => {
     const h = evaluateSendingHealth({ sent: 500, bounced: 1 }, { domainAgeDays: 90, configuredDailyCap: 30 });
     expect(h.status).toBe("ok");
     expect(h.recommendedDailyCap).toBe(30);
+  });
+});
+
+describe("ab experiments", () => {
+  it("does not call a winner while either variant is underpowered", () => {
+    // 3/5 looks like a 60% reply rate. It is five sends.
+    const r = pickVariantWinner([{ variant: 0, sent: 5, positives: 3 }, { variant: 1, sent: 5, positives: 0 }]);
+    expect(r.confident).toBe(false);
+    expect(r.winner).toBeNull();
+    expect(r.allocation).toEqual({ 0: 0.5, 1: 0.5 });
+    expect(r.summary).toMatch(/Too early/);
+  });
+
+  it("declares a winner only once the intervals separate", () => {
+    const r = pickVariantWinner([{ variant: 0, sent: 400, positives: 80 }, { variant: 1, sent: 400, positives: 16 }]);
+    expect(r.confident).toBe(true);
+    expect(r.winner).toBe(0);
+    expect(r.allocation[0]).toBeCloseTo(0.9, 5);
+    // Losers keep a slice so drift is still detectable.
+    expect(r.allocation[1]).toBeCloseTo(0.1, 5);
+  });
+
+  it("keeps the split even when a lead exists but is not separable from noise", () => {
+    const r = pickVariantWinner([{ variant: 0, sent: 100, positives: 12 }, { variant: 1, sent: 100, positives: 10 }]);
+    expect(r.confident).toBe(false);
+    expect(r.allocation).toEqual({ 0: 0.5, 1: 0.5 });
+    expect(r.summary).toMatch(/within noise/);
+  });
+
+  it("handles a single variant and clamps impossible inputs", () => {
+    expect(pickVariantWinner([{ variant: 0, sent: 10, positives: 2 }]).confident).toBe(false);
+    // positives above sent would poison the interval maths.
+    const r = pickVariantWinner([{ variant: 0, sent: 5, positives: 99 }, { variant: 1, sent: 5, positives: 0 }]);
+    expect(r.ranked[0].rate).toBeLessThanOrEqual(1);
+  });
+
+  it("allocates traffic by weight and falls back when empty", () => {
+    expect(allocateVariant({ 0: 0.9, 1: 0.1 }, 7, () => 0.0)).toBe(0);
+    expect(allocateVariant({ 0: 0.9, 1: 0.1 }, 7, () => 0.95)).toBe(1);
+    expect(allocateVariant({}, 7)).toBe(7);
   });
 });
 

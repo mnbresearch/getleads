@@ -8,7 +8,7 @@ import { encryptJson } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { testMailer, systemMailerConfig } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, mailerFromAccount, markReplied, tickCampaign } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, tickCampaign } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 
@@ -135,6 +135,24 @@ campaignRoutes.post("/:id/enroll", zValidator("json", z.object({ leadIds: z.arra
   const valid = await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, ids), sql`${leads.email} IS NOT NULL`, sql`${leads.emailStatus} <> 'invalid'`));
   const n = await enrollLeads(cp, valid.map((v) => v.id));
   return c.json({ enrolled: n, skippedNoEmail: ids.length - valid.length });
+});
+
+/**
+ * A/B results per sequence step. Steps with a single variant are omitted: there is nothing
+ * to compare.
+ */
+campaignRoutes.get("/:id/experiments", async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  const cp = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, oid)) });
+  if (!cp) throw notFound("Campaign");
+  const steps = await db.select().from(sequenceSteps).where(eq(sequenceSteps.campaignId, cp.id)).orderBy(asc(sequenceSteps.stepNo));
+  const out = [];
+  for (const st of steps) {
+    const result = await experimentForStep(db, st);
+    if (result) out.push({ stepId: st.id, stepNo: st.stepNo, subjects: [st.subjectTemplate, ...(st.variants ?? []).map((v) => v.subjectTemplate)], result });
+  }
+  return c.json({ experiments: out });
 });
 
 campaignRoutes.post("/:id/start", async (c) => {
