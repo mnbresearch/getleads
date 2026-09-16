@@ -36,7 +36,9 @@ class GeminiProvider implements AiProvider {
   name = "gemini";
   constructor(
     private apiKey: string,
-    public model = "gemini-2.0-flash",
+    // gemini-2.0-flash was retired as of Sep 2026 (Gemini API now points callers at
+    // gemini-3.6-flash) - override via GEMINI_MODEL if Google renames the line again.
+    public model = "gemini-3.6-flash",
   ) {}
   async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
     meter("gemini");
