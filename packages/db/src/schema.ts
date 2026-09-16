@@ -91,6 +91,10 @@ export const companies = pgTable(
     lastSignalAt: ts("last_signal_at"),
     intentScore: real("intent_score").notNull().default(0),
     raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default({}),
+    // AI-generated "why reach out now" account brief - cached so a rep opening the same
+    // company repeatedly doesn't re-spend an AI call each time. Regenerated on request.
+    aiBrief: jsonb("ai_brief").$type<{ summary: string; whyNow: string; angles: string[] }>(),
+    aiBriefAt: ts("ai_brief_at"),
     enrichedAt: ts("enriched_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
@@ -106,6 +110,9 @@ export const icps = pgTable("icps", {
   criteria: jsonb("criteria").$type<IcpCriteria>().notNull().default({} as IcpCriteria),
   seedDomains: text("seed_domains").array().notNull().default([]),
   aiProfile: jsonb("ai_profile").$type<Record<string, unknown>>(),
+  // Conversational ICP assistant transcript (see POST /v1/icps/:id/chat). Kept short by the
+  // route (last ~20 turns) so it never becomes a meaningful storage or prompt-size concern.
+  chatHistory: jsonb("chat_history").$type<{ role: "user" | "assistant"; content: string }[]>().notNull().default([]),
   createdAt: ts("created_at").notNull().defaultNow(),
   updatedAt: ts("updated_at").notNull().defaultNow(),
 });
@@ -272,6 +279,12 @@ export const messages = pgTable(
     clickedAt: ts("clicked_at"),
     repliedAt: ts("replied_at"),
     bouncedAt: ts("bounced_at"),
+    // AI reply-triage: set on inbound messages only. `intent` mirrors classifyReply()'s
+    // output (interested|not_interested|out_of_office|unsubscribe|referral|question|other);
+    // `draftReply` is an AI-suggested follow-up (subject/body) for positive-signal intents,
+    // reviewed and sent by the rep via POST /v1/campaigns/messages/:id/send-reply.
+    intent: text("intent"),
+    draftReply: jsonb("draft_reply").$type<{ subject: string; body: string }>(),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
   (t) => ({

@@ -1,14 +1,15 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, asc, inArray, campaignContacts, campaigns, companies, consume, desc, emailAccounts, enqueue, eq, getDb, leads, listLeads, messages, sequenceSteps, sql } from "@prospex/db";
-import { createAiProvider, generateOutreach, classifyReply } from "@prospex/core";
+import { and, asc, inArray, campaignContacts, campaigns, companies, consume, desc, emailAccounts, enqueue, eq, getDb, leads, listLeads, messages, organizations, sequenceSteps, sql } from "@prospex/db";
+import { createAiProvider, createAiProviderForPlan, generateOutreach, classifyReply, draftReplyToInbound } from "@prospex/core";
 import { env } from "../env.js";
 import { encryptJson } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { testMailer, systemMailerConfig } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { enrollLeads, mailerFromAccount, markReplied, tickCampaign } from "../services/campaigns.js";
+import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 
 export const campaignRoutes = new Hono<Env>();
@@ -232,20 +233,115 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   return c.json(await generateOutreach(createAiProvider(), { lead, sender: b.sender, instructions: b.instructions, stepNo: b.stepNo, language: b.language }));
 });
 
+/** Positive-signal intents worth drafting an AI follow-up for. */
+const REPLY_WORTHY_INTENTS = new Set(["interested", "referral", "question"]);
+
 /** Inbound reply ingestion (Resend inbound webhook, Gmail/Zapier forward, or manual). Stops sequences + classifies intent. */
 campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), text: z.string().default(""), subject: z.string().optional() })), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const email = (b.from.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0] ?? b.from).toLowerCase();
-  const cls = await classifyReply(createAiProvider(), `${b.subject ?? ""}\n${b.text}`);
+  const org = await getDb().db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+  const ai = createAiProviderForPlan(org?.plan ?? "free");
+  const cls = await classifyReply(ai, `${b.subject ?? ""}\n${b.text}`);
   const { db } = getDb();
   const matched = await markReplied(oid, email, cls.intent);
   if (matched) {
     const lead = await db.query.leads.findFirst({ where: and(eq(leads.orgId, oid), eq(leads.email, email)) });
-    await db.insert(messages).values({ orgId: oid, leadId: lead?.id, direction: "inbound", toEmail: email, subject: b.subject ?? "(reply)", bodyText: b.text.slice(0, 20000), status: "received" });
+    const company = lead?.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
+
+    // Reuse the sender identity from the most recent outbound message to this lead, if any.
+    const prevOutbound = lead
+      ? await db.query.messages.findFirst({ where: and(eq(messages.orgId, oid), eq(messages.leadId, lead.id), eq(messages.direction, "outbound")), orderBy: desc(messages.createdAt) })
+      : null;
+    const campaign = prevOutbound?.campaignId ? await db.query.campaigns.findFirst({ where: eq(campaigns.id, prevOutbound.campaignId) }) : null;
+    const account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
+    const cs = (campaign?.settings ?? {}) as Record<string, unknown>;
+
+    let draftReply: { subject: string; body: string } | null = null;
+    if (lead && REPLY_WORTHY_INTENTS.has(cls.intent)) {
+      draftReply = await draftReplyToInbound(ai, {
+        inboundText: b.text,
+        inboundSubject: b.subject,
+        intent: cls.intent,
+        lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null },
+        sender: {
+          name: account?.fromName ?? "Me",
+          company: String(cs.senderCompany ?? ""),
+          title: cs.senderTitle ? String(cs.senderTitle) : undefined,
+          valueProp: String(cs.valueProp ?? ""),
+          signature: account?.signature ?? undefined,
+          tone: (cs.tone as "friendly" | undefined) ?? "friendly",
+        },
+      }).catch(() => null);
+      if (draftReply) await consume(db, oid, "aiMessages", 1).catch(() => {});
+    }
+
+    await db.insert(messages).values({
+      orgId: oid,
+      campaignId: campaign?.id,
+      leadId: lead?.id,
+      direction: "inbound",
+      toEmail: email,
+      subject: b.subject ?? "(reply)",
+      bodyText: b.text.slice(0, 20000),
+      status: "received",
+      intent: cls.intent,
+      draftReply: draftReply ?? undefined,
+    });
   }
   return c.json({ matched, intent: cls.intent, confidence: cls.confidence });
 });
+
+/** Send (or edit-and-send) the AI-drafted follow-up for an inbound message. */
+campaignRoutes.post(
+  "/messages/:id/send-reply",
+  zValidator("json", z.object({ subject: z.string().min(1).optional(), body: z.string().min(1).optional() })),
+  async (c) => {
+    const oid = orgId(c);
+    const b = c.req.valid("json");
+    const { db } = getDb();
+    const inbound = await db.query.messages.findFirst({ where: and(eq(messages.id, c.req.param("id")), eq(messages.orgId, oid)) });
+    if (!inbound || inbound.direction !== "inbound") throw notFound("Inbound message");
+    const draft = inbound.draftReply as { subject: string; body: string } | null;
+    const subject = b.subject ?? draft?.subject;
+    const bodyText = b.body ?? draft?.body;
+    if (!subject || !bodyText) throw badRequest("No draft available - pass subject and body");
+    if (!inbound.leadId) throw badRequest("Inbound message has no matched lead");
+    const lead = await db.query.leads.findFirst({ where: eq(leads.id, inbound.leadId) });
+    if (!lead?.email) throw badRequest("Lead has no email");
+
+    const campaign = inbound.campaignId ? await db.query.campaigns.findFirst({ where: eq(campaigns.id, inbound.campaignId) }) : null;
+    let account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
+    if (!account) account = await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.orgId, oid), orderBy: desc(emailAccounts.createdAt) });
+    if (!account) throw badRequest("No email sending account configured for this org");
+
+    const mailer = mailerFromAccount(account);
+    if (!mailer) throw badRequest("Sending account is not configured correctly");
+
+    const [msg] = await db
+      .insert(messages)
+      .values({ orgId: oid, campaignId: campaign?.id, leadId: lead.id, direction: "outbound", toEmail: lead.email, subject, bodyText, status: "queued" })
+      .returning();
+
+    const res = await sendMail(mailer, {
+      from: `${account.fromName} <${account.fromEmail}>`,
+      to: lead.email,
+      subject,
+      text: bodyText,
+      replyTo: account.replyTo ?? account.fromEmail,
+      headers: { "X-Prospex-Message": msg.id },
+    });
+    if (res.ok) {
+      await db.update(messages).set({ status: "sent", sentAt: new Date(), providerMessageId: res.providerMessageId }).where(eq(messages.id, msg.id));
+      await db.update(messages).set({ draftReply: null }).where(eq(messages.id, inbound.id));
+      await emitEvent(oid, "message.sent", { messageId: msg.id, leadId: lead.id, campaignId: campaign?.id, to: lead.email, subject }, { type: "message", id: msg.id });
+      return c.json({ sent: true, messageId: msg.id });
+    }
+    await db.update(messages).set({ status: "failed", error: res.error }).where(eq(messages.id, msg.id));
+    throw badRequest(`Send failed: ${res.error}`);
+  },
+);
 
 campaignRoutes.get("/:id/stats", async (c) => {
   const oid = orgId(c);

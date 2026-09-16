@@ -74,3 +74,40 @@ export async function classifyReply(ai: AiProvider, text: string): Promise<{ int
   ], { maxTokens: 60, temperature: 0 });
   return res?.intent ? { intent: res.intent, confidence: Number(res.confidence ?? 0.7) } : { intent: "other", confidence: 0.4 };
 }
+
+/** Draft a short human follow-up reply to an inbound message that showed positive signal. */
+export async function draftReplyToInbound(
+  ai: AiProvider,
+  input: {
+    inboundText: string;
+    inboundSubject?: string;
+    intent: string;
+    lead: Parameters<typeof leadVars>[0];
+    sender: { name: string; company: string; title?: string; valueProp: string; signature?: string; tone?: "friendly" | "direct" | "formal" | "casual" };
+  },
+): Promise<{ subject: string; body: string } | null> {
+  if (!hasAi(ai)) return null;
+  const vars = leadVars(input.lead, { name: input.sender.name, company: input.sender.company, signature: input.sender.signature });
+  const res = await completeJson<{ subject: string; body: string }>(
+    ai,
+    [
+      {
+        role: "system",
+        content: `You draft short, human replies to inbound sales email replies. The person just replied with intent "${input.intent}". Rules: under 100 words; plain text; directly respond to what they said; one clear next step; ${input.sender.tone ?? "friendly"} tone; never invent facts you don't have; sign off with the sender's name only (signature added separately). Reply with JSON {"subject": string, "body": string}.`,
+      },
+      {
+        role: "user",
+        content: `Sender: ${input.sender.name}, ${input.sender.title ?? ""} at ${input.sender.company}. Value proposition: ${input.sender.valueProp}
+Recipient: ${vars.full_name || "unknown"}, ${vars.title || "unknown role"} at ${vars.company || "unknown company"}.
+Their reply (subject: "${input.inboundSubject ?? ""}"):
+${input.inboundText.slice(0, 2000)}
+Return JSON only.`,
+      },
+    ],
+    { maxTokens: 400, temperature: 0.6 },
+  );
+  if (!res?.subject || !res?.body) return null;
+  let body = String(res.body).trim();
+  if (input.sender.signature) body += `\n\n${input.sender.signature}`;
+  return { subject: String(res.subject).trim().slice(0, 120), body };
+}

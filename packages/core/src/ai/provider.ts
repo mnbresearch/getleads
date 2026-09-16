@@ -157,6 +157,23 @@ export function createAiProvider(cfg: AiConfig = configFromEnv()): AiProvider {
   return new NullProvider();
 }
 
+/**
+ * Plan-aware provider selection: free/pilot/starter plans never touch the paid Anthropic
+ * provider (mirrors the premiumLeadsPerMonth pattern in plans.ts - free-tier providers stay
+ * free until there's a paying customer to fund the paid tier). Growth+ plans get the normal
+ * priority order (anthropic first when configured, for best quality).
+ */
+const FREE_TIER_ONLY_PLANS = new Set(["free", "pilot", "starter"]);
+
+export function createAiProviderForPlan(plan: string, cfg: AiConfig = configFromEnv()): AiProvider {
+  if (FREE_TIER_ONLY_PLANS.has((plan || "free").toLowerCase())) {
+    const { anthropicApiKey, ...rest } = cfg;
+    void anthropicApiKey;
+    return createAiProvider({ ...rest, provider: cfg.provider === "anthropic" ? "auto" : cfg.provider });
+  }
+  return createAiProvider(cfg);
+}
+
 export function hasAi(p: AiProvider) {
   return p.name !== "none";
 }

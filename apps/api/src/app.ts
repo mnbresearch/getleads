@@ -10,6 +10,7 @@ import { authRoutes } from "./routes/auth.js";
 import { leadRoutes } from "./routes/leads.js";
 import { searchRoutes } from "./routes/search.js";
 import { icpRoutes } from "./routes/icps.js";
+import { companyRoutes } from "./routes/companies.js";
 import { campaignRoutes } from "./routes/campaigns.js";
 import { trackRoutes } from "./routes/track.js";
 import { miscRoutes } from "./routes/misc.js";
@@ -58,6 +59,7 @@ export function createApp() {
   app.route("/v1/leads", leadRoutes);
   app.route("/v1/search", searchRoutes);
   app.route("/v1/icps", icpRoutes);
+  app.route("/v1/companies", companyRoutes);
   app.route("/v1/campaigns", campaignRoutes);
   app.route("/v1/agent", agentRoutes);
   app.route("/v1/visitors", visitorRoutes);

@@ -1,5 +1,6 @@
 export * from "./types.js";
 export * from "./ai/provider.js";
+export * from "./ai/brief.js";
 export * from "./search/index.js";
 export * from "./discovery/people.js";
 export * from "./discovery/companies.js";

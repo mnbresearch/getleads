@@ -156,3 +156,67 @@ export async function scoreLeadWithAi(ai: AiProvider, lead: LeadForScoring & { f
   if (!res || typeof res.score !== "number") return null;
   return { score: Math.max(0, Math.min(100, Math.round(res.score))), reasons: (res.reasons ?? []).map(String) };
 }
+
+export interface IcpChatMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+
+/**
+ * Conversational ICP refinement: the user chats about who they want to target, and the
+ * assistant proposes an updated criteria object alongside a natural-language reply. Only
+ * fields the assistant chooses to change are patched onto the existing criteria.
+ */
+export async function refineIcpWithAi(
+  ai: AiProvider,
+  input: { criteria: IcpCriteria; summary?: string; history: IcpChatMessage[]; message: string },
+): Promise<{ reply: string; criteria: IcpCriteria } | null> {
+  if (!hasAi(ai)) return null;
+  const res = await completeJson<{ reply: string; criteria: Partial<IcpCriteria> }>(
+    ai,
+    [
+      {
+        role: "system",
+        content:
+          "You are a B2B sales strategist helping someone refine their Ideal Customer Profile (ICP) through " +
+          "conversation. Ask clarifying questions when useful, and propose concrete updates to their targeting " +
+          "criteria as you go. Reply with strict JSON " +
+          '{"reply": string, "criteria": {"industries"?: string[], "titles"?: string[], "seniorities"?: string[], ' +
+          '"departments"?: string[], "companySizes"?: string[], "locations"?: string[], "countries"?: string[], ' +
+          '"keywords"?: string[], "excludeKeywords"?: string[], "techStack"?: string[]}}. ' +
+          '"reply" is your conversational response (1-4 sentences). Only include a key in "criteria" if it should ' +
+          "change based on this message - omit keys that should stay as-is. When you include a key, give the FULL " +
+          "new list for it (it replaces the old one, it does not merge).",
+      },
+      {
+        role: "user",
+        content: `Current criteria: ${JSON.stringify(input.criteria)}\n${
+          input.summary ? `Current summary: ${input.summary}\n` : ""
+        }Conversation so far:\n${input.history
+          .slice(-20)
+          .map((h) => `${h.role}: ${h.content}`)
+          .join("\n")}\nuser: ${input.message}\n\nReturn JSON only.`,
+      },
+    ],
+    { maxTokens: 500, temperature: 0.4 },
+  );
+  if (!res?.reply) return null;
+  const arr = (x: unknown) => (Array.isArray(x) ? x.map(String).filter(Boolean) : undefined);
+  const patch: Partial<IcpCriteria> = {};
+  for (const k of [
+    "industries",
+    "titles",
+    "seniorities",
+    "departments",
+    "companySizes",
+    "locations",
+    "countries",
+    "keywords",
+    "excludeKeywords",
+    "techStack",
+  ] as const) {
+    const v = arr((res.criteria as Record<string, unknown> | undefined)?.[k]);
+    if (v) (patch as Record<string, unknown>)[k] = v;
+  }
+  return { reply: String(res.reply), criteria: { ...input.criteria, ...patch } };
+}

@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, companies, desc, inArray, enqueue, eq, getDb, icps, leads, sql } from "@prospex/db";
-import { createAiProvider, scoreLeadRules, scoreLeadWithAi, hasAi, type IcpCriteria } from "@prospex/core";
+import { and, companies, consume, desc, inArray, enqueue, eq, getDb, icps, leads, organizations, sql } from "@prospex/db";
+import { createAiProvider, createAiProviderForPlan, scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriteria, type IcpChatMessage } from "@prospex/core";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 
@@ -75,6 +75,36 @@ icpRoutes.post("/:id/build", async (c) => {
   if (!row) throw notFound("ICP");
   const job = await enqueue(db, "icp.build", { icpId: row.id }, { orgId: row.orgId });
   return c.json({ jobId: job.id }, 202);
+});
+
+/**
+ * Conversational ICP assistant: chat to refine targeting criteria in plain language.
+ * Persists the transcript (capped to the last 20 turns) and the updated criteria on the ICP.
+ */
+icpRoutes.post("/:id/chat", zValidator("json", z.object({ message: z.string().min(1).max(2000) })), async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  const icp = await db.query.icps.findFirst({ where: and(eq(icps.id, c.req.param("id")), eq(icps.orgId, oid)) });
+  if (!icp) throw notFound("ICP");
+  const b = c.req.valid("json");
+
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+  const ai = createAiProviderForPlan(org?.plan ?? "free");
+  if (!hasAi(ai)) throw notFound("No AI provider configured");
+
+  const history = (icp.chatHistory ?? []) as IcpChatMessage[];
+  const summary = String((icp.aiProfile as { summary?: string } | null)?.summary ?? icp.description ?? "");
+  const result = await refineIcpWithAi(ai, { criteria: (icp.criteria ?? {}) as IcpCriteria, summary, history, message: b.message });
+  if (!result) throw notFound("AI did not return a response - try again");
+  await consume(db, oid, "aiMessages", 1).catch(() => {});
+
+  const nextHistory = [...history, { role: "user" as const, content: b.message }, { role: "assistant" as const, content: result.reply }].slice(-20);
+  const [row] = await db
+    .update(icps)
+    .set({ chatHistory: nextHistory, criteria: result.criteria, updatedAt: new Date() })
+    .where(and(eq(icps.id, icp.id), eq(icps.orgId, oid)))
+    .returning();
+  return c.json({ reply: result.reply, criteria: row.criteria, chatHistory: row.chatHistory });
 });
 
 /** Score all (or given) leads against this ICP. Rule-based; optional AI re-rank of top N. */

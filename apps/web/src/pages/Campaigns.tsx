@@ -174,7 +174,7 @@ export function CampaignDetail() {
   const [c, setC] = useState<Campaign | null>(null);
   const [stats, setStats] = useState<{ messages: Record<string, number>; contacts: Record<string, number>; rates: Record<string, number>; variants?: { stepId: string | null; variant: number; sent: number; opened: number; replied: number }[] } | null>(null);
   const [contacts, setContacts] = useState<{ id: string; status: string; currentStep: number; nextSendAt: string | null; lead: { id: string; fullName: string | null; email: string | null; emailStatus: string; title: string | null; company: { name: string | null } | null } }[]>([]);
-  const [messages, setMessages] = useState<{ id: string; toEmail: string; subject: string; status: string; sentAt: string | null; openedAt: string | null; repliedAt: string | null; bodyText: string; direction: string }[]>([]);
+  const [messages, setMessages] = useState<{ id: string; toEmail: string; subject: string; status: string; sentAt: string | null; openedAt: string | null; repliedAt: string | null; bodyText: string; direction: string; intent?: string | null; draftReply?: { subject: string; body: string } | null }[]>([]);
   const [tab, setTab] = useState<"contacts" | "messages">("contacts");
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -239,8 +239,14 @@ export function CampaignDetail() {
         <div className="card divide-y divide-slate-100">
           {messages.map((m) => (
             <details key={m.id} className="p-3">
-              <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm"><StatusBadge s={m.status} /><span className="font-medium">{m.subject}</span><span className="text-ink-400">{m.direction === "inbound" ? "from" : "to"} {m.toEmail}</span><span className="ml-auto text-xs text-ink-500">{fmtDate(m.sentAt)}{m.openedAt && " · opened"}{m.repliedAt && " · replied"}</span></summary>
+              <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
+                <StatusBadge s={m.status} /><span className="font-medium">{m.subject}</span>
+                <span className="text-ink-400">{m.direction === "inbound" ? "from" : "to"} {m.toEmail}</span>
+                {m.intent && <span className="badge bg-brand-50 text-brand-700">{m.intent.replace(/_/g, " ")}</span>}
+                <span className="ml-auto text-xs text-ink-500">{fmtDate(m.sentAt)}{m.openedAt && " · opened"}{m.repliedAt && " · replied"}</span>
+              </summary>
               <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-ink-200">{m.bodyText}</pre>
+              {m.draftReply && <ReplyDraft message={m} onSent={() => { toast("Reply sent"); load(); }} toast={toast} />}
             </details>
           ))}
           {messages.length === 0 && <div className="p-8 text-center text-sm text-ink-400">No messages yet.</div>}
@@ -250,6 +256,27 @@ export function CampaignDetail() {
       <EnrollModal open={enrollOpen} onClose={() => setEnrollOpen(false)} campaign={c} lists={lists} onDone={() => { setEnrollOpen(false); load(); }} toast={toast} />
       <CampaignModal open={editOpen} onClose={() => setEditOpen(false)} accounts={accounts} lists={lists} icps={icps} existing={c} onDone={() => { setEditOpen(false); load(); }} toast={toast} />
     </Page>
+  );
+}
+
+function ReplyDraft({ message, onSent, toast }: { message: { id: string; draftReply?: { subject: string; body: string } | null }; onSent: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  const [subject, setSubject] = useState(message.draftReply?.subject ?? "");
+  const [body, setBody] = useState(message.draftReply?.body ?? "");
+  const [busy, setBusy] = useState(false);
+  const send = async () => {
+    setBusy(true);
+    try {
+      await apiFetch("POST", `/v1/campaigns/messages/${message.id}/send-reply`, { subject, body });
+      onSent();
+    } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
+  };
+  return (
+    <div className="mt-3 rounded-lg bg-cream p-3">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-400">AI-suggested reply · review before sending</div>
+      <input className="input mb-2" value={subject} onChange={(e) => setSubject(e.target.value)} />
+      <textarea className="input h-28" value={body} onChange={(e) => setBody(e.target.value)} />
+      <button className="btn-primary mt-2" disabled={busy || !subject.trim() || !body.trim()} onClick={send}>{busy ? "Sending…" : "Send reply"}</button>
+    </div>
   );
 }
 

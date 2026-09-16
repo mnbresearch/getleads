@@ -14,6 +14,13 @@ import type { PlanLimits } from "./schema.js";
  * free/pilot: premiumLeadsPerMonth = 0. These orgs only ever get scraped/crawled leads -
  * exactly "whatever we can find for free" - so they cost us effectively nothing to run.
  *
+ * The same free-tier-first principle applies to AI features (account briefs, reply-triage
+ * auto-draft, conversational ICP assistant - see createAiProviderForPlan() in
+ * packages/core/src/ai/provider.ts): free/pilot/starter plans are only ever routed to free
+ * AI providers (Groq/Gemini), never the paid Anthropic provider, regardless of AI_PROVIDER
+ * env config. Growth+ plans get the best configured provider. All AI calls across every
+ * plan are still metered against aiMessagesPerMonth below, so usage stays bounded either way.
+ *
  * Paid tiers (starter/growth/scale/enterprise) are priced for >=85% gross margin against
  * real paid-provider costs at moderate volume:
  *   Apollo Professional  $79/user/mo,  2,000 export credits  -> ~$0.04/premium lead

@@ -131,7 +131,8 @@ export function LeadsPage() {
 function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; onClose: () => void; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ subject: string; body: string } | null>(null);
-  useEffect(() => setDraft(null), [lead?.id]);
+  const [brief, setBrief] = useState<{ summary: string; whyNow: string; angles: string[] } | null>(null);
+  useEffect(() => { setDraft(null); setBrief(null); }, [lead?.id]);
   if (!lead) return null;
   const act = async (name: string, fn: () => Promise<unknown>) => {
     setBusy(name);
@@ -166,8 +167,17 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
         <button className="btn-secondary" disabled={!!busy || !lead.email} onClick={() => act("verify", () => apiFetch("POST", `/v1/leads/${lead.id}/verify`).then(() => toast("Verified")))}>{busy === "verify" ? "…" : "Verify email"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>
         <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
+        {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast("No AI provider configured", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
         <button className="btn-danger ml-auto" onClick={() => act("del", () => apiFetch("DELETE", `/v1/leads/${lead.id}`).then(onClose))}>Delete</button>
       </div>
+      {brief && (
+        <div className="mt-4 rounded-lg bg-cream p-3 text-sm">
+          <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Account brief</div>
+          <p className="mt-1 text-ink-200">{brief.summary}</p>
+          <p className="mt-2"><span className="font-medium">Why now: </span><span className="text-ink-200">{brief.whyNow}</span></p>
+          {brief.angles.length > 0 && <ul className="mt-2 list-inside list-disc text-ink-200">{brief.angles.map((a, i) => <li key={i}>{a}</li>)}</ul>}
+        </div>
+      )}
       {draft && <div className="mt-4 rounded-lg bg-cream p-3 text-sm"><div className="font-medium">{draft.subject}</div><pre className="mt-2 whitespace-pre-wrap font-sans text-ink-200">{draft.body}</pre><button className="btn-secondary mt-2" onClick={() => navigator.clipboard.writeText(`Subject: ${draft.subject}\n\n${draft.body}`).then(() => toast("Copied"))}>Copy</button></div>}
     </Modal>
   );
