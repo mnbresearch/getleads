@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, asc, companies, consume, desc, enqueue, eq, getDb, ilike, inArray, leads, listLeads, lists, or, sql, suppressions } from "@prospex/db";
-import { verifyEmail, findEmail, extractDomain } from "@prospex/core";
+import { and, asc, companies, consume, desc, enqueue, eq, getDb, ilike, inArray, leads, listLeads, lists, or, signals, sql, suppressions } from "@prospex/db";
+import { verifyEmail, findEmail, extractDomain, computeLeadPriority } from "@prospex/core";
 import { env } from "../env.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
@@ -138,6 +138,58 @@ leadRoutes.get("/:id", async (c) => {
   const l = await leadWithCompany(orgId(c), c.req.param("id"));
   if (!l) throw notFound("Lead");
   return c.json(l);
+});
+
+/**
+ * Composite "who to contact today, and why" score for a single lead - blends ICP fit,
+ * engagement (opens/clicks/replies), and recent company signals (funding, hiring, etc.)
+ * into one number with plain-English reasons. Free, deterministic, no AI call.
+ */
+leadRoutes.get("/:id/priority", async (c) => {
+  const oid = orgId(c);
+  const l = await leadWithCompany(oid, c.req.param("id"));
+  if (!l) throw notFound("Lead");
+  const recentSignals = l.company?.domain
+    ? await getDb().db.select({ type: signals.type, occurredAt: signals.occurredAt }).from(signals).where(eq(signals.companyDomain, l.company.domain)).orderBy(desc(signals.occurredAt)).limit(20)
+    : [];
+  const priority = computeLeadPriority(l, recentSignals);
+  return c.json({ leadId: l.id, ...priority });
+});
+
+/**
+ * Top N leads for this org ranked by the same composite priority score, for a "who should
+ * I contact today" view. Computed in-process over the org's leads rather than in SQL so the
+ * scoring logic (packages/core/src/icp/priority.ts) stays in one place and easy to tune.
+ */
+leadRoutes.get("/hot/list", zValidator("query", z.object({ limit: z.coerce.number().int().min(1).max(200).default(20) })), async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  const { limit } = c.req.valid("query");
+  // Pull a generous window of candidates (highest ICP fit + most recently active first) so
+  // the ranked slice we return is meaningful even on orgs with thousands of leads.
+  const rows = await db
+    .select({ lead: leads, company: companies })
+    .from(leads)
+    .leftJoin(companies, eq(leads.companyId, companies.id))
+    .where(and(eq(leads.orgId, oid), sql`${leads.status} != 'unsubscribed'`))
+    .orderBy(desc(leads.score), desc(leads.engagementScore))
+    .limit(500);
+  const domains = [...new Set(rows.map((r) => r.company?.domain).filter((d): d is string => !!d))];
+  const signalRows = domains.length ? await db.select({ companyDomain: signals.companyDomain, type: signals.type, occurredAt: signals.occurredAt }).from(signals).where(inArray(signals.companyDomain, domains)) : [];
+  const signalsByDomain = new Map<string, { type: string; occurredAt: Date | null }[]>();
+  for (const s of signalRows) {
+    if (!s.companyDomain) continue;
+    if (!signalsByDomain.has(s.companyDomain)) signalsByDomain.set(s.companyDomain, []);
+    signalsByDomain.get(s.companyDomain)!.push({ type: s.type, occurredAt: s.occurredAt });
+  }
+  const ranked = rows
+    .map((r) => {
+      const priority = computeLeadPriority(r.lead, r.company?.domain ? signalsByDomain.get(r.company.domain) ?? [] : []);
+      return { lead: { ...r.lead, company: r.company ?? null }, priority };
+    })
+    .sort((a, b) => b.priority.score - a.priority.score)
+    .slice(0, limit);
+  return c.json({ leads: ranked });
 });
 
 leadRoutes.patch("/:id", zValidator("json", leadInput.partial().extend({ emailStatus: z.string().optional(), score: z.number().optional() })), async (c) => {

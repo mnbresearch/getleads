@@ -3,6 +3,7 @@ import { parseLinkedinTitle, extractPeopleFromResults } from "./discovery/people
 import { applyPattern, candidatesFor, inferPattern, inferPatternFromEmails } from "./email/pattern.js";
 import { verifyEmail } from "./email/verify.js";
 import { scoreLeadRules } from "./icp/score.js";
+import { computeLeadPriority } from "./icp/priority.js";
 import { renderTemplate, leadVars } from "./outreach/template.js";
 import { extractDomain, isSocialOrAggregator, normalizeLinkedinUrl, rootDomain } from "./util/domain.js";
 import { inferDepartment, inferSeniority, splitName } from "./util/names.js";
@@ -94,6 +95,28 @@ describe("scoring", () => {
     );
     expect(s.score).toBeGreaterThan(80);
     expect(scoreLeadRules({ title: "Intern" }, { excludeKeywords: ["intern"] }).score).toBe(0);
+  });
+});
+
+describe("priority", () => {
+  it("ranks a strong-fit, engaged lead with a fresh funding signal above a cold perfect-fit lead", () => {
+    const hot = computeLeadPriority({ score: 80, engagementScore: 60, status: "replied" }, [{ type: "funding", occurredAt: new Date() }]);
+    const cold = computeLeadPriority({ score: 95, engagementScore: 0, status: "new" }, []);
+    expect(hot.score).toBeGreaterThan(cold.score);
+    expect(hot.reasons.some((r) => r.includes("funding"))).toBe(true);
+    expect(hot.reasons.some((r) => r.includes("replied"))).toBe(true);
+  });
+  it("ignores signals older than 60 days and non-buying-trigger types", () => {
+    const stale = computeLeadPriority({ score: 50, engagementScore: 0 }, [{ type: "funding", occurredAt: new Date(Date.now() - 90 * 86_400_000) }]);
+    const irrelevant = computeLeadPriority({ score: 50, engagementScore: 0 }, [{ type: "news", occurredAt: new Date() }]);
+    expect(stale.breakdown.signals).toBe(0);
+    expect(irrelevant.breakdown.signals).toBe(0);
+  });
+  it("stays within 0..100 and never throws on empty input", () => {
+    const r = computeLeadPriority({});
+    expect(r.score).toBeGreaterThanOrEqual(0);
+    expect(r.score).toBeLessThanOrEqual(100);
+    expect(r.reasons.length).toBeGreaterThan(0);
   });
 });
 

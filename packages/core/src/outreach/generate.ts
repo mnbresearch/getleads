@@ -84,16 +84,27 @@ export async function draftReplyToInbound(
     intent: string;
     lead: Parameters<typeof leadVars>[0];
     sender: { name: string; company: string; title?: string; valueProp: string; signature?: string; tone?: "friendly" | "direct" | "formal" | "casual" };
+    /**
+     * Past replies this org actually sent (after editing the AI draft, if they did), most
+     * recent last. Feeding these back in as few-shot examples is how drafts get closer to
+     * "sounds like us" over time instead of staying generic forever - this is org-specific
+     * data no competitor starts with, so the more an org uses this the better it gets *for them*.
+     */
+    styleExamples?: { subject: string; body: string }[];
   },
 ): Promise<{ subject: string; body: string } | null> {
   if (!hasAi(ai)) return null;
   const vars = leadVars(input.lead, { name: input.sender.name, company: input.sender.company, signature: input.sender.signature });
+  const examples = (input.styleExamples ?? []).slice(-3);
+  const styleBlock = examples.length
+    ? `\n\nMatch this sender's actual voice - here ${examples.length === 1 ? "is a reply" : "are replies"} they've sent before (adapt to the new situation, don't reuse the content):\n${examples.map((e, i) => `Example ${i + 1} - Subject: "${e.subject}"\n${e.body}`).join("\n---\n")}`
+    : "";
   const res = await completeJson<{ subject: string; body: string }>(
     ai,
     [
       {
         role: "system",
-        content: `You draft short, human replies to inbound sales email replies. The person just replied with intent "${input.intent}". Rules: under 100 words; plain text; directly respond to what they said; one clear next step; ${input.sender.tone ?? "friendly"} tone; never invent facts you don't have; sign off with the sender's name only (signature added separately). Reply with JSON {"subject": string, "body": string}.`,
+        content: `You draft short, human replies to inbound sales email replies. The person just replied with intent "${input.intent}". Rules: under 100 words; plain text; directly respond to what they said; one clear next step; ${input.sender.tone ?? "friendly"} tone; never invent facts you don't have; sign off with the sender's name only (signature added separately). Reply with JSON {"subject": string, "body": string}.${styleBlock}`,
       },
       {
         role: "user",

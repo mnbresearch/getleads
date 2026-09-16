@@ -260,6 +260,7 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
 
     let draftReply: { subject: string; body: string } | null = null;
     if (lead && REPLY_WORTHY_INTENTS.has(cls.intent)) {
+      const styleExamples = ((org?.settings as Record<string, unknown> | undefined)?.aiReplyStyleExamples as { subject: string; body: string }[] | undefined) ?? [];
       draftReply = await draftReplyToInbound(ai, {
         inboundText: b.text,
         inboundSubject: b.subject,
@@ -273,6 +274,7 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
           signature: account?.signature ?? undefined,
           tone: (cs.tone as "friendly" | undefined) ?? "friendly",
         },
+        styleExamples,
       }).catch(() => null);
       if (draftReply) await consume(db, oid, "aiMessages", 1).catch(() => {});
     }
@@ -336,6 +338,16 @@ campaignRoutes.post(
       await db.update(messages).set({ status: "sent", sentAt: new Date(), providerMessageId: res.providerMessageId }).where(eq(messages.id, msg.id));
       await db.update(messages).set({ draftReply: null }).where(eq(messages.id, inbound.id));
       await emitEvent(oid, "message.sent", { messageId: msg.id, leadId: lead.id, campaignId: campaign?.id, to: lead.email, subject }, { type: "message", id: msg.id });
+      // Learn this org's actual voice: every reply a human actually approved and sent (edited
+      // or not) is a better style example than anything we could write for them upfront. Feed
+      // the last 5 back into future draftReplyToInbound calls (see /inbound above).
+      if (draft) {
+        const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+        const settings = (org?.settings ?? {}) as Record<string, unknown>;
+        const prior = (settings.aiReplyStyleExamples as { subject: string; body: string }[] | undefined) ?? [];
+        const next = [...prior, { subject, body: bodyText }].slice(-5);
+        await db.update(organizations).set({ settings: { ...settings, aiReplyStyleExamples: next } }).where(eq(organizations.id, oid)).catch(() => {});
+      }
       return c.json({ sent: true, messageId: msg.id });
     }
     await db.update(messages).set({ status: "failed", error: res.error }).where(eq(messages.id, msg.id));

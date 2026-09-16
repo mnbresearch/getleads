@@ -14,11 +14,18 @@ interface Overview {
   usage: { period: string; plan: string; usage: Record<string, { used: number; limit: number }> };
 }
 
+interface HotLead {
+  lead: { id: string; fullName: string | null; title: string | null; company: { name: string | null; domain: string } | null };
+  priority: { score: number; reasons: string[] };
+}
+
 export function Dashboard() {
   const [d, setD] = useState<Overview | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  const [hot, setHot] = useState<HotLead[] | null>(null);
   useEffect(() => {
     apiFetch<Overview>("GET", "/v1/analytics/overview").then(setD).catch((e) => setErr(e.message));
+    apiFetch<{ leads: HotLead[] }>("GET", "/v1/leads/hot/list?limit=6").then((r) => setHot(r.leads)).catch(() => setHot([]));
   }, []);
   if (err) return <Page title="Overview"><div className="text-red-600">{err}</div></Page>;
   if (!d) return <Page title="Overview"><Spinner label="Loading…" /></Page>;
@@ -31,6 +38,30 @@ export function Dashboard() {
         <Stat label="Emails sent" value={fmtNum(d.messages.sent)} hint={`${d.messages.sent ? Math.round((d.messages.opened / d.messages.sent) * 100) : 0}% opened · ${d.messages.sent ? Math.round((d.messages.replied / d.messages.sent) * 100) : 0}% replied`} />
         <Stat label="Active campaigns" value={fmtNum(d.campaigns.active)} hint={`${fmtNum(d.companies)} companies tracked`} />
       </div>
+
+      {hot && hot.length > 0 && (
+        <div className="card mt-6 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <div>
+              <div className="font-medium">Contact today</div>
+              <div className="text-xs text-ink-400">Ranked by fit, engagement, and live company signals - not just recency.</div>
+            </div>
+            <Link to="/leads?sort=score&order=desc" className="text-sm text-brand-600 hover:underline">View all leads →</Link>
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {hot.map((h) => (
+              <div key={h.lead.id} className="rounded-lg border border-black/10 p-3 text-sm">
+                <div className="flex items-center justify-between">
+                  <div className="font-medium">{h.lead.fullName ?? "Unknown"}</div>
+                  <span className={`badge ${h.priority.score >= 70 ? "bg-emerald-50 text-emerald-700" : h.priority.score >= 40 ? "bg-amber-50 text-amber-700" : "bg-black/[0.05] text-ink-400"}`}>{h.priority.score}</span>
+                </div>
+                <div className="text-xs text-ink-400">{h.lead.title ?? ""}{h.lead.company ? ` · ${h.lead.company.name ?? h.lead.company.domain}` : ""}</div>
+                {h.priority.reasons[0] && <div className="mt-1 text-xs text-ink-300">{h.priority.reasons[0]}</div>}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       <div className="mt-6 grid gap-4 lg:grid-cols-3">
         <div className="card p-4 lg:col-span-2">
