@@ -31,25 +31,28 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().optional()
   const { q } = c.req.valid("query");
   const { db } = getDb();
   const period = currentPeriod();
-  const rows = await db
-    .select({
-      id: organizations.id,
-      name: organizations.name,
-      slug: organizations.slug,
-      plan: organizations.plan,
-      planLimits: organizations.planLimits,
-      status: organizations.status,
-      createdAt: organizations.createdAt,
-      leadsUsed: sql<number>`coalesce((SELECT count::int FROM usage WHERE org_id = ${organizations.id} AND period = ${period} AND metric = 'leads'), 0)`,
-      premiumLeadsUsed: sql<number>`coalesce((SELECT count::int FROM usage WHERE org_id = ${organizations.id} AND period = ${period} AND metric = 'premiumLeads'), 0)`,
-      userCount: sql<number>`(SELECT count(*)::int FROM users WHERE org_id = ${organizations.id})`,
-      ownerEmail: sql<string | null>`(SELECT email FROM users WHERE org_id = ${organizations.id} ORDER BY created_at ASC LIMIT 1)`,
-      ownerName: sql<string | null>`(SELECT name FROM users WHERE org_id = ${organizations.id} ORDER BY created_at ASC LIMIT 1)`,
-    })
-    .from(organizations)
-    .where(q ? sql`(${organizations.name} ilike ${"%" + q + "%"} OR ${organizations.slug} ilike ${"%" + q + "%"} OR exists (select 1 from users where org_id = ${organizations.id} and email ilike ${"%" + q + "%"}))` : sql`true`)
-    .orderBy(desc(organizations.createdAt))
-    .limit(1000);
+  // Plain aliased raw SQL (not Drizzle's .select({...}) builder with embedded Column refs in
+  // subqueries) - embedding organizations.id that way silently failed to correlate per-row and
+  // always returned the COALESCE default (every usage/user subquery came back empty). This
+  // form, with the correlation column written as plain SQL text against the query's own alias,
+  // is unambiguous and was verified against the live DB to return real counts.
+  const like = q ? `%${q}%` : null;
+  const result = await db.execute(sql`
+    SELECT o.id, o.name, o.slug, o.plan, o.plan_limits AS "planLimits", o.status, o.created_at AS "createdAt",
+      coalesce((SELECT count FROM usage WHERE org_id = o.id AND period = ${period} AND metric = 'leads'), 0)::int AS "leadsUsed",
+      coalesce((SELECT count FROM usage WHERE org_id = o.id AND period = ${period} AND metric = 'premiumLeads'), 0)::int AS "premiumLeadsUsed",
+      (SELECT count(*)::int FROM users WHERE org_id = o.id) AS "userCount",
+      (SELECT email FROM users WHERE org_id = o.id ORDER BY created_at ASC LIMIT 1) AS "ownerEmail",
+      (SELECT name FROM users WHERE org_id = o.id ORDER BY created_at ASC LIMIT 1) AS "ownerName"
+    FROM organizations o
+    WHERE ${like ? sql`(o.name ILIKE ${like} OR o.slug ILIKE ${like} OR EXISTS (SELECT 1 FROM users u2 WHERE u2.org_id = o.id AND u2.email ILIKE ${like}))` : sql`true`}
+    ORDER BY o.created_at DESC
+    LIMIT 1000
+  `);
+  const rows = (Array.isArray(result) ? result : (result as unknown as { rows: unknown[] }).rows) as Array<{
+    id: string; name: string; slug: string; plan: string; planLimits: Record<string, unknown> | null; status: string; createdAt: string;
+    leadsUsed: number; premiumLeadsUsed: number; userCount: number; ownerEmail: string | null; ownerName: string | null;
+  }>;
   return c.json({ orgs: rows.map((r) => ({ ...r, limits: { ...limitsFor(r.plan), ...(r.planLimits ?? {}) } })) });
 });
 
