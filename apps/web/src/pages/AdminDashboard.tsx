@@ -39,6 +39,7 @@ function OrgDetailPanel({ orgId, plans, onChanged, onClose }: { orgId: string; p
   const [plan, setPlan] = useState("");
   const [busy, setBusy] = useState(false);
   const [creditForm, setCreditForm] = useState({ metric: "premiumLeads", action: "grant" as "grant" | "set", amount: 0 });
+  const [confirmingStatus, setConfirmingStatus] = useState<string | null>(null);
 
   const load = () => adminFetch<OrgDetail>("GET", `/v1/admin/orgs/${orgId}`).then((d) => { setDetail(d); setPlan(d.org.plan); });
   useEffect(() => { load(); }, [orgId]);
@@ -57,7 +58,11 @@ function OrgDetailPanel({ orgId, plans, onChanged, onClose }: { orgId: string; p
   };
 
   const setStatus = async (status: string) => {
-    if (status !== "active" && !confirm(`${status === "revoked" ? "Revoke" : "Deactivate"} ${detail.org.name}? They will be locked out immediately.`)) return;
+    if (status !== "active" && confirmingStatus !== status) {
+      setConfirmingStatus(status);
+      return;
+    }
+    setConfirmingStatus(null);
     setBusy(true);
     try {
       await adminFetch("PATCH", `/v1/admin/orgs/${orgId}/status`, { status });
@@ -101,11 +106,18 @@ function OrgDetailPanel({ orgId, plans, onChanged, onClose }: { orgId: string; p
 
       <div>
         <div className="label">Status</div>
-        <div className="flex flex-wrap gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           {["active", "deactivated", "revoked"].map((s) => (
             <button key={s} className={`badge cursor-pointer ${detail.org.status === s ? STATUS_STYLES[s] : "border border-black/10 bg-black/5 text-ink-300 hover:text-ink-50"}`} disabled={busy} onClick={() => setStatus(s)}>{s}</button>
           ))}
         </div>
+        {confirmingStatus && (
+          <div className="mt-2 flex items-center gap-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-800">
+            <span>{confirmingStatus === "revoked" ? "Revoke" : "Deactivate"} {detail.org.name}? They'll be locked out immediately.</span>
+            <button className="btn-secondary py-1 text-xs" disabled={busy} onClick={() => setStatus(confirmingStatus)}>Confirm</button>
+            <button className="text-ink-400 hover:text-ink-50" onClick={() => setConfirmingStatus(null)}>Cancel</button>
+          </div>
+        )}
       </div>
 
       <div>
