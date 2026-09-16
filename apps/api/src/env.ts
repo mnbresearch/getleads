@@ -55,6 +55,10 @@ export const env = {
     },
   },
   internalToken: process.env.INTERNAL_TOKEN ?? "",
+  adminEmail: (process.env.ADMIN_EMAIL ?? "").toLowerCase(),
+  adminPassword: process.env.ADMIN_PASSWORD ?? "",
+  /** Where "upgrade me" lead-capture emails are sent. Falls back to ADMIN_EMAIL. */
+  leadNotifyEmail: process.env.LEAD_NOTIFY_EMAIL ?? process.env.ADMIN_EMAIL ?? "",
 };
 
 if (env.nodeEnv === "production" && env.jwtSecret === "dev-secret-change-me") {

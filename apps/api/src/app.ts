@@ -17,6 +17,8 @@ import { agentRoutes } from "./routes/agent.js";
 import { pixelPublic, visitorRoutes } from "./routes/visitors.js";
 import { signalRoutes } from "./routes/signals.js";
 import { joinRoutes, toolRoutes } from "./routes/tools.js";
+import { adminRoutes } from "./routes/admin.js";
+import { leadCaptureRoutes } from "./routes/leadCapture.js";
 import { docsHtml, openapi } from "./openapi.js";
 import { handlers } from "./jobs.js";
 
@@ -62,6 +64,8 @@ export function createApp() {
   app.route("/v1/auth", joinRoutes);
   app.route("/px", pixelPublic);
   app.route("/v1", miscRoutes);
+  app.route("/v1", leadCaptureRoutes);
+  app.route("/v1/admin", adminRoutes);
   app.route("/t", trackRoutes);
 
   /** Serverless job runner: call from an external cron (cron-job.org is free) when JOB_MODE=inline. */

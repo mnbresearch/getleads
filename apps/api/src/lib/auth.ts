@@ -23,6 +23,23 @@ export async function issueJwt(user: User, ttlSeconds = 60 * 60 * 24 * 14) {
   return sign({ sub: user.id, org: user.orgId, iat: now, exp: now + ttlSeconds }, env.jwtSecret);
 }
 
+/** Admin dashboard session - a single shared super-admin account (ADMIN_EMAIL/ADMIN_PASSWORD),
+ * not tied to any org or customer user. Separate token shape (role: "admin", no sub/org) so it
+ * can never be confused with a customer JWT even if someone tries to replay one as the other. */
+export async function issueAdminJwt(ttlSeconds = 60 * 60 * 12) {
+  const now = Math.floor(Date.now() / 1000);
+  return sign({ role: "admin", iat: now, exp: now + ttlSeconds }, env.jwtSecret);
+}
+
+export async function verifyAdminJwt(token: string): Promise<boolean> {
+  try {
+    const payload = (await verify(token, env.jwtSecret, "HS256")) as { role?: string };
+    return payload.role === "admin";
+  } catch {
+    return false;
+  }
+}
+
 export async function authenticate(header: string | undefined): Promise<AuthContext | null> {
   if (!header) return null;
   const [scheme, token] = header.split(" ");

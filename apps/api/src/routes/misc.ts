@@ -175,23 +175,4 @@ miscRoutes.post("/billing/webhook", async (c) => {
   return c.json({ received: true });
 });
 
-/** Admin: set an org's plan directly (for pilot management). Requires INTERNAL_TOKEN. */
-miscRoutes.post("/admin/orgs/:id/plan", zValidator("json", z.object({ plan: z.string(), overrides: z.record(z.unknown()).optional() })), async (c) => {
-  if (!env.internalToken || c.req.header("x-internal-token") !== env.internalToken) return c.json({ error: { code: "forbidden", message: "internal token required" } }, 403);
-  const b = c.req.valid("json");
-  const { db } = getDb();
-  const [row] = await db.update(organizations).set({ plan: b.plan, planLimits: { ...limitsFor(b.plan), ...(b.overrides ?? {}) } }).where(eq(organizations.id, c.req.param("id"))).returning();
-  if (!row) throw notFound("Org");
-  return c.json({ id: row.id, plan: row.plan, limits: row.planLimits });
-});
-
-miscRoutes.get("/admin/orgs", async (c) => {
-  if (!env.internalToken || c.req.header("x-internal-token") !== env.internalToken) return c.json({ error: { code: "forbidden", message: "internal token required" } }, 403);
-  const { db } = getDb();
-  const rows = await db
-    .select({ id: organizations.id, name: organizations.name, slug: organizations.slug, plan: organizations.plan, createdAt: organizations.createdAt, leads: sql<number>`(SELECT count(*)::int FROM leads WHERE org_id = ${organizations.id})`, users: sql<number>`(SELECT count(*)::int FROM users WHERE org_id = ${organizations.id})` })
-    .from(organizations)
-    .orderBy(desc(organizations.createdAt))
-    .limit(500);
-  return c.json({ orgs: rows });
-});
+// Admin org management now lives in routes/admin.ts, mounted at /v1/admin.

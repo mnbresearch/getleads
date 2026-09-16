@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { NavLink, Route, Routes } from "react-router-dom";
+import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { API_URL, apiFetch, fmtDate } from "../lib/api";
 import { Page, useToast } from "../components/ui";
 
@@ -133,7 +133,7 @@ function Billing() {
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{Object.entries(u.usage).map(([k, v]) => <div key={k} className="rounded-lg border border-black/10 p-3"><div className="text-xs capitalize text-ink-400">{k.replace(/([A-Z])/g, " $1")}</div><div className="text-lg font-semibold">{v.used.toLocaleString()} <span className="text-xs font-normal text-ink-500">/ {v.limit.toLocaleString()}</span></div></div>)}</div>
         {plans.pilotMode && <p className="mt-3 text-sm text-emerald-600">Pilot mode: everything is free during the pilot. Limits reset monthly.</p>}
       </div>
-      <div className="grid gap-3 md:grid-cols-4">{plans.plans.map((p) => <div key={p.id} className={`card p-4 ${p.id === u.plan ? "ring-2 ring-brand-500/50" : ""}`}><div className="font-semibold">{p.name}</div><div className="text-2xl font-semibold">${p.priceUsd}<span className="text-sm font-normal text-ink-400">/mo</span></div><ul className="mt-2 space-y-0.5 text-xs text-ink-300"><li>{Number(p.limits.leadsPerMonth).toLocaleString()} leads/mo</li><li>{Number(p.limits.verificationsPerMonth).toLocaleString()} verifications</li><li>{Number(p.limits.aiMessagesPerMonth).toLocaleString()} AI messages</li><li>{Number(p.limits.emailsPerMonth).toLocaleString()} emails</li><li>{p.limits.campaigns as number} campaigns</li></ul>{plans.stripeEnabled && p.priceUsd > 0 && p.id !== u.plan && <button className="btn-primary mt-3 w-full justify-center" onClick={() => apiFetch<{ url: string }>("POST", "/v1/billing/checkout", { plan: p.id }).then((r) => (location.href = r.url))}>Upgrade</button>}</div>)}</div>
+      <div className="grid gap-3 md:grid-cols-4">{plans.plans.map((p) => <div key={p.id} className={`card p-4 ${p.id === u.plan ? "ring-2 ring-brand-500/50" : ""}`}><div className="font-semibold">{p.name}</div><div className="text-2xl font-semibold">${p.priceUsd}<span className="text-sm font-normal text-ink-400">/mo</span></div><ul className="mt-2 space-y-0.5 text-xs text-ink-300"><li>{Number(p.limits.leadsPerMonth).toLocaleString()} leads/mo</li><li>{Number(p.limits.verificationsPerMonth).toLocaleString()} verifications</li><li>{Number(p.limits.aiMessagesPerMonth).toLocaleString()} AI messages</li><li>{Number(p.limits.emailsPerMonth).toLocaleString()} emails</li><li>{p.limits.campaigns as number} campaigns</li></ul>{p.priceUsd > 0 && p.id !== u.plan && <Link to={`/upgrade?plan=${p.id}`} className="btn-primary mt-3 w-full justify-center">Upgrade</Link>}</div>)}</div>
     </div>
   );
 }

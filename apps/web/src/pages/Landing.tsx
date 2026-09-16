@@ -90,8 +90,11 @@ function PricingSection() {
                     </li>
                   ))}
                 </ul>
-                <Link to="/signup" className={`mt-6 justify-center ${featured ? "btn-primary" : "btn-secondary"}`}>
-                  {custom ? "Talk to us" : p.priceUsd === 0 ? "Start free" : "Get started"}
+                <Link
+                  to={p.priceUsd === 0 ? "/signup" : `/upgrade?plan=${p.id}`}
+                  className={`mt-6 justify-center ${featured ? "btn-primary" : "btn-secondary"}`}
+                >
+                  {custom ? "Talk to us" : p.priceUsd === 0 ? "Start free" : "Yes, I'm interested — upgrade me"}
                 </Link>
               </div>
             );

@@ -21,6 +21,8 @@ export const organizations = pgTable("organizations", {
   slug: text("slug").notNull().unique(),
   plan: text("plan").notNull().default("free"),
   planLimits: jsonb("plan_limits").$type<PlanLimits>().notNull().default({} as PlanLimits),
+  /** active | deactivated | revoked - set by the admin dashboard. Deactivated/revoked orgs are blocked at auth time. */
+  status: text("status").notNull().default("active"),
   stripeCustomerId: text("stripe_customer_id"),
   stripeSubscriptionId: text("stripe_subscription_id"),
   settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
@@ -366,6 +368,29 @@ export const integrations = pgTable(
 );
 
 
+
+// ── admin / manual-billing tables ──
+
+/** Captured from the public "upgrade me" form on the pricing page - a sales lead for the
+ * admin dashboard, not a Stripe checkout. The admin follows up by email/phone and upgrades
+ * the org manually once payment is settled outside the app. */
+export const upgradeRequests = pgTable(
+  "upgrade_requests",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").references(() => organizations.id, { onDelete: "set null" }),
+    name: text("name").notNull(),
+    email: text("email").notNull(),
+    mobile: text("mobile").notNull(),
+    country: text("country").notNull(),
+    planId: text("plan_id").notNull(),
+    message: text("message"),
+    status: text("status").notNull().default("new"), // new|contacted|converted|dismissed
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ createdIdx: index("upgrade_requests_created_idx").on(t.createdAt) }),
+);
+
 // ── v2 tables ──
 
 export const invites = pgTable("invites", {
@@ -641,3 +666,4 @@ export type SavedSearch = typeof savedSearches.$inferSelect;
 export type Task = typeof tasks.$inferSelect;
 export type Autopilot = typeof autopilots.$inferSelect;
 export type Invite = typeof invites.$inferSelect;
+export type UpgradeRequest = typeof upgradeRequests.$inferSelect;

@@ -19,6 +19,9 @@ import { AutopilotPage } from "./pages/Autopilot";
 import { ToolsPage } from "./pages/Tools";
 import { JoinPage } from "./pages/Join";
 import { LandingPage } from "./pages/Landing";
+import { UpgradeRequestPage } from "./pages/UpgradeRequest";
+import { AdminLoginPage } from "./pages/AdminLogin";
+import { AdminDashboardPage } from "./pages/AdminDashboard";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const token = useAuthToken();
@@ -32,6 +35,9 @@ function Root() {
       <Route path="/login" element={<AuthPage mode="login" />} />
       <Route path="/signup" element={<AuthPage mode="signup" />} />
       <Route path="/join" element={<JoinPage />} />
+      <Route path="/upgrade" element={<UpgradeRequestPage />} />
+      <Route path="/admin/login" element={<AdminLoginPage />} />
+      <Route path="/admin" element={<AdminDashboardPage />} />
       <Route path="/" element={token ? <Protected><Shell><Dashboard /></Shell></Protected> : <LandingPage />} />
       <Route
         path="/*"

@@ -1,6 +1,7 @@
 import type { Context, MiddlewareHandler } from "hono";
-import { authenticate, type AuthContext } from "./lib/auth.js";
+import { authenticate, verifyAdminJwt, type AuthContext } from "./lib/auth.js";
 import { ApiError } from "./lib/errors.js";
+import { env } from "./env.js";
 
 export type Env = { Variables: { auth: AuthContext } };
 
@@ -8,8 +9,28 @@ export const requireAuth: MiddlewareHandler<Env> = async (c, next) => {
   const header = c.req.header("authorization") ?? (c.req.header("x-api-key") ? `ApiKey ${c.req.header("x-api-key")}` : undefined);
   const auth = await authenticate(header);
   if (!auth) throw new ApiError(401, "Authentication required. Use `Authorization: Bearer <jwt>` or `x-api-key: gl_...`", "unauthorized");
+  if (auth.org.status === "deactivated" || auth.org.status === "revoked") {
+    throw new ApiError(403, "This account has been suspended. Contact support to reactivate it.", "account_suspended");
+  }
   c.set("auth", auth);
   await next();
+};
+
+/** Super-admin dashboard auth - a signed admin JWT from POST /v1/admin/login, or the legacy
+ * shared INTERNAL_TOKEN header for server-to-server calls. Not connected to customer accounts. */
+export const requireAdmin: MiddlewareHandler = async (c, next) => {
+  const internal = c.req.header("x-internal-token");
+  if (internal && env.internalToken && internal === env.internalToken) {
+    await next();
+    return;
+  }
+  const header = c.req.header("authorization");
+  const token = header?.toLowerCase().startsWith("bearer ") ? header.slice(7) : undefined;
+  if (token && (await verifyAdminJwt(token))) {
+    await next();
+    return;
+  }
+  throw new ApiError(401, "Admin authentication required", "unauthorized");
 };
 
 export const requireUser: MiddlewareHandler<Env> = async (c, next) => {
