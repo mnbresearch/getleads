@@ -48,14 +48,14 @@ The pipeline (`packages/core/src/pipeline.ts`) already checks paid data provider
 
 This mirrors what Apollo/Clay/Clearbit actually do: cheap discovery for volume, paid waterfall credits gated as a premium action.
 
-## Paid tiers (live in plans.ts, >=80% gross margin)
+## Paid tiers (live in plans.ts, >=85% gross margin)
 
 | Plan | Price | Total leads/mo | Premium (provider) leads/mo | Verifications/mo | Searches/mo | AI msgs/mo | Seats | Est. COGS | Est. gross margin |
 |---|---|---|---|---|---|---|---|---|---|
-| Starter | $99/mo | 1,500 | 150 | 500 | 500 | 500 | 2 | ~$14.80 | ~85% |
-| Growth | $329/mo | 6,000 | 500 | 1,500 | 2,000 | 1,500 | 5 | ~$49.70 | ~85% |
-| Scale | $1,099/mo | 20,000 | 1,500 | 5,000 | 8,000 | 8,000 | 15 | ~$178 | ~84% |
-| Enterprise | $2,999/mo | 60,000 | 5,000 | 15,000 | 25,000 | 25,000 | 50 | ~$473 | ~84% |
+| Starter | $109/mo | 1,500 | 150 | 500 | 500 | 500 | 2 | ~$14.80 | ~86.4% |
+| Growth | $359/mo | 6,000 | 500 | 1,500 | 2,000 | 1,500 | 5 | ~$49.70 | ~86.2% |
+| Scale | $1,199/mo | 20,000 | 1,500 | 5,000 | 8,000 | 8,000 | 15 | ~$178 | ~85.2% |
+| Enterprise | $3,199/mo | 60,000 | 5,000 | 15,000 | 25,000 | 25,000 | 50 | ~$473 | ~85.2% |
 
 Free/Pilot: `premiumLeadsPerMonth = 0` - these orgs only ever get web-discovery + site-crawl leads, so they cost nothing to run beyond a fraction-of-a-cent search query per lead. That's the literal implementation of "for the free version, get them leads wherever we can from scraping/their website, at no cost to us."
 

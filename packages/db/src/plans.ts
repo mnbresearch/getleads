@@ -14,7 +14,7 @@ import type { PlanLimits } from "./schema.js";
  * free/pilot: premiumLeadsPerMonth = 0. These orgs only ever get scraped/crawled leads -
  * exactly "whatever we can find for free" - so they cost us effectively nothing to run.
  *
- * Paid tiers (starter/growth/scale/enterprise) are priced for >=80% gross margin against
+ * Paid tiers (starter/growth/scale/enterprise) are priced for >=85% gross margin against
  * real paid-provider costs at moderate volume:
  *   Apollo Professional  $79/user/mo,  2,000 export credits  -> ~$0.04/premium lead
  *   Hunter Growth (ann.) $104/mo,      10,000 credits        -> ~$0.01/verification
@@ -63,10 +63,10 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
   // the other reason these margins hold up in practice, not just on paper). ──
 
   // COGS ~= 150 premium * $0.04 + 500 verif * $0.01 + 500 search * $0.005 + ai/email negligible
-  //        = $6.00 + $5.00 + $2.50 + ~$1.30 = ~$14.80  ->  margin (99 - 14.8) / 99 = 85%
+  //        = $6.00 + $5.00 + $2.50 + ~$1.30 = ~$14.80  ->  margin (109 - 14.8) / 109 = 86.4%
   starter: {
     name: "Starter",
-    priceUsd: 99,
+    priceUsd: 109,
     limits: {
       leadsPerMonth: 1500,
       premiumLeadsPerMonth: 150,
@@ -82,10 +82,10 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
   },
 
   // COGS ~= 500 premium * $0.04 + 1,500 verif * $0.01 + 2,000 search * $0.005 + ai/email ~$4.7
-  //        = $20 + $15 + $10 + $4.70 = ~$49.70  ->  margin (329 - 49.7) / 329 = 85%
+  //        = $20 + $15 + $10 + $4.70 = ~$49.70  ->  margin (359 - 49.7) / 359 = 86.2%
   growth: {
     name: "Growth",
-    priceUsd: 329,
+    priceUsd: 359,
     limits: {
       leadsPerMonth: 6000,
       premiumLeadsPerMonth: 500,
@@ -101,10 +101,10 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
   },
 
   // COGS ~= 1,500 premium * $0.04 + 5,000 verif * $0.01 + 8,000 search * $0.005 + ai/email ~$28
-  //        = $60 + $50 + $40 + $28 = ~$178  ->  margin (1099 - 178) / 1099 = 84%
+  //        = $60 + $50 + $40 + $28 = ~$178  ->  margin (1199 - 178) / 1199 = 85.2%
   scale: {
     name: "Scale",
-    priceUsd: 1099,
+    priceUsd: 1199,
     limits: {
       leadsPerMonth: 20000,
       premiumLeadsPerMonth: 1500,
@@ -124,10 +124,10 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
   // the mid-tier assumptions above, which is where the extra margin cushion at this size
   // comes from, not a thinner cost basis.
   // COGS ~= 5,000 premium * $0.032 + 15,000 verif * $0.008 + 25,000 search * $0.004 + ai/email ~$93
-  //        = $160 + $120 + $100 + $93 = ~$473  ->  margin (2999 - 473) / 2999 = 84%
+  //        = $160 + $120 + $100 + $93 = ~$473  ->  margin (3199 - 473) / 3199 = 85.2%
   enterprise: {
     name: "Enterprise",
-    priceUsd: 2999,
+    priceUsd: 3199,
     limits: {
       leadsPerMonth: 60000,
       premiumLeadsPerMonth: 5000,
