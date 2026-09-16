@@ -57,7 +57,7 @@ export function VisitorsPage() {
       {loading ? <Spinner /> : rows.length === 0 ? <Empty title="No identified companies yet" hint="Once the pixel is installed, business visitors appear here within seconds of their visit. Consumer ISPs and cloud/hosting IPs are filtered out." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[800px]">
-            <thead className="border-b border-black/10 bg-base"><tr><th className="th">Company</th><th className="th">Intent</th><th className="th">Top pages</th><th className="th">Visits</th><th className="th">Last seen</th><th className="th">Status</th><th className="th"></th></tr></thead>
+            <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Company</th><th className="th">Intent</th><th className="th">Top pages</th><th className="th">Visits</th><th className="th">Last seen</th><th className="th">Status</th><th className="th"></th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((v) => (
                 <tr key={v.id} className="hover:bg-black/[0.05]">

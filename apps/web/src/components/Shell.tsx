@@ -26,7 +26,7 @@ export function Shell({ children }: { children: ReactNode }) {
     apiFetch<typeof me>("GET", "/v1/auth/me").then(setMe).catch(() => navigate("/login"));
   }, [navigate]);
   return (
-    <div className="flex min-h-screen bg-base">
+    <div className="flex min-h-screen bg-cream">
       <aside className={`fixed inset-y-0 left-0 z-40 w-60 transform border-r border-black/10 bg-surface/90 backdrop-blur transition sm:static sm:translate-x-0 ${open ? "translate-x-0" : "-translate-x-full"}`}>
         <div className="flex h-14 items-center gap-2 border-b border-black/10 px-4">
           <Logo size={26} textClassName="text-base" />

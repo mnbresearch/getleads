@@ -91,7 +91,7 @@ export function LeadsPage() {
       {loading ? <Spinner label="Loading leads…" /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[900px]">
-            <thead className="border-b border-black/10 bg-base">
+            <thead className="border-b border-black/10 bg-cream">
               <tr>
                 <th className="th w-8"><input type="checkbox" checked={sel.size === rows.length} onChange={(e) => setSel(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set())} /></th>
                 <th className="th">Name</th><th className="th">Company</th><th className="th">Email</th><th className="th">Score</th><th className="th">Location</th><th className="th">Added</th>
@@ -168,7 +168,7 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
         <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
         <button className="btn-danger ml-auto" onClick={() => act("del", () => apiFetch("DELETE", `/v1/leads/${lead.id}`).then(onClose))}>Delete</button>
       </div>
-      {draft && <div className="mt-4 rounded-lg bg-base p-3 text-sm"><div className="font-medium">{draft.subject}</div><pre className="mt-2 whitespace-pre-wrap font-sans text-ink-200">{draft.body}</pre><button className="btn-secondary mt-2" onClick={() => navigator.clipboard.writeText(`Subject: ${draft.subject}\n\n${draft.body}`).then(() => toast("Copied"))}>Copy</button></div>}
+      {draft && <div className="mt-4 rounded-lg bg-cream p-3 text-sm"><div className="font-medium">{draft.subject}</div><pre className="mt-2 whitespace-pre-wrap font-sans text-ink-200">{draft.body}</pre><button className="btn-secondary mt-2" onClick={() => navigator.clipboard.writeText(`Subject: ${draft.subject}\n\n${draft.body}`).then(() => toast("Copied"))}>Copy</button></div>}
     </Modal>
   );
 }

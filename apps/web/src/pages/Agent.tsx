@@ -51,7 +51,7 @@ export function AgentPage() {
                 <div className="mt-2 text-sm">{r.email ? <>{r.email} <EmailStatusBadge status={r.emailStatus} /></> : <span className="text-ink-500">no email found</span>}</div>
                 {r.linkedinUrl && <a className="text-xs text-brand-600" href={r.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}
                 {r.companyDescription && <p className="mt-2 line-clamp-2 text-xs text-ink-400">{r.companyDescription}</p>}
-                {r.draftEmail && <div className="mt-3 rounded-lg bg-base p-3 text-xs"><div className="font-medium">{r.draftEmail.subject}</div><pre className="mt-1 whitespace-pre-wrap font-sans">{r.draftEmail.body}</pre></div>}
+                {r.draftEmail && <div className="mt-3 rounded-lg bg-cream p-3 text-xs"><div className="font-medium">{r.draftEmail.subject}</div><pre className="mt-1 whitespace-pre-wrap font-sans">{r.draftEmail.body}</pre></div>}
               </div>
             ))}
             {res.length === 0 && <div className="card p-6 text-sm text-ink-400 md:col-span-2">No results. From datacenter IPs the keyless engines are often blocked; add a free Brave Search API key (2,000 queries/month) or Google CSE key in the server .env for reliable discovery.</div>}

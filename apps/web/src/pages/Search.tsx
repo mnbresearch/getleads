@@ -98,7 +98,7 @@ export function SearchPage() {
 
       <div className="card mt-6 overflow-x-auto">
         <table className="w-full">
-          <thead className="border-b border-black/10 bg-base"><tr><th className="th">When</th><th className="th">Query</th><th className="th">Status</th><th className="th">Results</th><th className="th"></th></tr></thead>
+          <thead className="border-b border-black/10 bg-cream"><tr><th className="th">When</th><th className="th">Query</th><th className="th">Status</th><th className="th">Results</th><th className="th"></th></tr></thead>
           <tbody className="divide-y divide-slate-100">
             {searches.map((s) => (
               <tr key={s.id}>

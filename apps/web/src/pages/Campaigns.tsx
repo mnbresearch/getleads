@@ -38,7 +38,7 @@ export function CampaignsPage() {
       {rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">
-            <thead className="border-b border-black/10 bg-base"><tr><th className="th">Campaign</th><th className="th">Status</th><th className="th">Contacts</th><th className="th">Sent</th><th className="th">Opened</th><th className="th">Replied</th><th className="th">Created</th></tr></thead>
+            <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Campaign</th><th className="th">Status</th><th className="th">Contacts</th><th className="th">Sent</th><th className="th">Opened</th><th className="th">Replied</th><th className="th">Created</th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((c) => (
                 <tr key={c.id} className="cursor-pointer hover:bg-black/[0.05]" onClick={() => navigate(`/campaigns/${c.id}`)}>
@@ -214,12 +214,12 @@ export function CampaignDetail() {
           ))}
         </div>
       )}
-      {stats?.variants && stats.variants.length > 1 && <div className="card mb-4 p-3 text-sm"><div className="mb-1 font-medium">A/B results</div><div className="flex flex-wrap gap-3">{stats.variants.map((v, i) => <div key={i} className="rounded-lg bg-base px-3 py-2 text-xs">Step {(c.steps ?? []).findIndex((st) => (st as unknown as { id: string }).id === v.stepId) + 1 || "?"} · Variant {String.fromCharCode(65 + v.variant)}: {v.sent} sent · {v.sent ? Math.round((v.opened / v.sent) * 100) : 0}% open · {v.sent ? Math.round((v.replied / v.sent) * 100) : 0}% reply</div>)}</div></div>}
+      {stats?.variants && stats.variants.length > 1 && <div className="card mb-4 p-3 text-sm"><div className="mb-1 font-medium">A/B results</div><div className="flex flex-wrap gap-3">{stats.variants.map((v, i) => <div key={i} className="rounded-lg bg-cream px-3 py-2 text-xs">Step {(c.steps ?? []).findIndex((st) => (st as unknown as { id: string }).id === v.stepId) + 1 || "?"} · Variant {String.fromCharCode(65 + v.variant)}: {v.sent} sent · {v.sent ? Math.round((v.opened / v.sent) * 100) : 0}% open · {v.sent ? Math.round((v.replied / v.sent) * 100) : 0}% reply</div>)}</div></div>}
       <div className="mb-3 flex gap-2 border-b border-black/10">{(["contacts", "messages"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}</button>)}</div>
       {tab === "contacts" ? (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">
-            <thead className="border-b border-black/10 bg-base"><tr><th className="th">Lead</th><th className="th">Email</th><th className="th">Status</th><th className="th">Step</th><th className="th">Next send</th><th className="th"></th></tr></thead>
+            <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Lead</th><th className="th">Email</th><th className="th">Status</th><th className="th">Step</th><th className="th">Next send</th><th className="th"></th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {contacts.map((x) => (
                 <tr key={x.id}>

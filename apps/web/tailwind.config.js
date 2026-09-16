@@ -16,7 +16,8 @@ export default {
           800: "#602a1a",
           900: "#3d1a10",
         },
-        base: "#f7f2e9",
+        cream: "#f7f2e9", // NOTE: never name a custom color "base" - it collides with Tailwind
+        // built-in text-base font-size utility (text-base then resolves to this color, not 1rem).
         surface: "#fffdf8",
         ink: {
           50: "#211d17",

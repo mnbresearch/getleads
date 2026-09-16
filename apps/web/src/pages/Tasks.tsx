@@ -28,7 +28,7 @@ export function TasksPage() {
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{t.title}</div>
                   {t.lead && <div className="text-xs text-ink-400">{t.lead.title} · {t.lead.company?.name ?? t.lead.company?.domain} {t.lead.linkedinUrl && <a className="ml-2 text-brand-600" href={t.lead.linkedinUrl} target="_blank" rel="noreferrer">Open LinkedIn ↗</a>}{t.lead.phone && <span className="ml-2">{t.lead.phone}</span>}{t.type === "whatsapp" && (t.lead.whatsapp ?? t.lead.phone) && <a className="ml-2 text-emerald-600" href={`https://wa.me/${(t.lead.whatsapp ?? t.lead.phone ?? "").replace(/\D/g, "")}?text=${encodeURIComponent(t.body ?? "")}`} target="_blank" rel="noreferrer">Open WhatsApp ↗</a>}</div>}
-                  {t.body && <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-base p-3 font-sans text-sm text-ink-200">{t.body}</pre>}
+                  {t.body && <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-cream p-3 font-sans text-sm text-ink-200">{t.body}</pre>}
                   <div className="mt-1 text-xs text-ink-500">Due {fmtDate(t.dueAt)}</div>
                 </div>
                 {t.status === "pending" && <div className="flex gap-2"><button className="btn-secondary" onClick={() => t.body && navigator.clipboard.writeText(t.body).then(() => toast("Copied"))}>Copy</button><button className="btn-secondary" onClick={() => done(t, "skipped")}>Skip</button><button className="btn-primary" onClick={() => done(t, "done")}>Mark done</button></div>}
