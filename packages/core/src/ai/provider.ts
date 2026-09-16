@@ -138,7 +138,10 @@ export function configFromEnv(env = process.env): AiConfig {
 export function createAiProvider(cfg: AiConfig = configFromEnv()): AiProvider {
   const want = (cfg.provider ?? "auto").toLowerCase();
   const groq = () =>
-    cfg.groqApiKey && new OpenAICompatProvider("groq", "https://api.groq.com/openai/v1", cfg.groqApiKey, cfg.groqModel ?? "llama-3.3-70b-versatile");
+    // llama-3.3-70b-versatile returned 404 model_not_found as of Sep 2026 - Groq's catalog
+    // moves fast. llama-3.1-8b-instant is a stable, currently-supported fallback default;
+    // override via GROQ_MODEL if Groq adds back a stronger default worth pinning to.
+    cfg.groqApiKey && new OpenAICompatProvider("groq", "https://api.groq.com/openai/v1", cfg.groqApiKey, cfg.groqModel ?? "llama-3.1-8b-instant");
   const gemini = () => cfg.geminiApiKey && new GeminiProvider(cfg.geminiApiKey, cfg.geminiModel);
   const anthropic = () => cfg.anthropicApiKey && new AnthropicProvider(cfg.anthropicApiKey, cfg.anthropicModel);
   const compat = () =>
