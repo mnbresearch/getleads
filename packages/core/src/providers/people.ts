@@ -9,6 +9,7 @@ import type { PersonCandidate } from "../types.js";
 import { fetchJson, fetchWithTimeout } from "../util/http.js";
 import { splitName } from "../util/names.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
+import { meter } from "../util/meter.js";
 
 export interface PeopleProviderQuery {
   titles?: string[];
@@ -47,6 +48,7 @@ export const apolloProvider = (apiKey = process.env.APOLLO_API_KEY): PeopleProvi
   name: "apollo",
   available: () => !!apiKey,
   async search(q) {
+    meter("apollo");
     const body: Record<string, unknown> = {
       page: 1,
       per_page: Math.min(q.limit ?? 25, 100),
@@ -89,6 +91,7 @@ export const apolloProvider = (apiKey = process.env.APOLLO_API_KEY): PeopleProvi
     });
   },
   async enrich(input) {
+    meter("apollo");
     const params = new URLSearchParams();
     if (input.email) params.set("email", input.email);
     if (input.linkedinUrl) params.set("linkedin_url", input.linkedinUrl);
@@ -112,6 +115,7 @@ export const hunterProvider = (apiKey = process.env.HUNTER_API_KEY): PeopleProvi
     if (!domains.length) return [];
     const out: ProviderPerson[] = [];
     for (const domain of domains.slice(0, 5)) {
+      meter("hunter");
       const data = await fetchJson<{ data?: { organization?: string; emails?: { value: string; first_name?: string; last_name?: string; position?: string; seniority?: string; linkedin?: string; confidence?: number; verification?: { status?: string } }[] } }>(
         `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&limit=${Math.min(q.limit ?? 25, 100)}&api_key=${apiKey}${q.seniorities?.length ? `&seniority=${encodeURIComponent(q.seniorities.map((s) => (s === "c_level" ? "executive" : s)).join(","))}` : ""}`,
         { timeoutMs: 20_000 },
@@ -132,6 +136,7 @@ export const pdlProvider = (apiKey = process.env.PDL_API_KEY): PeopleProvider =>
     return []; // PDL search is paid; enrich is free-tier
   },
   async enrich(input) {
+    meter("pdl");
     const params = new URLSearchParams({ api_key: apiKey!, min_likelihood: "6" });
     if (input.email) params.set("email", input.email);
     if (input.linkedinUrl) params.set("profile", input.linkedinUrl);

@@ -1,8 +1,10 @@
 import { getDb, runMigrations, startWorker } from "@prospex/db";
 import "./env.js";
 import { ensureRecurringJobs, handlers } from "./jobs.js";
+import { wireToolMeter } from "./lib/toolMeter.js";
 
 async function main() {
+  wireToolMeter();
   if (process.env.AUTO_MIGRATE !== "false") await runMigrations();
   const { db } = getDb();
   await ensureRecurringJobs();

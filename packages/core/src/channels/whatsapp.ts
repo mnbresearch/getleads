@@ -1,5 +1,6 @@
 /** WhatsApp Cloud API (Meta) - free tier: 1,000 service conversations/month. Template messages required for outbound-first. */
 import { fetchWithTimeout } from "../util/http.js";
+import { meter } from "../util/meter.js";
 
 export interface WhatsAppConfig {
   phoneNumberId: string;
@@ -27,6 +28,7 @@ export async function sendWhatsApp(cfg: WhatsAppConfig, to: string, msg: { text?
     ? { messaging_product: "whatsapp", to, type: "template", template: { name: msg.template.name, language: { code: msg.template.language ?? "en" }, components: msg.template.params?.length ? [{ type: "body", parameters: msg.template.params.map((p) => ({ type: "text", text: p })) }] : [] } }
     : { messaging_product: "whatsapp", to, type: "text", text: { body: msg.text ?? "", preview_url: true } };
   try {
+    meter("whatsapp_cloud");
     const res = await fetchWithTimeout(`https://graph.facebook.com/${cfg.apiVersion ?? "v20.0"}/${cfg.phoneNumberId}/messages`, {
       method: "POST",
       timeoutMs: 15_000,

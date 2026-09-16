@@ -21,8 +21,10 @@ import { adminRoutes } from "./routes/admin.js";
 import { leadCaptureRoutes } from "./routes/leadCapture.js";
 import { docsHtml, openapi } from "./openapi.js";
 import { handlers } from "./jobs.js";
+import { wireToolMeter } from "./lib/toolMeter.js";
 
 export function createApp() {
+  wireToolMeter();
   const app = new Hono<Env>();
   app.onError(errorHandler);
   app.use("*", secureHeaders({ crossOriginResourcePolicy: false }));

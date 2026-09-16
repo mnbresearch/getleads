@@ -3,6 +3,7 @@ import { candidatesFor, inferPatternFromEmails, PATTERNS } from "./pattern.js";
 import { isCatchAll, resolveMx, smtpProbe, verifyEmail, type VerifyOptions } from "./verify.js";
 import { fetchJson } from "../util/http.js";
 import { webSearch } from "../search/index.js";
+import { meter } from "../util/meter.js";
 
 export interface FindEmailInput {
   firstName: string;
@@ -25,6 +26,7 @@ export async function findEmail(input: FindEmailInput, opts: VerifyOptions = {})
   const candidates: EmailFindResult["candidates"] = [];
 
   if (opts.hunterApiKey) {
+    meter("hunter");
     const h = await fetchJson<{ data?: { email?: string; score?: number } }>(
       `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(lastName)}&api_key=${opts.hunterApiKey}`,
     );

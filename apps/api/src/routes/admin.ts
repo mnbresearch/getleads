@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, currentPeriod, desc, eq, getDb, limitsFor, organizations, PLANS, sql, upgradeRequests, usage, users } from "@prospex/db";
+import { and, currentPeriod, desc, eq, getDb, getToolsSummary, ilike, inArray, limitsFor, or, organizations, PLANS, sql, updateToolLimit, upgradeRequests, usage, users } from "@prospex/db";
 import { env } from "../env.js";
 import { issueAdminJwt } from "../lib/auth.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -31,29 +31,81 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().optional()
   const { q } = c.req.valid("query");
   const { db } = getDb();
   const period = currentPeriod();
-  // Plain aliased raw SQL (not Drizzle's .select({...}) builder with embedded Column refs in
-  // subqueries) - embedding organizations.id that way silently failed to correlate per-row and
-  // always returned the COALESCE default (every usage/user subquery came back empty). This
-  // form, with the correlation column written as plain SQL text against the query's own alias,
-  // is unambiguous and was verified against the live DB to return real counts.
+
+  // Plain Drizzle query-builder calls only (no raw sql subqueries) - this is the style proven
+  // reliable elsewhere in this file (see GET /orgs/:id). Fetch orgs, then fetch users + usage for
+  // those org ids in two more queries, then merge in JS.
   const like = q ? `%${q}%` : null;
-  const result = await db.execute(sql`
-    SELECT o.id, o.name, o.slug, o.plan, o.plan_limits AS "planLimits", o.status, o.created_at AS "createdAt",
-      coalesce((SELECT count FROM usage WHERE org_id = o.id AND period = ${period} AND metric = 'leads'), 0)::int AS "leadsUsed",
-      coalesce((SELECT count FROM usage WHERE org_id = o.id AND period = ${period} AND metric = 'premiumLeads'), 0)::int AS "premiumLeadsUsed",
-      (SELECT count(*)::int FROM users WHERE org_id = o.id) AS "userCount",
-      (SELECT email FROM users WHERE org_id = o.id ORDER BY created_at ASC LIMIT 1) AS "ownerEmail",
-      (SELECT name FROM users WHERE org_id = o.id ORDER BY created_at ASC LIMIT 1) AS "ownerName"
-    FROM organizations o
-    WHERE ${like ? sql`(o.name ILIKE ${like} OR o.slug ILIKE ${like} OR EXISTS (SELECT 1 FROM users u2 WHERE u2.org_id = o.id AND u2.email ILIKE ${like}))` : sql`true`}
-    ORDER BY o.created_at DESC
-    LIMIT 1000
-  `);
-  const rows = (Array.isArray(result) ? result : (result as unknown as { rows: unknown[] }).rows) as Array<{
-    id: string; name: string; slug: string; plan: string; planLimits: Record<string, unknown> | null; status: string; createdAt: string;
-    leadsUsed: number; premiumLeadsUsed: number; userCount: number; ownerEmail: string | null; ownerName: string | null;
-  }>;
-  return c.json({ orgs: rows.map((r) => ({ ...r, limits: { ...limitsFor(r.plan), ...(r.planLimits ?? {}) } })) });
+  const allOrgs = await db
+    .select()
+    .from(organizations)
+    .where(
+      like
+        ? or(
+            ilike(organizations.name, like),
+            ilike(organizations.slug, like),
+            inArray(
+              organizations.id,
+              db.select({ id: users.orgId }).from(users).where(ilike(users.email, like)),
+            ),
+          )
+        : undefined,
+    )
+    .orderBy(desc(organizations.createdAt))
+    .limit(1000);
+
+  const orgIds = allOrgs.map((o) => o.id);
+
+  const allUsers = orgIds.length
+    ? await db
+        .select({ id: users.id, orgId: users.orgId, email: users.email, name: users.name, createdAt: users.createdAt })
+        .from(users)
+        .where(inArray(users.orgId, orgIds))
+    : [];
+
+  const allUsage = orgIds.length
+    ? await db
+        .select()
+        .from(usage)
+        .where(and(inArray(usage.orgId, orgIds), eq(usage.period, period)))
+    : [];
+
+  const usersByOrg = new Map<string, typeof allUsers>();
+  for (const u of allUsers) {
+    const list = usersByOrg.get(u.orgId) ?? [];
+    list.push(u);
+    usersByOrg.set(u.orgId, list);
+  }
+  const usageByOrg = new Map<string, typeof allUsage>();
+  for (const row of allUsage) {
+    const list = usageByOrg.get(row.orgId) ?? [];
+    list.push(row);
+    usageByOrg.set(row.orgId, list);
+  }
+
+  const orgs = allOrgs.map((o) => {
+    const orgUsers = (usersByOrg.get(o.id) ?? []).slice().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
+    const orgUsage = usageByOrg.get(o.id) ?? [];
+    const owner = orgUsers[0];
+    const leadsUsed = orgUsage.find((r) => r.metric === "leads")?.count ?? 0;
+    const premiumLeadsUsed = orgUsage.find((r) => r.metric === "premiumLeads")?.count ?? 0;
+    return {
+      id: o.id,
+      name: o.name,
+      slug: o.slug,
+      plan: o.plan,
+      status: o.status,
+      createdAt: o.createdAt,
+      leadsUsed,
+      premiumLeadsUsed,
+      userCount: orgUsers.length,
+      ownerEmail: owner?.email ?? null,
+      ownerName: owner?.name ?? null,
+      limits: { ...limitsFor(o.plan), ...(o.planLimits ?? {}) },
+    };
+  });
+
+  return c.json({ orgs });
 });
 
 adminRoutes.get("/orgs/:id", async (c) => {
@@ -142,4 +194,25 @@ adminRoutes.patch("/upgrade-requests/:id", zValidator("json", z.object({ status:
   const [row] = await db.update(upgradeRequests).set({ status: c.req.valid("json").status }).where(eq(upgradeRequests.id, c.req.param("id"))).returning();
   if (!row) throw notFound("Upgrade request");
   return c.json(row);
+});
+
+// ── Tools & limits: every 3rd-party API Scout calls, its free-tier limit, and current usage,
+// so the admin knows exactly which tool to upgrade before a free tier runs out. ──
+adminRoutes.get("/tools", async (c) => {
+  const tools = await getToolsSummary();
+  return c.json({ tools });
+});
+
+const TOOL_LIMIT_SCHEMA = z.object({
+  usageLimit: z.number().int().min(0).nullable().optional(),
+  period: z.enum(["day", "month"]).optional(),
+  alertThresholdPct: z.number().int().min(1).max(100).optional(),
+  notes: z.string().max(2000).nullable().optional(),
+});
+
+adminRoutes.patch("/tools/:provider", zValidator("json", TOOL_LIMIT_SCHEMA), async (c) => {
+  const patch = c.req.valid("json");
+  const updated = await updateToolLimit(c.req.param("provider"), patch);
+  if (!updated) throw notFound("Tool");
+  return c.json(updated);
 });

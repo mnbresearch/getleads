@@ -6,6 +6,7 @@
 import { promises as dns } from "node:dns";
 import { fetchJson } from "../util/http.js";
 import { extractDomain, isSocialOrAggregator, rootDomain } from "../util/domain.js";
+import { meter } from "../util/meter.js";
 
 export interface IpIdentity {
   ip: string;
@@ -35,6 +36,7 @@ export async function identifyIp(ip: string, opts: { ipinfoToken?: string } = {}
     return out;
   }
   // 1) ipapi.is - free tier returns flat strings; paid returns objects. Handle both.
+  meter("ipapi_is");
   const a = await fetchJson<Record<string, unknown>>(`https://api.ipapi.is/?q=${ip}`, { timeoutMs: 6000 });
   if (a && (a.company || a.asn)) {
     const companyObj = typeof a.company === "object" && a.company ? (a.company as { name?: string; domain?: string; type?: string }) : null;
@@ -55,12 +57,14 @@ export async function identifyIp(ip: string, opts: { ipinfoToken?: string } = {}
       provider: "ipapi.is",
     };
   } else if (opts.ipinfoToken) {
+    meter("ipinfo");
     const b = await fetchJson<{ org?: string; country?: string; city?: string; company?: { name?: string; domain?: string; type?: string }; privacy?: { hosting?: boolean } }>(`https://ipinfo.io/${ip}?token=${opts.ipinfoToken}`, { timeoutMs: 6000 });
     if (b) {
       const name = b.company?.name ?? b.org?.replace(/^AS\d+\s+/, "");
       out = { ip, orgName: name, asn: b.org?.match(/^AS\d+/)?.[0], isIsp: b.company?.type === "isp" || (!!name && ISP_WORDS.test(name)), isHosting: !!b.privacy?.hosting || b.company?.type === "hosting", country: b.country, city: b.city, domainHint: b.company?.domain, provider: "ipinfo" };
     }
   } else {
+    meter("ip_api");
     const d = await fetchJson<{ status?: string; org?: string; isp?: string; as?: string; country?: string; city?: string; hosting?: boolean; mobile?: boolean }>(`http://ip-api.com/json/${ip}?fields=status,org,isp,as,country,city,hosting,mobile`, { timeoutMs: 6000 });
     if (d?.status === "success") {
       const name = d.org || d.isp;

@@ -1,4 +1,5 @@
 import nodemailer from "nodemailer";
+import { meter } from "@prospex/core";
 import { env } from "../env.js";
 
 export interface SendInput {
@@ -41,6 +42,7 @@ export async function sendMail(cfg: MailerConfig | null, input: SendInput): Prom
   }
   try {
     if (c.provider === "resend") {
+      meter("resend");
       const res = await fetch("https://api.resend.com/emails", {
         method: "POST",
         headers: { authorization: `Bearer ${c.resendApiKey}`, "content-type": "application/json" },

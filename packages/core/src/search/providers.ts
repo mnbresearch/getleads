@@ -1,6 +1,7 @@
 import * as cheerio from "cheerio";
 import type { SearchResult } from "../types.js";
 import { fetchJson, fetchText } from "../util/http.js";
+import { meter } from "../util/meter.js";
 
 export interface SearchProvider {
   name: string;
@@ -14,6 +15,7 @@ export const braveProvider = (apiKey = process.env.BRAVE_SEARCH_API_KEY): Search
   name: "brave",
   available: () => !!apiKey,
   async search(query, opts = {}) {
+    meter("brave");
     const params = new URLSearchParams({ q: query, count: String(Math.min(opts.count ?? 20, 20)), offset: String(opts.offset ?? 0) });
     if (opts.country) params.set("country", opts.country);
     const data = await fetchJson<{ web?: { results?: { title: string; url: string; description?: string }[] } }>(
@@ -29,6 +31,7 @@ export const googleCseProvider = (apiKey = process.env.GOOGLE_CSE_API_KEY, cx = 
   name: "google_cse",
   available: () => !!apiKey && !!cx,
   async search(query, opts = {}) {
+    meter("google_cse");
     const start = (opts.offset ?? 0) + 1;
     const params = new URLSearchParams({ key: apiKey!, cx: cx!, q: query, num: String(Math.min(opts.count ?? 10, 10)), start: String(start) });
     if (opts.country) params.set("gl", opts.country);
@@ -44,6 +47,7 @@ export const serpApiProvider = (apiKey = process.env.SERPAPI_KEY): SearchProvide
   name: "serpapi",
   available: () => !!apiKey,
   async search(query, opts = {}) {
+    meter("serpapi");
     const params = new URLSearchParams({ api_key: apiKey!, engine: "google", q: query, num: String(opts.count ?? 20), start: String(opts.offset ?? 0) });
     if (opts.country) params.set("gl", opts.country);
     const data = await fetchJson<{ organic_results?: { title: string; link: string; snippet?: string }[] }>(

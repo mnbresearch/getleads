@@ -1,5 +1,6 @@
 import type { AiMessage, AiProvider } from "../types.js";
 import { fetchWithTimeout } from "../util/http.js";
+import { meter } from "../util/meter.js";
 
 type CompleteOpts = { maxTokens?: number; temperature?: number; json?: boolean };
 
@@ -12,6 +13,7 @@ class OpenAICompatProvider implements AiProvider {
     public model: string,
   ) {}
   async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
+    meter(this.name);
     const res = await fetchWithTimeout(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       timeoutMs: 60_000,
@@ -37,6 +39,7 @@ class GeminiProvider implements AiProvider {
     public model = "gemini-2.0-flash",
   ) {}
   async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
+    meter("gemini");
     const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
     const contents = messages
       .filter((m) => m.role !== "system")
@@ -71,6 +74,7 @@ class AnthropicProvider implements AiProvider {
     public model = "claude-3-5-haiku-latest",
   ) {}
   async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
+    meter("anthropic");
     const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n");
     const rest = messages.filter((m) => m.role !== "system").map((m) => ({ role: m.role, content: m.content }));
     if (opts.json) rest.push({ role: "assistant", content: "{" });

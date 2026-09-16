@@ -23,6 +23,23 @@ type OrgUser = { id: string; email: string; name: string; role: string; lastLogi
 type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> }; users: OrgUser[]; usage: Record<string, number>; period: string };
 type UpgradeRequest = { id: string; orgId: string | null; name: string; email: string; mobile: string; country: string; planId: string; message: string | null; status: string; createdAt: string };
 type Plan = { id: string; name: string; priceUsd: number; limits: PlanLimits };
+type ToolSummary = {
+  provider: string;
+  label: string;
+  category: string;
+  keyEnvVar: string | null;
+  configured: boolean;
+  hasFreeTier: boolean;
+  freeTierNote: string | null;
+  usageLimit: number | null;
+  period: string;
+  alertThresholdPct: number;
+  notes: string | null;
+  currentPeriodKey: string;
+  used: number;
+  percentUsed: number | null;
+  status: "ok" | "warning" | "critical" | "unmetered";
+};
 
 const STATUS_STYLES: Record<string, string> = {
   active: "bg-emerald-50 text-emerald-700",
@@ -221,6 +238,125 @@ function LeadsTab({ plans }: { plans: Plan[] }) {
   );
 }
 
+const TOOL_STATUS_STYLES: Record<ToolSummary["status"], string> = {
+  ok: "bg-emerald-50 text-emerald-700",
+  warning: "bg-amber-50 text-amber-800",
+  critical: "bg-red-50 text-red-600",
+  unmetered: "bg-black/5 text-ink-400",
+};
+
+function ToolRow({ tool, onSaved }: { tool: ToolSummary; onSaved: (t: ToolSummary) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [limit, setLimit] = useState(tool.usageLimit ?? "");
+  const [threshold, setThreshold] = useState(tool.alertThresholdPct);
+  const [busy, setBusy] = useState(false);
+
+  const save = async () => {
+    setBusy(true);
+    try {
+      const updated = await adminFetch<ToolSummary>("PATCH", `/v1/admin/tools/${tool.provider}`, {
+        usageLimit: limit === "" ? null : Number(limit),
+        alertThresholdPct: threshold,
+      });
+      onSaved(updated);
+      setEditing(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <tr>
+      <td className="td">
+        <div className="font-medium text-ink-50">{tool.label}</div>
+        <div className="text-xs text-ink-400">{tool.category}</div>
+      </td>
+      <td className="td text-xs text-ink-400">
+        {tool.keyEnvVar ? (tool.configured ? <span className="text-emerald-700">key set</span> : <span className="text-red-600">no key ({tool.keyEnvVar})</span>) : "keyless"}
+      </td>
+      <td className="td text-xs text-ink-400">{tool.freeTierNote ?? "—"}{tool.notes && <div className="mt-0.5 italic">{tool.notes}</div>}</td>
+      <td className="td">
+        {tool.usageLimit !== null ? (
+          <div className="w-32">
+            <div className="mb-1 text-xs text-ink-400">{fmtNum(tool.used)} / {fmtNum(tool.usageLimit)} <span className="text-ink-500">/{tool.period}</span></div>
+            <div className="h-1.5 w-full overflow-hidden rounded-full bg-black/10">
+              <div
+                className={`h-full ${tool.status === "critical" ? "bg-red-500" : tool.status === "warning" ? "bg-amber-500" : "bg-emerald-500"}`}
+                style={{ width: `${Math.min(100, tool.percentUsed ?? 0)}%` }}
+              />
+            </div>
+          </div>
+        ) : (
+          <span className="text-xs text-ink-400">{fmtNum(tool.used)} calls{tool.period ? ` /${tool.period}` : ""} · no limit set</span>
+        )}
+      </td>
+      <td className="td"><span className={`badge ${TOOL_STATUS_STYLES[tool.status]}`}>{tool.status === "unmetered" ? "no alert set" : tool.status}</span></td>
+      <td className="td">
+        {editing ? (
+          <div className="flex items-center gap-1.5">
+            <input className="input w-20 py-1 text-xs" type="number" min={0} placeholder="limit" value={limit} onChange={(e) => setLimit(e.target.value === "" ? "" : Number(e.target.value))} />
+            <input className="input w-16 py-1 text-xs" type="number" min={1} max={100} value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} title="Alert at % used" />
+            <button className="btn-primary py-1 text-xs" disabled={busy} onClick={save}>Save</button>
+            <button className="text-xs text-ink-400 hover:text-ink-50" onClick={() => setEditing(false)}>Cancel</button>
+          </div>
+        ) : (
+          <button className="btn-secondary py-1 text-xs" onClick={() => setEditing(true)}>Set limit</button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+function ToolsTab() {
+  const [tools, setTools] = useState<ToolSummary[] | null>(null);
+  const load = () => adminFetch<{ tools: ToolSummary[] }>("GET", "/v1/admin/tools").then((r) => setTools(r.tools));
+  useEffect(() => { load(); }, []);
+
+  if (!tools) return <div className="card p-5 text-sm text-ink-400">Loading…</div>;
+
+  const needsAttention = tools.filter((t) => t.status === "warning" || t.status === "critical");
+  const byCategory = tools.reduce<Record<string, ToolSummary[]>>((acc, t) => {
+    (acc[t.category] ??= []).push(t);
+    return acc;
+  }, {});
+
+  return (
+    <div className="space-y-4">
+      {needsAttention.length > 0 && (
+        <div className="card border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+          <span className="font-semibold">Needs attention:</span>{" "}
+          {needsAttention.map((t) => `${t.label} (${t.percentUsed}% of ${t.usageLimit}/${t.period})`).join(", ")}
+        </div>
+      )}
+      <p className="text-xs text-ink-500">
+        Every 3rd-party API Scout calls, reconciled against what's actually used, with the free-tier limit for each. Set (or adjust) a limit and Scout emails you the moment a tool crosses it, so you know exactly which one to upgrade.
+      </p>
+      {Object.entries(byCategory).map(([category, rows]) => (
+        <div key={category} className="card overflow-x-auto p-0">
+          <div className="border-b border-black/5 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-ink-400">{category}</div>
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="text-left text-ink-400">
+                <th className="th">Tool</th>
+                <th className="th">Key</th>
+                <th className="th">Free tier</th>
+                <th className="th">Usage this period</th>
+                <th className="th">Status</th>
+                <th className="th">Alert limit</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((t) => (
+                <ToolRow key={t.provider} tool={t} onSaved={(updated) => setTools((prev) => prev!.map((x) => (x.provider === updated.provider ? updated : x)))} />
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function PlansTab({ plans }: { plans: Plan[] }) {
   return (
     <div className="grid gap-3 md:grid-cols-3 lg:grid-cols-5">
@@ -245,7 +381,7 @@ function PlansTab({ plans }: { plans: Plan[] }) {
 export function AdminDashboardPage() {
   const token = useAdminToken();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<"orgs" | "leads" | "plans">("orgs");
+  const [tab, setTab] = useState<"orgs" | "leads" | "tools" | "plans">("orgs");
   const [plans, setPlans] = useState<Plan[] | null>(null);
   const [authError, setAuthError] = useState(false);
 
@@ -270,12 +406,13 @@ export function AdminDashboardPage() {
       </header>
       <main className="mx-auto max-w-6xl p-6">
         <nav className="mb-5 flex gap-2">
-          {([["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["plans", "Pricing"]] as const).map(([id, label]) => (
+          {([["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["plans", "Pricing"]] as const).map(([id, label]) => (
             <button key={id} className={`rounded-lg px-3 py-1.5 text-sm ${tab === id ? "bg-brand-600 text-white" : "text-ink-300 hover:bg-black/5"}`} onClick={() => setTab(id)}>{label}</button>
           ))}
         </nav>
         {tab === "orgs" && <OrgsTab plans={plans} />}
         {tab === "leads" && <LeadsTab plans={plans} />}
+        {tab === "tools" && <ToolsTab />}
         {tab === "plans" && <PlansTab plans={plans} />}
       </main>
     </div>

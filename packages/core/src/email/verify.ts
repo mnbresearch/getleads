@@ -2,6 +2,7 @@ import { promises as dns } from "node:dns";
 import net from "node:net";
 import type { EmailStatus, EmailVerification } from "../types.js";
 import { fetchJson } from "../util/http.js";
+import { meter } from "../util/meter.js";
 
 const FREE_PROVIDERS = new Set([
   "gmail.com", "yahoo.com", "yahoo.co.in", "hotmail.com", "outlook.com", "live.com", "icloud.com", "aol.com", "protonmail.com", "proton.me", "rediffmail.com", "zoho.com", "mail.com", "gmx.com", "yandex.com",
@@ -155,6 +156,7 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
 
   // Optional external verifiers (free tiers) take precedence when configured
   if (opts.hunterApiKey) {
+    meter("hunter");
     const h = await fetchJson<{ data?: { status: string; score: number } }>(
       `https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${opts.hunterApiKey}`,
     );
@@ -165,6 +167,7 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
     }
   }
   if (opts.abstractApiKey) {
+    meter("abstract_email");
     const a = await fetchJson<{ deliverability?: string; is_catchall_email?: { value: boolean }; quality_score?: string }>(
       `https://emailvalidation.abstractapi.com/v1/?api_key=${opts.abstractApiKey}&email=${encodeURIComponent(email)}`,
     );

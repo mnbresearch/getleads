@@ -667,3 +667,39 @@ export type Task = typeof tasks.$inferSelect;
 export type Autopilot = typeof autopilots.$inferSelect;
 export type Invite = typeof invites.$inferSelect;
 export type UpgradeRequest = typeof upgradeRequests.$inferSelect;
+
+// ── Tool/integration registry: every 3rd-party API Scout calls, its free-tier limit, and
+// current usage - powers the admin "Tools & limits" tab so the admin gets warned before a
+// free tier runs out and knows exactly which tool to upgrade. ──
+export const toolRegistry = pgTable("tool_registry", {
+  provider: text("provider").primaryKey(), // e.g. "hunter", "apollo", "serpapi"
+  label: text("label").notNull(), // e.g. "Hunter.io"
+  category: text("category").notNull(), // e.g. "People & company data"
+  keyEnvVar: text("key_env_var"), // env var that holds the API key; null = keyless
+  hasFreeTier: boolean("has_free_tier").notNull().default(true),
+  freeTierNote: text("free_tier_note"), // human description of the free tier, e.g. "25 requests/month"
+  usageLimit: integer("usage_limit"), // count that triggers the alert; null = not tracked/no cap set
+  period: text("period").notNull().default("month"), // "day" | "month" - the window `usageLimit` resets on
+  alertThresholdPct: integer("alert_threshold_pct").notNull().default(80),
+  lastAlertPeriod: text("last_alert_period"), // period key we last emailed an alert for (avoids repeat spam)
+  notes: text("notes"),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
+export const toolUsage = pgTable(
+  "tool_usage",
+  {
+    provider: text("provider")
+      .notNull()
+      .references(() => toolRegistry.provider, { onDelete: "cascade" }),
+    period: text("period").notNull(), // "2026-09" for month-scoped, "2026-09-16" for day-scoped
+    count: integer("count").notNull().default(0),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.provider, t.period] }) }),
+);
+
+export type ToolRegistryEntry = typeof toolRegistry.$inferSelect;
+export type ToolUsage = typeof toolUsage.$inferSelect;
+
