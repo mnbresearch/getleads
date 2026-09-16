@@ -27,11 +27,11 @@ export function Stat({ label, value, hint }: { label: string; value: ReactNode; 
 
 export function EmailStatusBadge({ status }: { status?: string | null }) {
   const map: Record<string, string> = {
-    valid: "bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-500/20",
-    catch_all: "bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20",
-    risky: "bg-amber-500/10 text-amber-300 ring-1 ring-amber-500/20",
-    invalid: "bg-red-500/10 text-red-300 ring-1 ring-red-500/20",
-    unknown: "bg-surface/5 text-ink-300",
+    valid: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+    catch_all: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
+    risky: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
+    invalid: "bg-red-50 text-red-700 ring-1 ring-red-200",
+    unknown: "bg-black/[0.05] text-ink-300",
   };
   const s = status ?? "unknown";
   return <span className={`badge ${map[s] ?? map.unknown}`}>{s.replace("_", " ")}</span>;
@@ -39,10 +39,10 @@ export function EmailStatusBadge({ status }: { status?: string | null }) {
 
 export function ScoreBar({ score }: { score?: number | null }) {
   const s = Math.max(0, Math.min(100, Math.round(score ?? 0)));
-  const color = s >= 70 ? "bg-emerald-500/100" : s >= 40 ? "bg-amber-500/100" : "bg-surface/20";
+  const color = s >= 70 ? "bg-emerald-500" : s >= 40 ? "bg-amber-500" : "bg-black/10";
   return (
     <div className="flex items-center gap-2" title={`${s}/100`}>
-      <div className="h-1.5 w-16 rounded-full bg-surface/5">
+      <div className="h-1.5 w-16 rounded-full bg-black/[0.05]">
         <div className={`h-1.5 rounded-full ${color}`} style={{ width: `${s}%` }} />
       </div>
       <span className="text-xs tabular-nums text-ink-300">{s}</span>
@@ -84,7 +84,7 @@ export function Empty({ title, hint, action }: { title: string; hint?: string; a
 export function Spinner({ label }: { label?: string }) {
   return (
     <div className="flex items-center gap-2 text-sm text-ink-400">
-      <span className="h-4 w-4 animate-spin rounded-full border-2 border-white/20 border-t-brand-600" />
+      <span className="h-4 w-4 animate-spin rounded-full border-2 border-black/20 border-t-brand-600" />
       {label}
     </div>
   );
@@ -113,9 +113,9 @@ export function TagInput({ value, onChange, placeholder }: { value: string[]; on
   return (
     <div className="input flex flex-wrap items-center gap-1 py-1">
       {value.map((v) => (
-        <span key={v} className="badge bg-brand-500/10 text-brand-300">
+        <span key={v} className="badge bg-brand-50 text-brand-700">
           {v}
-          <button className="ml-1 text-brand-300 hover:text-brand-300" onClick={() => onChange(value.filter((x) => x !== v))}>×</button>
+          <button className="ml-1 text-brand-600 hover:text-brand-600" onClick={() => onChange(value.filter((x) => x !== v))}>×</button>
         </span>
       ))}
       <input

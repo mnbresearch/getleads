@@ -23,7 +23,7 @@ export function LandingPage() {
 
       <main className="mx-auto max-w-6xl px-6">
         <section className="flex flex-col items-center py-20 text-center sm:py-28">
-          <span className="badge border border-white/10 bg-white/5 text-ink-300">For sales teams and AI agents</span>
+          <span className="badge border border-black/10 bg-black/5 text-ink-300">For sales teams and AI agents</span>
           <h1 className="mt-6 max-w-3xl text-4xl font-bold tracking-tight text-ink-50 sm:text-6xl">
             Find, enrich, and reach your next customer — <span className="bg-brand-gradient bg-clip-text text-transparent">before your competitors do</span>
           </h1>
@@ -37,7 +37,7 @@ export function LandingPage() {
         <section className="grid grid-cols-1 gap-4 pb-24 sm:grid-cols-2 lg:grid-cols-3">
           {features.map((f) => (
             <div key={f.title} className="card p-6 transition hover:border-brand-500/30">
-              <div className="mb-3 grid h-10 w-10 place-items-center rounded-lg bg-brand-500/10 text-lg text-brand-300">{f.icon}</div>
+              <div className="mb-3 grid h-10 w-10 place-items-center rounded-lg bg-brand-50 text-lg text-brand-600">{f.icon}</div>
               <div className="font-semibold text-ink-50">{f.title}</div>
               <p className="mt-1.5 text-sm text-ink-400">{f.desc}</p>
             </div>
@@ -51,7 +51,7 @@ export function LandingPage() {
         </section>
       </main>
 
-      <footer className="border-t border-white/10 py-8 text-center text-xs text-ink-500">
+      <footer className="border-t border-black/10 py-8 text-center text-xs text-ink-500">
         <Logo size={18} textClassName="text-xs" className="justify-center" />
         <div className="mt-2">Lead intelligence infrastructure for sales teams and AI agents.</div>
       </footer>

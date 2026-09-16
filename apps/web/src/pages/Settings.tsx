@@ -7,7 +7,7 @@ export function SettingsPage() {
   const tabs = [["", "Workspace"], ["team", "Team"], ["api-keys", "API keys"], ["webhooks", "Webhooks"], ["integrations", "Integrations"], ["billing", "Plan & usage"]];
   return (
     <Page title="Settings">
-      <div className="mb-4 flex gap-1 border-b border-white/10">{tabs.map(([p, l]) => <NavLink key={p} to={`/settings/${p}`} end className={({ isActive }) => `px-3 py-2 text-sm ${isActive ? "border-b-2 border-brand-400 font-medium text-brand-300" : "text-ink-400"}`}>{l}</NavLink>)}</div>
+      <div className="mb-4 flex gap-1 border-b border-black/10">{tabs.map(([p, l]) => <NavLink key={p} to={`/settings/${p}`} end className={({ isActive }) => `px-3 py-2 text-sm ${isActive ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`}>{l}</NavLink>)}</div>
       <Routes>
         <Route path="/" element={<Workspace />} />
         <Route path="/api-keys" element={<ApiKeys />} />
@@ -50,15 +50,15 @@ function ApiKeys() {
       {Toast}
       <div className="card p-5">
         <div className="mb-2 flex items-center justify-between"><div className="font-medium">API keys</div><button className="btn-primary" onClick={async () => { const name = prompt("Key name", "Agent") ?? ""; if (!name) return; const r = await apiFetch<{ key: string }>("POST", "/v1/auth/api-keys", { name }); setFresh(r.key); load(); }}>Create key</button></div>
-        {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-300"><div className="mb-1 text-ink-100">Copy now - shown once:</div><code className="break-all">{fresh}</code></div>}
+        {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-600"><div className="mb-1 text-ink-100">Copy now - shown once:</div><code className="break-all">{fresh}</code></div>}
         <table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
-          <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-300" onClick={() => apiFetch("DELETE", `/v1/auth/api-keys/${k.id}`).then(load)}>Revoke</button>}</td></tr>)}</tbody></table>
+          <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/auth/api-keys/${k.id}`).then(load)}>Revoke</button>}</td></tr>)}</tbody></table>
       </div>
       <div className="card p-5 text-sm">
         <div className="mb-2 font-medium">Use with AI agents</div>
-        <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-300" href={`${API_URL}/openapi.json`} target="_blank" rel="noreferrer">{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-300" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">/docs</a>.</p>
+        <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-600" href={`${API_URL}/openapi.json`} target="_blank" rel="noreferrer">{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">/docs</a>.</p>
         <p className="mt-2 text-ink-300">MCP (Claude Desktop, Claude Code, Cursor):</p>
-        <pre className="mt-1 overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-200">{`{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
+        <pre className="mt-1 overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{`{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
     "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "${API_URL}" } } } }`}</pre>
       </div>
     </div>
@@ -79,18 +79,18 @@ function Webhooks() {
         <div className="mb-3 font-medium">Webhooks</div>
         <p className="mb-3 text-sm text-ink-300">Events: <code>lead.created</code>, <code>lead.updated</code>, <code>lead.enriched</code>, <code>lead.verified</code>, <code>lead.replied</code>, <code>lead.unsubscribed</code>, <code>search.completed</code>, <code>message.sent</code>, <code>message.opened</code>, <code>message.clicked</code>, <code>campaign.started</code>, or <code>*</code>. Signed with <code>x-prospex-signature</code> = sha256(secret.timestamp.body).</p>
         <div className="flex flex-wrap gap-2"><input className="input flex-1" placeholder="https://your-app.com/hooks/prospex" value={url} onChange={(e) => setUrl(e.target.value)} /><input className="input w-48" value={events} onChange={(e) => setEvents(e.target.value)} placeholder="* or lead.*,message.*" /><button className="btn-primary" disabled={!url} onClick={() => apiFetch("POST", "/v1/webhooks", { url, events: events.split(",").map((s) => s.trim()) }).then(() => { setUrl(""); load(); toast("Webhook added"); }).catch((e) => toast(e.message, "err"))}>Add</button></div>
-        <ul className="mt-4 divide-y divide-slate-100 text-sm">{hooks.map((h) => <li key={h.id} className="flex flex-wrap items-center gap-2 py-2"><span className={`badge ${h.active ? "bg-emerald-500/10 text-emerald-300" : "bg-red-500/10 text-red-300"}`}>{h.active ? "active" : "disabled"}</span><span className="font-mono text-xs">{h.url}</span><span className="text-xs text-ink-400">{h.events.join(", ")}</span><span className="text-xs text-ink-500">secret: {h.secret.slice(0, 8)}…</span><button className="btn-secondary ml-auto" onClick={() => apiFetch("POST", `/v1/webhooks/${h.id}/test`).then(() => toast("Test event queued"))}>Test</button><button className="text-red-300" onClick={() => apiFetch("DELETE", `/v1/webhooks/${h.id}`).then(load)}>Delete</button></li>)}</ul>
+        <ul className="mt-4 divide-y divide-slate-100 text-sm">{hooks.map((h) => <li key={h.id} className="flex flex-wrap items-center gap-2 py-2"><span className={`badge ${h.active ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{h.active ? "active" : "disabled"}</span><span className="font-mono text-xs">{h.url}</span><span className="text-xs text-ink-400">{h.events.join(", ")}</span><span className="text-xs text-ink-500">secret: {h.secret.slice(0, 8)}…</span><button className="btn-secondary ml-auto" onClick={() => apiFetch("POST", `/v1/webhooks/${h.id}/test`).then(() => toast("Test event queued"))}>Test</button><button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/webhooks/${h.id}`).then(load)}>Delete</button></li>)}</ul>
       </div>
     </div>
   );
 }
 
 const PROVIDER_FIELDS: Record<string, { label: string; fields: [string, string][]; help: string }> = {
-  whatsapp: { label: "WhatsApp Cloud API (Meta, free 1k conv/mo)", fields: [["phoneNumberId", "Phone number ID"], ["accessToken", "Permanent access token"], ["templateName", "Approved template name (for first-touch messages)"], ["templateLanguage", "Template language code (en, en_US, hi)"]], help: "developers.facebook.com → WhatsApp → API setup. Outbound-first messages must use an approved template with one {{1}} body variable; Prospex passes the personalized text as {{1}}." },
+  whatsapp: { label: "WhatsApp Cloud API (Meta, free 1k conv/mo)", fields: [["phoneNumberId", "Phone number ID"], ["accessToken", "Permanent access token"], ["templateName", "Approved template name (for first-touch messages)"], ["templateLanguage", "Template language code (en, en_US, hi)"]], help: "developers.facebook.com → WhatsApp → API setup. Outbound-first messages must use an approved template with one {{1}} body variable; Scout passes the personalized text as {{1}}." },
   hubspot: { label: "HubSpot (free CRM)", fields: [["accessToken", "Private app access token"]], help: "HubSpot → Settings → Integrations → Private apps → create with crm.objects.contacts write scope." },
   pipedrive: { label: "Pipedrive", fields: [["apiToken", "API token"], ["companyDomain", "Company subdomain (e.g. mycompany)"]], help: "Pipedrive → Personal preferences → API." },
   zoho: { label: "Zoho CRM (free)", fields: [["accessToken", "OAuth access token"], ["apiDomain", "API domain (https://www.zohoapis.in)"]], help: "Use a self-client OAuth token with ZohoCRM.modules.leads.CREATE scope." },
-  cortex: { label: "Cortex (your automation platform)", fields: [["url", "Cortex webhook / ingest URL"], ["authHeader", "Authorization header value (optional)"]], help: "Prospex POSTs {source, lead, company} JSON to this URL." },
+  cortex: { label: "Cortex (your automation platform)", fields: [["url", "Cortex webhook / ingest URL"], ["authHeader", "Authorization header value (optional)"]], help: "Scout POSTs {source, lead, company} JSON to this URL." },
   webhook: { label: "Generic webhook (Zapier, Make, n8n)", fields: [["url", "Webhook URL"], ["authHeader", "Authorization header (optional)"]], help: "Any endpoint that accepts JSON." },
   sheets: { label: "Google Sheets (Apps Script)", fields: [["url", "Apps Script web app URL"]], help: "Deploy a doPost(e) Apps Script that appends the lead to a sheet." },
 };
@@ -115,7 +115,7 @@ function Integrations() {
       </div>
       <div className="card p-5">
         <div className="mb-3 font-medium">Connected</div>
-        <ul className="divide-y divide-slate-100 text-sm">{list.map((i) => <li key={i.provider} className="flex items-center justify-between py-2"><div><div className="font-medium">{PROVIDER_FIELDS[i.provider]?.label ?? i.provider}</div><div className="text-xs text-ink-400">last sync {fmtDate(i.lastSyncAt)}</div></div><button className="text-red-300" onClick={() => apiFetch("DELETE", `/v1/integrations/${i.provider}`).then(load)}>Disconnect</button></li>)}{list.length === 0 && <li className="py-2 text-ink-400">Nothing connected yet.</li>}</ul>
+        <ul className="divide-y divide-slate-100 text-sm">{list.map((i) => <li key={i.provider} className="flex items-center justify-between py-2"><div><div className="font-medium">{PROVIDER_FIELDS[i.provider]?.label ?? i.provider}</div><div className="text-xs text-ink-400">last sync {fmtDate(i.lastSyncAt)}</div></div><button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/integrations/${i.provider}`).then(load)}>Disconnect</button></li>)}{list.length === 0 && <li className="py-2 text-ink-400">Nothing connected yet.</li>}</ul>
         <p className="mt-3 text-xs text-ink-400">Push leads from the Leads page (select → sync) or via <code>POST /v1/integrations/{"{provider}"}/sync</code>.</p>
       </div>
     </div>
@@ -130,8 +130,8 @@ function Billing() {
   return (
     <div className="space-y-4">
       <div className="card p-5"><div className="mb-3 font-medium">Current plan: <span className="capitalize">{u.plan}</span> · {u.period}</div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{Object.entries(u.usage).map(([k, v]) => <div key={k} className="rounded-lg border border-white/10 p-3"><div className="text-xs capitalize text-ink-400">{k.replace(/([A-Z])/g, " $1")}</div><div className="text-lg font-semibold">{v.used.toLocaleString()} <span className="text-xs font-normal text-ink-500">/ {v.limit.toLocaleString()}</span></div></div>)}</div>
-        {plans.pilotMode && <p className="mt-3 text-sm text-emerald-300">Pilot mode: everything is free during the pilot. Limits reset monthly.</p>}
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{Object.entries(u.usage).map(([k, v]) => <div key={k} className="rounded-lg border border-black/10 p-3"><div className="text-xs capitalize text-ink-400">{k.replace(/([A-Z])/g, " $1")}</div><div className="text-lg font-semibold">{v.used.toLocaleString()} <span className="text-xs font-normal text-ink-500">/ {v.limit.toLocaleString()}</span></div></div>)}</div>
+        {plans.pilotMode && <p className="mt-3 text-sm text-emerald-600">Pilot mode: everything is free during the pilot. Limits reset monthly.</p>}
       </div>
       <div className="grid gap-3 md:grid-cols-4">{plans.plans.map((p) => <div key={p.id} className={`card p-4 ${p.id === u.plan ? "ring-2 ring-brand-500/50" : ""}`}><div className="font-semibold">{p.name}</div><div className="text-2xl font-semibold">${p.priceUsd}<span className="text-sm font-normal text-ink-400">/mo</span></div><ul className="mt-2 space-y-0.5 text-xs text-ink-300"><li>{Number(p.limits.leadsPerMonth).toLocaleString()} leads/mo</li><li>{Number(p.limits.verificationsPerMonth).toLocaleString()} verifications</li><li>{Number(p.limits.aiMessagesPerMonth).toLocaleString()} AI messages</li><li>{Number(p.limits.emailsPerMonth).toLocaleString()} emails</li><li>{p.limits.campaigns as number} campaigns</li></ul>{plans.stripeEnabled && p.priceUsd > 0 && p.id !== u.plan && <button className="btn-primary mt-3 w-full justify-center" onClick={() => apiFetch<{ url: string }>("POST", "/v1/billing/checkout", { plan: p.id }).then((r) => (location.href = r.url))}>Upgrade</button>}</div>)}</div>
     </div>
@@ -153,7 +153,7 @@ function Team() {
       {Toast}
       <div className="card p-5">
         <div className="mb-3 flex items-center justify-between"><div className="font-medium">Members <span className="text-sm text-ink-400">{d.seats.used} / {d.seats.limit} seats</span></div></div>
-        <ul className="divide-y divide-slate-100 text-sm">{d.members.map((m) => <li key={m.id} className="flex items-center justify-between py-2"><div>{m.name || m.email} <span className="text-ink-400">{m.email}</span> <span className="badge ml-2 bg-surface/5 text-ink-300">{m.role}</span></div><span className="text-xs text-ink-500">last login {fmtDate(m.lastLoginAt)}</span></li>)}</ul>
+        <ul className="divide-y divide-slate-100 text-sm">{d.members.map((m) => <li key={m.id} className="flex items-center justify-between py-2"><div>{m.name || m.email} <span className="text-ink-400">{m.email}</span> <span className="badge ml-2 bg-black/[0.05] text-ink-300">{m.role}</span></div><span className="text-xs text-ink-500">last login {fmtDate(m.lastLoginAt)}</span></li>)}</ul>
         <div className="mt-4 flex flex-wrap gap-2"><input className="input flex-1" placeholder="colleague@company.com" value={email} onChange={(e) => setEmail(e.target.value)} /><select className="input w-32" value={role} onChange={(e) => setRole(e.target.value)}><option value="member">member</option><option value="admin">admin</option></select><button className="btn-primary" disabled={!email} onClick={() => apiFetch<{ link: string }>("POST", "/v1/tools/team/invite", { email, role }).then((r) => { setLink(r.link); setEmail(""); load(); toast("Invite sent"); }).catch((e) => toast(e.message, "err"))}>Invite</button></div>
         {link && <div className="mt-2 text-xs text-ink-400">Invite link (also emailed if a mail provider is configured): <code className="break-all">{link}</code></div>}
         {d.invites.length > 0 && <div className="mt-3 text-xs text-ink-400">Pending: {d.invites.map((i) => i.email).join(", ")}</div>}

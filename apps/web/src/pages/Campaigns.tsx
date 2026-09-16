@@ -34,14 +34,14 @@ export function CampaignsPage() {
   return (
     <Page title="Campaigns" subtitle="AI-personalized sequences with send windows, daily limits, open/click/reply tracking and auto-stop on reply." actions={<><button className="btn-secondary" onClick={() => setAccOpen(true)}>Sender accounts ({accounts.length})</button><button className="btn-primary" onClick={() => setOpen(true)}>New campaign</button></>}>
       {Toast}
-      {accounts.length === 0 && <div className="mb-4 rounded-lg border border-amber-500/20 bg-amber-500/10 p-3 text-sm text-amber-200">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>}
+      {accounts.length === 0 && <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>}
       {rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">
-            <thead className="border-b border-white/10 bg-base"><tr><th className="th">Campaign</th><th className="th">Status</th><th className="th">Contacts</th><th className="th">Sent</th><th className="th">Opened</th><th className="th">Replied</th><th className="th">Created</th></tr></thead>
+            <thead className="border-b border-black/10 bg-base"><tr><th className="th">Campaign</th><th className="th">Status</th><th className="th">Contacts</th><th className="th">Sent</th><th className="th">Opened</th><th className="th">Replied</th><th className="th">Created</th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((c) => (
-                <tr key={c.id} className="cursor-pointer hover:bg-surface/5" onClick={() => navigate(`/campaigns/${c.id}`)}>
+                <tr key={c.id} className="cursor-pointer hover:bg-black/[0.05]" onClick={() => navigate(`/campaigns/${c.id}`)}>
                   <td className="td font-medium">{c.name}</td>
                   <td className="td"><StatusBadge s={c.status} /></td>
                   <td className="td tabular-nums">{c.contacts}</td>
@@ -62,8 +62,8 @@ export function CampaignsPage() {
 }
 
 function StatusBadge({ s }: { s: string }) {
-  const m: Record<string, string> = { active: "bg-emerald-500/10 text-emerald-300", paused: "bg-amber-500/10 text-amber-300", draft: "bg-surface/5 text-ink-300", completed: "bg-brand-500/10 text-brand-300", replied: "bg-emerald-500/10 text-emerald-300", queued: "bg-surface/5 text-ink-300", bounced: "bg-red-500/10 text-red-300", unsubscribed: "bg-red-500/10 text-red-300", failed: "bg-red-500/10 text-red-300", sent: "bg-brand-500/10 text-brand-300", opened: "bg-emerald-500/10 text-emerald-300", clicked: "bg-emerald-500/10 text-emerald-300" };
-  return <span className={`badge ${m[s] ?? "bg-surface/5 text-ink-300"}`}>{s}</span>;
+  const m: Record<string, string> = { active: "bg-emerald-50 text-emerald-700", paused: "bg-amber-50 text-amber-700", draft: "bg-black/[0.05] text-ink-300", completed: "bg-brand-50 text-brand-700", replied: "bg-emerald-50 text-emerald-700", queued: "bg-black/[0.05] text-ink-300", bounced: "bg-red-50 text-red-700", unsubscribed: "bg-red-50 text-red-700", failed: "bg-red-50 text-red-700", sent: "bg-brand-50 text-brand-700", opened: "bg-emerald-50 text-emerald-700", clicked: "bg-emerald-50 text-emerald-700" };
+  return <span className={`badge ${m[s] ?? "bg-black/[0.05] text-ink-300"}`}>{s}</span>;
 }
 
 function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, existing }: { open: boolean; onClose: () => void; accounts: Account[]; lists: { id: string; name: string }[]; icps: { id: string; name: string }[]; onDone: (id: string) => void; toast: (m: string, k?: "ok" | "err") => void; existing?: Campaign }) {
@@ -106,19 +106,19 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
           <div className="mb-2 flex items-center justify-between"><div className="label mb-0">Sequence steps</div><button className="btn-secondary" onClick={() => setSteps([...steps, { delayDays: 3, subjectTemplate: "Re: ", bodyTemplate: "", aiPersonalize: true }])}>+ Step</button></div>
           <div className="space-y-3">
             {steps.map((s, i) => (
-              <div key={i} className="rounded-lg border border-white/10 p-3">
+              <div key={i} className="rounded-lg border border-black/10 p-3">
                 <div className="mb-2 flex flex-wrap items-center gap-3 text-sm">
                   <span className="font-medium">Step {i + 1}</span>
                   <select className="input w-44 py-1" value={s.channel ?? "email"} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, channel: e.target.value } : x)))}><option value="email">Email</option><option value="linkedin_connect">LinkedIn connect (task)</option><option value="linkedin_message">LinkedIn message (task)</option><option value="whatsapp">WhatsApp</option><option value="call">Call (task)</option><option value="task">Custom task</option></select>
                   {i > 0 && <label className="flex items-center gap-1">wait <input type="number" className="input w-16" value={s.delayDays} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, delayDays: Number(e.target.value) } : x)))} /> days</label>}
                   <label className="flex items-center gap-1"><input type="checkbox" checked={s.aiPersonalize} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, aiPersonalize: e.target.checked } : x)))} /> AI personalize</label>
-                  <button className="ml-auto text-red-300" onClick={() => setSteps(steps.filter((_, j) => j !== i))}>Remove</button>
+                  <button className="ml-auto text-red-600" onClick={() => setSteps(steps.filter((_, j) => j !== i))}>Remove</button>
                 </div>
                 {(s.channel ?? "email") === "email" && <input className="input mb-2" placeholder="Subject" value={s.subjectTemplate} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, subjectTemplate: e.target.value } : x)))} />}
                 <textarea className="input h-24 font-mono text-xs" placeholder="Body - use {{first_name}}, {{company}}, {{title}}, {{sender_name}}" value={s.bodyTemplate} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, bodyTemplate: e.target.value } : x)))} />
                 {(s.channel ?? "email") === "email" && <div className="mt-2">
-                  {(s.variants ?? []).map((v, vi) => <div key={vi} className="mb-2 rounded border border-dashed border-white/20 p-2"><div className="mb-1 flex items-center justify-between text-xs text-ink-400"><span>Variant {String.fromCharCode(66 + vi)} (A/B test)</span><button className="text-red-300" onClick={() => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: (x.variants ?? []).filter((_, k) => k !== vi) } : x)))}>remove</button></div><input className="input mb-1" placeholder="Subject" value={v.subjectTemplate} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: (x.variants ?? []).map((vv, k) => (k === vi ? { ...vv, subjectTemplate: e.target.value } : vv)) } : x)))} /><textarea className="input h-16 font-mono text-xs" value={v.bodyTemplate} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: (x.variants ?? []).map((vv, k) => (k === vi ? { ...vv, bodyTemplate: e.target.value } : vv)) } : x)))} /></div>)}
-                  {(s.variants ?? []).length < 3 && <button className="text-xs text-brand-300" onClick={() => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: [...(x.variants ?? []), { subjectTemplate: "", bodyTemplate: "" }] } : x)))}>+ Add A/B variant</button>}
+                  {(s.variants ?? []).map((v, vi) => <div key={vi} className="mb-2 rounded border border-dashed border-black/20 p-2"><div className="mb-1 flex items-center justify-between text-xs text-ink-400"><span>Variant {String.fromCharCode(66 + vi)} (A/B test)</span><button className="text-red-600" onClick={() => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: (x.variants ?? []).filter((_, k) => k !== vi) } : x)))}>remove</button></div><input className="input mb-1" placeholder="Subject" value={v.subjectTemplate} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: (x.variants ?? []).map((vv, k) => (k === vi ? { ...vv, subjectTemplate: e.target.value } : vv)) } : x)))} /><textarea className="input h-16 font-mono text-xs" value={v.bodyTemplate} onChange={(e) => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: (x.variants ?? []).map((vv, k) => (k === vi ? { ...vv, bodyTemplate: e.target.value } : vv)) } : x)))} /></div>)}
+                  {(s.variants ?? []).length < 3 && <button className="text-xs text-brand-600" onClick={() => setSteps(steps.map((x, j) => (j === i ? { ...x, variants: [...(x.variants ?? []), { subjectTemplate: "", bodyTemplate: "" }] } : x)))}>+ Add A/B variant</button>}
                 </div>}
               </div>
             ))}
@@ -146,7 +146,7 @@ function AccountsModal({ open, onClose, accounts, sysAvail, onChanged, toast }: 
     <Modal open={open} onClose={onClose} title="Sender accounts" wide>
       <ul className="mb-4 divide-y divide-slate-100 text-sm">
         {accounts.map((a) => (
-          <li key={a.id} className="flex items-center justify-between py-2"><div>{a.fromName} &lt;{a.fromEmail}&gt; <span className="badge ml-2 bg-surface/5 text-ink-300">{a.provider}</span> <StatusBadge s={a.status === "active" ? "active" : "failed"} /><div className="text-xs text-ink-400">{a.sentToday}/{a.dailyLimit} sent today</div></div><button className="text-red-300" onClick={() => apiFetch("DELETE", `/v1/campaigns/email-accounts/${a.id}`).then(onChanged)}>Remove</button></li>
+          <li key={a.id} className="flex items-center justify-between py-2"><div>{a.fromName} &lt;{a.fromEmail}&gt; <span className="badge ml-2 bg-black/[0.05] text-ink-300">{a.provider}</span> <StatusBadge s={a.status === "active" ? "active" : "failed"} /><div className="text-xs text-ink-400">{a.sentToday}/{a.dailyLimit} sent today</div></div><button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/campaigns/email-accounts/${a.id}`).then(onChanged)}>Remove</button></li>
         ))}
       </ul>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -215,11 +215,11 @@ export function CampaignDetail() {
         </div>
       )}
       {stats?.variants && stats.variants.length > 1 && <div className="card mb-4 p-3 text-sm"><div className="mb-1 font-medium">A/B results</div><div className="flex flex-wrap gap-3">{stats.variants.map((v, i) => <div key={i} className="rounded-lg bg-base px-3 py-2 text-xs">Step {(c.steps ?? []).findIndex((st) => (st as unknown as { id: string }).id === v.stepId) + 1 || "?"} · Variant {String.fromCharCode(65 + v.variant)}: {v.sent} sent · {v.sent ? Math.round((v.opened / v.sent) * 100) : 0}% open · {v.sent ? Math.round((v.replied / v.sent) * 100) : 0}% reply</div>)}</div></div>}
-      <div className="mb-3 flex gap-2 border-b border-white/10">{(["contacts", "messages"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-300" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}</button>)}</div>
+      <div className="mb-3 flex gap-2 border-b border-black/10">{(["contacts", "messages"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}</button>)}</div>
       {tab === "contacts" ? (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">
-            <thead className="border-b border-white/10 bg-base"><tr><th className="th">Lead</th><th className="th">Email</th><th className="th">Status</th><th className="th">Step</th><th className="th">Next send</th><th className="th"></th></tr></thead>
+            <thead className="border-b border-black/10 bg-base"><tr><th className="th">Lead</th><th className="th">Email</th><th className="th">Status</th><th className="th">Step</th><th className="th">Next send</th><th className="th"></th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {contacts.map((x) => (
                 <tr key={x.id}>
@@ -228,7 +228,7 @@ export function CampaignDetail() {
                   <td className="td"><StatusBadge s={x.status} /></td>
                   <td className="td tabular-nums">{x.currentStep}/{c.steps?.length ?? 0}</td>
                   <td className="td text-xs text-ink-400">{fmtDate(x.nextSendAt)}</td>
-                  <td className="td text-right"><button className="text-brand-300 hover:underline" onClick={() => apiFetch<{ subject: string; body: string }>("POST", `/v1/campaigns/${c.id}/preview`, { leadId: x.lead.id, stepNo: Math.min((c.steps?.length ?? 1), x.currentStep + 1) }).then(setPreview).catch((e) => toast(e.message, "err"))}>Preview</button></td>
+                  <td className="td text-right"><button className="text-brand-600 hover:underline" onClick={() => apiFetch<{ subject: string; body: string }>("POST", `/v1/campaigns/${c.id}/preview`, { leadId: x.lead.id, stepNo: Math.min((c.steps?.length ?? 1), x.currentStep + 1) }).then(setPreview).catch((e) => toast(e.message, "err"))}>Preview</button></td>
                 </tr>
               ))}
               {contacts.length === 0 && <tr><td colSpan={6} className="td py-8 text-center text-ink-400">No contacts enrolled. Use "Enroll leads".</td></tr>}

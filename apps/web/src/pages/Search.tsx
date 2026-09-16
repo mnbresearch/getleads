@@ -57,7 +57,7 @@ export function SearchPage() {
   };
 
   return (
-    <Page title="Find leads" subtitle="Describe who you want. Prospex searches the open web + LinkedIn, enriches companies, finds and verifies emails, and scores fit.">
+    <Page title="Find leads" subtitle="Describe who you want. Scout searches the open web + LinkedIn, enriches companies, finds and verifies emails, and scores fit.">
       {Toast}
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="card space-y-4 p-5 lg:col-span-2">
@@ -98,15 +98,15 @@ export function SearchPage() {
 
       <div className="card mt-6 overflow-x-auto">
         <table className="w-full">
-          <thead className="border-b border-white/10 bg-base"><tr><th className="th">When</th><th className="th">Query</th><th className="th">Status</th><th className="th">Results</th><th className="th"></th></tr></thead>
+          <thead className="border-b border-black/10 bg-base"><tr><th className="th">When</th><th className="th">Query</th><th className="th">Status</th><th className="th">Results</th><th className="th"></th></tr></thead>
           <tbody className="divide-y divide-slate-100">
             {searches.map((s) => (
               <tr key={s.id}>
                 <td className="td whitespace-nowrap text-ink-400">{fmtDate(s.createdAt)}</td>
                 <td className="td">{String(s.query.query ?? (s.query.titles as string[] | undefined)?.join(", ") ?? (s.query.companyDomains as string[] | undefined)?.join(", ") ?? "")}</td>
-                <td className="td">{s.status === "running" || s.status === "queued" ? <Spinner label={s.status} /> : <span className={`badge ${s.status === "done" ? "bg-emerald-500/10 text-emerald-300" : "bg-red-500/10 text-red-300"}`}>{s.status}</span>}{s.error && <div className="text-xs text-red-300">{s.error}</div>}</td>
+                <td className="td">{s.status === "running" || s.status === "queued" ? <Spinner label={s.status} /> : <span className={`badge ${s.status === "done" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{s.status}</span>}{s.error && <div className="text-xs text-red-600">{s.error}</div>}</td>
                 <td className="td tabular-nums">{s.resultCount}</td>
-                <td className="td text-right">{s.status === "done" && s.resultCount > 0 && <Link className="text-brand-300 hover:underline" to={`/leads?tag=search:${s.id.slice(0, 8)}`}>View leads →</Link>}</td>
+                <td className="td text-right">{s.status === "done" && s.resultCount > 0 && <Link className="text-brand-600 hover:underline" to={`/leads?tag=search:${s.id.slice(0, 8)}`}>View leads →</Link>}</td>
               </tr>
             ))}
             {searches.length === 0 && <tr><td className="td py-8 text-center text-ink-400" colSpan={5}>No searches yet.</td></tr>}

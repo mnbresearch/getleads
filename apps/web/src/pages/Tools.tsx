@@ -41,7 +41,7 @@ export function ToolsPage() {
       {Toast}
       <div className="grid gap-4 lg:grid-cols-3">
         <div className="card p-4 lg:col-span-1">
-          <div className="space-y-1">{(Object.keys(meta) as (typeof tool)[]).map((k) => <button key={k} className={`block w-full rounded-lg px-3 py-2 text-left text-sm ${tool === k ? "bg-brand-500/10 font-medium text-brand-300" : "hover:bg-surface/5"}`} onClick={() => { setTool(k); setOut(null); }}>{meta[k].label}</button>)}</div>
+          <div className="space-y-1">{(Object.keys(meta) as (typeof tool)[]).map((k) => <button key={k} className={`block w-full rounded-lg px-3 py-2 text-left text-sm ${tool === k ? "bg-brand-50 font-medium text-brand-600" : "hover:bg-black/[0.05]"}`} onClick={() => { setTool(k); setOut(null); }}>{meta[k].label}</button>)}</div>
         </div>
         <div className="card space-y-3 p-4 lg:col-span-2">
           <div className="font-medium">{meta[tool].label}</div>
@@ -54,7 +54,7 @@ export function ToolsPage() {
                 <tbody className="divide-y divide-slate-100">{out.map((r, i) => <tr key={i}>{Object.keys(out[0] ?? {}).filter((k) => !["snippet", "raw", "checks", "person", "candidates"].includes(k)).slice(0, 8).map((k) => <td key={k} className="td text-xs">{k === "emailStatus" || k === "status" ? <EmailStatusBadge status={String(r[k] ?? "")} /> : typeof r[k] === "object" ? JSON.stringify(r[k]) : String(r[k] ?? "")}</td>)}</tr>)}</tbody></table>
               {out.length === 0 && <div className="py-4 text-sm text-ink-400">No results (keyless search engines are rate-limited from cloud IPs; add a Brave/Google key or Apollo/Hunter for consistent results).</div>}
             </div>
-          ) : <pre className="max-h-96 overflow-auto rounded-lg bg-black p-3 text-xs text-emerald-200">{JSON.stringify(out, null, 2)}</pre>)}
+          ) : <pre className="max-h-96 overflow-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{JSON.stringify(out, null, 2)}</pre>)}
         </div>
       </div>
     </Page>

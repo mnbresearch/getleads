@@ -9,7 +9,7 @@ interface Result { id: string; kind: string; title: string; url: string | null; 
 
 const TYPES = ["funding", "acquisition", "hiring", "leadership", "expansion", "launch", "partnership"];
 const money = (n: number | null) => (n ? (n >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : `$${Math.round(n / 1e3)}K`) : "");
-const TypeBadge = ({ t }: { t: string }) => <span className={`badge ${{ funding: "bg-emerald-500/10 text-emerald-300", acquisition: "bg-purple-50 text-purple-700", hiring: "bg-brand-500/10 text-brand-300", leadership: "bg-amber-500/10 text-amber-300" }[t] ?? "bg-surface/5 text-ink-300"}`}>{t}</span>;
+const TypeBadge = ({ t }: { t: string }) => <span className={`badge ${{ funding: "bg-emerald-50 text-emerald-700", acquisition: "bg-purple-50 text-purple-700", hiring: "bg-brand-50 text-brand-700", leadership: "bg-amber-50 text-amber-700" }[t] ?? "bg-black/[0.05] text-ink-300"}`}>{t}</span>;
 
 export function SignalsPage() {
   const [tab, setTab] = useState<"feed" | "subscriptions" | "monitors">("feed");
@@ -42,9 +42,9 @@ export function SignalsPage() {
   };
 
   return (
-    <Page title="Intent signals" subtitle="Companies that just raised money, got acquired, hired a new leader or are hiring fast are 3-5x more likely to buy. Subscribe and Prospex turns signals into decision-maker leads automatically." actions={<><button className="btn-secondary" onClick={scan} disabled={scanning}>{scanning ? "Scanning news…" : "Scan now"}</button><button className="btn-secondary" onClick={() => setMonOpen(true)}>New monitor</button><button className="btn-primary" onClick={() => setSubOpen(true)}>New subscription</button></>}>
+    <Page title="Intent signals" subtitle="Companies that just raised money, got acquired, hired a new leader or are hiring fast are 3-5x more likely to buy. Subscribe and Scout turns signals into decision-maker leads automatically." actions={<><button className="btn-secondary" onClick={scan} disabled={scanning}>{scanning ? "Scanning news…" : "Scan now"}</button><button className="btn-secondary" onClick={() => setMonOpen(true)}>New monitor</button><button className="btn-primary" onClick={() => setSubOpen(true)}>New subscription</button></>}>
       {Toast}
-      <div className="mb-3 flex gap-2 border-b border-white/10">{(["feed", "subscriptions", "monitors"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-300" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}{t === "subscriptions" ? ` (${subs.length})` : t === "monitors" ? ` (${mons.length})` : ""}</button>)}</div>
+      <div className="mb-3 flex gap-2 border-b border-black/10">{(["feed", "subscriptions", "monitors"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}{t === "subscriptions" ? ` (${subs.length})` : t === "monitors" ? ` (${mons.length})` : ""}</button>)}</div>
 
       {tab === "feed" && <>
         <div className="mb-3 flex flex-wrap gap-2">
@@ -58,9 +58,9 @@ export function SignalsPage() {
               <div key={s.id} className="flex flex-wrap items-start gap-3 p-3">
                 <TypeBadge t={s.type} />
                 <div className="min-w-0 flex-1">
-                  <div className="font-medium">{s.companyName ?? "Unknown company"} {s.amountUsd ? <span className="ml-1 text-emerald-300">{money(s.amountUsd)}</span> : null} {s.round && <span className="ml-1 text-xs text-ink-400">{s.round}</span>}</div>
+                  <div className="font-medium">{s.companyName ?? "Unknown company"} {s.amountUsd ? <span className="ml-1 text-emerald-600">{money(s.amountUsd)}</span> : null} {s.round && <span className="ml-1 text-xs text-ink-400">{s.round}</span>}</div>
                   <a className="text-sm text-ink-300 hover:underline" href={s.url} target="_blank" rel="noreferrer">{s.title}</a>
-                  <div className="text-xs text-ink-500">{s.source} · {fmtDate(s.occurredAt ?? s.createdAt)} {s.match && <span className="ml-2 badge bg-brand-500/10 text-brand-300">matched{s.match.leadsCreated ? ` · ${s.match.leadsCreated} leads` : ""}</span>}</div>
+                  <div className="text-xs text-ink-500">{s.source} · {fmtDate(s.occurredAt ?? s.createdAt)} {s.match && <span className="ml-2 badge bg-brand-50 text-brand-700">matched{s.match.leadsCreated ? ` · ${s.match.leadsCreated} leads` : ""}</span>}</div>
                 </div>
                 {s.companyName && <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ people: unknown[] }>("POST", "/v1/tools/decision-makers", { companyName: s.companyName, companyDomain: s.companyDomain ?? undefined, limit: 4 }).then((r) => toast(`${r.people.length} decision makers saved as leads`)).catch((e) => toast(e.message, "err"))}>Find decision makers</button>}
               </div>
@@ -73,7 +73,7 @@ export function SignalsPage() {
         <div className="grid gap-3 md:grid-cols-2">
           {subs.map((s) => (
             <div key={s.id} className="card p-4">
-              <div className="flex items-start justify-between"><div className="font-semibold">{s.name}</div><div className="flex gap-2"><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/signals/subscriptions/${s.id}/run`).then((r) => { toast(`Run: ${JSON.stringify(r)}`); load(); })}>Run now</button><button className="text-xs text-red-300" onClick={() => apiFetch("DELETE", `/v1/signals/subscriptions/${s.id}`).then(load)}>Delete</button></div></div>
+              <div className="flex items-start justify-between"><div className="font-semibold">{s.name}</div><div className="flex gap-2"><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/signals/subscriptions/${s.id}/run`).then((r) => { toast(`Run: ${JSON.stringify(r)}`); load(); })}>Run now</button><button className="text-xs text-red-600" onClick={() => apiFetch("DELETE", `/v1/signals/subscriptions/${s.id}`).then(load)}>Delete</button></div></div>
               <div className="mt-2 flex flex-wrap gap-1">{s.types.map((t) => <TypeBadge key={t} t={t} />)}</div>
               <div className="mt-2 text-xs text-ink-400">Keywords: {[...s.keywords, ...s.industries, ...s.locations].join(", ") || "any"} · Targets: {s.targetTitles.join(", ")}</div>
               <div className="mt-1 text-xs text-ink-400">{s.autoCreateLeads ? "Auto-creates leads" : "Match only"} · matched {s.stats.matched ?? 0} · leads {s.stats.leadsCreated ?? 0} · last run {fmtDate(s.lastRunAt)}</div>
@@ -86,11 +86,11 @@ export function SignalsPage() {
         <div className="card divide-y divide-slate-100">
           {mons.map((m) => (
             <div key={m.id} className="flex flex-wrap items-center gap-3 p-3">
-              <span className="badge bg-surface/5 text-ink-200">{m.type.replace("_", " ")}</span>
+              <span className="badge bg-black/[0.05] text-ink-200">{m.type.replace("_", " ")}</span>
               <div className="min-w-0 flex-1"><div className="font-medium">{m.name}</div><div className="truncate text-xs text-ink-400">{m.target} · every {m.intervalMinutes >= 60 ? `${Math.round(m.intervalMinutes / 60)}h` : `${m.intervalMinutes}m`} · {m.resultsCount} results · last {fmtDate(m.lastRunAt)}{m.lastResult && "openRoles" in m.lastResult ? ` · ${m.lastResult.openRoles} open roles` : ""}{m.lastResult && "publicPage" in m.lastResult && !m.lastResult.publicPage ? " · post not public" : ""}</div></div>
               <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ results: Result[] }>("GET", `/v1/signals/monitors/${m.id}/results`).then((r) => setResults({ m, rows: r.results }))}>Results</button>
               <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ added: number }>("POST", `/v1/signals/monitors/${m.id}/run`).then((r) => { toast(`Added ${r.added}`); load(); }).catch((e) => toast(e.message, "err"))}>Run</button>
-              <button className="text-xs text-red-300" onClick={() => apiFetch("DELETE", `/v1/signals/monitors/${m.id}`).then(load)}>Delete</button>
+              <button className="text-xs text-red-600" onClick={() => apiFetch("DELETE", `/v1/signals/monitors/${m.id}`).then(load)}>Delete</button>
             </div>
           ))}
         </div>
@@ -100,7 +100,7 @@ export function SignalsPage() {
       <MonitorModal open={monOpen} onClose={() => setMonOpen(false)} onDone={() => { setMonOpen(false); load(); }} toast={toast} />
       <Modal open={!!results} onClose={() => setResults(null)} title={results?.m.name ?? ""} wide>
         <div className="max-h-[60vh] divide-y divide-slate-100 overflow-y-auto text-sm">
-          {results?.rows.map((r) => <div key={r.id} className="py-2"><span className="badge mr-2 bg-surface/5 text-ink-300">{r.kind}</span>{r.url && !r.url.startsWith("job:") ? <a className="hover:underline" href={r.url} target="_blank" rel="noreferrer">{r.title}</a> : r.title}{r.leadId && <span className="ml-2 badge bg-emerald-500/10 text-emerald-300">lead</span>}<div className="text-xs text-ink-400">{r.snippet}</div></div>)}
+          {results?.rows.map((r) => <div key={r.id} className="py-2"><span className="badge mr-2 bg-black/[0.05] text-ink-300">{r.kind}</span>{r.url && !r.url.startsWith("job:") ? <a className="hover:underline" href={r.url} target="_blank" rel="noreferrer">{r.title}</a> : r.title}{r.leadId && <span className="ml-2 badge bg-emerald-50 text-emerald-700">lead</span>}<div className="text-xs text-ink-400">{r.snippet}</div></div>)}
           {results?.rows.length === 0 && <div className="py-6 text-center text-ink-400">No results yet.</div>}
         </div>
       </Modal>

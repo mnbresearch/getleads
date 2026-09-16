@@ -1,22 +1,22 @@
-export const BRAND_NAME = "Prospex";
+export const BRAND_NAME = "Scout";
 export const BRAND_TAGLINE = "Lead intelligence for sales teams and AI agents";
 
 /**
- * Logo mark: a signal/ping locking onto a target, rising along a growth
- * vector — prospecting read as "find the target, close the distance".
+ * Logo mark: a compass/spyglass needle pointing to a found target — scouting
+ * read as "survey the field, lock onto the right lead."
  */
 export function LogoMark({ size = 28, className = "" }: { size?: number; className?: string }) {
   return (
     <svg width={size} height={size} viewBox="0 0 28 28" fill="none" className={className} xmlns="http://www.w3.org/2000/svg">
-      <rect width="28" height="28" rx="8" fill="url(#px-grad)" />
-      <path d="M7.5 18.5L13 13L16.3 16.3L20.5 12.1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" opacity="0.55" />
-      <path d="M16.5 12.1H20.5V16.1" stroke="white" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" opacity="0.55" />
-      <circle cx="20.5" cy="12.1" r="2.6" fill="white" />
-      <circle cx="20.5" cy="12.1" r="5" stroke="white" strokeOpacity="0.5" strokeWidth="1.2" />
+      <rect width="28" height="28" rx="8" fill="url(#sc-grad)" />
+      <circle cx="13" cy="13" r="7.25" stroke="white" strokeWidth="1.8" opacity="0.9" />
+      <path d="M10.4 15.6L12.6 11L17.2 8.8L15 13.4L10.4 15.6Z" fill="white" />
+      <circle cx="20.5" cy="20.5" r="1.4" fill="white" opacity="0.9" />
+      <path d="M18.6 18.6L16.9 16.9" stroke="white" strokeWidth="1.8" strokeLinecap="round" />
       <defs>
-        <linearGradient id="px-grad" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
-          <stop stopColor="#7c5cfc" />
-          <stop offset="1" stopColor="#22d3ee" />
+        <linearGradient id="sc-grad" x1="0" y1="0" x2="28" y2="28" gradientUnits="userSpaceOnUse">
+          <stop stopColor="#c15f37" />
+          <stop offset="1" stopColor="#dc7f4d" />
         </linearGradient>
       </defs>
     </svg>
