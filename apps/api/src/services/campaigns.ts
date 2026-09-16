@@ -1,5 +1,5 @@
 import { and, asc, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, getDb, integrations, leads, lte, messages, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount } from "@prospex/db";
-import { createAiProvider, generateOutreach, leadVars, renderTemplate, textToHtml, normalizePhone, sendWhatsApp } from "@prospex/core";
+import { createAiProvider, evaluateSendingHealth, generateOutreach, leadVars, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type SendingHealth } from "@prospex/core";
 import { decryptJson as decryptCfg } from "../lib/crypto.js";
 import { consume } from "@prospex/db";
 import { env } from "../env.js";
@@ -51,6 +51,45 @@ export async function enrollLeads(campaign: Campaign, leadIds: string[]) {
   return n;
 }
 
+/** Rolling window used to judge deliverability. Long enough to be stable, short enough to react. */
+const HEALTH_WINDOW_DAYS = 14;
+
+/**
+ * Live deliverability verdict for one sending identity, from the last 14 days of real outcomes.
+ *
+ * Bounces come from the messages sent through this account's campaigns; complaints and
+ * unsubscribes come from the org's suppression list over the same window. Account age is
+ * used as the warm-up clock.
+ */
+export async function sendingHealthForAccount(
+  db: ReturnType<typeof getDb>["db"],
+  orgIdValue: string,
+  account: EmailAccount,
+): Promise<SendingHealth> {
+  const since = new Date(Date.now() - HEALTH_WINDOW_DAYS * 86_400_000);
+  const [m] = await db
+    .select({
+      sent: sql<number>`count(*) FILTER (WHERE ${messages.sentAt} IS NOT NULL)::int`,
+      bounced: sql<number>`count(*) FILTER (WHERE ${messages.bouncedAt} IS NOT NULL)::int`,
+      replied: sql<number>`count(*) FILTER (WHERE ${messages.repliedAt} IS NOT NULL)::int`,
+    })
+    .from(messages)
+    .innerJoin(campaigns, eq(campaigns.id, messages.campaignId))
+    .where(and(eq(messages.orgId, orgIdValue), eq(campaigns.emailAccountId, account.id), sql`${messages.createdAt} > ${since}`));
+  const [s] = await db
+    .select({
+      complained: sql<number>`count(*) FILTER (WHERE ${suppressions.reason} IN ('complaint','spam'))::int`,
+      unsubscribed: sql<number>`count(*) FILTER (WHERE ${suppressions.reason} = 'unsubscribe')::int`,
+    })
+    .from(suppressions)
+    .where(and(eq(suppressions.orgId, orgIdValue), sql`${suppressions.createdAt} > ${since}`));
+  const ageDays = account.createdAt ? Math.floor((Date.now() - new Date(account.createdAt).getTime()) / 86_400_000) : null;
+  return evaluateSendingHealth(
+    { sent: m?.sent ?? 0, bounced: m?.bounced ?? 0, complained: s?.complained ?? 0, unsubscribed: s?.unsubscribed ?? 0, replied: m?.replied ?? 0 },
+    { domainAgeDays: ageDays, configuredDailyCap: account.dailyLimit },
+  );
+}
+
 /**
  * One scheduler tick for an active campaign: pick due contacts, respect daily limit + window,
  * enqueue message.send jobs. Called by the campaign.tick job every minute.
@@ -67,10 +106,30 @@ export async function tickCampaign(campaignId: string) {
   const needsEmail = steps.some((st) => st.channel === "email");
   if (needsEmail && (!account || account.status !== "active")) return { sent: 0, reason: "no active email account" };
 
+  // Deliverability gate. A domain that is already bouncing gets worse, not better, by
+  // continuing to send, so a "halt" verdict stops the campaign rather than just warning.
+  let health: SendingHealth | null = null;
+  if (account) {
+    health = await sendingHealthForAccount(db, campaign.orgId, account);
+    if (health.status === "halt") {
+      await db.update(campaigns).set({ status: "paused", updatedAt: new Date() }).where(eq(campaigns.id, campaign.id));
+      await emitEvent(
+        campaign.orgId,
+        "campaign.paused_deliverability",
+        { campaignId: campaign.id, emailAccountId: account.id, reasons: health.reasons, bounceRate: health.bounceRate },
+        { type: "campaign", id: campaign.id },
+      );
+      return { sent: 0, reason: `paused: ${health.reasons[0] ?? "deliverability"}` };
+    }
+  }
+
   const today = new Date().toISOString().slice(0, 10);
   const sentToday = account && account.sentTodayDate === today ? account.sentToday : 0;
-  const budget = Math.min(s.dailyLimit, account?.dailyLimit ?? s.dailyLimit) - sentToday;
-  if (budget <= 0) return { sent: 0, reason: "daily limit reached" };
+  const caps = [s.dailyLimit, account?.dailyLimit ?? s.dailyLimit];
+  // Warm-up ramp and any degraded-deliverability throttle both bind here.
+  if (health) caps.push(health.recommendedDailyCap);
+  const budget = Math.min(...caps) - sentToday;
+  if (budget <= 0) return { sent: 0, reason: health && health.status === "warn" ? "throttled for deliverability" : "daily limit reached" };
 
   const due = await db
     .select()

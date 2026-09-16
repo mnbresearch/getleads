@@ -10,6 +10,8 @@ export * from "./email/verify.js";
 export * from "./email/find.js";
 export * from "./icp/score.js";
 export * from "./icp/priority.js";
+export * from "./icp/learn.js";
+export * from "./email/sendingHealth.js";
 export * from "./outreach/template.js";
 export * from "./outreach/generate.js";
 export * from "./pipeline.js";

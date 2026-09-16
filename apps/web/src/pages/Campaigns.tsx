@@ -34,6 +34,7 @@ export function CampaignsPage() {
   return (
     <Page title="Campaigns" subtitle="AI-personalized sequences with send windows, daily limits, open/click/reply tracking and auto-stop on reply." actions={<><button className="btn-secondary" onClick={() => setAccOpen(true)}>Sender accounts ({accounts.length})</button><button className="btn-primary" onClick={() => setOpen(true)}>New campaign</button></>}>
       {Toast}
+      <SendingHealthPanel />
       {accounts.length === 0 && <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>}
       {rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
         <div className="card overflow-x-auto">
@@ -58,6 +59,39 @@ export function CampaignsPage() {
       <CampaignModal open={open} onClose={() => setOpen(false)} accounts={accounts} lists={lists} icps={icps} onDone={(id) => { setOpen(false); navigate(`/campaigns/${id}`); }} toast={toast} />
       <AccountsModal open={accOpen} onClose={() => setAccOpen(false)} accounts={accounts} sysAvail={sysAvail} onChanged={load} toast={toast} />
     </Page>
+  );
+}
+
+interface Health { status: "ok" | "warn" | "halt"; bounceRate: number; complaintRate: number; recommendedDailyCap: number; rampDay: number | null; reasons: string[]; actions: string[] }
+
+/**
+ * Deliverability verdict per sender. A "halt" here is not advisory: the scheduler has
+ * already paused the campaign, so this explains why sending stopped.
+ */
+function SendingHealthPanel() {
+  const [rows, setRows] = useState<{ account: { id: string; fromEmail: string; dailyLimit: number }; health: Health }[]>([]);
+  useEffect(() => { apiFetch<{ accounts: typeof rows }>("GET", "/v1/analytics/sending-health").then((r) => setRows(r.accounts ?? [])).catch(() => setRows([])); }, []);
+  const notable = rows.filter((r) => r.health.status !== "ok" || r.health.rampDay != null);
+  if (notable.length === 0) return null;
+  return (
+    <div className="mb-4 space-y-2">
+      {notable.map(({ account, health }) => {
+        const tone = health.status === "halt" ? "border-red-300 bg-red-50 text-red-800" : health.status === "warn" ? "border-amber-300 bg-amber-50 text-amber-800" : "border-black/10 bg-cream text-ink-300";
+        const label = health.status === "halt" ? "Sending halted" : health.status === "warn" ? "Deliverability at risk" : "Warming up";
+        return (
+          <div key={account.id} className={`rounded-lg border p-3 text-sm ${tone}`}>
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium">{label} · {account.fromEmail}</span>
+              <span className="text-xs">bounce {(health.bounceRate * 100).toFixed(1)}% · cap {health.recommendedDailyCap}/day{health.rampDay != null ? ` · day ${health.rampDay} of warm-up` : ""}</span>
+            </div>
+            <ul className="mt-1 list-disc pl-5 text-xs">
+              {health.reasons.map((r) => <li key={r}>{r}</li>)}
+              {health.actions.map((a) => <li key={a} className="font-medium">{a}</li>)}
+            </ul>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 

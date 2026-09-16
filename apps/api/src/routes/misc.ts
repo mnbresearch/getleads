@@ -2,7 +2,9 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import Stripe from "stripe";
-import { and, desc, enqueue, eq, events, getDb, getUsage, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
+import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
+import { learnFromOutcomes } from "@prospex/core";
+import { sendingHealthForAccount } from "../services/campaigns.js";
 import { env } from "../env.js";
 import { encryptJson, randomToken } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -56,6 +58,60 @@ miscRoutes.get("/analytics/overview", requireAuth, async (c) => {
     .orderBy(desc(sql`count(${leads.id})`))
     .limit(10);
   return c.json({ leads: l, messages: m, companies: co.n, campaigns: cp, daily: (daily as unknown as { rows?: unknown[] }).rows ?? daily, emailStatus: Object.fromEntries(byStatus.map((r) => [r.status, r.n])), topCompanies, usage: await getUsage(db, oid) });
+});
+
+/**
+ * What your send history says your ICP actually is, as opposed to what you declared.
+ *
+ * Buckets deliberately use the inferred/normalized attributes (seniority, department,
+ * industry, size, country) rather than raw job titles: raw titles are too high-cardinality
+ * to ever reach a statistically meaningful group size.
+ */
+miscRoutes.get("/analytics/icp-learning", requireAuth, async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  const rows = (await db.execute(sql`
+    SELECT l.seniority, l.department, l.country, l.email_status, co.industry, co.size,
+           bool_or(m.replied_at IS NOT NULL) AS replied,
+           coalesce(bool_or(inb.intent IN ('interested','referral')), false) AS positive_intent
+    FROM leads l
+    JOIN messages m ON m.lead_id = l.id AND m.direction = 'outbound' AND m.sent_at IS NOT NULL
+    LEFT JOIN messages inb ON inb.lead_id = l.id AND inb.direction = 'inbound'
+    LEFT JOIN companies co ON co.id = l.company_id
+    WHERE l.org_id = ${oid}
+    GROUP BY l.id, co.id
+  `)) as unknown as { rows?: Record<string, unknown>[] };
+  const list = (rows.rows ?? (rows as unknown as Record<string, unknown>[])) ?? [];
+  const samples = list.map((r) => ({
+    attributes: {
+      seniority: r.seniority as string | null,
+      department: r.department as string | null,
+      industry: r.industry as string | null,
+      companySize: r.size as string | null,
+      country: r.country as string | null,
+      emailStatus: r.email_status as string | null,
+    },
+    positive: Boolean(r.replied) || Boolean(r.positive_intent),
+  }));
+  return c.json(learnFromOutcomes(samples));
+});
+
+/**
+ * Live deliverability verdict per sending identity. `status: "halt"` is enforced by the
+ * campaign scheduler, not just displayed here.
+ */
+miscRoutes.get("/analytics/sending-health", requireAuth, async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  const accounts = await db.select().from(emailAccounts).where(eq(emailAccounts.orgId, oid));
+  const out = [];
+  for (const a of accounts) {
+    out.push({
+      account: { id: a.id, fromEmail: a.fromEmail, dailyLimit: a.dailyLimit, status: a.status },
+      health: await sendingHealthForAccount(db, oid, a),
+    });
+  }
+  return c.json({ accounts: out });
 });
 
 miscRoutes.get("/events", requireAuth, zValidator("query", z.object({ type: z.string().optional(), limit: z.coerce.number().min(1).max(200).default(50) })), async (c) => {

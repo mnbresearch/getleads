@@ -4,6 +4,8 @@ import { applyPattern, candidatesFor, inferPattern, inferPatternFromEmails } fro
 import { verifyEmail } from "./email/verify.js";
 import { scoreLeadRules } from "./icp/score.js";
 import { computeLeadPriority } from "./icp/priority.js";
+import { learnFromOutcomes, wilsonInterval } from "./icp/learn.js";
+import { evaluateSendingHealth, rampCapFor } from "./email/sendingHealth.js";
 import { renderTemplate, leadVars } from "./outreach/template.js";
 import { extractDomain, isSocialOrAggregator, normalizeLinkedinUrl, rootDomain } from "./util/domain.js";
 import { inferDepartment, inferSeniority, splitName } from "./util/names.js";
@@ -117,6 +119,101 @@ describe("priority", () => {
     expect(r.score).toBeGreaterThanOrEqual(0);
     expect(r.score).toBeLessThanOrEqual(100);
     expect(r.reasons.length).toBeGreaterThan(0);
+  });
+});
+
+describe("icp learning", () => {
+  // 60 contacted leads, 12 positive => 20% baseline.
+  // VPs in Fintech reply 10/20 (50%); Interns in Retail reply 2/40 (5%).
+  const sample = (n: number, positives: number, attrs: Record<string, string>) =>
+    Array.from({ length: n }, (_, i) => ({ attributes: { ...attrs, country: "IN" }, positive: i < positives }));
+  const dataset = [...sample(20, 10, { title: "VP of Sales", industry: "Fintech" }), ...sample(40, 2, { title: "Intern", industry: "Retail" })];
+
+  it("separates real segments from the baseline and reports lift", () => {
+    const r = learnFromOutcomes(dataset);
+    expect(r.sufficient).toBe(true);
+    expect(r.sampleSize).toBe(60);
+    expect(r.positives).toBe(12);
+    expect(r.baseline).toBeCloseTo(0.2, 5);
+    const vp = r.insights.find((i) => i.value === "VP of Sales");
+    expect(vp?.direction).toBe("outperforms");
+    expect(vp?.lift).toBeCloseTo(2.5, 5);
+    expect(r.insights.find((i) => i.value === "Intern")?.direction).toBe("underperforms");
+    expect(r.suggestions.add.title).toContain("VP of Sales");
+    expect(r.suggestions.avoid.title).toContain("Intern");
+  });
+
+  it("ignores an attribute that covers the entire dataset", () => {
+    // Every lead is country=IN, so it explains no variance and must not be reported.
+    expect(learnFromOutcomes(dataset).insights.some((i) => i.attribute === "country")).toBe(false);
+  });
+
+  it("refuses to promote a tiny perfect-looking segment", () => {
+    // 3/3 replies is a 100% rate and completely meaningless at n=3.
+    const withFluke = [...dataset, ...sample(3, 3, { title: "Unicorn", industry: "Fintech" })];
+    const r = learnFromOutcomes(withFluke);
+    expect(r.insights.some((i) => i.value === "Unicorn")).toBe(false);
+  });
+
+  it("declines to conclude anything when history is thin, and says what it needs", () => {
+    const r = learnFromOutcomes(sample(10, 1, { title: "VP of Sales" }));
+    expect(r.sufficient).toBe(false);
+    expect(r.insights).toHaveLength(0);
+    expect(r.summary).toMatch(/more contacted lead/);
+  });
+
+  it("computes Wilson bounds that stay in range and tighten with n", () => {
+    expect(wilsonInterval(0, 0)).toEqual({ lower: 0, upper: 1 });
+    const small = wilsonInterval(1, 1);
+    const large = wilsonInterval(500, 1000);
+    expect(small.lower).toBeLessThan(0.9); // 1/1 is not evidence of a 100% rate
+    expect(large.upper - large.lower).toBeLessThan(small.upper - small.lower);
+    expect(large.lower).toBeGreaterThan(0.45);
+    expect(large.upper).toBeLessThan(0.55);
+  });
+});
+
+describe("sending health", () => {
+  it("halts sending once bounce rate hits the hard limit", () => {
+    const h = evaluateSendingHealth({ sent: 200, bounced: 12 }, { configuredDailyCap: 100 });
+    expect(h.status).toBe("halt");
+    expect(h.recommendedDailyCap).toBe(0);
+    expect(h.reasons.join(" ")).toMatch(/Bounce rate/);
+  });
+
+  it("warns and halves volume on an elevated but not fatal bounce rate", () => {
+    const h = evaluateSendingHealth({ sent: 200, bounced: 6 }, { configuredDailyCap: 100 });
+    expect(h.status).toBe("warn");
+    expect(h.recommendedDailyCap).toBe(50);
+  });
+
+  it("halts on spam complaints well below the bounce threshold", () => {
+    // 1 complaint in 300 is only 0.33% but is already reputation-damaging.
+    const h = evaluateSendingHealth({ sent: 300, bounced: 0, complained: 1 }, { configuredDailyCap: 100 });
+    expect(h.status).toBe("halt");
+  });
+
+  it("does not act on rates from a volume too small to be meaningful", () => {
+    // 1 bounce in 5 is 20%, but 5 sends prove nothing.
+    const h = evaluateSendingHealth({ sent: 5, bounced: 1 }, { configuredDailyCap: 100 });
+    expect(h.status).toBe("ok");
+    expect(h.recommendedDailyCap).toBe(100);
+  });
+
+  it("holds a cold sending identity to the warm-up ladder", () => {
+    const d1 = evaluateSendingHealth({ sent: 0, bounced: 0 }, { domainAgeDays: 1, configuredDailyCap: 500 });
+    expect(d1.recommendedDailyCap).toBe(20);
+    expect(d1.rampDay).toBe(1);
+    expect(evaluateSendingHealth({ sent: 0, bounced: 0 }, { domainAgeDays: 12, configuredDailyCap: 500 }).recommendedDailyCap).toBe(200);
+    // Warmed identity is governed by the user's own cap again.
+    expect(evaluateSendingHealth({ sent: 0, bounced: 0 }, { domainAgeDays: 60, configuredDailyCap: 500 }).recommendedDailyCap).toBe(500);
+    expect(rampCapFor(null)).toBeNull();
+  });
+
+  it("never recommends more than the user configured", () => {
+    const h = evaluateSendingHealth({ sent: 500, bounced: 1 }, { domainAgeDays: 90, configuredDailyCap: 30 });
+    expect(h.status).toBe("ok");
+    expect(h.recommendedDailyCap).toBe(30);
   });
 });
 

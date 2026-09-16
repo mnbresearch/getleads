@@ -47,6 +47,7 @@ export function IcpPage() {
   return (
     <Page title="Ideal customer profiles" subtitle="Describe your best customers (or give example domains) and Scout builds lookalike criteria to score every lead." actions={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>New ICP</button>}>
       {Toast}
+      <IcpLearningPanel />
       {icps.length === 0 ? <Empty title="No ICPs yet" hint="Create one from a description like 'B2B SaaS founders in India with 20-200 employees' or from 3-5 of your best customers' websites." action={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>Create ICP</button>} /> : (
         <div className="grid gap-4 md:grid-cols-2">
           {icps.map((i) => (
@@ -84,6 +85,59 @@ export function IcpPage() {
       </Modal>
       <IcpChatModal icp={chatIcp} onClose={() => setChatIcp(null)} onUpdated={(next) => { setChatIcp(next); load(); }} />
     </Page>
+  );
+}
+
+interface Insight { attribute: string; value: string; n: number; positives: number; rate: number; lift: number; direction: "outperforms" | "underperforms"; reason: string }
+interface Learning { sampleSize: number; positives: number; baseline: number; sufficient: boolean; insights: Insight[]; suggestions: { add: Record<string, string[]>; avoid: Record<string, string[]> }; summary: string }
+
+const ATTR_LABEL: Record<string, string> = { seniority: "Seniority", department: "Department", industry: "Industry", companySize: "Company size", country: "Country", emailStatus: "Email status" };
+
+/**
+ * The declared ICP vs the one the reply data implies. Shown above the ICPs themselves
+ * because it is the evidence you would want before editing them.
+ */
+function IcpLearningPanel() {
+  const [d, setD] = useState<Learning | null>(null);
+  useEffect(() => { apiFetch<Learning>("GET", "/v1/analytics/icp-learning").then(setD).catch(() => setD(null)); }, []);
+  if (!d) return null;
+  return (
+    <div className="card mb-4 p-4">
+      <div className="flex items-start justify-between gap-3">
+        <div>
+          <div className="font-medium">What's actually working</div>
+          <div className="text-xs text-ink-400">Learned from who really replied, not from what the ICP claims. Updates as you send.</div>
+        </div>
+        {d.sufficient && <span className="badge bg-black/[0.05] text-ink-300">{d.sampleSize} contacted · {d.positives} positive · {Math.round(d.baseline * 100)}% baseline</span>}
+      </div>
+      <p className="mt-3 text-sm text-ink-300">{d.summary}</p>
+      {d.sufficient && d.insights.length > 0 && (
+        <div className="mt-3 grid gap-2 sm:grid-cols-2">
+          {d.insights.slice(0, 6).map((i) => (
+            <div key={`${i.attribute}:${i.value}`} className="rounded-lg border border-black/10 p-3 text-sm">
+              <div className="flex items-center justify-between gap-2">
+                <div className="truncate font-medium">{i.value}</div>
+                <span className={`badge ${i.direction === "outperforms" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>
+                  {i.direction === "outperforms" ? `${i.lift.toFixed(1)}x` : "low"}
+                </span>
+              </div>
+              <div className="text-xs text-ink-400">{ATTR_LABEL[i.attribute] ?? i.attribute}</div>
+              <div className="mt-1 text-xs text-ink-300">{i.positives}/{i.n} replied ({Math.round(i.rate * 100)}%)</div>
+            </div>
+          ))}
+        </div>
+      )}
+      {d.sufficient && (Object.keys(d.suggestions.add).length > 0 || Object.keys(d.suggestions.avoid).length > 0) && (
+        <div className="mt-3 space-y-1 text-xs">
+          {Object.entries(d.suggestions.add).map(([k, vs]) => (
+            <div key={`a${k}`} className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-emerald-700">Lean into</span><span className="text-ink-400">{ATTR_LABEL[k] ?? k}:</span>{vs.map((v) => <span key={v} className="badge bg-emerald-50 text-emerald-700">{v}</span>)}</div>
+          ))}
+          {Object.entries(d.suggestions.avoid).map(([k, vs]) => (
+            <div key={`v${k}`} className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-red-700">Cut back</span><span className="text-ink-400">{ATTR_LABEL[k] ?? k}:</span>{vs.map((v) => <span key={v} className="badge bg-red-50 text-red-700">{v}</span>)}</div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
