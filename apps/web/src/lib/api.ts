@@ -1,8 +1,10 @@
+import { useSyncExternalStore } from "react";
 import { Prospex, ProspexError } from "@prospex/sdk";
 
 export const API_URL = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? "http://localhost:8080";
 
 const TOKEN_KEY = "gl.token";
+const authListeners = new Set<() => void>();
 export const auth = {
   get token() {
     try {
@@ -15,8 +17,17 @@ export const auth = {
     try {
       token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY);
     } catch {}
+    authListeners.forEach((fn) => fn());
+  },
+  subscribe(fn: () => void) {
+    authListeners.add(fn);
+    return () => authListeners.delete(fn);
   },
 };
+
+export function useAuthToken(): string | null {
+  return useSyncExternalStore(auth.subscribe, () => auth.token);
+}
 
 export function client() {
   return new Prospex({ baseUrl: API_URL, token: auth.token ?? undefined });
