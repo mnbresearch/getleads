@@ -82,6 +82,26 @@ curl -X POST $API/v1/search/verify -H "x-api-key: px_live_..." -H 'content-type:
   "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "https://your-api.onrender.com" } } } }
 ```
 
+## AI visibility (AEO/GEO)
+
+Tracks how AI engines answer the questions your buyers ask before they buy, so you can see
+whether a prospect researching you after your outreach finds you or a competitor. See
+[VISION.md](VISION.md) for why this sits in the same product as outbound.
+
+Sampling is repeated by design. One LLM answer is a sample, not a measurement, so rates are
+reported with confidence intervals, changes are only called real when the intervals
+separate, and refusals are excluded from the denominator rather than counted as absence.
+
+```
+GET/PUT /v1/visibility/config            # your brand, aliases, domain, rivals
+GET/POST /v1/visibility/prompts          # the questions worth winning
+POST    /v1/visibility/prompts/:id/run   # sample now (N samples, not one)
+GET     /v1/visibility/overview          # metrics, rivals, winnable gaps, change test
+GET     /v1/visibility/runs              # raw answers behind every number
+```
+
+Active prompts are sampled daily by the `visibility.tick` worker job.
+
 ## Tests
 
 ```bash

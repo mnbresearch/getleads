@@ -684,6 +684,46 @@ export type UpgradeRequest = typeof upgradeRequests.$inferSelect;
 // ── Tool/integration registry: every 3rd-party API Scout calls, its free-tier limit, and
 // current usage - powers the admin "Tools & limits" tab so the admin gets warned before a
 // free tier runs out and knows exactly which tool to upgrade. ──
+export const visibilityPrompts = pgTable(
+  "visibility_prompts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    text: text("text").notNull(),
+    topic: text("topic"),
+    engines: text("engines").array().notNull().default([]),
+    samplesPerRun: integer("samples_per_run").notNull().default(3),
+    active: boolean("active").notNull().default(true),
+    lastRunAt: ts("last_run_at"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ orgIdx: index("visibility_prompts_org_idx").on(t.orgId, t.active) }),
+);
+
+export const visibilityRuns = pgTable(
+  "visibility_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    promptId: uuid("prompt_id").notNull().references(() => visibilityPrompts.id, { onDelete: "cascade" }),
+    engine: text("engine").notNull(),
+    model: text("model"),
+    answer: text("answer").notNull().default(""),
+    analysis: jsonb("analysis").$type<Record<string, unknown>>().notNull().default({}),
+    mentioned: boolean("mentioned").notNull().default(false),
+    cited: boolean("cited").notNull().default(false),
+    position: integer("position"),
+    brands: text("brands").array().notNull().default([]),
+    usable: boolean("usable").notNull().default(true),
+    error: text("error"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("visibility_runs_org_idx").on(t.orgId, t.createdAt),
+    promptIdx: index("visibility_runs_prompt_idx").on(t.promptId, t.createdAt),
+  }),
+);
+
 export const toolRegistry = pgTable("tool_registry", {
   provider: text("provider").primaryKey(), // e.g. "hunter", "apollo", "serpapi"
   label: text("label").notNull(), // e.g. "Hunter.io"

@@ -38,6 +38,9 @@ suite("database integration", () => {
   let experimentForStep: any;
   let icpLearningSamples: any;
   let learnFromOutcomes: any;
+  let visibilityOverview: any;
+  let observationsFor: any;
+  let knownBrands: any;
 
   beforeAll(async () => {
     const dbPkg = await import("@prospex/db");
@@ -46,6 +49,7 @@ suite("database integration", () => {
     db = dbPkg.getDb().db;
     ({ sendingHealthForAccount, experimentForStep } = await import("./services/campaigns.js"));
     ({ icpLearningSamples } = await import("./services/insights.js"));
+    ({ visibilityOverview, observationsFor, knownBrands } = await import("./services/visibility.js"));
     ({ learnFromOutcomes } = await import("@prospex/core"));
   }, 60_000);
 
@@ -228,6 +232,81 @@ suite("database integration", () => {
       await db.insert(schema.messages).values({ orgId: a.id, leadId: lead.id, toEmail: "a@a.com", subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date() });
       expect(await icpLearningSamples(db, a.id)).toHaveLength(1);
       expect(await icpLearningSamples(db, b.id)).toHaveLength(0);
+    });
+  });
+
+  describe("ai visibility", () => {
+    async function seedRuns(rows: { mentioned: boolean; usable?: boolean; position?: number | null; brands?: string[]; daysAgo?: number }[]) {
+      const org = await newOrg("vis");
+      const [prompt] = await db
+        .insert(schema.visibilityPrompts)
+        .values({ orgId: org.id, text: "best b2b prospecting tools", samplesPerRun: 3 })
+        .returning();
+      for (const r of rows) {
+        const [run] = await db
+          .insert(schema.visibilityRuns)
+          .values({
+            orgId: org.id, promptId: prompt.id, engine: "groq", answer: "x",
+            mentioned: r.mentioned, cited: false, position: r.position ?? (r.mentioned ? 2 : null),
+            brands: r.brands ?? (r.mentioned ? ["Apollo", "Scout"] : ["Apollo"]),
+            usable: r.usable ?? true,
+          })
+          .returning();
+        if (r.daysAgo) {
+          await db.execute(schema.sql`UPDATE visibility_runs SET created_at = now() - (${r.daysAgo} || ' days')::interval WHERE id = ${run.id}`);
+        }
+      }
+      await db.execute(schema.sql`UPDATE organizations SET settings = jsonb_set(coalesce(settings,'{}'::jsonb), '{visibility}', ${JSON.stringify({ brand: { name: "Scout", aliases: [], domain: "scout.mnbresearch.com" }, competitors: [{ name: "Apollo", domain: "apollo.io" }] })}::jsonb) WHERE id = ${org.id}`);
+      return { org, prompt };
+    }
+
+    it("excludes refusals from the denominator instead of counting them as absence", async () => {
+      // 10 usable runs, all mentioning us, plus 10 refusals. Mention rate must be 100%,
+      // not 50%: counting refusals as absence would invent a visibility collapse.
+      const { org } = await seedRuns([
+        ...Array.from({ length: 10 }, () => ({ mentioned: true })),
+        ...Array.from({ length: 10 }, () => ({ mentioned: false, usable: false })),
+      ]);
+      const obs = await observationsFor(db, org.id, { days: 30 });
+      expect(obs).toHaveLength(10);
+      const o = await visibilityOverview(db, org.id, 30);
+      expect(o.metrics.mentionRate.value).toBe(1);
+      expect(o.excludedRuns).toBe(10);
+    });
+
+    it("reports a rate with an interval and never leaks across orgs", async () => {
+      const { org } = await seedRuns(Array.from({ length: 30 }, (_, i) => ({ mentioned: i < 15 })));
+      const other = await newOrg("vis-other");
+      const o = await visibilityOverview(db, org.id, 30);
+      expect(o.metrics.runs).toBe(30);
+      expect(o.metrics.mentionRate.value).toBeCloseTo(0.5, 5);
+      expect(o.metrics.mentionRate.ci.lower).toBeLessThan(0.5);
+      expect(o.brand.name).toBe("Scout");
+      expect((await visibilityOverview(db, other.id, 30)).metrics.runs).toBe(0);
+    });
+
+    it("refuses to call an overlapping week-on-week move a trend", async () => {
+      // Older half 50%, newer half 40%. Small samples, overlapping intervals.
+      const { org } = await seedRuns([
+        ...Array.from({ length: 20 }, (_, i) => ({ mentioned: i < 10, daysAgo: 25 })),
+        ...Array.from({ length: 20 }, (_, i) => ({ mentioned: i < 8, daysAgo: 2 })),
+      ]);
+      const o = await visibilityOverview(db, org.id, 30);
+      expect(o.change.significant).toBe(false);
+      expect(o.change.direction).toBe("flat");
+    });
+
+    it("surfaces the rival winning answers we are absent from", async () => {
+      const { org } = await seedRuns(Array.from({ length: 20 }, () => ({ mentioned: false, brands: ["Apollo", "Clay"] })));
+      const o = await visibilityOverview(db, org.id, 30);
+      expect(o.competitors[0].name).toBe("Apollo");
+      expect(o.competitors[0].beatsYou).toBe(20);
+      expect(o.gaps[0].prompt).toBe("best b2b prospecting tools");
+    });
+
+    it("learns rival names from past answers to rank untracked brands later", async () => {
+      const { org } = await seedRuns(Array.from({ length: 5 }, () => ({ mentioned: false, brands: ["Instantly", "Apollo"] })));
+      expect(await knownBrands(db, org.id)).toContain("Instantly");
     });
   });
 

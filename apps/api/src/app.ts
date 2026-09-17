@@ -20,6 +20,7 @@ import { signalRoutes } from "./routes/signals.js";
 import { joinRoutes, toolRoutes } from "./routes/tools.js";
 import { adminRoutes } from "./routes/admin.js";
 import { leadCaptureRoutes } from "./routes/leadCapture.js";
+import { visibilityRoutes } from "./routes/visibility.js";
 import { docsHtml, openapi } from "./openapi.js";
 import { handlers } from "./jobs.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
@@ -61,6 +62,7 @@ export function createApp() {
   app.route("/v1/icps", icpRoutes);
   app.route("/v1/companies", companyRoutes);
   app.route("/v1/campaigns", campaignRoutes);
+  app.route("/v1/visibility", visibilityRoutes);
   app.route("/v1/agent", agentRoutes);
   app.route("/v1/visitors", visitorRoutes);
   app.route("/v1/signals", signalRoutes);

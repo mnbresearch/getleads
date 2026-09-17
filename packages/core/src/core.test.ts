@@ -7,6 +7,8 @@ import { computeLeadPriority } from "./icp/priority.js";
 import { learnFromOutcomes, wilsonInterval } from "./icp/learn.js";
 import { evaluateSendingHealth, rampCapFor } from "./email/sendingHealth.js";
 import { pickVariantWinner, allocateVariant } from "./outreach/experiment.js";
+import { analyzeAnswer } from "./visibility/analyze.js";
+import { visibilityMetrics, competitorStandings, compareVisibility, visibilityGaps, type VisibilityObservation } from "./visibility/metrics.js";
 import { renderTemplate, leadVars } from "./outreach/template.js";
 import { extractDomain, isSocialOrAggregator, normalizeLinkedinUrl, rootDomain } from "./util/domain.js";
 import { inferDepartment, inferSeniority, splitName } from "./util/names.js";
@@ -255,6 +257,135 @@ describe("ab experiments", () => {
     expect(allocateVariant({ 0: 0.9, 1: 0.1 }, 7, () => 0.0)).toBe(0);
     expect(allocateVariant({ 0: 0.9, 1: 0.1 }, 7, () => 0.95)).toBe(1);
     expect(allocateVariant({}, 7)).toBe(7);
+  });
+});
+
+describe("ai visibility: answer analysis", () => {
+  const brand = { name: "Scout", aliases: ["Scout by MNB"], domain: "scout.mnbresearch.com" };
+  const competitors = [{ name: "Apollo", domain: "apollo.io" }, { name: "Clay", domain: "clay.com" }];
+
+  it("ranks brands by where they first appear, not by who was asked about", () => {
+    const a = analyzeAnswer(
+      "For B2B prospecting, Apollo is the most established option. Clay is strong for enrichment. Scout is a newer entrant.",
+      { brand, competitors },
+    );
+    expect(a.brand?.position).toBe(3);
+    expect(a.orderedBrands).toEqual(["Apollo", "Clay", "Scout"]);
+    expect(a.competitors[0].name).toBe("Apollo");
+  });
+
+  it("does not match a brand name inside a longer word", () => {
+    // "Apollo" must not match "Apollonia"; "Clay" must not match "Clayton".
+    const a = analyzeAnswer("Apollonia Systems and Clayton Labs are unrelated companies.", { brand, competitors });
+    expect(a.competitors).toHaveLength(0);
+    expect(a.brand).toBeNull();
+  });
+
+  it("matches possessives and plurals but still respects boundaries", () => {
+    const a = analyzeAnswer("Scout's pricing is simple. Compare with Apollo's tiers.", { brand, competitors });
+    expect(a.brand?.mentions).toBe(1);
+    expect(a.competitors.map((c) => c.name)).toContain("Apollo");
+  });
+
+  it("counts an alias as the same brand", () => {
+    expect(analyzeAnswer("Scout by MNB handles outbound.", { brand, competitors }).brand?.mentions).toBe(1);
+  });
+
+  it("treats a link to your own domain as presence even when unnamed", () => {
+    const a = analyzeAnswer("One option is documented at https://scout.mnbresearch.com/pricing for teams.", { brand, competitors });
+    expect(a.brand).not.toBeNull();
+    expect(a.brand?.cited).toBe(true);
+    expect(a.brand?.citedUrls).toEqual(["https://scout.mnbresearch.com/pricing"]);
+  });
+
+  it("does not credit a citation to a lookalike domain", () => {
+    const a = analyzeAnswer("See https://notscout.mnbresearch.com.evil.com/x", { brand, competitors });
+    expect(a.brand?.cited ?? false).toBe(false);
+  });
+
+  it("ranks untracked brands too, because an unknown rival above you still wins", () => {
+    const a = analyzeAnswer("Instantly leads the category. Scout is an alternative.", { brand, competitors, others: ["Instantly"] });
+    expect(a.orderedBrands[0]).toBe("Instantly");
+    expect(a.brand?.position).toBe(2);
+  });
+
+  it("treats a refusal as unusable, not as absence", () => {
+    // Counting a refusal as "not mentioned" would invent a visibility drop.
+    expect(analyzeAnswer("", { brand }).usable).toBe(false);
+    const refused = analyzeAnswer("I cannot help with that request.", { brand });
+    expect(refused.refusal).toBe(true);
+    expect(refused.usable).toBe(false);
+    // A real answer that merely omits us is usable, and genuinely counts as absence.
+    const real = analyzeAnswer("The leading options here are Apollo and Clay, both well established in the category.", { brand, competitors });
+    expect(real.usable).toBe(true);
+    expect(real.brand).toBeNull();
+  });
+});
+
+describe("ai visibility: metrics", () => {
+  const obs = (n: number, mentioned: number, opts: Partial<VisibilityObservation> = {}): VisibilityObservation[] =>
+    Array.from({ length: n }, (_, i) => ({
+      engine: "chatgpt", promptId: "p1", mentioned: i < mentioned, cited: false,
+      position: i < mentioned ? 2 : null, brands: i < mentioned ? ["Apollo", "Scout"] : ["Apollo"],
+      at: new Date(), ...opts,
+    }));
+
+  it("refuses to report a rate from a handful of runs", () => {
+    const m = visibilityMetrics(obs(3, 3), { brandName: "Scout" });
+    expect(m.sufficient).toBe(false);
+    expect(m.summary).toMatch(/a sample, not a measurement/);
+  });
+
+  it("reports a rate with an interval once there is enough history", () => {
+    const m = visibilityMetrics(obs(40, 20), { brandName: "Scout" });
+    expect(m.sufficient).toBe(true);
+    expect(m.mentionRate.value).toBeCloseTo(0.5, 5);
+    expect(m.mentionRate.ci.lower).toBeLessThan(0.5);
+    expect(m.mentionRate.ci.upper).toBeGreaterThan(0.5);
+    expect(m.summary).toMatch(/95% CI/);
+  });
+
+  it("computes share of voice over mention slots, not over answers", () => {
+    // 20 answers, each naming Apollo; we appear in 10. 10 of 30 total slots.
+    const m = visibilityMetrics(obs(20, 10), { brandName: "Scout" });
+    expect(m.shareOfVoice.value).toBeCloseTo(10 / 30, 3);
+  });
+
+  it("distinguishes absence from a bad ranking", () => {
+    const m = visibilityMetrics(obs(30, 0), { brandName: "Scout" });
+    expect(m.avgPosition).toBeNull();
+    expect(m.summary).toMatch(/an absence, not a ranking problem/);
+  });
+
+  it("surfaces rivals and counts answers they win while you are absent", () => {
+    const s = competitorStandings(obs(20, 5), "Scout");
+    expect(s[0].name).toBe("Apollo");
+    expect(s[0].appearances).toBe(20);
+    expect(s[0].beatsYou).toBe(15);
+  });
+
+  it("calls a week-on-week wobble flat rather than a trend", () => {
+    // 50% to 40% on 20 runs each: the intervals overlap heavily.
+    const c = compareVisibility(obs(20, 10), obs(20, 8));
+    expect(c.significant).toBe(false);
+    expect(c.direction).toBe("flat");
+    expect(c.summary).toMatch(/No detectable change/);
+  });
+
+  it("calls a genuine collapse real once the intervals separate", () => {
+    const c = compareVisibility(obs(200, 160), obs(200, 40));
+    expect(c.significant).toBe(true);
+    expect(c.direction).toBe("down");
+  });
+
+  it("prioritises prompts a rival owns over prompts nobody wins", () => {
+    const winnable = obs(10, 0, { promptId: "winnable" }); // Apollo in every answer, we are absent
+    const nobody = Array.from({ length: 10 }, () => ({
+      engine: "chatgpt", promptId: "barren", mentioned: false, cited: false, position: null, brands: [] as string[], at: new Date(),
+    }));
+    const gaps = visibilityGaps([...winnable, ...nobody], "Scout");
+    expect(gaps[0].promptId).toBe("winnable");
+    expect(gaps[0].topRival).toBe("Apollo");
   });
 });
 

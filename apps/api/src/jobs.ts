@@ -1,8 +1,9 @@
-import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, webhooks, sql as dsql, type JobHandler } from "@prospex/db";
+import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, visibilityPrompts, webhooks, sql as dsql, type JobHandler } from "@prospex/db";
 import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, runLeadPipeline, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
 import { pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
+import { knownBrands, runVisibilityPrompt } from "./services/visibility.js";
 import { sendStep, tickCampaign } from "./services/campaigns.js";
 import { syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
@@ -236,6 +237,38 @@ export const handlers: Record<string, JobHandler> = {
     return { queued: due.length };
   },
 
+  /**
+   * Sample one tracked visibility prompt several times.
+   *
+   * Runs `samplesPerRun` times rather than once on purpose. One LLM answer is a sample,
+   * not a measurement, and the whole product depends on having enough of them to put a
+   * confidence interval around the result.
+   */
+  "visibility.run": async (job, ctx) => {
+    const { db } = ctx;
+    const prompt = await db.query.visibilityPrompts.findFirst({ where: eq(visibilityPrompts.id, String(job.payload.promptId)) });
+    if (!prompt || !prompt.active) return { skipped: true };
+    const others = await knownBrands(db, prompt.orgId);
+    let usable = 0;
+    for (let i = 0; i < prompt.samplesPerRun; i++) {
+      const { run } = await runVisibilityPrompt(db, prompt.orgId, prompt, { others });
+      if (run.usable) usable++;
+    }
+    return { samples: prompt.samplesPerRun, usable };
+  },
+
+  /** Scheduler: daily, sample every active visibility prompt not run in the last 20 hours. */
+  "visibility.tick": async (job, ctx) => {
+    const { db } = ctx;
+    const due = await db
+      .select()
+      .from(visibilityPrompts)
+      .where(and(eq(visibilityPrompts.active, true), dsql`(${visibilityPrompts.lastRunAt} IS NULL OR ${visibilityPrompts.lastRunAt} < now() - interval '20 hours')`));
+    for (const p of due) await enqueue(db, "visibility.run", { promptId: p.id }, { orgId: p.orgId, priority: 3 });
+    if (job.payload.recurring) await enqueue(db, "visibility.tick", { recurring: true }, { runAt: new Date(Date.now() + 3600_000), maxAttempts: 1 });
+    return { queued: due.length };
+  },
+
   "autopilot.run": async (job, ctx) => {
     const ap = await ctx.db.query.autopilots.findFirst({ where: eq(autopilots.id, String(job.payload.autopilotId)) });
     if (!ap || !ap.active) return { skipped: true };
@@ -300,7 +333,7 @@ export const handlers: Record<string, JobHandler> = {
 /** Ensure the recurring scheduler jobs exist exactly once. */
 export async function ensureRecurringJobs() {
   const { db, sql } = getDb();
-  for (const type of ["campaign.tick", "system.cleanup", "signals.scan", "monitors.tick", "autopilots.tick"]) {
+  for (const type of ["campaign.tick", "system.cleanup", "signals.scan", "monitors.tick", "autopilots.tick", "visibility.tick"]) {
     const rows = await sql`SELECT 1 FROM jobs WHERE type = ${type} AND status IN ('queued','running') AND (payload->>'recurring')::boolean = true LIMIT 1`;
     if (rows.length === 0) await enqueue(db, type, { recurring: true }, { maxAttempts: 1 });
   }

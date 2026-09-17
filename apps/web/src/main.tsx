@@ -14,6 +14,7 @@ import { SettingsPage } from "./pages/Settings";
 import { AgentPage } from "./pages/Agent";
 import { VisitorsPage } from "./pages/Visitors";
 import { SignalsPage } from "./pages/Signals";
+import { VisibilityPage } from "./pages/Visibility";
 import { TasksPage } from "./pages/Tasks";
 import { AutopilotPage } from "./pages/Autopilot";
 import { ToolsPage } from "./pages/Tools";
@@ -53,6 +54,7 @@ function Root() {
                 <Route path="/agent" element={<AgentPage />} />
                 <Route path="/visitors" element={<VisitorsPage />} />
                 <Route path="/signals" element={<SignalsPage />} />
+                <Route path="/visibility" element={<VisibilityPage />} />
                 <Route path="/tasks" element={<TasksPage />} />
                 <Route path="/autopilot" element={<AutopilotPage />} />
                 <Route path="/tools" element={<ToolsPage />} />
