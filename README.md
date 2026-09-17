@@ -85,10 +85,31 @@ curl -X POST $API/v1/search/verify -H "x-api-key: px_live_..." -H 'content-type:
 ## Tests
 
 ```bash
-npm test -w packages/core        # unit tests (parsers, patterns, scoring, templates)
+npm test                         # everything (unit + integration; integration skips without a DB)
+npm test -w packages/core        # unit tests (parsers, patterns, scoring, priority, learning, A/B)
 API=http://localhost:8080 ./scripts/smoke.sh      # 15-step end-to-end API test (v1)
 API=http://localhost:8080 ./scripts/smoke-v2.sh   # visitors, signals, monitors, tools, tasks, team, autopilot, multichannel A/B
 ```
+
+### Database integration tests
+
+Unit tests cover pure functions. They cannot catch a broken query, because they never
+execute SQL - a malformed `sql` template once returned 500 in production while the whole
+unit suite stayed green. `apps/api/src/integration.test.ts` runs the risky queries
+(deliverability health, A/B attribution, ICP-learning aggregation, org isolation) against
+a real Postgres.
+
+They need a throwaway database and are **skipped**, not failed, when `TEST_DATABASE_URL`
+is unset, so `npm test` stays green on a machine without one:
+
+```bash
+createdb scout_test
+TEST_DATABASE_URL=postgres://localhost:5432/scout_test npm test -w apps/api
+```
+
+Migrations are applied automatically, and every test allocates its own org, so the
+database can be reused between runs and tests cannot contaminate each other. Run these
+before shipping anything that touches a query.
 
 ## License
 

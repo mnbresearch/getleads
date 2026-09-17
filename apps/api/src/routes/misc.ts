@@ -3,8 +3,8 @@ import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import Stripe from "stripe";
 import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
-import { learnFromOutcomes } from "@prospex/core";
 import { sendingHealthForAccount } from "../services/campaigns.js";
+import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
 import { encryptJson, randomToken } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -68,32 +68,7 @@ miscRoutes.get("/analytics/overview", requireAuth, async (c) => {
  * to ever reach a statistically meaningful group size.
  */
 miscRoutes.get("/analytics/icp-learning", requireAuth, async (c) => {
-  const oid = orgId(c);
-  const { db } = getDb();
-  const rows = (await db.execute(sql`
-    SELECT l.seniority, l.department, l.country, l.email_status, co.industry, co.size,
-           bool_or(m.replied_at IS NOT NULL) AS replied,
-           coalesce(bool_or(inb.intent IN ('interested','referral')), false) AS positive_intent
-    FROM leads l
-    JOIN messages m ON m.lead_id = l.id AND m.direction = 'outbound' AND m.sent_at IS NOT NULL
-    LEFT JOIN messages inb ON inb.lead_id = l.id AND inb.direction = 'inbound'
-    LEFT JOIN companies co ON co.id = l.company_id
-    WHERE l.org_id = ${oid}
-    GROUP BY l.id, co.id
-  `)) as unknown as { rows?: Record<string, unknown>[] };
-  const list = (rows.rows ?? (rows as unknown as Record<string, unknown>[])) ?? [];
-  const samples = list.map((r) => ({
-    attributes: {
-      seniority: r.seniority as string | null,
-      department: r.department as string | null,
-      industry: r.industry as string | null,
-      companySize: r.size as string | null,
-      country: r.country as string | null,
-      emailStatus: r.email_status as string | null,
-    },
-    positive: Boolean(r.replied) || Boolean(r.positive_intent),
-  }));
-  return c.json(learnFromOutcomes(samples));
+  return c.json(await icpLearningFor(getDb().db, orgId(c)));
 });
 
 /**
