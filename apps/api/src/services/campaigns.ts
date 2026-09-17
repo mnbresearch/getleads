@@ -66,7 +66,6 @@ export async function sendingHealthForAccount(
   orgIdValue: string,
   account: EmailAccount,
 ): Promise<SendingHealth> {
-  const since = new Date(Date.now() - HEALTH_WINDOW_DAYS * 86_400_000);
   const [m] = await db
     .select({
       sent: sql<number>`count(*) FILTER (WHERE ${messages.sentAt} IS NOT NULL)::int`,
@@ -75,14 +74,14 @@ export async function sendingHealthForAccount(
     })
     .from(messages)
     .innerJoin(campaigns, eq(campaigns.id, messages.campaignId))
-    .where(and(eq(messages.orgId, orgIdValue), eq(campaigns.emailAccountId, account.id), sql`${messages.createdAt} > ${since}`));
+    .where(and(eq(messages.orgId, orgIdValue), eq(campaigns.emailAccountId, account.id), sql`${messages.createdAt} > now() - (${HEALTH_WINDOW_DAYS} || ' days')::interval`));
   const [s] = await db
     .select({
       complained: sql<number>`count(*) FILTER (WHERE ${suppressions.reason} IN ('complaint','spam'))::int`,
       unsubscribed: sql<number>`count(*) FILTER (WHERE ${suppressions.reason} = 'unsubscribe')::int`,
     })
     .from(suppressions)
-    .where(and(eq(suppressions.orgId, orgIdValue), sql`${suppressions.createdAt} > ${since}`));
+    .where(and(eq(suppressions.orgId, orgIdValue), sql`${suppressions.createdAt} > now() - (${HEALTH_WINDOW_DAYS} || ' days')::interval`));
   const ageDays = account.createdAt ? Math.floor((Date.now() - new Date(account.createdAt).getTime()) / 86_400_000) : null;
   return evaluateSendingHealth(
     { sent: m?.sent ?? 0, bounced: m?.bounced ?? 0, complained: s?.complained ?? 0, unsubscribed: s?.unsubscribed ?? 0, replied: m?.replied ?? 0 },
