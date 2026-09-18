@@ -188,6 +188,48 @@ export async function observationsFor(
   }));
 }
 
+/**
+ * Per-engine operational health over the window.
+ *
+ * Excluding a broken engine from the metrics is correct, but silently excluding it is not:
+ * an engine whose model is misconfigured produces zero usable answers forever, and without
+ * this the only symptom is a denominator that never grows. Errors are reported separately
+ * from refusals because they mean different things - an error is your configuration, a
+ * refusal is the engine's choice - and only one of them is fixable by you.
+ */
+export async function engineHealth(db: ReturnType<typeof getDb>["db"], orgIdValue: string, days = 30) {
+  const rows = await db
+    .select({
+      engine: visibilityRuns.engine,
+      total: sql<number>`count(*)::int`,
+      usable: sql<number>`count(*) FILTER (WHERE usable = true)::int`,
+      errored: sql<number>`count(*) FILTER (WHERE error IS NOT NULL)::int`,
+      lastError: sql<string | null>`max(error)`,
+    })
+    .from(visibilityRuns)
+    .where(and(eq(visibilityRuns.orgId, orgIdValue), sql`${visibilityRuns.createdAt} > now() - (${days} || ' days')::interval`))
+    .groupBy(visibilityRuns.engine);
+
+  return rows.map((r) => {
+    const refused = r.total - r.usable - r.errored;
+    const healthy = r.errored === 0 || r.usable > 0;
+    return {
+      engine: r.engine,
+      total: r.total,
+      usable: r.usable,
+      errored: r.errored,
+      refused: refused > 0 ? refused : 0,
+      healthy,
+      // Only surface the provider error when the engine is producing nothing at all,
+      // so an occasional transient failure does not read as a broken configuration.
+      problem:
+        r.usable === 0 && r.errored > 0
+          ? `${r.engine} returned an error on all ${r.errored} attempts and contributed no data. ${(r.lastError ?? "").slice(0, 200)}`
+          : null,
+    };
+  });
+}
+
 /** The full report: where you stand, who owns the answers, and which gaps are winnable. */
 export async function visibilityOverview(db: ReturnType<typeof getDb>["db"], orgIdValue: string, days = 30) {
   const cfg = await visibilityConfig(db, orgIdValue);
@@ -219,6 +261,8 @@ export async function visibilityOverview(db: ReturnType<typeof getDb>["db"], org
     gaps: visibilityGaps(current, cfg.brand.name).map((g) => ({ ...g, prompt: promptText.get(g.promptId) ?? g.promptId })),
     /** Refusals and errors, surfaced so a thin denominator is never silently hidden. */
     excludedRuns: unusable ?? 0,
+    /** Which engines are actually contributing data, and which are misconfigured. */
+    engineHealth: await engineHealth(db, orgIdValue, days),
   };
 }
 

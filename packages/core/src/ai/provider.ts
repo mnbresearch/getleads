@@ -4,7 +4,48 @@ import { meter } from "../util/meter.js";
 
 type CompleteOpts = { maxTokens?: number; temperature?: number; json?: boolean };
 
-/** OpenAI-compatible chat completions (Groq, Together, OpenRouter, Ollama, etc.). */
+/**
+ * Pick a usable chat model from an OpenAI-compatible /models listing.
+ *
+ * Exported for testing because the selection rules are the fiddly part: these listings
+ * mix speech, embedding, moderation and TTS models in with chat models, and picking one
+ * of those produces a confusing runtime failure rather than an obvious one.
+ *
+ * Prefers small/fast variants, which is the right default for this app's high-volume,
+ * low-complexity calls.
+ */
+export function pickChatModel(ids: string[]): string | null {
+  const NON_CHAT = /(whisper|tts|embed|embedding|moderation|guard|rerank|vision-only|image|dall|sora|audio)/i;
+  const candidates = ids.filter((id) => id && !NON_CHAT.test(id));
+  if (candidates.length === 0) return null;
+  const score = (id: string) => {
+    let s = 0;
+    if (/instant|mini|small|flash|fast|8b|20b|lite/i.test(id)) s += 10;
+    if (/llama/i.test(id)) s += 3;
+    if (/preview|deprecated|beta/i.test(id)) s -= 8;
+    return s;
+  };
+  return [...candidates].sort((a, b) => score(b) - score(a) || a.length - b.length)[0];
+}
+
+/** Does this error body mean "that model is not available to this key"? */
+function isModelNotFound(status: number, body: string): boolean {
+  return (status === 404 || status === 400) && /model_not_found|does not exist|do not have access/i.test(body);
+}
+
+/**
+ * OpenAI-compatible chat completions (Groq, Together, OpenRouter, Ollama, etc.).
+ *
+ * Self-heals against catalogue drift. Provider model catalogues move fast and a pinned
+ * default rots: this codebase has already been broken twice by Groq retiring a model, and
+ * a key can also simply lack access to a model that still exists. Rather than pin a third
+ * name and wait for it to fail, a model_not_found response triggers one lookup of the
+ * provider's own /models list, picks a usable chat model, retries, and remembers it for
+ * the life of the process.
+ *
+ * An explicitly configured model is still tried first, so this never silently overrides
+ * a deliberate choice. It only rescues a call that would otherwise have failed outright.
+ */
 class OpenAICompatProvider implements AiProvider {
   constructor(
     public name: string,
@@ -12,21 +53,60 @@ class OpenAICompatProvider implements AiProvider {
     private apiKey: string,
     public model: string,
   ) {}
-  async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
-    meter(this.name);
-    const res = await fetchWithTimeout(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
+
+  private async listModels(): Promise<string[]> {
+    try {
+      const res = await fetchWithTimeout(`${this.baseUrl.replace(/\/$/, "")}/models`, {
+        method: "GET",
+        timeoutMs: 20_000,
+        headers: { authorization: `Bearer ${this.apiKey}` },
+      });
+      if (!res.ok) return [];
+      const data = (await res.json()) as { data?: { id?: string }[] };
+      return (data.data ?? []).map((m) => m.id).filter((x): x is string => !!x);
+    } catch {
+      return [];
+    }
+  }
+
+  private async post(model: string, messages: AiMessage[], opts: CompleteOpts) {
+    return fetchWithTimeout(`${this.baseUrl.replace(/\/$/, "")}/chat/completions`, {
       method: "POST",
       timeoutMs: 60_000,
       headers: { "content-type": "application/json", authorization: `Bearer ${this.apiKey}` },
       body: JSON.stringify({
-        model: this.model,
+        model,
         messages,
         max_tokens: opts.maxTokens ?? 1024,
         temperature: opts.temperature ?? 0.4,
         ...(opts.json ? { response_format: { type: "json_object" } } : {}),
       }),
     });
-    if (!res.ok) throw new Error(`${this.name} ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  }
+
+  async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
+    meter(this.name);
+    let res = await this.post(this.model, messages, opts);
+
+    if (!res.ok) {
+      const body = (await res.text()).slice(0, 300);
+      if (!isModelNotFound(res.status, body)) throw new Error(`${this.name} ${res.status}: ${body}`);
+
+      const available = await this.listModels();
+      const next = pickChatModel(available);
+      if (!next || next === this.model) {
+        throw new Error(
+          `${this.name} ${res.status}: ${body}` +
+            (available.length ? ` (no usable chat model among: ${available.slice(0, 8).join(", ")})` : " (could not list available models)"),
+        );
+      }
+      // Remember it: the original default is dead for this key, so retrying it every call
+      // would double the latency and the error rate for no reason.
+      this.model = next;
+      res = await this.post(next, messages, opts);
+      if (!res.ok) throw new Error(`${this.name} ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    }
+
     const data = (await res.json()) as { choices: { message: { content: string } }[] };
     return data.choices?.[0]?.message?.content ?? "";
   }

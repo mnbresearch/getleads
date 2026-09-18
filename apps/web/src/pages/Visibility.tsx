@@ -12,6 +12,7 @@ interface Overview {
   change: { significant: boolean; direction: "up" | "down" | "flat"; deltaPoints: number; summary: string };
   byEngine: { engine: string; metrics: Overview["metrics"] }[];
   engineDisagreement: { disagree: boolean; best: { engine: string }; worst: { engine: string }; summary: string } | null;
+  engineHealth: { engine: string; total: number; usable: number; errored: number; refused: number; healthy: boolean; problem: string | null }[];
   gaps: { promptId: string; prompt: string; runs: number; mentionRate: number; topRival: string | null; rivalRate: number }[];
   excludedRuns: number;
 }
@@ -76,6 +77,14 @@ export function VisibilityPage() {
           {d.change.summary}
         </div>
       </div>
+
+      {(d.engineHealth ?? []).filter((e) => e.problem).map((e) => (
+        <div key={e.engine} className="mt-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800">
+          <div className="font-medium">{e.engine} is contributing no data</div>
+          <div className="mt-1 text-xs">{e.problem}</div>
+          <div className="mt-1 text-xs">This is a configuration problem, not a visibility problem. Its answers are excluded from the rates above rather than counted against you.</div>
+        </div>
+      ))}
 
       {d.byEngine.length > 0 && (
         <div className="card mt-4 p-4">

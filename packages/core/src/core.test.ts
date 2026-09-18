@@ -9,7 +9,7 @@ import { evaluateSendingHealth, rampCapFor } from "./email/sendingHealth.js";
 import { pickVariantWinner, allocateVariant } from "./outreach/experiment.js";
 import { analyzeAnswer } from "./visibility/analyze.js";
 import { visibilityMetrics, competitorStandings, compareVisibility, visibilityGaps, metricsByEngine, engineDisagreement, type VisibilityObservation } from "./visibility/metrics.js";
-import { availableAiProviders, availableAiProvidersForPlan } from "./ai/provider.js";
+import { availableAiProviders, availableAiProvidersForPlan, pickChatModel } from "./ai/provider.js";
 import { renderTemplate, leadVars } from "./outreach/template.js";
 import { extractDomain, isSocialOrAggregator, normalizeLinkedinUrl, rootDomain } from "./util/domain.js";
 import { inferDepartment, inferSeniority, splitName } from "./util/names.js";
@@ -433,6 +433,24 @@ describe("ai visibility: multi-engine", () => {
     expect(availableAiProviders(cfg).map((p) => p.name).sort()).toEqual(["anthropic", "gemini", "groq"]);
     expect(availableAiProviders({ geminiApiKey: "x" }).map((p) => p.name)).toEqual(["gemini"]);
     expect(availableAiProviders({})).toHaveLength(0);
+  });
+
+  it("picks a chat model and skips the non-chat entries a /models list mixes in", () => {
+    // Groq's real listing interleaves speech and guard models with chat models. Picking
+    // one of those fails at runtime in a confusing way rather than an obvious one.
+    const groqish = ["whisper-large-v3", "whisper-large-v3-turbo", "meta-llama/llama-guard-4-12b", "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-20b"];
+    const picked = pickChatModel(groqish)!;
+    expect(picked).not.toMatch(/whisper|guard/);
+    expect(["llama-3.1-8b-instant", "openai/gpt-oss-20b"]).toContain(picked);
+  });
+
+  it("returns null rather than a nonsense model when nothing usable is listed", () => {
+    expect(pickChatModel(["whisper-large-v3", "text-embedding-3-small"])).toBeNull();
+    expect(pickChatModel([])).toBeNull();
+  });
+
+  it("prefers a small fast model over a large one for high-volume sampling", () => {
+    expect(pickChatModel(["llama-3.3-70b-versatile", "llama-3.1-8b-instant"])).toBe("llama-3.1-8b-instant");
   });
 
   it("keeps paid engines off free-tier plans, same rule as single-provider selection", () => {
