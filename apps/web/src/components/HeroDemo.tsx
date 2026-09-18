@@ -62,6 +62,20 @@ const HOLD_MS = 3600;
 
 type Phase = "typing" | "working" | "results" | "erasing";
 
+/** True while the tab is actually on screen. Chrome clamps timers in a hidden tab to about
+ * one per second, which would leave the demo stranded half-typed; pausing and restarting the
+ * scene is cleaner than letting it crawl, and costs nothing while nobody is looking. */
+function usePageVisible(): boolean {
+  const [visible, setVisible] = useState(true);
+  useEffect(() => {
+    const on = () => setVisible(document.visibilityState === "visible");
+    on();
+    document.addEventListener("visibilitychange", on);
+    return () => document.removeEventListener("visibilitychange", on);
+  }, []);
+  return visible;
+}
+
 function usePrefersReducedMotion(): boolean {
   const [reduced, setReduced] = useState(false);
   useEffect(() => {
@@ -107,6 +121,7 @@ const ENGINE_TONE: Record<EngineRow["tone"], string> = {
 
 export function HeroDemo() {
   const reduced = usePrefersReducedMotion();
+  const visible = usePageVisible();
   const [idx, setIdx] = useState(0);
   const [typed, setTyped] = useState("");
   const [phase, setPhase] = useState<Phase>("typing");
@@ -123,8 +138,17 @@ export function HeroDemo() {
     }
   }, [reduced]);
 
+  // Coming back into view restarts the current scene from the top rather than resuming a
+  // frozen half-typed line.
   useEffect(() => {
-    if (reduced) return;
+    if (reduced || !visible) return;
+    setTyped("");
+    setStep(0);
+    setPhase("typing");
+  }, [visible, reduced]);
+
+  useEffect(() => {
+    if (reduced || !visible) return;
     let t: number | undefined;
 
     if (phase === "typing") {
@@ -153,7 +177,7 @@ export function HeroDemo() {
     }
 
     return () => window.clearTimeout(t);
-  }, [phase, typed, step, idx, reduced, scene]);
+  }, [phase, typed, step, idx, reduced, visible, scene]);
 
   const caret = phase === "typing" || phase === "erasing";
   const label = useMemo(() => (scene.kind === "leads" ? "Live search" : "AI visibility"), [scene.kind]);
