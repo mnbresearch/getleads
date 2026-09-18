@@ -105,12 +105,16 @@ inform each other, this document is wrong and the feature should be cut.
 | Deliverability circuit breaker and warm-up | Shipped |
 | Statistical A/B winner selection | Shipped |
 | AI visibility: tracked prompts, sampling, metrics, rivals, gaps | Shipped |
-| Multi-engine sampling beyond the configured provider | Not built |
+| Multi-engine sampling across every configured engine | Shipped |
 | Correlating visibility against reply outcomes | Not built |
 | Deriving tracked prompts from the winning ICP | Not built |
 | Sentiment of a mention | Deliberately not built until it can be done honestly |
 
-The last three rows are the thesis. Until they exist, Scout is two good products sharing a
+Multi-engine matters more than it sounds: engines disagree, so measuring one and calling
+it "what AI says" is simply wrong. Per-engine rows are the actionable view, and a blended
+headline describes no engine that exists.
+
+The remaining unbuilt rows are the thesis. Until they exist, Scout is two good products sharing a
 login, and the moat argument above is a plan rather than a fact.
 
 ## What would falsify this

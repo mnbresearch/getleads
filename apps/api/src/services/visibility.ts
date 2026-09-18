@@ -1,11 +1,14 @@
 import { and, desc, eq, getDb, organizations, sql, visibilityPrompts, visibilityRuns } from "@prospex/db";
 import {
   analyzeAnswer,
+  availableAiProvidersForPlan,
   competitorStandings,
   compareVisibility,
-  createAiProviderForPlan,
+  engineDisagreement,
+  metricsByEngine,
   visibilityGaps,
   visibilityMetrics,
+  type AiProvider,
   type BrandSpec,
   type VisibilityObservation,
 } from "@prospex/core";
@@ -60,10 +63,10 @@ export async function runVisibilityPrompt(
   db: ReturnType<typeof getDb>["db"],
   orgIdValue: string,
   prompt: { id: string; text: string },
-  opts: { plan?: string; others?: string[] } = {},
+  opts: { plan?: string; others?: string[]; provider?: AiProvider } = {},
 ) {
   const cfg = await visibilityConfig(db, orgIdValue);
-  const provider = createAiProviderForPlan(opts.plan ?? "free");
+  const provider = opts.provider ?? availableAiProvidersForPlan(opts.plan ?? "free")[0];
   if (!provider) throw new Error("No AI provider configured");
 
   let answer = "";
@@ -102,6 +105,56 @@ export async function runVisibilityPrompt(
     .returning();
   await db.update(visibilityPrompts).set({ lastRunAt: new Date() }).where(eq(visibilityPrompts.id, prompt.id));
   return { run: row, analysis };
+}
+
+/**
+ * Sample one prompt across every engine the org can use.
+ *
+ * Engines disagree, so "what AI says" is only answerable by asking all of them. Each
+ * engine is sampled `samples` times independently, which also keeps the per-engine
+ * denominators balanced; an uneven split would bias the blended headline rate toward
+ * whichever engine happened to run most.
+ *
+ * One engine failing does not abort the cycle. A dead API key on one provider should cost
+ * you that engine's data, not the whole measurement.
+ */
+export async function sampleAcrossEngines(
+  db: ReturnType<typeof getDb>["db"],
+  orgIdValue: string,
+  prompt: { id: string; text: string; engines?: string[] | null; samplesPerRun?: number },
+  opts: { plan?: string; others?: string[]; samples?: number } = {},
+) {
+  const all = availableAiProvidersForPlan(opts.plan ?? "free");
+  const wanted = (prompt.engines ?? []).filter(Boolean);
+  const providers = wanted.length ? all.filter((p) => wanted.includes(p.name)) : all;
+  if (providers.length === 0) throw new Error("No AI provider configured");
+
+  const samples = opts.samples ?? prompt.samplesPerRun ?? 3;
+  const results: { engine: string; ok: boolean; mentioned: boolean; usable: boolean }[] = [];
+  for (const provider of providers) {
+    for (let i = 0; i < samples; i++) {
+      try {
+        const { run } = await runVisibilityPrompt(db, orgIdValue, prompt, { ...opts, provider });
+        results.push({ engine: provider.name, ok: true, mentioned: run.mentioned, usable: run.usable });
+      } catch (e) {
+        void e;
+        results.push({ engine: provider.name, ok: false, mentioned: false, usable: false });
+      }
+    }
+  }
+  return {
+    engines: providers.map((p) => p.name),
+    samplesPerEngine: samples,
+    total: results.length,
+    usable: results.filter((r) => r.usable).length,
+    mentioned: results.filter((r) => r.mentioned).length,
+    results,
+  };
+}
+
+/** Engines this org can currently sample, for the UI to show what "AI" actually covers. */
+export function enginesForPlan(plan = "free") {
+  return availableAiProvidersForPlan(plan).map((p) => ({ engine: p.name, model: p.model }));
 }
 
 /** Load usable runs as observations. Unusable runs are excluded, never counted as absence. */
@@ -157,6 +210,10 @@ export async function visibilityOverview(db: ReturnType<typeof getDb>["db"], org
     brand: cfg.brand,
     windowDays: days,
     metrics: visibilityMetrics(current, { brandName: cfg.brand.name }),
+    // Per-engine is the actionable view; the blended headline above describes no single
+    // engine and skews toward whichever was sampled most.
+    byEngine: metricsByEngine(current, cfg.brand.name),
+    engineDisagreement: engineDisagreement(current, cfg.brand.name),
     competitors: competitorStandings(current, cfg.brand.name),
     change: compareVisibility(before, after),
     gaps: visibilityGaps(current, cfg.brand.name).map((g) => ({ ...g, prompt: promptText.get(g.promptId) ?? g.promptId })),

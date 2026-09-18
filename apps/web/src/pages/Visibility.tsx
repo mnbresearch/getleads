@@ -10,6 +10,8 @@ interface Overview {
   metrics: { runs: number; mentionRate: Rate; citationRate: Rate; avgPosition: number | null; topSpotRate: Rate; shareOfVoice: Rate; sufficient: boolean; minRuns: number; summary: string };
   competitors: { name: string; appearances: number; appearanceRate: number; avgPosition: number | null; beatsYou: number }[];
   change: { significant: boolean; direction: "up" | "down" | "flat"; deltaPoints: number; summary: string };
+  byEngine: { engine: string; metrics: Overview["metrics"] }[];
+  engineDisagreement: { disagree: boolean; best: { engine: string }; worst: { engine: string }; summary: string } | null;
   gaps: { promptId: string; prompt: string; runs: number; mentionRate: number; topRival: string | null; rivalRate: number }[];
   excludedRuns: number;
 }
@@ -19,6 +21,7 @@ const pct = (x: number) => `${Math.round(x * 100)}%`;
 export function VisibilityPage() {
   const [d, setD] = useState<Overview | null>(null);
   const [prompts, setPrompts] = useState<Prompt[]>([]);
+  const [engines, setEngines] = useState<{ engine: string; model: string }[]>([]);
   const [cfgOpen, setCfgOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
@@ -27,14 +30,15 @@ export function VisibilityPage() {
   const load = useCallback(() => {
     apiFetch<Overview>("GET", "/v1/visibility/overview").then(setD).catch((e) => toast((e as Error).message, "err"));
     apiFetch<{ prompts: Prompt[] }>("GET", "/v1/visibility/prompts").then((r) => setPrompts(r.prompts)).catch(() => setPrompts([]));
+    apiFetch<{ engines: typeof engines }>("GET", "/v1/visibility/engines").then((r) => setEngines(r.engines ?? [])).catch(() => setEngines([]));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
 
   const run = async (p: Prompt) => {
     setBusy(p.id);
     try {
-      const r = await apiFetch<{ samples: number; usable: number; mentioned: number; note?: string }>("POST", `/v1/visibility/prompts/${p.id}/run`, {});
-      toast(r.note ?? `Sampled ${r.samples}x, mentioned in ${r.mentioned}`);
+      const r = await apiFetch<{ engines: string[]; samplesPerEngine: number; total: number; usable: number; mentioned: number; note?: string }>("POST", `/v1/visibility/prompts/${p.id}/run`, {});
+      toast(r.note ?? `Sampled ${r.engines.join(", ")} ${r.samplesPerEngine}x each; mentioned in ${r.mentioned} of ${r.total}`);
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(null); }
   };
@@ -44,7 +48,7 @@ export function VisibilityPage() {
   return (
     <Page
       title="AI visibility"
-      subtitle="What ChatGPT, Gemini and other engines tell a buyer who researches your category. Measured by repeated sampling, not single answers."
+      subtitle={engines.length ? `Sampling ${engines.map((e) => e.engine).join(", ")}. What a buyer researching your category is told, measured by repeated sampling rather than single answers.` : "What AI engines tell a buyer who researches your category, measured by repeated sampling rather than single answers."}
       actions={<><button className="btn-secondary" onClick={() => setCfgOpen(true)}>Brand & rivals</button><button className="btn-primary" onClick={() => setAddOpen(true)}>Track a question</button></>}
     >
       {Toast}
@@ -72,6 +76,41 @@ export function VisibilityPage() {
           {d.change.summary}
         </div>
       </div>
+
+      {d.byEngine.length > 0 && (
+        <div className="card mt-4 p-4">
+          <div className="font-medium">By engine</div>
+          <div className="mb-2 text-xs text-ink-400">
+            Engines are trained and retrieved differently and often disagree, so act on these rows. The headline above blends them and describes no single engine.
+          </div>
+          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {d.byEngine.map((e) => (
+              <div key={e.engine} className="rounded-lg border border-black/10 p-3 text-sm">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium capitalize">{e.engine}</span>
+                  <span className="text-xs text-ink-400">n={e.metrics.runs}</span>
+                </div>
+                {e.metrics.sufficient ? (
+                  <>
+                    <div className="text-xl font-semibold">{pct(e.metrics.mentionRate.value)}</div>
+                    <div className="text-xs text-ink-400">
+                      {pct(e.metrics.mentionRate.ci.lower)}–{pct(e.metrics.mentionRate.ci.upper)}
+                      {e.metrics.avgPosition ? ` · avg position ${e.metrics.avgPosition}` : ""}
+                    </div>
+                  </>
+                ) : (
+                  <div className="mt-1 text-xs text-ink-400">Not enough samples yet ({e.metrics.runs} of {e.metrics.minRuns}).</div>
+                )}
+              </div>
+            ))}
+          </div>
+          {d.engineDisagreement && (
+            <div className={`mt-3 rounded-lg p-2 text-xs ${d.engineDisagreement.disagree ? "bg-amber-50 text-amber-800" : "bg-black/[0.05] text-ink-300"}`}>
+              {d.engineDisagreement.summary}
+            </div>
+          )}
+        </div>
+      )}
 
       {d.competitors.length > 0 && (
         <div className="card mt-4 p-4">
@@ -199,7 +238,7 @@ function AddPromptModal({ open, onClose, onSaved, toast }: { open: boolean; onCl
         <div>
           <label className="label">Samples per day: {samples}</label>
           <input type="range" min={1} max={10} value={samples} onChange={(e) => setSamples(Number(e.target.value))} className="w-full" />
-          <p className="mt-1 text-xs text-ink-400">More samples tighten the confidence interval sooner. Below about 20 total answers, no rate is reported at all.</p>
+          <p className="mt-1 text-xs text-ink-400">Per engine, per day. Every configured engine is sampled this many times, so the per-engine denominators stay balanced. Below about 20 answers for an engine, no rate is reported for it.</p>
         </div>
         <button className="btn-primary w-full justify-center" disabled={busy || text.trim().length < 5} onClick={save}>{busy ? "Saving…" : "Track"}</button>
       </div>

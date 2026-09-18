@@ -1,10 +1,10 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, consume, desc, eq, getDb, visibilityPrompts, visibilityRuns } from "@prospex/db";
+import { and, consume, desc, eq, getDb, organizations, visibilityPrompts, visibilityRuns } from "@prospex/db";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { knownBrands, observationsFor, runVisibilityPrompt, saveVisibilityConfig, visibilityConfig, visibilityOverview } from "../services/visibility.js";
+import { enginesForPlan, knownBrands, observationsFor, sampleAcrossEngines, saveVisibilityConfig, visibilityConfig, visibilityOverview } from "../services/visibility.js";
 
 /**
  * AI visibility (AEO/GEO).
@@ -95,21 +95,29 @@ visibilityRoutes.post("/prompts/:id/run", zValidator("json", z.object({ samples:
   });
   if (!prompt) throw notFound("Prompt");
 
-  const samples = c.req.valid("json")?.samples ?? prompt.samplesPerRun;
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+  const plan = org?.plan ?? "free";
   const others = await knownBrands(db, oid);
-  const results = [];
-  for (let i = 0; i < samples; i++) {
-    await consume(db, oid, "aiMessages", 1).catch(() => {});
-    results.push(await runVisibilityPrompt(db, oid, prompt, { others }));
-  }
-  const usable = results.filter((r) => r.run.usable).length;
+  const samples = c.req.valid("json")?.samples ?? prompt.samplesPerRun;
+  // Quota is charged per actual model call, so sampling N engines costs N times as much.
+  const engineCount = Math.max(1, enginesForPlan(plan).length);
+  await consume(db, oid, "aiMessages", samples * engineCount).catch(() => {});
+
+  const r = await sampleAcrossEngines(db, oid, prompt, { others, samples, plan });
   return c.json({
-    samples,
-    usable,
-    mentioned: results.filter((r) => r.run.mentioned).length,
-    runs: results.map((r) => ({ id: r.run.id, engine: r.run.engine, mentioned: r.run.mentioned, cited: r.run.cited, position: r.run.position, usable: r.run.usable })),
-    note: usable < samples ? `${samples - usable} answer(s) were refusals or errors and are excluded from metrics rather than counted as absence.` : undefined,
+    ...r,
+    note:
+      r.usable < r.total
+        ? `${r.total - r.usable} of ${r.total} answers were refusals or errors and are excluded from metrics rather than counted as absence.`
+        : undefined,
   });
+});
+
+/** Which engines "AI visibility" actually covers for this org right now. */
+visibilityRoutes.get("/engines", async (c) => {
+  const { db } = getDb();
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId(c)) });
+  return c.json({ engines: enginesForPlan(org?.plan ?? "free") });
 });
 
 // ── Reporting ──

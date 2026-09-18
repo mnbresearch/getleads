@@ -3,7 +3,7 @@ import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, runLe
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
 import { pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
-import { knownBrands, runVisibilityPrompt } from "./services/visibility.js";
+import { knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { sendStep, tickCampaign } from "./services/campaigns.js";
 import { syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
@@ -249,12 +249,10 @@ export const handlers: Record<string, JobHandler> = {
     const prompt = await db.query.visibilityPrompts.findFirst({ where: eq(visibilityPrompts.id, String(job.payload.promptId)) });
     if (!prompt || !prompt.active) return { skipped: true };
     const others = await knownBrands(db, prompt.orgId);
-    let usable = 0;
-    for (let i = 0; i < prompt.samplesPerRun; i++) {
-      const { run } = await runVisibilityPrompt(db, prompt.orgId, prompt, { others });
-      if (run.usable) usable++;
-    }
-    return { samples: prompt.samplesPerRun, usable };
+    // Every configured engine, not just the priority winner: engines disagree, so one of
+    // them is not an answer to "what does AI say about us".
+    const r = await sampleAcrossEngines(db, prompt.orgId, prompt, { others });
+    return { engines: r.engines, samplesPerEngine: r.samplesPerEngine, total: r.total, usable: r.usable };
   },
 
   /** Scheduler: daily, sample every active visibility prompt not run in the last 20 hours. */

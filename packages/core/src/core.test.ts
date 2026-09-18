@@ -8,7 +8,8 @@ import { learnFromOutcomes, wilsonInterval } from "./icp/learn.js";
 import { evaluateSendingHealth, rampCapFor } from "./email/sendingHealth.js";
 import { pickVariantWinner, allocateVariant } from "./outreach/experiment.js";
 import { analyzeAnswer } from "./visibility/analyze.js";
-import { visibilityMetrics, competitorStandings, compareVisibility, visibilityGaps, type VisibilityObservation } from "./visibility/metrics.js";
+import { visibilityMetrics, competitorStandings, compareVisibility, visibilityGaps, metricsByEngine, engineDisagreement, type VisibilityObservation } from "./visibility/metrics.js";
+import { availableAiProviders, availableAiProvidersForPlan } from "./ai/provider.js";
 import { renderTemplate, leadVars } from "./outreach/template.js";
 import { extractDomain, isSocialOrAggregator, normalizeLinkedinUrl, rootDomain } from "./util/domain.js";
 import { inferDepartment, inferSeniority, splitName } from "./util/names.js";
@@ -386,6 +387,59 @@ describe("ai visibility: metrics", () => {
     const gaps = visibilityGaps([...winnable, ...nobody], "Scout");
     expect(gaps[0].promptId).toBe("winnable");
     expect(gaps[0].topRival).toBe("Apollo");
+  });
+});
+
+describe("ai visibility: multi-engine", () => {
+  const mk = (engine: string, n: number, mentioned: number): VisibilityObservation[] =>
+    Array.from({ length: n }, (_, i) => ({
+      engine, promptId: "p1", mentioned: i < mentioned, cited: false,
+      position: i < mentioned ? 1 : null, brands: i < mentioned ? ["Scout"] : ["Apollo"], at: new Date(),
+    }));
+
+  it("splits metrics per engine instead of blending them into a number no engine has", () => {
+    const rows = metricsByEngine([...mk("gemini", 40, 36), ...mk("groq", 40, 4)], "Scout");
+    expect(rows.map((r) => r.engine).sort()).toEqual(["gemini", "groq"]);
+    expect(rows.find((r) => r.engine === "gemini")!.metrics.mentionRate.value).toBeCloseTo(0.9, 5);
+    expect(rows.find((r) => r.engine === "groq")!.metrics.mentionRate.value).toBeCloseTo(0.1, 5);
+  });
+
+  it("calls out a real engine-specific gap", () => {
+    const d = engineDisagreement([...mk("gemini", 40, 36), ...mk("groq", 40, 4)], "Scout");
+    expect(d?.disagree).toBe(true);
+    expect(d?.best.engine).toBe("gemini");
+    expect(d?.worst.engine).toBe("groq");
+    expect(d?.summary).toMatch(/engine-specific gap/);
+  });
+
+  it("does not claim engines disagree when they are within noise", () => {
+    const d = engineDisagreement([...mk("gemini", 40, 20), ...mk("groq", 40, 18)], "Scout");
+    expect(d?.disagree).toBe(false);
+    expect(d?.summary).toMatch(/within sampling noise/);
+  });
+
+  it("returns null unless at least two engines have enough data to compare", () => {
+    // A single engine cannot disagree with anything.
+    expect(engineDisagreement(mk("gemini", 40, 20), "Scout")).toBeNull();
+    // Nor can one with a thin sample: 3 runs is not evidence, so it is excluded and the
+    // comparison falls back to a single qualifying engine.
+    expect(engineDisagreement([...mk("gemini", 40, 20), ...mk("groq", 3, 1)], "Scout")).toBeNull();
+    // Two adequately sampled engines do compare.
+    expect(engineDisagreement([...mk("gemini", 40, 20), ...mk("groq", 40, 10)], "Scout")).not.toBeNull();
+  });
+
+  it("enumerates every configured provider, not just the priority winner", () => {
+    const cfg = { groqApiKey: "g", geminiApiKey: "x", anthropicApiKey: "a" };
+    expect(availableAiProviders(cfg).map((p) => p.name).sort()).toEqual(["anthropic", "gemini", "groq"]);
+    expect(availableAiProviders({ geminiApiKey: "x" }).map((p) => p.name)).toEqual(["gemini"]);
+    expect(availableAiProviders({})).toHaveLength(0);
+  });
+
+  it("keeps paid engines off free-tier plans, same rule as single-provider selection", () => {
+    const cfg = { groqApiKey: "g", geminiApiKey: "x", anthropicApiKey: "a" };
+    expect(availableAiProvidersForPlan("free", cfg).map((p) => p.name)).not.toContain("anthropic");
+    expect(availableAiProvidersForPlan("starter", cfg).map((p) => p.name)).not.toContain("anthropic");
+    expect(availableAiProvidersForPlan("growth", cfg).map((p) => p.name)).toContain("anthropic");
   });
 });
 

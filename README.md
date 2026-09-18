@@ -98,7 +98,14 @@ GET/POST /v1/visibility/prompts          # the questions worth winning
 POST    /v1/visibility/prompts/:id/run   # sample now (N samples, not one)
 GET     /v1/visibility/overview          # metrics, rivals, winnable gaps, change test
 GET     /v1/visibility/runs              # raw answers behind every number
+GET     /v1/visibility/engines           # which engines "AI" actually covers right now
 ```
+
+Every configured engine is sampled, not just the one the provider priority order would
+pick, because engines disagree about who they recommend. Each engine gets the same number
+of samples so the per-engine denominators stay balanced, results are reported per engine,
+and Scout says explicitly when a gap is engine-specific rather than general. A failing
+engine costs you that engine's data, not the whole cycle.
 
 Active prompts are sampled daily by the `visibility.tick` worker job.
 

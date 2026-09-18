@@ -181,6 +181,35 @@ export function createAiProviderForPlan(plan: string, cfg: AiConfig = configFrom
   return createAiProvider(cfg);
 }
 
+/**
+ * Every provider that is actually configured, not just the winner of the priority order.
+ *
+ * createAiProvider() picks one engine, which is right for generating a single email or
+ * brief. AI visibility is the opposite problem: engines genuinely disagree about who they
+ * recommend, so measuring one and calling it "what AI says" is wrong. This returns all of
+ * them so a prompt can be sampled across the whole set.
+ */
+export function availableAiProviders(cfg: AiConfig = configFromEnv()): AiProvider[] {
+  const out: AiProvider[] = [];
+  if (cfg.anthropicApiKey) out.push(new AnthropicProvider(cfg.anthropicApiKey, cfg.anthropicModel));
+  if (cfg.groqApiKey) out.push(new OpenAICompatProvider("groq", "https://api.groq.com/openai/v1", cfg.groqApiKey, cfg.groqModel ?? "llama-3.1-8b-instant"));
+  if (cfg.geminiApiKey) out.push(new GeminiProvider(cfg.geminiApiKey, cfg.geminiModel));
+  if (cfg.openaiCompatBaseUrl) {
+    out.push(new OpenAICompatProvider("openai-compat", cfg.openaiCompatBaseUrl, cfg.openaiCompatApiKey ?? "none", cfg.openaiCompatModel ?? "gpt-4o-mini"));
+  }
+  return out;
+}
+
+/** Same free-tier-first gating as createAiProviderForPlan: paid engines need a paying plan. */
+export function availableAiProvidersForPlan(plan: string, cfg: AiConfig = configFromEnv()): AiProvider[] {
+  if (FREE_TIER_ONLY_PLANS.has((plan || "free").toLowerCase())) {
+    const { anthropicApiKey, ...rest } = cfg;
+    void anthropicApiKey;
+    return availableAiProviders(rest);
+  }
+  return availableAiProviders(cfg);
+}
+
 export function hasAi(p: AiProvider) {
   return p.name !== "none";
 }

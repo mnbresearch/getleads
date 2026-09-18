@@ -162,6 +162,60 @@ export function competitorStandings(observations: VisibilityObservation[], brand
     .slice(0, limit);
 }
 
+export interface EngineMetrics {
+  engine: string;
+  metrics: VisibilityMetrics;
+}
+
+/**
+ * Metrics split per engine.
+ *
+ * This is not a nicety, it is the more correct view. ChatGPT, Gemini and Groq are trained
+ * and retrieved differently and routinely disagree about who they recommend, so a single
+ * blended "AI visibility" number describes no engine that actually exists. Worse, when
+ * engines are sampled unevenly the blend silently weights toward whichever one ran most.
+ *
+ * Report the blend for a headline if you must, but act on the per-engine rows.
+ */
+export function metricsByEngine(observations: VisibilityObservation[], brandName: string, minRuns?: number): EngineMetrics[] {
+  const byEngine = new Map<string, VisibilityObservation[]>();
+  for (const o of observations) {
+    const arr = byEngine.get(o.engine) ?? [];
+    arr.push(o);
+    byEngine.set(o.engine, arr);
+  }
+  return Array.from(byEngine.entries())
+    .map(([engine, obs]) => ({ engine, metrics: visibilityMetrics(obs, { brandName, minRuns }) }))
+    .sort((a, b) => b.metrics.runs - a.metrics.runs);
+}
+
+/**
+ * Do engines disagree more than sampling noise explains?
+ *
+ * Returns null when fewer than two engines have enough data to compare. When they do
+ * disagree, that is a real finding: it means your visibility problem is engine-specific
+ * rather than general, and the fix differs accordingly.
+ */
+export function engineDisagreement(
+  observations: VisibilityObservation[],
+  brandName: string,
+): { disagree: boolean; best: EngineMetrics; worst: EngineMetrics; summary: string } | null {
+  const rows = metricsByEngine(observations, brandName).filter((r) => r.metrics.sufficient);
+  if (rows.length < 2) return null;
+  const sorted = [...rows].sort((a, b) => b.metrics.mentionRate.value - a.metrics.mentionRate.value);
+  const best = sorted[0];
+  const worst = sorted[sorted.length - 1];
+  const disagree = best.metrics.mentionRate.ci.lower > worst.metrics.mentionRate.ci.upper;
+  return {
+    disagree,
+    best,
+    worst,
+    summary: disagree
+      ? `${best.engine} mentions you in ${pct(best.metrics.mentionRate.value)} of answers but ${worst.engine} only ${pct(worst.metrics.mentionRate.value)}, and the intervals separate. This is an engine-specific gap, not a general one.`
+      : `Engines are within sampling noise of each other (${rows.map((r) => `${r.engine} ${pct(r.metrics.mentionRate.value)}`).join(", ")}). Treat visibility as general rather than engine-specific.`,
+  };
+}
+
 export interface VisibilityChange {
   /** True only when the two intervals do not overlap. */
   significant: boolean;
