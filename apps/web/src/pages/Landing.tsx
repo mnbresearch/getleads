@@ -1,21 +1,55 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { Logo, BRAND_TAGLINE } from "../components/Logo";
+import { Logo } from "../components/Logo";
+import { HeroDemo } from "../components/HeroDemo";
 import { apiFetch } from "../lib/api";
 
+/**
+ * Landing page.
+ *
+ * Written problem-first on purpose: the buyer already knows what a prospecting tool does,
+ * so the page leads with the four ways outbound actually breaks and names the mechanism
+ * that fixes each one. Claims here must stay things the product genuinely does.
+ */
+
+const problems = [
+  {
+    pain: "Half your list bounces, and your domain pays for it.",
+    why: "Exported lists rot at roughly 2% a month. Send into them and your reputation goes down with them.",
+    fix: "Scout verifies before it sends, holds back risky addresses, and trips a circuit breaker the moment bounce rates climb.",
+  },
+  {
+    pain: "Everyone is emailing the same exported list.",
+    why: "If you bought the list, so did your competitors. The prospect has read your email four times already.",
+    fix: "Live discovery from the open web plus funding, hiring and leadership signals, so you arrive while the need is fresh.",
+  },
+  {
+    pain: "Real personalisation takes 20 minutes a prospect.",
+    why: "So it does not happen, and the template goes out instead, and reply rates keep sliding.",
+    fix: "Scout researches the account first and drafts from what it actually found, then learns which angles earn replies.",
+  },
+  {
+    pain: "They read your email, then ask ChatGPT about you.",
+    why: "Whatever the AI says next is now part of your funnel, and almost nobody can tell you what it said.",
+    fix: "Scout asks the engines your buyers use and shows you the answer, the rivals named, and where you are missing.",
+  },
+];
+
 const features = [
-  { icon: "⌕", title: "Real-time B2B discovery", desc: "Search live company and people data by industry, size, tech stack, and intent — no stale lists." },
-  { icon: "◎", title: "ICP lookalike scoring", desc: "Feed in your best accounts and score every new prospect against your ideal customer profile." },
-  { icon: "✉", title: "AI-personalized outreach", desc: "Draft, sequence, and send outbound that reads like it was written by a rep who did the research." },
-  { icon: "◉", title: "Website visitor identification", desc: "Turn anonymous traffic into named companies and route hot visitors straight into your pipeline." },
-  { icon: "◈", title: "Intent signals", desc: "Track funding, hiring, and buying signals across the web so you reach out at the right moment." },
-  { icon: "⚡", title: "Built for AI agents", desc: "A first-class MCP server and REST API mean your agents can prospect, enrich, and send — autonomously." },
+  { icon: "⌕", title: "Real-time B2B discovery", desc: "Search live company and people data by industry, size, tech stack and intent, instead of buying a list that is already stale." },
+  { icon: "◎", title: "ICP that learns from replies", desc: "Feed in your best accounts, then let outcomes reshape the profile as real replies come in." },
+  { icon: "✉", title: "Outreach written from research", desc: "Drafts built on what Scout found about the account, sequenced and A/B tested with a statistical winner, not a hunch." },
+  { icon: "◉", title: "Website visitor identification", desc: "Turn anonymous traffic into named companies and route hot visitors straight into the pipeline." },
+  { icon: "◈", title: "Intent signals", desc: "Funding, hiring, leadership changes and news, watched continuously so timing stops being luck." },
+  { icon: "◐", title: "AI visibility across engines", desc: "Track what Gemini, Groq and the rest say when a buyer researches you, per engine, with the raw answers kept." },
+  { icon: "⚑", title: "Deliverability that defends you", desc: "Warm-up, per-mailbox health scoring and an automatic stop before a bad run damages your domain." },
+  { icon: "⚡", title: "Built for AI agents", desc: "A first-class MCP server and REST API, so your agents can prospect, enrich and send with the same tools your reps use." },
 ];
 
 const steps = [
-  { n: "01", title: "Describe who you're after", desc: "Titles, industries, company size, tech stack, or just plain language — Scout turns it into a live search." },
-  { n: "02", title: "Scout finds and scores them", desc: "Every result is enriched, verified, and ranked against your ICP before it ever hits your list." },
-  { n: "03", title: "Reach out, or let your agent do it", desc: "Draft and send from the app, or hand the same search + send tools to your AI agent over MCP." },
+  { n: "01", title: "Describe who you're after", desc: "Titles, industries, company size, tech stack, or plain language. Scout turns it into a live search." },
+  { n: "02", title: "Scout finds, verifies and ranks", desc: "Every result is enriched, checked and scored against your ICP before it ever reaches your list." },
+  { n: "03", title: "Reach out, and watch both sides", desc: "Send from the app or hand the tools to your agent, then see what the AI engines tell buyers who go looking." },
 ];
 
 type PlanLimits = {
@@ -116,47 +150,6 @@ function PricingSection() {
   );
 }
 
-/** Small stylized product preview for the hero — illustrative, not a real screenshot or real data. */
-function HeroPreview() {
-  const rows = [
-    { name: "Priya Kapoor", role: "VP Growth · Nimbus Cloud", score: 94 },
-    { name: "Daniel Osei", role: "Head of RevOps · Lattice Pay", score: 88 },
-    { name: "Wei Chen", role: "Director Sales · Forma Health", score: 81 },
-  ];
-  return (
-    <div className="relative mx-auto mt-16 w-full max-w-3xl">
-      <div className="absolute -inset-x-6 -top-6 h-full rounded-3xl bg-brand-gradient opacity-10 blur-2xl" aria-hidden />
-      <div className="card relative overflow-hidden p-0 shadow-xl">
-        <div className="flex items-center gap-1.5 border-b border-black/[0.06] px-4 py-3">
-          <span className="h-2.5 w-2.5 rounded-full bg-black/10" />
-          <span className="h-2.5 w-2.5 rounded-full bg-black/10" />
-          <span className="h-2.5 w-2.5 rounded-full bg-black/10" />
-          <span className="ml-3 text-xs text-ink-400">Search results · "Heads of Growth, Series B fintech, US"</span>
-        </div>
-        <div className="divide-y divide-black/[0.05]">
-          {rows.map((r) => (
-            <div key={r.name} className="flex items-center justify-between px-5 py-4">
-              <div className="flex items-center gap-3">
-                <div className="grid h-9 w-9 place-items-center rounded-full bg-brand-50 text-sm font-semibold text-brand-600">
-                  {r.name.split(" ").map((w) => w[0]).join("")}
-                </div>
-                <div>
-                  <div className="text-sm font-medium text-ink-50">{r.name}</div>
-                  <div className="text-xs text-ink-400">{r.role}</div>
-                </div>
-              </div>
-              <div className="flex items-center gap-2 text-xs">
-                <span className="badge bg-emerald-50 text-emerald-700">Verified</span>
-                <span className="badge bg-brand-50 text-brand-700">{r.score} fit</span>
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-}
-
 export function LandingPage() {
   return (
     <div className="min-h-screen overflow-x-hidden">
@@ -164,7 +157,8 @@ export function LandingPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <Logo size={28} textClassName="text-lg" />
           <nav className="hidden items-center gap-6 text-sm text-ink-300 sm:flex">
-            <a href="#how-it-works" className="hover:text-ink-50">How it works</a>
+            <a href="#problems" className="hover:text-ink-50">Why Scout</a>
+            <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
             <a href="#features" className="hover:text-ink-50">Features</a>
             <a href="#pricing" className="hover:text-ink-50">Pricing</a>
           </nav>
@@ -176,22 +170,83 @@ export function LandingPage() {
       </header>
 
       <main className="mx-auto max-w-6xl px-6">
-        <section className="flex flex-col items-center pb-8 pt-20 text-center sm:pt-28">
-          <span className="badge border border-black/10 bg-black/5 text-ink-300">For sales teams and AI agents</span>
-          <h1 className="mt-6 max-w-3xl text-4xl font-bold tracking-tight text-ink-50 sm:text-6xl">
-            Find, enrich, and reach your next customer —{" "}
-            <span className="bg-brand-gradient bg-clip-text text-transparent">before your competitors do</span>
+        <section className="flex flex-col items-center pb-8 pt-14 text-center sm:pt-16">
+          <span className="badge border border-black/10 bg-black/5 text-ink-300">Outbound and AI visibility, in one system</span>
+          <h1 className="mt-6 max-w-3xl text-[2rem] font-bold leading-[1.12] tracking-tight text-ink-50 sm:text-5xl">
+            The list is stale. The emails bounce. And when they check you out,{" "}
+            <span className="bg-brand-gradient bg-clip-text text-transparent">the AI recommends someone else.</span>
           </h1>
-          <p className="mt-6 max-w-xl text-lg text-ink-300">{BRAND_TAGLINE}. One platform, one API, one MCP server — for your reps and your agents.</p>
-          <div className="mt-8 flex flex-wrap items-center justify-center gap-3">
+          <p className="mt-5 max-w-2xl text-base text-ink-300 sm:text-lg">
+            Scout finds buyers who actually exist, writes outreach worth replying to, and shows you what the AI engines say
+            about you when the prospect goes looking. Both halves of the funnel, one place.
+          </p>
+          <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
             <Link to="/signup" className="btn-primary px-6 py-3 text-base shadow-glow">Start free</Link>
-            <Link to="/login" className="btn-secondary px-6 py-3 text-base">Sign in</Link>
+            <a href="#problems" className="btn-secondary px-6 py-3 text-base">See what it fixes</a>
           </div>
           <p className="mt-4 text-xs text-ink-400">No credit card required · Free web-sourced leads on day one</p>
-          <HeroPreview />
+          <HeroDemo />
         </section>
 
-        <section id="how-it-works" className="scroll-mt-24 py-24">
+        <section id="problems" className="scroll-mt-24 py-24">
+          <div className="mx-auto max-w-2xl text-center">
+            <span className="badge border border-black/10 bg-black/5 text-ink-300">Sound familiar?</span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Four ways outbound quietly stops working</h2>
+            <p className="mt-3 text-ink-300">Each one has a mechanism behind it, not a feature name.</p>
+          </div>
+          <div className="mt-14 grid grid-cols-1 gap-5 sm:grid-cols-2">
+            {problems.map((p) => (
+              <div key={p.pain} className="card flex flex-col p-6 transition hover:-translate-y-0.5 hover:shadow-lg">
+                <div className="text-lg font-semibold leading-snug text-ink-50">{p.pain}</div>
+                <p className="mt-2 text-sm text-ink-400">{p.why}</p>
+                <div className="mt-4 flex items-start gap-2 rounded-lg border border-brand-100 bg-brand-50/60 p-3 text-sm text-ink-200">
+                  <span className="mt-0.5 shrink-0 text-brand-600">→</span>
+                  <span>{p.fix}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section id="visibility" className="scroll-mt-24 pb-24">
+          <div className="card relative overflow-hidden p-8 sm:p-12">
+            <div className="pointer-events-none absolute inset-0 bg-brand-gradient opacity-[0.05]" aria-hidden />
+            <div className="relative grid gap-10 lg:grid-cols-2 lg:items-center">
+              <div>
+                <span className="badge border border-black/10 bg-black/5 text-ink-300">The half nobody measures</span>
+                <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">
+                  Your email lands. Then they ask an AI whether you're any good.
+                </h2>
+                <p className="mt-4 text-ink-300">
+                  Prospecting tools optimise the sending and know nothing about that moment. AI visibility tools measure that
+                  moment and know nothing about who you contacted. Scout is the only place both sit on one schema.
+                </p>
+                <ul className="mt-6 space-y-3 text-sm text-ink-200">
+                  <li className="flex gap-2"><span className="text-brand-600">✓</span> Track the questions your buyers actually ask, across every engine you have configured.</li>
+                  <li className="flex gap-2"><span className="text-brand-600">✓</span> See which rivals own the answer, and which questions are winnable.</li>
+                  <li className="flex gap-2"><span className="text-brand-600">✓</span> Raw answers stored verbatim, so a number can always be traced back to the text it came from.</li>
+                </ul>
+                <Link to="/signup" className="btn-primary mt-8 px-6 py-3 text-base">Find out what AI says about you</Link>
+              </div>
+              <div className="rounded-xl border border-black/[0.06] bg-surface p-6">
+                <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Why our numbers look less exciting</div>
+                <p className="mt-3 text-sm text-ink-200">
+                  An AI answer is a sample, not a measurement. Ask twice and you get different brands in a different order.
+                  Most tools run a prompt once, find you missing, and report that visibility collapsed.
+                </p>
+                <p className="mt-3 text-sm text-ink-200">
+                  Scout reports a rate only with its confidence interval and sample size, calls a change real only when the
+                  intervals separate, and excludes refusals instead of counting them as absence.
+                </p>
+                <p className="mt-4 border-t border-black/[0.06] pt-4 text-sm font-medium text-ink-50">
+                  It will tell you "not enough data yet" rather than be confidently wrong. That is the point.
+                </p>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section id="how-it-works" className="scroll-mt-24 pb-24">
           <div className="mx-auto max-w-2xl text-center">
             <span className="badge border border-black/10 bg-black/5 text-ink-300">How it works</span>
             <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">From "who do we want" to "sent" in minutes</h2>
@@ -213,7 +268,7 @@ export function LandingPage() {
             <span className="badge border border-black/10 bg-black/5 text-ink-300">Features</span>
             <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Everything a modern pipeline needs</h2>
           </div>
-          <div className="mt-14 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="mt-14 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {features.map((f) => (
               <div key={f.title} className="card p-6 transition hover:-translate-y-0.5 hover:border-brand-500/30 hover:shadow-lg">
                 <div className="mb-3 grid h-10 w-10 place-items-center rounded-lg bg-brand-50 text-lg text-brand-600">{f.icon}</div>
@@ -246,6 +301,8 @@ export function LandingPage() {
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Product</div>
             <ul className="mt-3 space-y-2 text-ink-300">
+              <li><a href="#problems" className="hover:text-ink-50">Why Scout</a></li>
+              <li><a href="#visibility" className="hover:text-ink-50">AI visibility</a></li>
               <li><a href="#how-it-works" className="hover:text-ink-50">How it works</a></li>
               <li><a href="#features" className="hover:text-ink-50">Features</a></li>
               <li><a href="#pricing" className="hover:text-ink-50">Pricing</a></li>
