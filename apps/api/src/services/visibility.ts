@@ -71,6 +71,11 @@ export async function runVisibilityPrompt(
 
   let answer = "";
   let error: string | null = null;
+  // Snapshot before the call: the provider self-heals onto a different model when the
+  // configured one is unavailable, so reading provider.model afterwards would record the
+  // replacement on a run that actually failed on the original. The stored model must be
+  // the one the attempt used, or the run history cannot be trusted for forensics.
+  const attemptedModel = provider.model;
   try {
     answer = await provider.complete(
       [
@@ -79,10 +84,18 @@ export async function runVisibilityPrompt(
         { role: "system", content: "Answer the user's question directly and concretely, as you normally would. Name specific products or vendors where relevant." },
         { role: "user", content: prompt.text },
       ],
-      { maxTokens: 900, temperature: 0.7 },
+      { maxTokens: 1600, temperature: 0.7 },
     );
   } catch (e) {
     error = (e as Error).message.slice(0, 500);
+  }
+
+  // An empty body with no exception is not the engine declining - it is the engine
+  // returning nothing, which happens when a reasoning model spends its whole token budget
+  // before emitting content. Recording it as a refusal would blame the engine's judgement
+  // for what is really a configuration problem, and hide it from engine health.
+  if (!error && answer.trim().length === 0) {
+    error = `${provider.name} returned an empty completion (model ${provider.model}); likely token budget exhausted before any content was produced`;
   }
 
   const analysis = analyzeAnswer(answer, { brand: cfg.brand, competitors: cfg.competitors, others: opts.others });
@@ -92,7 +105,8 @@ export async function runVisibilityPrompt(
       orgId: orgIdValue,
       promptId: prompt.id,
       engine: provider.name,
-      model: provider.model,
+      // The model actually used for this attempt, not whatever the provider healed onto.
+      model: error ? attemptedModel : provider.model,
       answer,
       analysis: analysis as unknown as Record<string, unknown>,
       mentioned: !!analysis.brand,
