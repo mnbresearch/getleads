@@ -492,3 +492,82 @@ describe("v2 signals", () => {
     expect(normalizePhone("9876543210")).toBe("919876543210");
   });
 });
+
+describe("visibility prompt templates", () => {
+  const ctx = { brand: "Scout", category: "B2B lead generation", competitors: ["Apollo", "Clay"], audience: "VP Sales", problem: "stale lead lists" };
+
+  it("starter pack never names the brand being tracked", async () => {
+    const { starterPack } = await import("./visibility/templates.js");
+    // The whole measurement is invalid if the question names you: the engine will mention
+    // you because you asked about you, not because a buyer would have found you.
+    for (const p of starterPack(ctx)) expect(p.text.toLowerCase()).not.toContain("scout");
+  });
+
+  it("starter pack covers every intent, not just the flattering ones", async () => {
+    const { starterPack, intentCoverage } = await import("./visibility/templates.js");
+    for (const row of intentCoverage(starterPack(ctx))) expect(row.count).toBeGreaterThan(0);
+  });
+
+  it("starter pack degrades to category questions when no competitors are configured", async () => {
+    const { starterPack } = await import("./visibility/templates.js");
+    const p = starterPack({ brand: "Scout", category: "CRM" });
+    expect(p.length).toBeGreaterThanOrEqual(4);
+    expect(p.every((x) => x.text.trim().length > 0)).toBe(true);
+  });
+
+  it("rejects a generated question that names the brand", async () => {
+    const { validatePrompts } = await import("./visibility/templates.js");
+    const r = validatePrompts(
+      [
+        { text: "Is Scout better than Apollo for outbound?", topic: "x", intent: "comparison", rationale: "" },
+        { text: "What is the best B2B prospecting tool?", topic: "x", intent: "category", rationale: "" },
+      ],
+      { brand: "Scout" },
+    );
+    expect(r.kept).toHaveLength(1);
+    expect(r.rejected[0].reason).toContain("names Scout");
+  });
+
+  it("does not reject a question that merely contains the brand as a substring", async () => {
+    const { validatePrompts } = await import("./visibility/templates.js");
+    // "Scouting" is not "Scout"; a naive includes() check would drop a valid question.
+    const r = validatePrompts([{ text: "What are the best talent scouting platforms?", topic: "x", intent: "category", rationale: "" }], { brand: "Scout" });
+    expect(r.kept).toHaveLength(1);
+  });
+
+  it("collapses reworded duplicates and questions already tracked", async () => {
+    const { validatePrompts } = await import("./visibility/templates.js");
+    const r = validatePrompts(
+      [
+        { text: "What is the best B2B lead generation tool?", topic: "x", intent: "category", rationale: "" },
+        { text: "The best B2B lead generation tool?", topic: "x", intent: "category", rationale: "" },
+        { text: "Which CRM integrates with Slack?", topic: "x", intent: "category", rationale: "" },
+      ],
+      { brand: "Scout" },
+      ["which crm integrates with slack?"],
+    );
+    expect(r.kept).toHaveLength(1);
+    expect(r.rejected.map((x) => x.reason)).toEqual(["duplicate of a question already tracked", "duplicate of a question already tracked"]);
+  });
+
+  it("parses model output wrapped in a code fence with a preamble", async () => {
+    const { parseGeneratedPrompts } = await import("./visibility/templates.js");
+    const raw = 'Here you go:\n```json\n[{"text":"What is the best CRM for startups?","topic":"category","intent":"category","rationale":"why"}]\n```';
+    const p = parseGeneratedPrompts(raw);
+    expect(p).toHaveLength(1);
+    expect(p[0].intent).toBe("category");
+  });
+
+  it("returns nothing rather than guessing when output is not parseable", async () => {
+    const { parseGeneratedPrompts } = await import("./visibility/templates.js");
+    expect(parseGeneratedPrompts("I cannot help with that.")).toEqual([]);
+    expect(parseGeneratedPrompts("[{broken json")).toEqual([]);
+  });
+
+  it("coerces a bogus intent instead of trusting the model's value", async () => {
+    const { parseGeneratedPrompts } = await import("./visibility/templates.js");
+    const p = parseGeneratedPrompts('[{"text":"What is the best CRM?","intent":"totally-made-up"}]');
+    expect(p[0].intent).toBe("category");
+    expect(p[0].topic).toBe("category");
+  });
+});

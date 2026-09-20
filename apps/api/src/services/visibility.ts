@@ -1,4 +1,4 @@
-import { and, desc, eq, getDb, organizations, sql, visibilityPrompts, visibilityRuns } from "@prospex/db";
+import { and, desc, eq, getDb, icps, organizations, sql, visibilityPrompts, visibilityRuns, type IcpCriteria } from "@prospex/db";
 import {
   analyzeAnswer,
   availableAiProvidersForPlan,
@@ -8,8 +8,15 @@ import {
   metricsByEngine,
   visibilityGaps,
   visibilityMetrics,
+  intentCoverage,
+  parseGeneratedPrompts,
+  starterPack,
+  templateBrief,
+  validatePrompts,
   type AiProvider,
   type BrandSpec,
+  type PromptTemplate,
+  type TemplateContext,
   type VisibilityObservation,
 } from "@prospex/core";
 
@@ -294,4 +301,106 @@ export async function knownBrands(db: ReturnType<typeof getDb>["db"], orgIdValue
     .sort((a, b) => b[1] - a[1])
     .slice(0, limit)
     .map(([n]) => n);
+}
+
+/**
+ * Suggest the questions this org should be tracking.
+ *
+ * This closes the gap named in VISION.md: the prompts worth tracking are derivable from
+ * the ICP that is already producing replies, rather than guessed in a keyword tool. The
+ * ICP is the honest input - it is what the org told us about who they sell to, refined by
+ * outcomes - so the suggested questions are the ones their actual buyers would ask.
+ *
+ * `source` is reported back rather than hidden. A caller that asked for AI-written
+ * questions and silently got the deterministic pack would be misled about what it is
+ * looking at, and "the AI wrote this" is exactly the claim that has to stay true.
+ */
+export async function suggestPrompts(
+  db: ReturnType<typeof getDb>["db"],
+  orgIdValue: string,
+  opts: { plan?: string; useAi?: boolean; category?: string } = {},
+): Promise<{
+  source: "ai" | "starter";
+  prompts: PromptTemplate[];
+  rejected: { text: string; reason: string }[];
+  coverage: { intent: string; count: number }[];
+  note?: string;
+}> {
+  const cfg = await visibilityConfig(db, orgIdValue);
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgIdValue) });
+
+  // The ICP is the org's own description of its buyer. Prefer it over anything inferred.
+  const icp = await db.query.icps.findFirst({ where: eq(icps.orgId, orgIdValue), orderBy: desc(icps.updatedAt) });
+  const criteria = (icp?.criteria ?? {}) as IcpCriteria;
+  const audience = [criteria.titles?.[0], criteria.industries?.[0] ? `${criteria.industries[0]} companies` : null]
+    .filter(Boolean)
+    .join(" at ") || null;
+
+  const ctx: TemplateContext = {
+    brand: cfg.brand.name,
+    category: opts.category?.trim() || criteria.keywords?.[0] || icp?.name || org?.name || "software",
+    competitors: cfg.competitors.map((c) => c.name),
+    audience,
+    problem: icp?.description ?? null,
+  };
+
+  const existing = await db
+    .select({ text: visibilityPrompts.text })
+    .from(visibilityPrompts)
+    .where(eq(visibilityPrompts.orgId, orgIdValue));
+  const existingTexts = existing.map((r) => r.text);
+
+  const starter = validatePrompts(starterPack(ctx), ctx, existingTexts);
+
+  if (!opts.useAi) {
+    return { source: "starter", prompts: starter.kept, rejected: starter.rejected, coverage: intentCoverage(starter.kept) };
+  }
+
+  const provider = availableAiProvidersForPlan(opts.plan ?? "free")[0];
+  if (!provider) {
+    return {
+      source: "starter",
+      prompts: starter.kept,
+      rejected: starter.rejected,
+      coverage: intentCoverage(starter.kept),
+      note: "No AI provider is configured, so these are the deterministic starter questions.",
+    };
+  }
+
+  const brief = templateBrief(ctx);
+  let generated: PromptTemplate[] = [];
+  let failure: string | null = null;
+  try {
+    const raw = await provider.complete(
+      [
+        { role: "system", content: brief.system },
+        { role: "user", content: brief.user },
+      ],
+      { maxTokens: 1400, temperature: 0.8 },
+    );
+    generated = parseGeneratedPrompts(raw);
+  } catch (e) {
+    failure = (e as Error).message.slice(0, 200);
+  }
+
+  // Model output is untrusted text: it is run through the same validation as anything a
+  // user pastes in, including the rule that a question must not name the brand.
+  const checked = validatePrompts(generated, ctx, existingTexts);
+
+  // A thin or empty generation falls back rather than handing over two usable questions
+  // and calling it a set. The starter pack is a worse set of questions than a good
+  // generation and a much better one than a failed generation.
+  if (checked.kept.length < 4) {
+    return {
+      source: "starter",
+      prompts: starter.kept,
+      rejected: [...checked.rejected, ...starter.rejected],
+      coverage: intentCoverage(starter.kept),
+      note: failure
+        ? `The model call failed (${failure}), so these are the deterministic starter questions.`
+        : `The model returned ${checked.kept.length} usable question(s), too few to be a set, so these are the deterministic starter questions.`,
+    };
+  }
+
+  return { source: "ai", prompts: checked.kept, rejected: checked.rejected, coverage: intentCoverage(checked.kept) };
 }

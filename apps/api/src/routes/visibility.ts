@@ -4,7 +4,7 @@ import { z } from "zod";
 import { and, consume, desc, eq, getDb, organizations, visibilityPrompts, visibilityRuns } from "@prospex/db";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enginesForPlan, knownBrands, observationsFor, sampleAcrossEngines, saveVisibilityConfig, visibilityConfig, visibilityOverview } from "../services/visibility.js";
+import { enginesForPlan, knownBrands, observationsFor, sampleAcrossEngines, saveVisibilityConfig, suggestPrompts, visibilityConfig, visibilityOverview } from "../services/visibility.js";
 
 /**
  * AI visibility (AEO/GEO).
@@ -112,6 +112,61 @@ visibilityRoutes.post("/prompts/:id/run", zValidator("json", z.object({ samples:
         : undefined,
   });
 });
+
+/**
+ * Suggest what to track.
+ *
+ * `ai=true` has the model write the set from this org's own brand, competitors and ICP;
+ * otherwise a deterministic pack is returned. Either way the response says which one it
+ * is, and every suggestion has already been validated - notably against naming the brand,
+ * since a question that names you guarantees you appear and measures nothing.
+ */
+visibilityRoutes.post(
+  "/prompts/suggest",
+  zValidator("json", z.object({ ai: z.boolean().default(false), category: z.string().max(120).optional() }).optional()),
+  async (c) => {
+    const oid = orgId(c);
+    const { db } = getDb();
+    const body = c.req.valid("json") ?? { ai: false };
+    const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+    // One model call, charged like any other.
+    if (body.ai) await consume(db, oid, "aiMessages", 1).catch(() => {});
+    return c.json(await suggestPrompts(db, oid, { plan: org?.plan ?? "free", useAi: body.ai, category: body.category }));
+  },
+);
+
+/** Install a reviewed set in one call, so accepting suggestions is not 10 round trips. */
+visibilityRoutes.post(
+  "/prompts/bulk",
+  zValidator(
+    "json",
+    z.object({
+      prompts: z
+        .array(z.object({ text: z.string().min(5).max(500), topic: z.string().max(80).optional() }))
+        .min(1)
+        .max(25),
+      samplesPerRun: z.number().int().min(1).max(10).default(3),
+    }),
+  ),
+  async (c) => {
+    const oid = orgId(c);
+    const { db } = getDb();
+    const body = c.req.valid("json");
+
+    // Re-check against what is already tracked. The client sends back a set it was shown
+    // moments ago, and the user may have added one of them by hand in between.
+    const existing = await db.select({ text: visibilityPrompts.text }).from(visibilityPrompts).where(eq(visibilityPrompts.orgId, oid));
+    const seen = new Set(existing.map((r) => r.text.trim().toLowerCase()));
+    const fresh = body.prompts.filter((p) => !seen.has(p.text.trim().toLowerCase()));
+    if (fresh.length === 0) return c.json({ created: [], skipped: body.prompts.length });
+
+    const rows = await db
+      .insert(visibilityPrompts)
+      .values(fresh.map((p) => ({ orgId: oid, text: p.text.trim(), topic: p.topic, samplesPerRun: body.samplesPerRun })))
+      .returning();
+    return c.json({ created: rows, skipped: body.prompts.length - fresh.length }, 201);
+  },
+);
 
 /** Which engines "AI visibility" actually covers for this org right now. */
 visibilityRoutes.get("/engines", async (c) => {

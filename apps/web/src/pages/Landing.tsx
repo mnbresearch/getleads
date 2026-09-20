@@ -46,6 +46,45 @@ const features = [
   { icon: "⚡", title: "Built for AI agents", desc: "A first-class MCP server and REST API, so your agents can prospect, enrich and send with the same tools your reps use." },
 ];
 
+/**
+ * Comparison matrix. Rows are what Scout does; columns are categories rather than named
+ * vendors, and anything uncertain says "varies" rather than asserting a competitor's
+ * behaviour we have not verified.
+ */
+const COMPARE_COLS = ["Scout", "Prospecting tools", "AI visibility tools", "SEO / keyword tools"] as const;
+const compare: { row: string; cells: (true | false | "varies")[] }[] = [
+  { row: "Finds and verifies buyers from live sources", cells: [true, true, false, false] },
+  { row: "Writes outreach from real account research", cells: [true, true, false, false] },
+  { row: "Measures what AI answers say about you", cells: [true, false, true, "varies"] },
+  { row: "Reports per engine, not one blended number", cells: [true, false, "varies", false] },
+  { row: "Confidence intervals and sample sizes on every rate", cells: [true, false, "varies", false] },
+  { row: "Keeps raw answers so past data can be recomputed", cells: [true, false, "varies", false] },
+  { row: "Writes the tracked questions from your own ICP", cells: [true, false, false, false] },
+  { row: "Outbound outcomes and AI answers in one database", cells: [true, false, false, false] },
+];
+
+/** The AI does work here that a person would otherwise do badly or not at all. */
+const aiWork = [
+  {
+    label: "Writes the questions",
+    title: "Prompt sets, generated from your ICP",
+    body: "Most tools hand you an empty box and let you track your own brand name, which you always win and no buyer ever asks. Scout reads your brand, rivals and ICP and writes the category, comparison and problem questions a real buyer would type.",
+    guard: "Every generated question is validated before it is stored, including a rule that it must not name you.",
+  },
+  {
+    label: "Reads the answers",
+    title: "Brand mentions parsed, not keyword-matched",
+    body: "Each answer is parsed for who was named, in what order, and who was linked. Aliases resolve to one brand and overlapping names are not double counted, so share of voice is computed over mention slots rather than raw string hits.",
+    guard: "Refusals and errors are excluded from the denominator instead of being counted as absence.",
+  },
+  {
+    label: "Writes the outreach",
+    title: "Drafts built from what was actually found",
+    body: "Account research first, draft second. Variants are A/B tested and the winner is chosen when the intervals separate, not when one is briefly ahead.",
+    guard: "The ICP is reshaped by real reply outcomes, so the targeting learns instead of staying as first typed.",
+  },
+];
+
 const steps = [
   { n: "01", title: "Describe who you're after", desc: "Titles, industries, company size, tech stack, or plain language. Scout turns it into a live search." },
   { n: "02", title: "Scout finds, verifies and ranks", desc: "Every result is enriched, checked and scored against your ICP before it ever reaches your list." },
@@ -158,8 +197,9 @@ export function LandingPage() {
           <Logo size={28} textClassName="text-lg" />
           <nav className="hidden items-center gap-6 text-sm text-ink-300 sm:flex">
             <a href="#problems" className="hover:text-ink-50">Why Scout</a>
+            <a href="#ai" className="hover:text-ink-50">The AI layer</a>
             <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
-            <a href="#features" className="hover:text-ink-50">Features</a>
+            <a href="#compare" className="hover:text-ink-50">Compare</a>
             <a href="#pricing" className="hover:text-ink-50">Pricing</a>
           </nav>
           <div className="flex items-center gap-3">
@@ -246,6 +286,109 @@ export function LandingPage() {
           </div>
         </section>
 
+
+        <section id="ai" className="scroll-mt-24 pb-24">
+          <div className="mx-auto max-w-2xl text-center">
+            <span className="badge border border-black/10 bg-black/5 text-ink-300">Where the AI actually does the work</span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">It writes the questions, not just the emails</h2>
+            <p className="mt-3 text-ink-300">
+              Three places Scout does work a person would otherwise do badly, or skip. Each one ships with the guardrail
+              that keeps it honest.
+            </p>
+          </div>
+          <div className="mt-14 grid grid-cols-1 gap-5 lg:grid-cols-3">
+            {aiWork.map((a) => (
+              <div key={a.title} className="card flex flex-col p-6 transition hover:-translate-y-0.5 hover:shadow-lg">
+                <span className="badge w-fit bg-brand-50 text-brand-700">{a.label}</span>
+                <div className="mt-3 text-lg font-semibold leading-snug text-ink-50">{a.title}</div>
+                <p className="mt-2 flex-1 text-sm text-ink-400">{a.body}</p>
+                <div className="mt-4 flex items-start gap-2 border-t border-black/[0.06] pt-3 text-xs text-ink-300">
+                  <span className="mt-0.5 shrink-0 text-brand-600">&#9673;</span>
+                  <span>{a.guard}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="card mt-6 overflow-hidden p-0">
+            <div className="border-b border-black/[0.06] px-6 py-4">
+              <div className="font-semibold text-ink-50">One click, a tracked set worth measuring</div>
+              <p className="mt-1 text-sm text-ink-400">
+                A generated set, reviewed before anything is stored. If the model returns too little to be a set, Scout
+                says so and falls back rather than passing a thin result off as generated.
+              </p>
+            </div>
+            <ul className="divide-y divide-black/[0.05] text-sm">
+              {[
+                { q: "What is the best B2B lead generation platform for small sales teams?", tag: "category" },
+                { q: "What are the top alternatives to Apollo?", tag: "alternative" },
+                { q: "Apollo vs Clay: which is better for outbound in 2026?", tag: "comparison" },
+                { q: "How do teams usually deal with lead lists going stale?", tag: "problem" },
+                { q: "What should I look for when choosing a prospecting tool?", tag: "evaluation" },
+              ].map((r) => (
+                <li key={r.q} className="flex items-center justify-between gap-3 px-6 py-3">
+                  <span className="min-w-0 text-ink-200">{r.q}</span>
+                  <span className="badge shrink-0 bg-black/5 text-ink-400">{r.tag}</span>
+                </li>
+              ))}
+            </ul>
+            <div className="border-t border-black/[0.06] bg-black/[0.015] px-6 py-3 text-xs text-ink-400">
+              Not one of them names you. A question that names you guarantees you appear, which measures the question
+              rather than your visibility.
+            </div>
+          </div>
+        </section>
+
+        <section id="compare" className="scroll-mt-24 pb-24">
+          <div className="mx-auto max-w-2xl text-center">
+            <span className="badge border border-black/10 bg-black/5 text-ink-300">Why Scout instead of the alternatives</span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Each category owns half the problem</h2>
+            <p className="mt-3 text-ink-300">
+              Prospecting tools know who you contacted. Visibility tools know what the AI said. Neither holds both, which
+              is why nobody can tell you whether being cited actually converts.
+            </p>
+          </div>
+          <div className="card mt-12 overflow-x-auto">
+            <table className="w-full min-w-[620px] text-sm">
+              <thead>
+                <tr className="border-b border-black/[0.06]">
+                  <th className="px-5 py-3 text-left text-xs font-semibold uppercase tracking-wide text-ink-400">Capability</th>
+                  {COMPARE_COLS.map((c) => (
+                    <th
+                      key={c}
+                      className={`px-4 py-3 text-center text-xs font-semibold uppercase tracking-wide ${c === "Scout" ? "bg-brand-50/60 text-brand-700" : "text-ink-400"}`}
+                    >
+                      {c}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-black/[0.05]">
+                {compare.map((r) => (
+                  <tr key={r.row}>
+                    <td className="px-5 py-3 text-ink-200">{r.row}</td>
+                    {r.cells.map((cell, i) => (
+                      <td key={i} className={`px-4 py-3 text-center ${i === 0 ? "bg-brand-50/40" : ""}`}>
+                        {cell === true ? (
+                          <span className="font-semibold text-brand-600">&#10003;</span>
+                        ) : cell === "varies" ? (
+                          <span className="text-xs text-ink-400">varies</span>
+                        ) : (
+                          <span className="text-ink-600">&mdash;</span>
+                        )}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          <p className="mt-4 text-center text-xs text-ink-500">
+            Columns are categories, not specific vendors, and "varies" means exactly that. Individual products differ, so
+            check the one you are comparing against.
+          </p>
+        </section>
+
         <section id="how-it-works" className="scroll-mt-24 pb-24">
           <div className="mx-auto max-w-2xl text-center">
             <span className="badge border border-black/10 bg-black/5 text-ink-300">How it works</span>
@@ -302,7 +445,9 @@ export function LandingPage() {
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Product</div>
             <ul className="mt-3 space-y-2 text-ink-300">
               <li><a href="#problems" className="hover:text-ink-50">Why Scout</a></li>
+              <li><a href="#ai" className="hover:text-ink-50">The AI layer</a></li>
               <li><a href="#visibility" className="hover:text-ink-50">AI visibility</a></li>
+              <li><a href="#compare" className="hover:text-ink-50">Compare</a></li>
               <li><a href="#how-it-works" className="hover:text-ink-50">How it works</a></li>
               <li><a href="#features" className="hover:text-ink-50">Features</a></li>
               <li><a href="#pricing" className="hover:text-ink-50">Pricing</a></li>

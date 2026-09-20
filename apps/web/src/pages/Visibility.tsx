@@ -25,6 +25,7 @@ export function VisibilityPage() {
   const [engines, setEngines] = useState<{ engine: string; model: string }[]>([]);
   const [cfgOpen, setCfgOpen] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
+  const [suggestOpen, setSuggestOpen] = useState(false);
   const [busy, setBusy] = useState<string | null>(null);
   const { toast, Toast } = useToast();
 
@@ -157,9 +158,26 @@ export function VisibilityPage() {
       )}
 
       <div className="card mt-4 p-4">
-        <div className="mb-2 font-medium">Tracked questions</div>
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div className="font-medium">Tracked questions</div>
+          {prompts.length > 0 && (
+            <div className="flex gap-2">
+              <button className="btn-secondary" onClick={() => setSuggestOpen(true)}>Suggest more</button>
+              <button className="btn-secondary" onClick={() => setAddOpen(true)}>Add one</button>
+            </div>
+          )}
+        </div>
         {prompts.length === 0 ? (
-          <Empty title="No questions tracked yet" hint="Add the questions your buyers actually ask an AI before they buy, like 'best B2B lead generation tools for small teams'." action={<button className="btn-primary" onClick={() => setAddOpen(true)}>Track a question</button>} />
+          <Empty
+            title="No questions tracked yet"
+            hint="Scout can write the set for you from your brand, your rivals and your ICP, so you are not guessing in a keyword tool."
+            action={
+              <div className="flex flex-wrap items-center justify-center gap-2">
+                <button className="btn-primary" onClick={() => setSuggestOpen(true)}>Suggest questions</button>
+                <button className="btn-secondary" onClick={() => setAddOpen(true)}>Add one myself</button>
+              </div>
+            }
+          />
         ) : (
           <ul className="divide-y divide-slate-100 text-sm">
             {prompts.map((p) => (
@@ -177,6 +195,7 @@ export function VisibilityPage() {
 
       <ConfigModal open={cfgOpen} onClose={() => setCfgOpen(false)} onSaved={() => { setCfgOpen(false); load(); }} toast={toast} />
       <AddPromptModal open={addOpen} onClose={() => setAddOpen(false)} onSaved={() => { setAddOpen(false); load(); }} toast={toast} />
+      <SuggestModal open={suggestOpen} onClose={() => setSuggestOpen(false)} onSaved={() => { setSuggestOpen(false); load(); }} toast={toast} />
     </Page>
   );
 }
@@ -250,6 +269,91 @@ function AddPromptModal({ open, onClose, onSaved, toast }: { open: boolean; onCl
           <p className="mt-1 text-xs text-ink-400">Per engine, per day. Every configured engine is sampled this many times, so the per-engine denominators stay balanced. Below about 20 answers for an engine, no rate is reported for it.</p>
         </div>
         <button className="btn-primary w-full justify-center" disabled={busy || text.trim().length < 5} onClick={save}>{busy ? "Saving…" : "Track"}</button>
+      </div>
+    </Modal>
+  );
+}
+
+interface Suggestion { text: string; topic: string; intent: string; rationale: string }
+
+/**
+ * Suggested questions.
+ *
+ * Shows where each set came from, because "the AI wrote these" is a claim that has to
+ * stay true: a generation that failed and fell back to the deterministic pack says so
+ * instead of passing the pack off as AI output. Nothing is installed without review.
+ */
+function SuggestModal({ open, onClose, onSaved, toast }: { open: boolean; onClose: () => void; onSaved: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  const [items, setItems] = useState<Suggestion[] | null>(null);
+  const [source, setSource] = useState<"ai" | "starter">("starter");
+  const [note, setNote] = useState<string | undefined>();
+  const [picked, setPicked] = useState<Record<string, boolean>>({});
+  const [busy, setBusy] = useState(false);
+
+  const fetchSet = async (ai: boolean) => {
+    setBusy(true);
+    try {
+      const r = await apiFetch<{ source: "ai" | "starter"; prompts: Suggestion[]; note?: string }>("POST", "/v1/visibility/prompts/suggest", { ai });
+      setItems(r.prompts);
+      setSource(r.source);
+      setNote(r.note);
+      setPicked(Object.fromEntries(r.prompts.map((p) => [p.text, true])));
+    } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
+  };
+
+  useEffect(() => { if (open && items === null) void fetchSet(false); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const chosen = (items ?? []).filter((i) => picked[i.text]);
+
+  const install = async () => {
+    setBusy(true);
+    try {
+      const r = await apiFetch<{ created: unknown[]; skipped: number }>("POST", "/v1/visibility/prompts/bulk", {
+        prompts: chosen.map((c) => ({ text: c.text, topic: c.topic })),
+      });
+      toast(`Tracking ${r.created.length} new question${r.created.length === 1 ? "" : "s"}${r.skipped ? `, ${r.skipped} already tracked` : ""}`);
+      setItems(null);
+      onSaved();
+    } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Questions worth tracking">
+      <p className="text-sm text-ink-400">
+        The questions your buyers ask never name you. Tracking your own name measures nothing, so these are category,
+        comparison and problem questions where you may be missing today.
+      </p>
+
+      <div className="mt-3 flex flex-wrap items-center gap-2">
+        <button className="btn-secondary" disabled={busy} onClick={() => void fetchSet(false)}>Starter set</button>
+        <button className="btn-primary" disabled={busy} onClick={() => void fetchSet(true)}>Write them with AI</button>
+        <span className="text-xs text-ink-400">
+          {source === "ai" ? "Written by AI from your brand, rivals and ICP" : "Deterministic set, no AI call"}
+        </span>
+      </div>
+      {note && <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">{note}</div>}
+
+      {busy && items === null ? (
+        <div className="py-8"><Spinner /></div>
+      ) : (
+        <ul className="mt-3 max-h-80 space-y-2 overflow-y-auto">
+          {(items ?? []).map((i) => (
+            <li key={i.text} className="flex gap-2 rounded-lg border border-black/10 p-3">
+              <input type="checkbox" className="mt-1" checked={!!picked[i.text]} onChange={(e) => setPicked({ ...picked, [i.text]: e.target.checked })} />
+              <div className="min-w-0">
+                <div className="text-sm font-medium">{i.text}</div>
+                <div className="mt-0.5 text-xs text-ink-400">{i.intent}{i.rationale ? ` · ${i.rationale}` : ""}</div>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <div className="mt-4 flex justify-end gap-2">
+        <button className="btn-secondary" onClick={onClose}>Cancel</button>
+        <button className="btn-primary" disabled={busy || chosen.length === 0} onClick={install}>
+          {busy ? "Saving…" : `Track ${chosen.length} question${chosen.length === 1 ? "" : "s"}`}
+        </button>
       </div>
     </Modal>
   );
