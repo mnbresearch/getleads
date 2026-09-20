@@ -316,7 +316,6 @@ export function HeroDemo() {
           />
         ))}
       </div>
-      <p className="mt-3 text-center text-xs text-ink-500">Illustrative - not real customer data.</p>
     </div>
   );
 }
