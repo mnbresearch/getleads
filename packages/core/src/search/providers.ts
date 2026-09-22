@@ -3,6 +3,10 @@ import type { SearchResult } from "../types.js";
 import { fetchJson, fetchText, fetchWithTimeout } from "../util/http.js";
 import { meter } from "../util/meter.js";
 import { providerRecentlyRejected, recordHttp, reportProviderCall } from "../providers/health.js";
+// Keys arrive from dashboards and .env files, where a trailing newline or a wrapping pair of
+// quotes survives the paste. Cleaning at the edge means the value the provider sees is the
+// value the operator thinks they stored. See util/secret.ts.
+import { secret } from "../util/secret.js";
 
 export interface SearchProvider {
   name: string;
@@ -12,7 +16,7 @@ export interface SearchProvider {
 
 /** Brave Search API - no free tier since Feb 2026, $5/1,000 queries. Kept last in the
  * fallback chain (see defaultProviders below) so it's only used when free providers fall short. */
-export const braveProvider = (apiKey = process.env.BRAVE_SEARCH_API_KEY): SearchProvider => ({
+export const braveProvider = (apiKey = secret(process.env.BRAVE_SEARCH_API_KEY)): SearchProvider => ({
   name: "brave",
   available: () => !!apiKey,
   async search(query, opts = {}) {
@@ -28,7 +32,7 @@ export const braveProvider = (apiKey = process.env.BRAVE_SEARCH_API_KEY): Search
 });
 
 /** Google Programmable Search JSON API - 100 free queries/day. */
-export const googleCseProvider = (apiKey = process.env.GOOGLE_CSE_API_KEY, cx = process.env.GOOGLE_CSE_CX): SearchProvider => ({
+export const googleCseProvider = (apiKey = secret(process.env.GOOGLE_CSE_API_KEY), cx = secret(process.env.GOOGLE_CSE_CX)): SearchProvider => ({
   name: "google_cse",
   available: () => !!apiKey && !!cx,
   async search(query, opts = {}) {
@@ -53,7 +57,7 @@ export const googleCseProvider = (apiKey = process.env.GOOGLE_CSE_API_KEY, cx = 
  * provider that returns enough results, which makes this ordering the thing that decides
  * what a search actually costs.
  */
-export const serperProvider = (apiKey = process.env.SERPER_API_KEY): SearchProvider => ({
+export const serperProvider = (apiKey = secret(process.env.SERPER_API_KEY)): SearchProvider => ({
   name: "serper",
   available: () => !!apiKey,
   async search(query, opts = {}) {
@@ -80,7 +84,7 @@ export const serperProvider = (apiKey = process.env.SERPER_API_KEY): SearchProvi
 });
 
 /** SerpAPI - 100 free searches/month. */
-export const serpApiProvider = (apiKey = process.env.SERPAPI_KEY): SearchProvider => ({
+export const serpApiProvider = (apiKey = secret(process.env.SERPAPI_KEY)): SearchProvider => ({
   name: "serpapi",
   available: () => !!apiKey,
   async search(query, opts = {}) {

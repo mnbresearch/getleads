@@ -609,6 +609,46 @@ describe("provider health classification", () => {
     expect(classifyHttp(401, "").detail).toContain("401");
   });
 
+  it("strips the damage a clipboard does to a pasted key", async () => {
+    const { readSecret } = await import("./util/secret.js");
+    // The three shapes a dashboard actually stores when someone pastes a key.
+    expect(readSecret("abc123\n").value).toBe("abc123");
+    expect(readSecret('"abc123"').value).toBe("abc123");
+    expect(readSecret("  abc123  ").value).toBe("abc123");
+    expect(readSecret("'abc123'").value).toBe("abc123");
+    // A clean key is returned untouched, and reported as clean.
+    const clean = readSecret("abc123");
+    expect(clean.value).toBe("abc123");
+    expect(clean.shape).toEqual({ length: 6, hadWhitespace: false, hadQuotes: false, hasInnerWhitespace: false });
+  });
+
+  it("does not corrupt a value by stripping unmatched quotes", async () => {
+    const { readSecret } = await import("./util/secret.js");
+    // Half-cleaning is how a working credential gets broken by the code meant to fix it.
+    expect(readSecret('"abc123').value).toBe('"abc123');
+    expect(readSecret("abc123\"").value).toBe('abc123"');
+  });
+
+  it("reports what had to be stripped, and never the key itself", async () => {
+    const { readSecret, describeSecretShape } = await import("./util/secret.js");
+    const withNewline = describeSecretShape(readSecret("sk-live-abc123\n").shape);
+    expect(withNewline).toContain("whitespace");
+    expect(withNewline).not.toContain("sk-live-abc123");
+    // Inner whitespace survives trimming, so it is called out separately: that is a
+    // truncated or line-wrapped paste, not something cleaning can fix.
+    expect(describeSecretShape(readSecret("abc 123").shape)).toContain("truncated");
+    // A clean key still gets a sentence, because "the key is fine" is the answer that
+    // moves the investigation on to the provider's side.
+    expect(describeSecretShape(readSecret("abc123").shape)).toContain("exactly as stored");
+  });
+
+  it("treats an empty or quote-only value as no key at all", async () => {
+    const { readSecret } = await import("./util/secret.js");
+    expect(readSecret(undefined).value).toBeUndefined();
+    expect(readSecret("   ").value).toBeUndefined();
+    expect(readSecret('""').value).toBeUndefined();
+  });
+
   it("reads a 403 that names a credential problem as a rejected key, not a plan limit", async () => {
     const { classifyHttp } = await import("./providers/health.js");
     // Serper answers a bad key with 403 "Unauthorized." Reporting that as "your key is fine,

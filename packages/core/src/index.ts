@@ -32,3 +32,4 @@ export * from "./linkedin/resolve.js";
 export * from "./email/domainHealth.js";
 export * from "./channels/whatsapp.js";
 export * from "./util/meter.js";
+export * from "./util/secret.js";

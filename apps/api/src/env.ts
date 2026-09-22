@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { secret } from "@prospex/core";
 
 // Load .env from repo root or app dir without a dependency
 for (const p of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.env")]) {
@@ -30,21 +31,21 @@ export const env = {
   pilotMode: bool(process.env.PILOT_MODE, true),
   pilotInviteCode: process.env.PILOT_INVITE_CODE ?? "",
   defaultPlan: process.env.DEFAULT_PLAN ?? (bool(process.env.PILOT_MODE, true) ? "pilot" : "free"),
-  resendApiKey: process.env.RESEND_API_KEY,
+  resendApiKey: secret(process.env.RESEND_API_KEY),
   smtp: {
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT ?? 587),
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
+    user: secret(process.env.SMTP_USER),
+    pass: secret(process.env.SMTP_PASS),
     secure: bool(process.env.SMTP_SECURE, false),
   },
   mailFrom: process.env.MAIL_FROM ?? "Prospex <no-reply@localhost>",
-  hunterApiKey: process.env.HUNTER_API_KEY,
-  abstractEmailApiKey: process.env.ABSTRACT_EMAIL_API_KEY,
+  hunterApiKey: secret(process.env.HUNTER_API_KEY),
+  abstractEmailApiKey: secret(process.env.ABSTRACT_EMAIL_API_KEY),
   smtpProbeEnabled: bool(process.env.SMTP_PROBE_ENABLED, true),
   stripe: {
-    secretKey: process.env.STRIPE_SECRET_KEY,
-    webhookSecret: process.env.STRIPE_WEBHOOK_SECRET,
+    secretKey: secret(process.env.STRIPE_SECRET_KEY),
+    webhookSecret: secret(process.env.STRIPE_WEBHOOK_SECRET),
     // One STRIPE_PRICE_<PLAN> env var per plan id in packages/db/src/plans.ts (upper-cased),
     // e.g. STRIPE_PRICE_PRO, STRIPE_PRICE_STARTER, STRIPE_PRICE_GROWTH, STRIPE_PRICE_SCALE.
     // Legacy pricePro/priceBusiness kept for anything still reading them directly.
@@ -55,8 +56,8 @@ export const env = {
     },
   },
   google: {
-    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
-    clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+    clientId: secret(process.env.GOOGLE_OAUTH_CLIENT_ID),
+    clientSecret: secret(process.env.GOOGLE_OAUTH_CLIENT_SECRET),
   },
   internalToken: process.env.INTERNAL_TOKEN ?? "",
   adminEmail: (process.env.ADMIN_EMAIL ?? "").toLowerCase(),

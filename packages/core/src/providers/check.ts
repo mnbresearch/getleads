@@ -17,6 +17,7 @@
  */
 
 import { fetchWithTimeout } from "../util/http.js";
+import { readSecret, describeSecretShape, type SecretShape } from "../util/secret.js";
 import { classifyHttp, classifyThrown, explainOutcome, type ProviderOutcome } from "./health.js";
 
 export interface ProviderCheck {
@@ -32,6 +33,16 @@ export interface ProviderCheck {
   summary: string;
   /** Which endpoint was exercised, so the result can be traced. */
   endpoint?: string;
+  /**
+   * What the stored credential looked like: length, and whether quotes or whitespace had to
+   * be stripped off it. Never the credential. Present only when a key was configured.
+   *
+   * This exists because "the key is definitely correct" and "the provider rejects the key"
+   * are both usually true at once - the value is right and the thing we send is not.
+   */
+  keyShape?: SecretShape;
+  /** One sentence about keyShape, safe to display. */
+  keyNote?: string;
   ms: number;
 }
 
@@ -53,8 +64,10 @@ async function run(
   provider: string,
   endpoint: string,
   call: () => Promise<Response>,
+  shape: SecretShape | null = null,
 ): Promise<ProviderCheck> {
   const started = Date.now();
+  const keyBits = shape ? { keyShape: shape, keyNote: describeSecretShape(shape) } : {};
   try {
     const res = await call();
     const body = res.ok ? "" : await res.text().catch(() => "");
@@ -66,8 +79,14 @@ async function run(
       ok: outcome === "ok",
       status: res.status,
       detail,
-      summary: explainOutcome(outcome, detail || undefined),
+      // When a credential is refused, the shape of the stored value is the next thing worth
+      // knowing, so it goes in the sentence rather than three clicks away.
+      summary:
+        outcome === "auth" || outcome === "forbidden"
+          ? `${explainOutcome(outcome, detail || undefined)}${keyBits.keyNote ? ` - ${keyBits.keyNote}` : ""}`
+          : explainOutcome(outcome, detail || undefined),
       endpoint,
+      ...keyBits,
       ms: Date.now() - started,
     };
   } catch (e) {
@@ -80,13 +99,15 @@ async function run(
       detail,
       summary: explainOutcome(outcome, detail),
       endpoint,
+      ...keyBits,
       ms: Date.now() - started,
     };
   }
 }
 
 /** Apollo: one person-search page of a single row. */
-export async function checkApollo(apiKey = process.env.APOLLO_API_KEY): Promise<ProviderCheck> {
+export async function checkApollo(raw = process.env.APOLLO_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("apollo", "APOLLO_API_KEY");
   return run("apollo", "POST /api/v1/mixed_people/search", () =>
     fetchWithTimeout("https://api.apollo.io/api/v1/mixed_people/search", {
@@ -95,6 +116,7 @@ export async function checkApollo(apiKey = process.env.APOLLO_API_KEY): Promise<
       headers: { "x-api-key": apiKey, "content-type": "application/json" },
       body: JSON.stringify({ page: 1, per_page: 1 }),
     }),
+    shape,
   );
 }
 
@@ -105,7 +127,8 @@ export async function checkApollo(apiKey = process.env.APOLLO_API_KEY): Promise<
  * "working" while the enrichment half quietly 403s. Reported as its own line for that
  * reason: knowing which half you have is the actionable part.
  */
-export async function checkApolloEnrich(apiKey = process.env.APOLLO_API_KEY): Promise<ProviderCheck> {
+export async function checkApolloEnrich(raw = process.env.APOLLO_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("apollo-enrich", "APOLLO_API_KEY");
   const r = await run("apollo-enrich", "POST /api/v1/people/match", () =>
     fetchWithTimeout("https://api.apollo.io/api/v1/people/match?first_name=test&last_name=test&domain=example.com", {
@@ -113,6 +136,7 @@ export async function checkApolloEnrich(apiKey = process.env.APOLLO_API_KEY): Pr
       timeoutMs: TIMEOUT,
       headers: { "x-api-key": apiKey, "content-type": "application/json" },
     }),
+    shape,
   );
   // A match endpoint answering "nobody" for an invented person is a healthy endpoint.
   if (r.outcome === "not_found") return { ...r, ok: true, summary: "Working (no match for the probe, which is expected)" };
@@ -120,23 +144,27 @@ export async function checkApolloEnrich(apiKey = process.env.APOLLO_API_KEY): Pr
 }
 
 /** Hunter: domain-search capped to one result. */
-export async function checkHunter(apiKey = process.env.HUNTER_API_KEY): Promise<ProviderCheck> {
+export async function checkHunter(raw = process.env.HUNTER_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("hunter", "HUNTER_API_KEY");
   return run("hunter", "GET /v2/domain-search", () =>
     fetchWithTimeout(`https://api.hunter.io/v2/domain-search?domain=example.com&limit=1&api_key=${encodeURIComponent(apiKey)}`, {
       timeoutMs: TIMEOUT,
     }),
+    shape,
   );
 }
 
 /** PDL: person enrich with a deliberately unmatchable identity. */
-export async function checkPdl(apiKey = process.env.PDL_API_KEY): Promise<ProviderCheck> {
+export async function checkPdl(raw = process.env.PDL_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("pdl", "PDL_API_KEY");
   const r = await run("pdl", "GET /v5/person/enrich", () =>
     fetchWithTimeout(
       `https://api.peopledatalabs.com/v5/person/enrich?api_key=${encodeURIComponent(apiKey)}&email=probe%40example.com&min_likelihood=10`,
       { timeoutMs: TIMEOUT },
     ),
+    shape,
   );
   // PDL answers 404 when nobody matches. That is the endpoint working.
   if (r.outcome === "not_found") return { ...r, ok: true, summary: "Working (no match for the probe, which is expected)" };
@@ -145,9 +173,11 @@ export async function checkPdl(apiKey = process.env.PDL_API_KEY): Promise<Provid
 
 /** Google Programmable Search: one result. */
 export async function checkGoogleCse(
-  apiKey = process.env.GOOGLE_CSE_API_KEY,
-  cx = process.env.GOOGLE_CSE_CX,
+  rawKey = process.env.GOOGLE_CSE_API_KEY,
+  rawCx = process.env.GOOGLE_CSE_CX,
 ): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(rawKey);
+  const cx = readSecret(rawCx).value;
   if (!apiKey) return notConfigured("google_cse", "GOOGLE_CSE_API_KEY");
   if (!cx) return notConfigured("google_cse", "GOOGLE_CSE_CX");
   return run("google_cse", "GET /customsearch/v1", () =>
@@ -155,6 +185,7 @@ export async function checkGoogleCse(
       `https://www.googleapis.com/customsearch/v1?key=${encodeURIComponent(apiKey)}&cx=${encodeURIComponent(cx)}&q=test&num=1`,
       { timeoutMs: TIMEOUT },
     ),
+    shape,
   );
 }
 
@@ -164,7 +195,8 @@ export async function checkGoogleCse(
  * Costs one credit out of the 2,500 free ones, which is the cheapest honest way to prove the
  * key works.
  */
-export async function checkSerper(apiKey = process.env.SERPER_API_KEY): Promise<ProviderCheck> {
+export async function checkSerper(raw = process.env.SERPER_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("serper", "SERPER_API_KEY");
   return run("serper", "POST /search", () =>
     fetchWithTimeout("https://google.serper.dev/search", {
@@ -173,14 +205,17 @@ export async function checkSerper(apiKey = process.env.SERPER_API_KEY): Promise<
       headers: { "X-API-KEY": apiKey, "content-type": "application/json" },
       body: JSON.stringify({ q: "test", num: 1 }),
     }),
+    shape,
   );
 }
 
 /** SerpAPI, when configured as the paid search fallback. */
-export async function checkSerpApi(apiKey = process.env.SERPAPI_KEY): Promise<ProviderCheck> {
+export async function checkSerpApi(raw = process.env.SERPAPI_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("serpapi", "SERPAPI_KEY");
   return run("serpapi", "GET /search.json", () =>
     fetchWithTimeout(`https://serpapi.com/search.json?q=test&num=1&api_key=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT }),
+    shape,
   );
 }
 
@@ -195,10 +230,12 @@ export async function checkSerpApi(apiKey = process.env.SERPAPI_KEY): Promise<Pr
  */
 const SEND_ONLY = /restricted to only send|sending access|only send emails/i;
 
-export async function checkResend(apiKey = process.env.RESEND_API_KEY): Promise<ProviderCheck> {
+export async function checkResend(raw = process.env.RESEND_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("resend", "RESEND_API_KEY");
   const r = await run("resend", "GET /domains", () =>
     fetchWithTimeout("https://api.resend.com/domains", { timeoutMs: TIMEOUT, headers: { authorization: `Bearer ${apiKey}` } }),
+    shape,
   );
   if (r.outcome === "auth" && SEND_ONLY.test(r.detail)) {
     return { ...r, outcome: "ok", ok: true, summary: "Working (send-only key, which is the recommended setup)" };

@@ -11,6 +11,7 @@ import { splitName } from "../util/names.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { meter } from "../util/meter.js";
 import { recordHttp } from "./health.js";
+import { secret } from "../util/secret.js";
 
 export interface PeopleProviderQuery {
   titles?: string[];
@@ -45,7 +46,7 @@ export interface PeopleProvider {
 
 const APOLLO_SIZE_MAP: Record<string, string> = { "1-10": "1,10", "11-50": "11,50", "51-200": "51,200", "201-500": "201,500", "501-1000": "501,1000", "1001-5000": "1001,5000", "5000+": "5001,1000000" };
 
-export const apolloProvider = (apiKey = process.env.APOLLO_API_KEY): PeopleProvider => ({
+export const apolloProvider = (apiKey = secret(process.env.APOLLO_API_KEY)): PeopleProvider => ({
   name: "apollo",
   available: () => !!apiKey,
   async search(q) {
@@ -112,7 +113,7 @@ export const apolloProvider = (apiKey = process.env.APOLLO_API_KEY): PeopleProvi
   },
 });
 
-export const hunterProvider = (apiKey = process.env.HUNTER_API_KEY): PeopleProvider => ({
+export const hunterProvider = (apiKey = secret(process.env.HUNTER_API_KEY)): PeopleProvider => ({
   name: "hunter",
   available: () => !!apiKey,
   async search(q) {
@@ -134,7 +135,7 @@ export const hunterProvider = (apiKey = process.env.HUNTER_API_KEY): PeopleProvi
   },
 });
 
-export const pdlProvider = (apiKey = process.env.PDL_API_KEY): PeopleProvider => ({
+export const pdlProvider = (apiKey = secret(process.env.PDL_API_KEY)): PeopleProvider => ({
   name: "pdl",
   available: () => !!apiKey,
   async search() {
