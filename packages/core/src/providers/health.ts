@@ -122,8 +122,12 @@ export function classifyHttp(status: number, body = ""): { outcome: ProviderOutc
     return { outcome: "auth", detail: summary || "credential rejected (401); the API key is wrong, expired or revoked" };
   }
   if (status === 403) {
-    // Deliberately not folded into "auth": a new key will not fix a plan limit, and telling
-    // someone to rotate a working key is worse than telling them nothing.
+    // A 403 usually is a plan limit - Apollo says so in words - and folding those into "auth"
+    // would send someone to rotate a perfectly good key. But not every API uses 401 for a
+    // rejected credential: Serper answers a bad key with 403 "Unauthorized.", and reporting
+    // that as "the key is fine, upgrade your plan" is a worse lie than saying nothing, because
+    // it points at a bill instead of at the one-line fix. So the body decides.
+    if (looksLikeCredentialProblem(summary)) return { outcome: "auth", detail: summary };
     return { outcome: "forbidden", detail: summary || "authenticated but not permitted (403); usually the plan or key scope excludes this endpoint" };
   }
   if (status === 429) return { outcome: "rate_limit", detail: summary || "rate limited or out of quota (429)" };

@@ -609,6 +609,25 @@ describe("provider health classification", () => {
     expect(classifyHttp(401, "").detail).toContain("401");
   });
 
+  it("reads a 403 that names a credential problem as a rejected key, not a plan limit", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    // Serper answers a bad key with 403 "Unauthorized." Reporting that as "your key is fine,
+    // upgrade your plan" points the operator at a bill instead of at a one-line fix, which is
+    // the same class of lie this module exists to prevent - just pointed the other way.
+    expect(classifyHttp(403, "Unauthorized.").outcome).toBe("auth");
+    expect(classifyHttp(403, '{"message":"Invalid API key"}').outcome).toBe("auth");
+  });
+
+  it("still reads a plain plan limit as forbidden, so nobody rotates a working key", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    // Apollo and Google both 403 with prose that mentions "API" without meaning the credential.
+    expect(
+      classifyHttp(403, '{"error":"The api/v1/people/match API is not included in your Free plan. All paid plans include full API access."}').outcome,
+    ).toBe("forbidden");
+    expect(classifyHttp(403, '{"error":{"message":"This project does not have the access to Custom Search JSON API."}}').outcome).toBe("forbidden");
+    expect(classifyHttp(403).outcome).toBe("forbidden");
+  });
+
   it("truncates a huge error body rather than storing it whole", async () => {
     const { classifyHttp } = await import("./providers/health.js");
     expect(classifyHttp(500, "x".repeat(5000)).detail.length).toBeLessThanOrEqual(200);
