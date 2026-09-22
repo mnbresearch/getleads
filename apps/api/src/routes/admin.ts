@@ -221,13 +221,19 @@ adminRoutes.post("/tools/check", rateLimit({ perMinute: 3 }), async (c) => {
         recordProviderHealth({ provider: r.provider, outcome: r.outcome, status: r.status, detail: r.detail }).catch(() => {}),
       ),
   );
-  const broken = results.filter((r) => r.configured && !r.ok);
+  // Retired providers cannot pass and must not be counted as failures, or the summary line
+  // reports a permanent problem after every single check.
+  const registry = await getToolsSummary();
+  const retired = new Set(registry.filter((t) => t.retired).map((t) => t.provider));
+  const broken = results.filter((r) => r.configured && !r.ok && !retired.has(r.provider));
   return c.json({
     results,
     checkedAt: new Date().toISOString(),
-    summary: broken.length === 0
-      ? `All ${results.filter((r) => r.configured).length} configured providers responded successfully.`
-      : `${broken.length} of ${results.filter((r) => r.configured).length} configured providers did not: ${broken.map((b) => `${b.provider} (${b.outcome})`).join(", ")}.`,
+    retired: [...retired],
+    summary:
+      broken.length === 0
+        ? `All configured providers responded successfully${retired.size ? ` (${retired.size} retired provider(s) skipped)` : ""}.`
+        : `${broken.length} configured provider(s) did not: ${broken.map((b) => `${b.provider} (${b.outcome})`).join(", ")}.`,
   });
 });
 

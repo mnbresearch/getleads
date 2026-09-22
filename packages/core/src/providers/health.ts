@@ -61,6 +61,7 @@ export function setProviderHealthHook(fn: HealthHook) {
 /** Fire-and-forget: reporting must never break the request it is describing. */
 export function reportProviderCall(call: ProviderCall) {
   try {
+    noteForSkipping(call);
     hook(call);
   } catch {
     // health reporting is best-effort by design
@@ -168,6 +169,43 @@ export async function recordHttp(provider: string, res: Response): Promise<boole
 export function recordThrown(provider: string, e: unknown) {
   const { outcome, detail } = classifyThrown(e);
   reportProviderCall({ provider, outcome, detail });
+}
+
+/**
+ * Short-lived skip list for providers that just rejected us.
+ *
+ * A provider returning 401 or 403 will return it again for the next request and the one
+ * after. Google closed the Custom Search JSON API to new customers on 22 Sep 2026, so that
+ * provider now 403s permanently while still sitting first in the search chain - without
+ * this, every single search pays a round trip to a door that is never going to open.
+ *
+ * Deliberately time-boxed rather than permanent: plans get upgraded and keys get replaced,
+ * and a process that refuses to retry would hide a fix. Deliberately in memory rather than
+ * in the database: core has no DB dependency, and a restart re-probing once is correct.
+ */
+const SKIP_MS = 30 * 60 * 1000;
+const skipUntil = new Map<string, number>();
+
+/** True while a provider is in its cooling-off window after rejecting us. */
+export function providerRecentlyRejected(provider: string, now = Date.now()): boolean {
+  const until = skipUntil.get(provider);
+  if (until === undefined) return false;
+  if (now >= until) {
+    skipUntil.delete(provider);
+    return false;
+  }
+  return true;
+}
+
+/** Only credential and permission failures cool off; a timeout deserves an immediate retry. */
+function noteForSkipping(call: ProviderCall, now = Date.now()) {
+  if (call.outcome === "auth" || call.outcome === "forbidden") skipUntil.set(call.provider, now + SKIP_MS);
+  else if (call.outcome === "ok") skipUntil.delete(call.provider);
+}
+
+/** Testing seam: clears the cooling-off state. */
+export function resetProviderSkips() {
+  skipUntil.clear();
 }
 
 /** Human sentence for an outcome, used in the admin UI and in check results. */

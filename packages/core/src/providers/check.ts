@@ -158,6 +158,24 @@ export async function checkGoogleCse(
   );
 }
 
+/**
+ * Serper, the primary paid search provider since Google closed Custom Search to new customers.
+ *
+ * Costs one credit out of the 2,500 free ones, which is the cheapest honest way to prove the
+ * key works.
+ */
+export async function checkSerper(apiKey = process.env.SERPER_API_KEY): Promise<ProviderCheck> {
+  if (!apiKey) return notConfigured("serper", "SERPER_API_KEY");
+  return run("serper", "POST /search", () =>
+    fetchWithTimeout("https://google.serper.dev/search", {
+      method: "POST",
+      timeoutMs: TIMEOUT,
+      headers: { "X-API-KEY": apiKey, "content-type": "application/json" },
+      body: JSON.stringify({ q: "test", num: 1 }),
+    }),
+  );
+}
+
 /** SerpAPI, when configured as the paid search fallback. */
 export async function checkSerpApi(apiKey = process.env.SERPAPI_KEY): Promise<ProviderCheck> {
   if (!apiKey) return notConfigured("serpapi", "SERPAPI_KEY");
@@ -194,6 +212,7 @@ export const PROVIDER_CHECKS: { provider: string; label: string; run: () => Prom
   { provider: "hunter", label: "Hunter.io", run: () => checkHunter() },
   { provider: "pdl", label: "People Data Labs", run: () => checkPdl() },
   { provider: "google_cse", label: "Google Programmable Search", run: () => checkGoogleCse() },
+  { provider: "serper", label: "Serper", run: () => checkSerper() },
   { provider: "serpapi", label: "SerpAPI", run: () => checkSerpApi() },
   { provider: "resend", label: "Resend", run: () => checkResend() },
 ];

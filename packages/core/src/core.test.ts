@@ -791,3 +791,101 @@ describe("scraped search: reject decoy result sets", () => {
     expect(distinctiveTerms("best CRM for small business")).toEqual(["crm", "small", "business"]);
   });
 });
+
+describe("search provider chain after Google closed Custom Search", () => {
+  it("puts the cheapest provider first, because that ordering is what a search costs", async () => {
+    const { defaultProviders } = await import("./search/providers.js");
+    const order = defaultProviders().map((p) => p.name);
+    // webSearch stops at the first provider returning enough results, so this order decides
+    // the bill. Serper is ~30x cheaper per query than SerpAPI and must precede it.
+    expect(order.indexOf("serper")).toBeLessThan(order.indexOf("serpapi"));
+    expect(order.indexOf("serpapi")).toBeLessThan(order.indexOf("brave"));
+    // The keyless scrapes are last resorts, never ahead of a provider that returns real data.
+    expect(order.indexOf("brave")).toBeLessThan(order.indexOf("duckduckgo"));
+  });
+
+  it("only offers serper once a key exists", async () => {
+    const { serperProvider } = await import("./search/providers.js");
+    expect(serperProvider(undefined).available()).toBe(false);
+    expect(serperProvider("k").available()).toBe(true);
+  });
+
+  it("stops calling a provider that just rejected the credential", async () => {
+    const { reportProviderCall, providerRecentlyRejected, resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    expect(providerRecentlyRejected("google_cse")).toBe(false);
+
+    // Google's Custom Search closure is a permanent 403. Without this, every search pays a
+    // round trip to a door that will never open again.
+    reportProviderCall({ provider: "google_cse", outcome: "forbidden", status: 403 });
+    expect(providerRecentlyRejected("google_cse")).toBe(true);
+
+    reportProviderCall({ provider: "serper", outcome: "auth", status: 401 });
+    expect(providerRecentlyRejected("serper")).toBe(true);
+    resetProviderSkips();
+  });
+
+  it("does not cool off on a timeout, which deserves an immediate retry", async () => {
+    const { reportProviderCall, providerRecentlyRejected, resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    reportProviderCall({ provider: "serper", outcome: "network", detail: "aborted" });
+    expect(providerRecentlyRejected("serper")).toBe(false);
+    reportProviderCall({ provider: "serper", outcome: "server", status: 503 });
+    expect(providerRecentlyRejected("serper")).toBe(false);
+  });
+
+  it("lets a provider back in once it succeeds, and once the window expires", async () => {
+    const { reportProviderCall, providerRecentlyRejected, resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    reportProviderCall({ provider: "serper", outcome: "forbidden", status: 403 });
+    expect(providerRecentlyRejected("serper")).toBe(true);
+
+    // A plan upgrade or a replaced key must not be hidden by a process that refuses to retry.
+    reportProviderCall({ provider: "serper", outcome: "ok", status: 200 });
+    expect(providerRecentlyRejected("serper")).toBe(false);
+
+    reportProviderCall({ provider: "serper", outcome: "forbidden", status: 403 });
+    expect(providerRecentlyRejected("serper", Date.now() + 31 * 60 * 1000)).toBe(false);
+    resetProviderSkips();
+  });
+
+  it("skips a cooling-off provider when choosing who to search with", async () => {
+    const { webSearch } = await import("./search/index.js");
+    const { reportProviderCall, resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    const called: string[] = [];
+    const fake = (name: string, results: number) => ({
+      name,
+      available: () => true,
+      search: async () => {
+        called.push(name);
+        return Array.from({ length: results }, (_, i) => ({ title: `${name} ${i}`, url: `https://${name}.example/${i}`, snippet: "", provider: name }));
+      },
+    });
+
+    reportProviderCall({ provider: "dead", outcome: "forbidden", status: 403 });
+    const out = await webSearch(`unique-${Math.random()}`, { providers: [fake("dead", 5), fake("live", 5)] });
+    expect(called).toEqual(["live"]);
+    expect(out.length).toBe(5);
+    resetProviderSkips();
+  });
+});
+
+describe("retired providers", () => {
+  it("reports retirement rather than a fixable key problem", async () => {
+    const { keyStatusFrom } = await import("@prospex/db");
+    // Google closed Custom Search to new customers. The key still authenticates in the sense
+    // that Google recognises it; there is simply no access. Calling that "gated" would tell
+    // an operator to upgrade a plan that does not exist.
+    expect(keyStatusFrom(true, "forbidden", true)).toBe("retired");
+    expect(keyStatusFrom(true, "ok", true)).toBe("retired");
+    expect(keyStatusFrom(false, null, true)).toBe("retired");
+  });
+
+  it("leaves every other provider's status untouched", async () => {
+    const { keyStatusFrom } = await import("@prospex/db");
+    expect(keyStatusFrom(true, "forbidden", false)).toBe("gated");
+    expect(keyStatusFrom(true, "auth", false)).toBe("rejected");
+    expect(keyStatusFrom(true, null)).toBe("unverified");
+  });
+});

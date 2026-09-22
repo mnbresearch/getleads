@@ -743,6 +743,10 @@ export const toolRegistry = pgTable("tool_registry", {
   lastDetail: text("last_detail"),
   lastSeenAt: ts("last_seen_at"),
   lastOkAt: ts("last_ok_at"),
+  // Permanently unusable through no fault of the key (Google closed Custom Search to new
+  // customers in Sep 2026). Kept separate from a failing key so the admin stops asking for
+  // a fix that does not exist. See migration 0008.
+  retired: boolean("retired").notNull().default(false),
   createdAt: ts("created_at").notNull().defaultNow(),
   updatedAt: ts("updated_at").notNull().defaultNow(),
 });

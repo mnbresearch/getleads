@@ -42,8 +42,11 @@ services:
         sync: false
       - key: GEMINI_API_KEY
         sync: false
-      # Search - Google CSE is the primary free key (100/day); Brave has no free tier since
-      # Feb 2026 so it's left unset here on purpose (add it later as a paid top-up if needed)
+      # Search. Serper is the primary provider: Google closed Custom Search to new customers
+      # in Sep 2026, so GOOGLE_CSE_API_KEY only works for projects that already had access.
+      # Brave has had no free tier since Feb 2026 and is left unset on purpose.
+      - key: SERPER_API_KEY
+        sync: false
       - key: GOOGLE_CSE_API_KEY
         sync: false
       - key: GOOGLE_CSE_CX

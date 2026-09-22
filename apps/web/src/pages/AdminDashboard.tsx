@@ -39,8 +39,9 @@ type ToolSummary = {
   used: number;
   percentUsed: number | null;
   status: "ok" | "warning" | "critical" | "unmetered";
-  keyStatus: "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "erroring";
+  keyStatus: "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "erroring" | "retired";
   keyStatusLabel: string;
+  retired: boolean;
   lastOutcome: string | null;
   lastStatusCode: number | null;
   lastDetail: string | null;
@@ -63,6 +64,9 @@ const KEY_STATUS_STYLES: Record<ToolSummary["keyStatus"], string> = {
   gated: "bg-amber-50 text-amber-800",
   rate_limited: "bg-amber-50 text-amber-800",
   erroring: "bg-red-50 text-red-700",
+  // Grey, not red: there is nothing to fix, so it must not compete for attention with a
+  // key that genuinely needs replacing.
+  retired: "bg-black/5 text-ink-400",
 };
 
 const STATUS_STYLES: Record<string, string> = {
@@ -368,7 +372,12 @@ function ToolsTab() {
 
   if (!tools) return <div className="card p-5 text-sm text-ink-400">Loading…</div>;
 
-  const keyProblems = tools.filter((t) => t.keyStatus === "rejected" || t.keyStatus === "erroring" || t.keyStatus === "gated" || t.keyStatus === "rate_limited");
+  // Retired providers are deliberately excluded: a banner that keeps demanding a fix which
+  // does not exist teaches people to stop reading banners.
+  const keyProblems = tools.filter(
+    (t) => !t.retired && (t.keyStatus === "rejected" || t.keyStatus === "erroring" || t.keyStatus === "gated" || t.keyStatus === "rate_limited"),
+  );
+  const retired = tools.filter((t) => t.retired);
   const needsAttention = tools.filter((t) => t.status === "warning" || t.status === "critical");
   const byCategory = tools.reduce<Record<string, ToolSummary[]>>((acc, t) => {
     (acc[t.category] ??= []).push(t);
@@ -392,6 +401,20 @@ function ToolsTab() {
                 <span className="font-medium">{t.label}</span>: {t.keyStatusLabel}
                 {t.lastDetail ? ` - ${t.lastDetail}` : ""}
                 {t.keyStatus === "gated" ? " (the key is fine; a replacement will not help)" : ""}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {retired.length > 0 && (
+        <div className="card border border-black/10 bg-black/[0.02] p-4 text-sm text-ink-300">
+          <div className="font-semibold text-ink-100">Retired by the provider</div>
+          <ul className="mt-1 space-y-0.5">
+            {retired.map((t) => (
+              <li key={t.provider}>
+                <span className="font-medium">{t.label}</span>
+                {t.notes ? ` - ${t.notes}` : ""}
               </li>
             ))}
           </ul>

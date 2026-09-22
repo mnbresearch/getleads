@@ -77,9 +77,12 @@ export async function recordProviderHealth(call: { provider: string; outcome: st
  * them nothing. "unverified" is its own state rather than being rounded up to healthy,
  * because a key nothing has called yet is exactly the case this whole change exists for.
  */
-export type KeyStatus = "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "erroring";
+export type KeyStatus = "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "erroring" | "retired";
 
-export function keyStatusFrom(configured: boolean, lastOutcome: string | null): KeyStatus {
+export function keyStatusFrom(configured: boolean, lastOutcome: string | null, retired = false): KeyStatus {
+  // Retirement outranks everything, including a key that still technically authenticates:
+  // nothing an operator does brings the provider back, so asking them to try is noise.
+  if (retired) return "retired";
   if (!configured) return "not_configured";
   switch (lastOutcome) {
     case "ok":
@@ -109,6 +112,7 @@ export const KEY_STATUS_LABEL: Record<KeyStatus, string> = {
   gated: "Not on this plan",
   rate_limited: "Rate limited",
   erroring: "Erroring",
+  retired: "Retired by the provider",
 };
 
 export interface ToolSummary {
@@ -129,6 +133,8 @@ export interface ToolSummary {
   status: "ok" | "warning" | "critical" | "unmetered";
   keyStatus: KeyStatus;
   keyStatusLabel: string;
+  /** Permanently unusable through no fault of the key; excluded from "needs attention". */
+  retired: boolean;
   lastOutcome: string | null;
   lastStatusCode: number | null;
   lastDetail: string | null;
@@ -169,8 +175,9 @@ export async function getToolsSummary(): Promise<ToolSummary[]> {
       currentPeriodKey: period,
       used,
       percentUsed,
-      keyStatus: keyStatusFrom(configured, reg.lastOutcome ?? null),
-      keyStatusLabel: KEY_STATUS_LABEL[keyStatusFrom(configured, reg.lastOutcome ?? null)],
+      keyStatus: keyStatusFrom(configured, reg.lastOutcome ?? null, reg.retired ?? false),
+      keyStatusLabel: KEY_STATUS_LABEL[keyStatusFrom(configured, reg.lastOutcome ?? null, reg.retired ?? false)],
+      retired: reg.retired ?? false,
       lastOutcome: reg.lastOutcome ?? null,
       lastStatusCode: reg.lastStatus ?? null,
       lastDetail: reg.lastDetail ?? null,
