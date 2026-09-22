@@ -734,3 +734,60 @@ describe("provider checks: scoped credentials are not broken ones", () => {
     }
   });
 });
+
+describe("scraped search: reject decoy result sets", () => {
+  const R = (title: string, url = "https://example.com", snippet = "") => ({ title, url, snippet, provider: "bing_html" });
+
+  it("rejects the exact decoy Bing served for a real query", async () => {
+    const { resultsAnswerQuery } = await import("./search/providers.js");
+    // Verified live 22 Sep 2026: Bing echoed the full query but returned results for "best".
+    expect(
+      resultsAnswerQuery("best CRM for small business", [
+        R("Best Buy | Official Online Store"),
+        R("BEST Definition & Meaning - Merriam-Webster"),
+        R("Best - definition of best by The Free Dictionary"),
+      ]),
+    ).toBe(false);
+
+    // Same shape, second case: everything about Razorpay, nothing about fintech or Bengaluru.
+    expect(
+      resultsAnswerQuery("Razorpay fintech Bengaluru", [
+        R("Razorpay - Best Payment Solution for Online Payments"),
+        R("Razorpay Sign Up & Login - Access Your Dashboard"),
+      ]),
+    ).toBe(false);
+  });
+
+  it("keeps a genuine result set", async () => {
+    const { resultsAnswerQuery } = await import("./search/providers.js");
+    expect(
+      resultsAnswerQuery("best CRM for small business", [
+        R("10 Best CRM Software of 2026"),
+        R("Best Buy | Official Online Store"),
+      ]),
+    ).toBe(true);
+    // One good result among noise is enough; the bar is deliberately low so real sets pass.
+    expect(resultsAnswerQuery("Razorpay fintech Bengaluru", [R("Razorpay raises round"), R("Bengaluru startup news")])).toBe(true);
+  });
+
+  it("matches on snippet and url, not only title", async () => {
+    const { resultsAnswerQuery } = await import("./search/providers.js");
+    expect(resultsAnswerQuery("MNB Research automation", [R("Home", "https://x.com", "AI automation for SMEs")])).toBe(true);
+    expect(resultsAnswerQuery("MNB Research automation", [R("Home", "https://automation.example.com", "")])).toBe(true);
+  });
+
+  it("never rejects when there is nothing to check", async () => {
+    const { resultsAnswerQuery, distinctiveTerms } = await import("./search/providers.js");
+    // A single-token query has no distinctive terms beyond the first, so it cannot be judged
+    // this way; rejecting it would throw away good results.
+    expect(distinctiveTerms("CRM")).toEqual([]);
+    expect(resultsAnswerQuery("CRM", [R("Best Buy")])).toBe(true);
+    expect(resultsAnswerQuery("best CRM for small business", [])).toBe(true);
+  });
+
+  it("ignores the site: operator and stopwords when picking terms", async () => {
+    const { distinctiveTerms } = await import("./search/providers.js");
+    expect(distinctiveTerms('site:linkedin.com/in "MNB Research" founder')).toEqual(["research", "founder"]);
+    expect(distinctiveTerms("best CRM for small business")).toEqual(["crm", "small", "business"]);
+  });
+});

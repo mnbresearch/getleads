@@ -2,6 +2,7 @@ import * as cheerio from "cheerio";
 import type { SearchResult } from "../types.js";
 import { fetchJson, fetchText } from "../util/http.js";
 import { meter } from "../util/meter.js";
+import { reportProviderCall } from "../providers/health.js";
 
 export interface SearchProvider {
   name: string;
@@ -82,7 +83,7 @@ export const duckDuckGoProvider = (): SearchProvider => ({
         const snippet = $l(el).closest("tr").next("tr").find(".result-snippet").text().trim();
         outL.push({ title: $l(el).text().trim(), url: href, snippet, provider: "duckduckgo" });
       });
-      return honorSiteOperator(query, outL).slice(0, opts.count ?? 20);
+      return rejectDecoys("duckduckgo", query, honorSiteOperator(query, outL)).slice(0, opts.count ?? 20);
     }
     const $ = cheerio.load(html);
     const out: SearchResult[] = [];
@@ -94,9 +95,64 @@ export const duckDuckGoProvider = (): SearchProvider => ({
       if (!href.startsWith("http")) return;
       out.push({ title: a.text().trim(), url: href, snippet: $(el).find(".result__snippet").text().trim(), provider: "duckduckgo" });
     });
-    return honorSiteOperator(query, out).slice(0, opts.count ?? 20);
+    return rejectDecoys("duckduckgo", query, honorSiteOperator(query, out)).slice(0, opts.count ?? 20);
   },
 });
+
+
+/**
+ * Discard a scraped result set that does not answer the query.
+ *
+ * Verified against Bing on 22 Sep 2026: from a datacenter IP it echoes the full query in the
+ * page title and the search box, returns a normal-looking `li.b_algo` list, and fills it with
+ * results for the FIRST TOKEN ONLY. "best CRM for small business" came back as Best Buy and
+ * dictionary entries for "best"; "Razorpay fintech Bengaluru" came back as Razorpay's own
+ * pages with nothing about fintech or Bengaluru. Nothing errors, so the junk flows straight
+ * into lead discovery looking like real data - the worst failure shape there is, and the same
+ * principle as the visibility work: better to return nothing than to return noise as signal.
+ *
+ * The bar is deliberately low to avoid discarding good results: across the whole set, at least
+ * one result must mention at least one distinctive term from the query. A genuine result set
+ * clears that trivially; a first-token decoy cannot clear it at all, because every distinctive
+ * term is precisely what the decoy dropped.
+ *
+ * Only applied to scraped providers. A keyed API that returns nothing is answering honestly.
+ */
+const QUERY_STOPWORDS = new Set([
+  "the", "a", "an", "of", "for", "in", "on", "at", "to", "and", "or", "is", "are", "with",
+  "best", "top", "how", "what", "who", "which", "site", "com", "www", "vs", "by", "from",
+]);
+
+export function distinctiveTerms(query: string): string[] {
+  const tokens = query
+    .toLowerCase()
+    .replace(/site:\S+/g, " ")
+    .replace(/[^a-z0-9\s]/g, " ")
+    .split(/\s+/)
+    .filter(Boolean);
+  // The first token is exactly what a decoy keeps, so it proves nothing and is excluded.
+  return tokens.slice(1).filter((t) => t.length > 2 && !QUERY_STOPWORDS.has(t));
+}
+
+export function resultsAnswerQuery(query: string, results: SearchResult[]): boolean {
+  const terms = distinctiveTerms(query);
+  if (terms.length === 0 || results.length === 0) return true; // nothing to check against
+  return results.some((r) => {
+    const hay = `${r.title} ${r.snippet} ${r.url}`.toLowerCase();
+    return terms.some((t) => hay.includes(t));
+  });
+}
+
+/** Drop a decoyed set and report it, so the chain falls through instead of passing junk on. */
+function rejectDecoys(provider: string, query: string, results: SearchResult[]): SearchResult[] {
+  if (resultsAnswerQuery(query, results)) return results;
+  reportProviderCall({
+    provider,
+    outcome: "bad_response",
+    detail: `returned ${results.length} result(s) matching none of the query's distinctive terms; the scrape is being served decoy results`,
+  });
+  return [];
+}
 
 /** Bing HTML fallback (no key). */
 export const bingHtmlProvider = (): SearchProvider => ({
@@ -121,7 +177,7 @@ export const bingHtmlProvider = (): SearchProvider => ({
       if (!href.startsWith("http")) return;
       out.push({ title: a.text().trim(), url: href, snippet: $(el).find(".b_caption p, .b_lineclamp2, .b_algoSlug").first().text().trim(), provider: "bing_html" });
     });
-    return honorSiteOperator(query, out).slice(0, opts.count ?? 20);
+    return rejectDecoys("bing_html", query, honorSiteOperator(query, out)).slice(0, opts.count ?? 20);
   },
 });
 
