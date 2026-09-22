@@ -1,9 +1,19 @@
+import { classifyHttp, classifyThrown, reportProviderCall } from "../providers/health.js";
+
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ProspexBot/0.1 (+https://prospex.dev/bot)";
 
 export interface FetchOpts extends RequestInit {
   timeoutMs?: number;
   maxBytes?: number;
+  /**
+   * Report this call's outcome to provider health.
+   *
+   * Opt-in rather than automatic: most fetchJson callers are scraping the open web, where a
+   * 404 or a timeout is ordinary and recording it as a provider fault would bury the signal.
+   * Set it only for calls against a credentialed API we actually care about the health of.
+   */
+  provider?: string;
 }
 
 export async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
@@ -38,9 +48,21 @@ export async function fetchText(url: string, opts: FetchOpts = {}): Promise<stri
 export async function fetchJson<T = unknown>(url: string, opts: FetchOpts = {}): Promise<T | null> {
   try {
     const res = await fetchWithTimeout(url, opts);
-    if (!res.ok) return null;
+    if (!res.ok) {
+      if (opts.provider) {
+        const body = await res.text().catch(() => "");
+        const { outcome, detail } = classifyHttp(res.status, body);
+        reportProviderCall({ provider: opts.provider, outcome, status: res.status, detail });
+      }
+      return null;
+    }
+    if (opts.provider) reportProviderCall({ provider: opts.provider, outcome: "ok", status: res.status });
     return (await res.json()) as T;
-  } catch {
+  } catch (e) {
+    if (opts.provider) {
+      const { outcome, detail } = classifyThrown(e);
+      reportProviderCall({ provider: opts.provider, outcome, detail });
+    }
     return null;
   }
 }

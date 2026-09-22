@@ -15,6 +15,8 @@ export * from "./outreach/experiment.js";
 export * from "./visibility/analyze.js";
 export * from "./visibility/metrics.js";
 export * from "./visibility/templates.js";
+export * from "./providers/health.js";
+export * from "./providers/check.js";
 export * from "./email/sendingHealth.js";
 export * from "./outreach/template.js";
 export * from "./outreach/generate.js";

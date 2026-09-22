@@ -10,6 +10,7 @@ import { fetchJson, fetchWithTimeout } from "../util/http.js";
 import { splitName } from "../util/names.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { meter } from "../util/meter.js";
+import { recordHttp } from "./health.js";
 
 export interface PeopleProviderQuery {
   titles?: string[];
@@ -66,7 +67,9 @@ export const apolloProvider = (apiKey = process.env.APOLLO_API_KEY): PeopleProvi
       headers: { "content-type": "application/json", "x-api-key": apiKey!, "cache-control": "no-cache" },
       body: JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`apollo ${res.status}: ${(await res.text()).slice(0, 200)}`);
+    // Classify before throwing: searchProviders swallows the error, so this is the only
+    // place the difference between a rejected key and a plan limit can still be captured.
+    if (!(await recordHttp("apollo", res))) throw new Error(`apollo search failed (${res.status})`);
     const data = (await res.json()) as { people?: Record<string, unknown>[] };
     return (data.people ?? []).map((p) => {
       const org = (p.organization ?? {}) as Record<string, unknown>;
@@ -99,7 +102,9 @@ export const apolloProvider = (apiKey = process.env.APOLLO_API_KEY): PeopleProvi
     if (input.lastName) params.set("last_name", input.lastName);
     if (input.companyDomain) params.set("domain", input.companyDomain);
     const res = await fetchWithTimeout(`https://api.apollo.io/api/v1/people/match?${params}`, { method: "POST", timeoutMs: 20_000, headers: { "x-api-key": apiKey!, "content-type": "application/json" } });
-    if (!res.ok) return null;
+    // Was a bare `return null`, which made a 403 from a plan that excludes People Match
+    // indistinguishable from "nobody matched". Record which one it was, then degrade as before.
+    if (!(await recordHttp("apollo-enrich", res))) return null;
     const p = ((await res.json()) as { person?: Record<string, unknown> }).person;
     if (!p) return null;
     const org = (p.organization ?? {}) as Record<string, unknown>;
@@ -118,7 +123,7 @@ export const hunterProvider = (apiKey = process.env.HUNTER_API_KEY): PeopleProvi
       meter("hunter");
       const data = await fetchJson<{ data?: { organization?: string; emails?: { value: string; first_name?: string; last_name?: string; position?: string; seniority?: string; linkedin?: string; confidence?: number; verification?: { status?: string } }[] } }>(
         `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&limit=${Math.min(q.limit ?? 25, 100)}&api_key=${apiKey}${q.seniorities?.length ? `&seniority=${encodeURIComponent(q.seniorities.map((s) => (s === "c_level" ? "executive" : s)).join(","))}` : ""}`,
-        { timeoutMs: 20_000 },
+        { timeoutMs: 20_000, provider: "hunter" },
       );
       for (const e of data?.data?.emails ?? []) {
         if (!e.first_name) continue;
@@ -145,7 +150,7 @@ export const pdlProvider = (apiKey = process.env.PDL_API_KEY): PeopleProvider =>
       params.set("last_name", input.lastName);
       params.set("company", input.companyDomain);
     }
-    const data = await fetchJson<{ status?: number; data?: Record<string, unknown> }>(`https://api.peopledatalabs.com/v5/person/enrich?${params}`, { timeoutMs: 15_000 });
+    const data = await fetchJson<{ status?: number; data?: Record<string, unknown> }>(`https://api.peopledatalabs.com/v5/person/enrich?${params}`, { timeoutMs: 15_000, provider: "pdl" });
     const p = data?.data;
     if (!p) return null;
     const nm = splitName(String(p.full_name ?? ""));

@@ -736,6 +736,13 @@ export const toolRegistry = pgTable("tool_registry", {
   alertThresholdPct: integer("alert_threshold_pct").notNull().default(80),
   lastAlertPeriod: text("last_alert_period"), // period key we last emailed an alert for (avoids repeat spam)
   notes: text("notes"),
+  // What the provider last actually said. "configured" only ever meant the env var was set,
+  // which is not the same as the key working - see migration 0007.
+  lastOutcome: text("last_outcome"),
+  lastStatus: integer("last_status"),
+  lastDetail: text("last_detail"),
+  lastSeenAt: ts("last_seen_at"),
+  lastOkAt: ts("last_ok_at"),
   createdAt: ts("created_at").notNull().defaultNow(),
   updatedAt: ts("updated_at").notNull().defaultNow(),
 });

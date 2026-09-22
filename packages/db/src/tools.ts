@@ -47,6 +47,70 @@ export async function recordToolUsage(
   return { count: nextCount, limit: reg.usageLimit, thresholdCrossed, label: reg.label };
 }
 
+/**
+ * Record what a provider actually said.
+ *
+ * Only ever writes to a provider already in tool_registry, so an unknown id from a typo is
+ * ignored rather than throwing - health reporting must never break the call it describes.
+ * `lastOkAt` is only advanced on success, so a provider that has started failing still shows
+ * when it last worked, which is the first thing you want to know when something breaks.
+ */
+export async function recordProviderHealth(call: { provider: string; outcome: string; status?: number; detail?: string }): Promise<void> {
+  const { db } = getDb();
+  const now = new Date();
+  const set: Record<string, unknown> = {
+    lastOutcome: call.outcome,
+    lastStatus: call.status ?? null,
+    lastDetail: call.detail?.slice(0, 500) ?? null,
+    lastSeenAt: now,
+    updatedAt: now,
+  };
+  if (call.outcome === "ok") set.lastOkAt = now;
+  await db.update(toolRegistry).set(set).where(eq(toolRegistry.provider, call.provider));
+}
+
+/**
+ * What an operator should do about a provider, derived from its last real outcome.
+ *
+ * Deliberately distinguishes "rejected" from "gated": a new key fixes the first and does
+ * nothing for the second, and telling someone to rotate a working key is worse than telling
+ * them nothing. "unverified" is its own state rather than being rounded up to healthy,
+ * because a key nothing has called yet is exactly the case this whole change exists for.
+ */
+export type KeyStatus = "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "erroring";
+
+export function keyStatusFrom(configured: boolean, lastOutcome: string | null): KeyStatus {
+  if (!configured) return "not_configured";
+  switch (lastOutcome) {
+    case "ok":
+      return "working";
+    case "auth":
+      return "rejected";
+    case "forbidden":
+      return "gated";
+    case "rate_limit":
+      return "rate_limited";
+    case "server":
+    case "network":
+    case "bad_response":
+      return "erroring";
+    default:
+      // Includes not_found, which on a probe usually means the endpoint worked and matched
+      // nothing, and null, which means nothing has called this provider yet.
+      return lastOutcome ? "working" : "unverified";
+  }
+}
+
+export const KEY_STATUS_LABEL: Record<KeyStatus, string> = {
+  not_configured: "No key set",
+  unverified: "Key set, never used",
+  working: "Working",
+  rejected: "Key rejected",
+  gated: "Not on this plan",
+  rate_limited: "Rate limited",
+  erroring: "Erroring",
+};
+
 export interface ToolSummary {
   provider: string;
   label: string;
@@ -63,6 +127,13 @@ export interface ToolSummary {
   used: number;
   percentUsed: number | null;
   status: "ok" | "warning" | "critical" | "unmetered";
+  keyStatus: KeyStatus;
+  keyStatusLabel: string;
+  lastOutcome: string | null;
+  lastStatusCode: number | null;
+  lastDetail: string | null;
+  lastSeenAt: string | null;
+  lastOkAt: string | null;
 }
 
 /** All registered tools with their current-period usage, for the admin "Tools & limits" tab. */
@@ -98,6 +169,13 @@ export async function getToolsSummary(): Promise<ToolSummary[]> {
       currentPeriodKey: period,
       used,
       percentUsed,
+      keyStatus: keyStatusFrom(configured, reg.lastOutcome ?? null),
+      keyStatusLabel: KEY_STATUS_LABEL[keyStatusFrom(configured, reg.lastOutcome ?? null)],
+      lastOutcome: reg.lastOutcome ?? null,
+      lastStatusCode: reg.lastStatus ?? null,
+      lastDetail: reg.lastDetail ?? null,
+      lastSeenAt: reg.lastSeenAt ? new Date(reg.lastSeenAt).toISOString() : null,
+      lastOkAt: reg.lastOkAt ? new Date(reg.lastOkAt).toISOString() : null,
       status,
     });
   }

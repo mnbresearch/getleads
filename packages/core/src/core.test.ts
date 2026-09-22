@@ -571,3 +571,133 @@ describe("visibility prompt templates", () => {
     expect(p[0].topic).toBe("category");
   });
 });
+
+describe("provider health classification", () => {
+  it("keeps a rejected key and a plan limit apart", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    // The distinction that matters: 401 means replace the key, 403 usually means the key is
+    // fine and the plan excludes the endpoint. Collapsing them sends people to rotate a
+    // working credential.
+    expect(classifyHttp(401).outcome).toBe("auth");
+    expect(classifyHttp(403).outcome).toBe("forbidden");
+    expect(classifyHttp(401).outcome).not.toBe(classifyHttp(403).outcome);
+  });
+
+  it("maps the rest of the status space to distinct outcomes", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    expect(classifyHttp(200).outcome).toBe("ok");
+    expect(classifyHttp(204).outcome).toBe("ok");
+    expect(classifyHttp(429).outcome).toBe("rate_limit");
+    expect(classifyHttp(404).outcome).toBe("not_found");
+    expect(classifyHttp(500).outcome).toBe("server");
+    expect(classifyHttp(503).outcome).toBe("server");
+    expect(classifyHttp(418).outcome).toBe("bad_response");
+  });
+
+  it("pulls the provider's own message out of a JSON error body", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    expect(classifyHttp(403, '{"error":"This endpoint is not available on your plan"}').detail).toBe(
+      "This endpoint is not available on your plan",
+    );
+    expect(classifyHttp(401, '{"message":"invalid api key"}').detail).toBe("invalid api key");
+    expect(classifyHttp(422, '{"errors":["missing domain"]}').detail).toBe("missing domain");
+  });
+
+  it("falls back to the raw body when it is not JSON, and to a default when empty", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    expect(classifyHttp(500, "<html>  Gateway   Error </html>").detail).toBe("<html> Gateway Error </html>");
+    expect(classifyHttp(401, "").detail).toContain("401");
+  });
+
+  it("truncates a huge error body rather than storing it whole", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    expect(classifyHttp(500, "x".repeat(5000)).detail.length).toBeLessThanOrEqual(200);
+  });
+
+  it("treats a thrown fetch error as network, not as an auth problem", async () => {
+    const { classifyThrown } = await import("./providers/health.js");
+    // A timeout must never be reported as a bad key; that sends someone to rotate a
+    // credential that was fine.
+    expect(classifyThrown(new Error("The operation was aborted")).outcome).toBe("network");
+  });
+
+  it("marks only the outcomes an operator can act on", async () => {
+    const { isActionable } = await import("./providers/health.js");
+    expect(isActionable("auth")).toBe(true);
+    expect(isActionable("forbidden")).toBe(true);
+    expect(isActionable("rate_limit")).toBe(true);
+    // Transient: alerting on these trains people to ignore alerts.
+    expect(isActionable("server")).toBe(false);
+    expect(isActionable("network")).toBe(false);
+    expect(isActionable("ok")).toBe(false);
+  });
+
+  it("reports through the hook without letting a throwing hook break the caller", async () => {
+    const { setProviderHealthHook, reportProviderCall } = await import("./providers/health.js");
+    const seen: string[] = [];
+    setProviderHealthHook((c) => seen.push(`${c.provider}:${c.outcome}`));
+    reportProviderCall({ provider: "apollo", outcome: "auth" });
+    expect(seen).toEqual(["apollo:auth"]);
+
+    setProviderHealthHook(() => {
+      throw new Error("reporting backend is down");
+    });
+    expect(() => reportProviderCall({ provider: "apollo", outcome: "ok" })).not.toThrow();
+    setProviderHealthHook(() => {});
+  });
+});
+
+describe("key status derivation", () => {
+  it("does not round an unused key up to healthy", async () => {
+    const { keyStatusFrom } = await import("@prospex/db");
+    // The exact case this work exists for: a key nobody has called yet is unknown, not fine.
+    expect(keyStatusFrom(true, null)).toBe("unverified");
+    expect(keyStatusFrom(false, null)).toBe("not_configured");
+  });
+
+  it("maps outcomes to what the operator should do", async () => {
+    const { keyStatusFrom } = await import("@prospex/db");
+    expect(keyStatusFrom(true, "ok")).toBe("working");
+    expect(keyStatusFrom(true, "auth")).toBe("rejected");
+    expect(keyStatusFrom(true, "forbidden")).toBe("gated");
+    expect(keyStatusFrom(true, "rate_limit")).toBe("rate_limited");
+    expect(keyStatusFrom(true, "server")).toBe("erroring");
+    // A probe that matched nobody proves the endpoint answered.
+    expect(keyStatusFrom(true, "not_found")).toBe("working");
+  });
+
+  it("reports no key even when a stale outcome is still on the row", async () => {
+    const { keyStatusFrom } = await import("@prospex/db");
+    // Someone removing a key must not keep showing green from last week's successful call.
+    expect(keyStatusFrom(false, "ok")).toBe("not_configured");
+  });
+});
+
+describe("provider health: 400 that is really a bad key", () => {
+  it("classifies Google's 400 'API key not valid' as a rejected key", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    // Verified against the live endpoint: Google Programmable Search answers an invalid key
+    // with 400, not 401. Reporting that as "unexpected response" hid the most common
+    // misconfiguration for that provider.
+    const body = '{"error":{"code":400,"message":"API key not valid. Please pass a valid API key."}}';
+    const r = classifyHttp(400, body);
+    expect(r.outcome).toBe("auth");
+    expect(r.detail).toBe("API key not valid. Please pass a valid API key.");
+  });
+
+  it("leaves an ordinary 400 alone", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    // A malformed request must not be reported as a credential problem; that sends someone
+    // to rotate a key that was working.
+    expect(classifyHttp(400, '{"error":"missing required parameter: domain"}').outcome).toBe("bad_response");
+    expect(classifyHttp(400, "").outcome).toBe("bad_response");
+  });
+
+  it("unwraps a nested error message from Hunter and Google shapes", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    expect(classifyHttp(401, '{"errors":[{"id":"authentication_failed","code":401,"details":"No user found for this API key."}]}').detail).toBe(
+      "No user found for this API key.",
+    );
+    expect(classifyHttp(500, '{"error":{"code":500,"message":"Backend error"}}').detail).toBe("Backend error");
+  });
+});

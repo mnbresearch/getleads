@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, currentPeriod, desc, eq, getDb, getToolsSummary, ilike, inArray, limitsFor, or, organizations, PLANS, sql, updateToolLimit, upgradeRequests, usage, users } from "@prospex/db";
+import { and, currentPeriod, desc, eq, getDb, getToolsSummary, ilike, inArray, limitsFor, or, organizations, PLANS, recordProviderHealth, sql, updateToolLimit, upgradeRequests, usage, users } from "@prospex/db";
+import { checkAllProviders } from "@prospex/core";
 import { env } from "../env.js";
 import { issueAdminJwt } from "../lib/auth.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -201,6 +202,33 @@ adminRoutes.patch("/upgrade-requests/:id", zValidator("json", z.object({ status:
 adminRoutes.get("/tools", async (c) => {
   const tools = await getToolsSummary();
   return c.json({ tools });
+});
+
+/**
+ * Test the configured keys for real.
+ *
+ * "Configured" has only ever meant the env var is non-empty, which is why a wrong key could
+ * sit in production looking healthy. This makes one cheap call per provider and records the
+ * result, so the page stops guessing. Rate limited because each run spends real quota on
+ * providers whose free tiers are measured in tens of calls a month.
+ */
+adminRoutes.post("/tools/check", rateLimit({ perMinute: 3 }), async (c) => {
+  const results = await checkAllProviders();
+  await Promise.all(
+    results
+      .filter((r) => r.configured)
+      .map((r) =>
+        recordProviderHealth({ provider: r.provider, outcome: r.outcome, status: r.status, detail: r.detail }).catch(() => {}),
+      ),
+  );
+  const broken = results.filter((r) => r.configured && !r.ok);
+  return c.json({
+    results,
+    checkedAt: new Date().toISOString(),
+    summary: broken.length === 0
+      ? `All ${results.filter((r) => r.configured).length} configured providers responded successfully.`
+      : `${broken.length} of ${results.filter((r) => r.configured).length} configured providers did not: ${broken.map((b) => `${b.provider} (${b.outcome})`).join(", ")}.`,
+  });
 });
 
 const TOOL_LIMIT_SCHEMA = z.object({
