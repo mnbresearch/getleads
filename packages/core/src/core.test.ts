@@ -701,3 +701,36 @@ describe("provider health: 400 that is really a bad key", () => {
     expect(classifyHttp(500, '{"error":{"code":500,"message":"Backend error"}}').detail).toBe("Backend error");
   });
 });
+
+describe("provider checks: scoped credentials are not broken ones", () => {
+  it("treats a Resend send-only key as working rather than rejected", async () => {
+    const { checkResend } = await import("./providers/check.js");
+    // Resend answers 401 on GET /domains for a send-only key, which is the recommended
+    // production scope. Reporting that as "key rejected" sent an operator to replace a
+    // correctly configured credential - a check that cries wolf is worse than no check.
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(JSON.stringify({ message: "This API key is restricted to only send emails" }), { status: 401 })) as typeof fetch;
+    try {
+      const r = await checkResend("re_probe");
+      expect(r.ok).toBe(true);
+      expect(r.outcome).toBe("ok");
+      expect(r.summary).toContain("send-only");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("still reports a genuinely invalid Resend key as rejected", async () => {
+    const { checkResend } = await import("./providers/check.js");
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () => new Response(JSON.stringify({ message: "API key is invalid" }), { status: 401 })) as typeof fetch;
+    try {
+      const r = await checkResend("re_bad");
+      expect(r.ok).toBe(false);
+      expect(r.outcome).toBe("auth");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+});

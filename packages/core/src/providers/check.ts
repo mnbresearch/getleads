@@ -166,12 +166,26 @@ export async function checkSerpApi(apiKey = process.env.SERPAPI_KEY): Promise<Pr
   );
 }
 
-/** Resend, for transactional and outbound email. */
+/**
+ * Resend, for transactional and outbound email.
+ *
+ * Probing GET /domains is the only read that costs nothing, but a send-only key cannot
+ * reach it and Resend answers 401 - which looked identical to a bad key. A send-only key
+ * is the correct production setup, so reporting it as rejected would send someone to
+ * replace a properly scoped credential. Resend names the reason in the body, so the
+ * restriction is recognised rather than guessed at.
+ */
+const SEND_ONLY = /restricted to only send|sending access|only send emails/i;
+
 export async function checkResend(apiKey = process.env.RESEND_API_KEY): Promise<ProviderCheck> {
   if (!apiKey) return notConfigured("resend", "RESEND_API_KEY");
-  return run("resend", "GET /domains", () =>
+  const r = await run("resend", "GET /domains", () =>
     fetchWithTimeout("https://api.resend.com/domains", { timeoutMs: TIMEOUT, headers: { authorization: `Bearer ${apiKey}` } }),
   );
+  if (r.outcome === "auth" && SEND_ONLY.test(r.detail)) {
+    return { ...r, outcome: "ok", ok: true, summary: "Working (send-only key, which is the recommended setup)" };
+  }
+  return r;
 }
 
 export const PROVIDER_CHECKS: { provider: string; label: string; run: () => Promise<ProviderCheck> }[] = [
