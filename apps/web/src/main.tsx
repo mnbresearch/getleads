@@ -22,6 +22,7 @@ import { JoinPage } from "./pages/Join";
 import { LandingPage } from "./pages/Landing";
 import { UpgradeRequestPage } from "./pages/UpgradeRequest";
 import { AdminLoginPage } from "./pages/AdminLogin";
+import { GoogleCallbackPage } from "./pages/GoogleCallback";
 import { AdminDashboardPage } from "./pages/AdminDashboard";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -37,6 +38,7 @@ function Root() {
       <Route path="/signup" element={<AuthPage mode="signup" />} />
       <Route path="/join" element={<JoinPage />} />
       <Route path="/upgrade" element={<UpgradeRequestPage />} />
+      <Route path="/auth/google" element={<GoogleCallbackPage />} />
       <Route path="/admin/login" element={<AdminLoginPage />} />
       <Route path="/admin" element={<AdminDashboardPage />} />
       <Route path="/" element={token ? <Protected><Shell><Dashboard /></Shell></Protected> : <LandingPage />} />

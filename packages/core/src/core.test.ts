@@ -889,3 +889,27 @@ describe("retired providers", () => {
     expect(keyStatusFrom(true, null)).toBe("unverified");
   });
 });
+
+describe("google sign-in: redirect safety", () => {
+  it("refuses any redirect target that is not a path on our own app", async () => {
+    const { safeNext } = await import("../../../apps/api/src/lib/googleAuth.js");
+    // An open redirect on a sign-in flow is how phishing borrows your domain's credibility.
+    expect(safeNext("https://evil.example/steal")).toBe("/");
+    expect(safeNext("//evil.example")).toBe("/");
+    expect(safeNext("/\\evil.example")).toBe("/");
+    expect(safeNext("javascript:alert(1)")).toBe("/");
+    expect(safeNext(undefined)).toBe("/");
+    expect(safeNext("")).toBe("/");
+  });
+
+  it("keeps a genuine in-app path", async () => {
+    const { safeNext } = await import("../../../apps/api/src/lib/googleAuth.js");
+    expect(safeNext("/leads?sort=score")).toBe("/leads?sort=score");
+    expect(safeNext("/visibility")).toBe("/visibility");
+  });
+
+  it("truncates rather than trusting an unbounded path", async () => {
+    const { safeNext } = await import("../../../apps/api/src/lib/googleAuth.js");
+    expect(safeNext("/" + "a".repeat(500)).length).toBeLessThanOrEqual(200);
+  });
+});

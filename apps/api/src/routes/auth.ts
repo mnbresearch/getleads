@@ -4,8 +4,10 @@ import { z } from "zod";
 import { and, apiKeys, desc, eq, getDb, limitsFor, organizations, users } from "@prospex/db";
 import { env } from "../env.js";
 import { checkPassword, generateApiKey, hashPassword, issueJwt } from "../lib/auth.js";
+import { exchangeCode, findUserForGoogle, googleAuthConfigured, googleAuthUrl, makeState, readState, safeNext, type GoogleIdentity } from "../lib/googleAuth.js";
 import { ApiError, badRequest } from "../lib/errors.js";
 import { rateLimit, requireAuth, requireUser, type Env } from "../middleware.js";
+import { randomToken } from "../lib/crypto.js";
 import { emitEvent } from "../lib/events.js";
 
 export const authRoutes = new Hono<Env>();
@@ -43,6 +45,84 @@ authRoutes.post("/login", rateLimit({ perMinute: 20 }), zValidator("json", z.obj
   await db.update(users).set({ lastLoginAt: new Date() }).where(eq(users.id, user.id));
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, user.orgId) });
   return c.json({ token: await issueJwt(user), user: publicUser(user), org: publicOrg(org!) });
+});
+
+
+// ── Sign in with Google ──
+//
+// Two endpoints and a redirect. /start signs a state and bounces to Google; /callback
+// exchanges the code, resolves the account, and hands the session back to the web app.
+// The security reasoning lives in lib/googleAuth.ts, which is where the risky decisions are.
+
+/** Whether the web app should show the Google button at all. */
+authRoutes.get("/google/status", (c) => c.json({ enabled: googleAuthConfigured() }));
+
+authRoutes.get("/google/start", rateLimit({ perMinute: 30 }), async (c) => {
+  if (!googleAuthConfigured()) throw badRequest("Google sign-in is not configured");
+  const state = await makeState(c.req.query("next") ?? "/");
+  return c.redirect(googleAuthUrl(state));
+});
+
+/**
+ * Google sends the browser here.
+ *
+ * Every failure path redirects back to the app with a short reason rather than rendering an
+ * API error page: the person is in a browser mid-sign-in, and a raw JSON 400 is a dead end
+ * for them. The token leaves via the URL fragment, not the query string, because a fragment
+ * is never sent to a server and never lands in access logs or a Referer header.
+ */
+authRoutes.get("/google/callback", rateLimit({ perMinute: 30 }), async (c) => {
+  const appUrl = env.appUrl.replace(/\/$/, "");
+  const fail = (reason: string) => c.redirect(`${appUrl}/login?error=${encodeURIComponent(reason)}`);
+
+  if (!googleAuthConfigured()) return fail("Google sign-in is not configured");
+  // Google reports a user who cancelled as an error rather than an absent code.
+  if (c.req.query("error")) return fail(c.req.query("error") === "access_denied" ? "Sign-in cancelled" : "Google could not complete the sign-in");
+
+  const code = c.req.query("code");
+  if (!code) return fail("Google did not return an authorization code");
+
+  let next = "/";
+  let identity: GoogleIdentity;
+  try {
+    next = (await readState(c.req.query("state"))).next;
+    identity = await exchangeCode(code);
+  } catch (e) {
+    return fail(e instanceof ApiError ? e.message : "Sign-in failed");
+  }
+
+  const { db } = getDb();
+  let user;
+  try {
+    user = await findUserForGoogle(identity);
+  } catch (e) {
+    return fail(e instanceof ApiError ? e.message : "Sign-in failed");
+  }
+
+  if (!user) {
+    // First time through: same workspace bootstrap as a password signup, minus the password.
+    if (env.pilotInviteCode) return fail("Signing up with Google needs an invite code. Please use the signup form.");
+    const orgName = `${identity.name || identity.email.split("@")[0]}'s workspace`;
+    let slug = slugify(orgName);
+    if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
+    const plan = env.defaultPlan;
+    const [org] = await db.insert(organizations).values({ name: orgName, slug, plan, planLimits: limitsFor(plan) }).returning();
+    // A random unusable password rather than an empty hash: the password login path compares
+    // against this, and an empty or predictable value there would be a way in.
+    const unusable = await hashPassword(`google:${identity.sub}:${randomToken(32)}`);
+    [user] = await db
+      .insert(users)
+      .values({ orgId: org.id, email: identity.email, passwordHash: unusable, name: identity.name || "", role: "owner", lastLoginAt: new Date() })
+      .returning();
+    const key = generateApiKey();
+    await db.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash });
+    await emitEvent(org.id, "org.created", { orgId: org.id, email: user.email, via: "google" });
+  } else {
+    await db.update(users).set({ lastLoginAt: new Date(), ...(user.name ? {} : { name: identity.name || "" }) }).where(eq(users.id, user.id));
+  }
+
+  const token = await issueJwt(user);
+  return c.redirect(`${appUrl}/auth/google#token=${encodeURIComponent(token)}&next=${encodeURIComponent(safeNext(next))}`);
 });
 
 authRoutes.get("/me", requireAuth, async (c) => {

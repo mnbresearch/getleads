@@ -51,6 +51,12 @@ services:
         sync: false
       - key: GOOGLE_CSE_CX
         sync: false
+      # Sign in with Google (optional). The redirect URI registered in the Google console
+      # must be exactly <API_URL>/v1/auth/google/callback.
+      - key: GOOGLE_OAUTH_CLIENT_ID
+        sync: false
+      - key: GOOGLE_OAUTH_CLIENT_SECRET
+        sync: false
       # Email
       - key: RESEND_API_KEY
         sync: false

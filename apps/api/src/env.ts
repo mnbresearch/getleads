@@ -54,6 +54,10 @@ export const env = {
       return process.env[`STRIPE_PRICE_${plan.toUpperCase()}`];
     },
   },
+  google: {
+    clientId: process.env.GOOGLE_OAUTH_CLIENT_ID,
+    clientSecret: process.env.GOOGLE_OAUTH_CLIENT_SECRET,
+  },
   internalToken: process.env.INTERNAL_TOKEN ?? "",
   adminEmail: (process.env.ADMIN_EMAIL ?? "").toLowerCase(),
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
