@@ -63,6 +63,52 @@ const compare: { row: string; cells: (true | false | "varies")[] }[] = [
   { row: "Outbound outcomes and AI answers in one database", cells: [true, false, false, false] },
 ];
 
+/**
+ * How the AI-visibility half actually runs, in the order it runs.
+ *
+ * Written out because "AEO" and "GEO" are the terms buyers arrive with and are mostly sold as
+ * a black box. The mechanism is the product here, so stating it plainly is the pitch.
+ */
+const aeoSteps = [
+  {
+    n: "01",
+    title: "The questions get written for you",
+    desc: "Scout reads your brand, your rivals and your ICP and writes the category, comparison, alternative, problem and evaluation questions a buyer actually types. None of them name you, because a question that names you guarantees you appear.",
+  },
+  {
+    n: "02",
+    title: "Every engine you have gets asked, repeatedly",
+    desc: "The same questions go to each AI engine you have configured, on a schedule, many times over. One answer is a sample, not a measurement: ask twice and you get different brands in a different order.",
+  },
+  {
+    n: "03",
+    title: "Each answer is read, not keyword-matched",
+    desc: "Scout parses who was named, in what position, and which sources were cited. Aliases resolve to one brand, overlapping names are not double counted, and a refusal is told apart from an answer that simply left you out.",
+  },
+  {
+    n: "04",
+    title: "You get rates, rivals and ranked gaps",
+    desc: "Mention rate and share of voice per engine with a confidence interval, who owns the answers you are missing from, and which questions are winnable - ranked so a rival holding a slot beats a question nobody wins.",
+  },
+];
+
+/** The question people actually ask, answered without the usual hand-waving. */
+const aeoScope = {
+  does: [
+    "Tells you whether AI engines name you for the questions your buyers ask, with a number you can defend.",
+    "Names the rivals who own the answers you are absent from, including ones you never thought to track.",
+    "Shows which sources each engine cites, so you know which pages and publications the answer is actually built from.",
+    "Ranks the gaps by winnability, so effort goes where a slot demonstrably exists.",
+    "Keeps every raw answer verbatim, so any number traces back to the text it came from and history can be recomputed.",
+  ],
+  doesNot: [
+    "Write your content or publish it for you. Scout tells you what to go and earn; earning it is still work.",
+    "Promise a ranking. Nobody can, and anyone selling AEO or GEO guarantees is selling you variance.",
+    "Report a rate before it has enough usable answers to mean anything. Below the threshold it says what it still needs.",
+    "Count a refusal as you being absent, which is how other tools manufacture a collapse that never happened.",
+  ],
+};
+
 /** The AI does work here that a person would otherwise do badly or not at all. */
 const aiWork = [
   {
@@ -199,6 +245,7 @@ export function LandingPage() {
             <a href="#problems" className="hover:text-ink-50">Why Scout</a>
             <a href="#ai" className="hover:text-ink-50">The AI layer</a>
             <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
+            <a href="#how-aeo" className="hover:text-ink-50">AEO / GEO</a>
             <a href="#compare" className="hover:text-ink-50">Compare</a>
             <a href="#pricing" className="hover:text-ink-50">Pricing</a>
           </nav>
@@ -253,13 +300,19 @@ export function LandingPage() {
             <div className="pointer-events-none absolute inset-0 bg-brand-gradient opacity-[0.05]" aria-hidden />
             <div className="relative grid gap-10 lg:grid-cols-2 lg:items-center">
               <div>
-                <span className="badge border border-black/10 bg-black/5 text-ink-300">The half nobody measures</span>
+                <span className="badge border border-black/10 bg-black/5 text-ink-300">AEO / GEO, measured honestly</span>
                 <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">
                   Your email lands. Then they ask an AI whether you're any good.
                 </h2>
                 <p className="mt-4 text-ink-300">
-                  Prospecting tools optimise the sending and know nothing about that moment. AI visibility tools measure that
-                  moment and know nothing about who you contacted. Scout is the only place both sit on one schema.
+                  This is the thing now sold as <strong className="font-semibold text-ink-100">Answer Engine Optimisation</strong> and{" "}
+                  <strong className="font-semibold text-ink-100">Generative Engine Optimisation</strong>. Buyers no longer arrive from ten
+                  blue links; they ask an assistant and act on one answer. If that answer names three competitors and not
+                  you, the deal ended before anyone opened your email.
+                </p>
+                <p className="mt-3 text-ink-300">
+                  Prospecting tools optimise the sending and know nothing about that moment. AEO tools measure that moment
+                  and know nothing about who you contacted. Scout is the only place both sit on one schema.
                 </p>
                 <ul className="mt-6 space-y-3 text-sm text-ink-200">
                   <li className="flex gap-2"><span className="text-brand-600">✓</span> Track the questions your buyers actually ask, across every engine you have configured.</li>
@@ -286,6 +339,58 @@ export function LandingPage() {
           </div>
         </section>
 
+
+        <section id="how-aeo" className="scroll-mt-24 pb-24">
+          <div className="mx-auto max-w-2xl text-center">
+            <span className="badge border border-black/10 bg-black/5 text-ink-300">How AI visibility actually works</span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">
+              Four steps, and none of them are a black box
+            </h2>
+            <p className="mt-3 text-ink-300">
+              AEO and GEO are mostly sold as magic. Here is the whole mechanism, in the order it runs, so you can judge
+              whether the number at the end deserves your trust.
+            </p>
+          </div>
+          <div className="mt-14 grid grid-cols-1 gap-5 sm:grid-cols-2">
+            {aeoSteps.map((a) => (
+              <div key={a.n} className="card flex gap-4 p-6">
+                <div className="shrink-0 text-sm font-semibold tabular-nums text-brand-600">{a.n}</div>
+                <div>
+                  <div className="text-lg font-semibold leading-snug text-ink-50">{a.title}</div>
+                  <p className="mt-2 text-sm text-ink-400">{a.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="mt-6 grid grid-cols-1 gap-5 lg:grid-cols-2">
+            <div className="card p-6">
+              <div className="text-sm font-semibold uppercase tracking-wide text-ink-400">What Scout does</div>
+              <ul className="mt-4 space-y-3 text-sm text-ink-200">
+                {aeoScope.does.map((d) => (
+                  <li key={d} className="flex gap-2">
+                    <span className="mt-0.5 shrink-0 text-brand-600">&#10003;</span>
+                    <span>{d}</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+            <div className="card p-6">
+              <div className="text-sm font-semibold uppercase tracking-wide text-ink-400">What Scout does not do</div>
+              <ul className="mt-4 space-y-3 text-sm text-ink-200">
+                {aeoScope.doesNot.map((d) => (
+                  <li key={d} className="flex gap-2">
+                    <span className="mt-0.5 shrink-0 text-ink-400">&#8212;</span>
+                    <span>{d}</span>
+                  </li>
+                ))}
+              </ul>
+              <p className="mt-4 border-t border-black/[0.06] pt-4 text-sm font-medium text-ink-50">
+                A tool that cannot say what it will not do is not measuring anything.
+              </p>
+            </div>
+          </div>
+        </section>
 
         <section id="ai" className="scroll-mt-24 pb-24">
           <div className="mx-auto max-w-2xl text-center">
@@ -447,6 +552,7 @@ export function LandingPage() {
               <li><a href="#problems" className="hover:text-ink-50">Why Scout</a></li>
               <li><a href="#ai" className="hover:text-ink-50">The AI layer</a></li>
               <li><a href="#visibility" className="hover:text-ink-50">AI visibility</a></li>
+              <li><a href="#how-aeo" className="hover:text-ink-50">How AEO / GEO works</a></li>
               <li><a href="#compare" className="hover:text-ink-50">Compare</a></li>
               <li><a href="#how-it-works" className="hover:text-ink-50">How it works</a></li>
               <li><a href="#features" className="hover:text-ink-50">Features</a></li>
