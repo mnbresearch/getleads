@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import type { SearchResult } from "../types.js";
 import { fetchJson, fetchText, fetchWithTimeout } from "../util/http.js";
 import { meter } from "../util/meter.js";
-import { providerRecentlyRejected, recordHttp, reportProviderCall } from "../providers/health.js";
+import { classifyHttp, providerRecentlyRejected, recordHttp, reportProviderCall, retireProvider } from "../providers/health.js";
 // Keys arrive from dashboards and .env files, where a trailing newline or a wrapping pair of
 // quotes survives the paste. Cleaning at the edge means the value the provider sees is the
 // value the operator thinks they stored. See util/secret.ts.
@@ -31,7 +31,17 @@ export const braveProvider = (apiKey = secret(process.env.BRAVE_SEARCH_API_KEY))
   },
 });
 
-/** Google Programmable Search JSON API - 100 free queries/day. */
+/**
+ * Google Programmable Search JSON API.
+ *
+ * Google closed this to new customers in Sep 2026; existing projects lose access 1 Jan 2027.
+ * A project without access answers 403 "This project does not have the access to Custom
+ * Search JSON API", which no key, project or enablement change fixes. It used to sit first in
+ * the chain spending a round trip on every single search to be told that again, so it now
+ * retires itself for the life of the process the first time it hears it.
+ */
+const CSE_CLOSED = /does not have the access to custom search/i;
+
 export const googleCseProvider = (apiKey = secret(process.env.GOOGLE_CSE_API_KEY), cx = secret(process.env.GOOGLE_CSE_CX)): SearchProvider => ({
   name: "google_cse",
   available: () => !!apiKey && !!cx,
@@ -40,9 +50,18 @@ export const googleCseProvider = (apiKey = secret(process.env.GOOGLE_CSE_API_KEY
     const start = (opts.offset ?? 0) + 1;
     const params = new URLSearchParams({ key: apiKey!, cx: cx!, q: query, num: String(Math.min(opts.count ?? 10, 10)), start: String(start) });
     if (opts.country) params.set("gl", opts.country);
-    const data = await fetchJson<{ items?: { title: string; link: string; snippet?: string }[] }>(
-      `https://www.googleapis.com/customsearch/v1?${params}`,
-    );
+    const res = await fetchWithTimeout(`https://www.googleapis.com/customsearch/v1?${params}`, { timeoutMs: 15_000 });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      const { outcome, detail } = classifyHttp(res.status, body);
+      reportProviderCall({ provider: "google_cse", outcome, status: res.status, detail });
+      if (CSE_CLOSED.test(detail)) {
+        retireProvider("google_cse", "Google closed the Custom Search JSON API to new customers (Sep 2026)");
+      }
+      return [];
+    }
+    reportProviderCall({ provider: "google_cse", outcome: "ok", status: res.status });
+    const data = (await res.json().catch(() => null)) as { items?: { title: string; link: string; snippet?: string }[] } | null;
     return (data?.items ?? []).map((r) => ({ title: r.title, url: r.link, snippet: r.snippet ?? "", provider: "google_cse" }));
   },
 });
@@ -61,27 +80,102 @@ export const serperProvider = (apiKey = secret(process.env.SERPER_API_KEY)): Sea
   name: "serper",
   available: () => !!apiKey,
   async search(query, opts = {}) {
-    meter("serper");
-    const body: Record<string, unknown> = { q: query, num: Math.min(opts.count ?? 20, 100) };
-    if (opts.country) body.gl = opts.country.toLowerCase();
-    if (opts.offset) body.page = Math.floor(opts.offset / (opts.count ?? 10)) + 1;
+    const attempt = async (q: string) => {
+      meter("serper");
+      const body: Record<string, unknown> = { q, num: Math.min(opts.count ?? 20, 100) };
+      if (opts.country) body.gl = opts.country.toLowerCase();
+      if (opts.offset) body.page = Math.floor(opts.offset / (opts.count ?? 10)) + 1;
+      return fetchWithTimeout("https://google.serper.dev/search", {
+        method: "POST",
+        timeoutMs: 20_000,
+        headers: { "X-API-KEY": apiKey!, "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+    };
 
-    const res = await fetchWithTimeout("https://google.serper.dev/search", {
-      method: "POST",
-      timeoutMs: 20_000,
-      headers: { "X-API-KEY": apiKey!, "content-type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    // Classified rather than swallowed: a rejected key here would otherwise look exactly
-    // like a query nobody matched, which is the failure this codebase keeps tripping over.
-    if (!(await recordHttp("serper", res))) return [];
+    const parse = async (res: Response): Promise<SearchResult[]> => {
+      const data = (await res.json().catch(() => null)) as { organic?: { title?: string; link?: string; snippet?: string }[] } | null;
+      return (data?.organic ?? [])
+        .filter((r) => r.link)
+        .map((r) => ({ title: r.title ?? "", url: r.link!, snippet: r.snippet ?? "", provider: "serper" }));
+    };
 
-    const data = (await res.json().catch(() => null)) as { organic?: { title?: string; link?: string; snippet?: string }[] } | null;
-    return (data?.organic ?? [])
-      .filter((r) => r.link)
-      .map((r) => ({ title: r.title ?? "", url: r.link!, snippet: r.snippet ?? "", provider: "serper" }));
+    // Known-restricted accounts skip straight to the plain query rather than spending a round
+    // trip proving the restriction again. The window expires, so upgrading the plan starts
+    // working on its own: the next full query after it lapses succeeds and clears the flag.
+    const plain = simplifyQuery(query);
+    const hasOperators = plain !== query;
+
+    // A known-restricted account skips straight to the plain query rather than spending a
+    // round trip proving the restriction again - but only when there is something to strip.
+    // A query with no operators is one this plan accepts, restricted or not.
+    if (!operatorQueriesRestricted() || !hasOperators) {
+      const res = await attempt(query);
+      if (res.ok) {
+        // A full operator query succeeding is how a plan upgrade announces itself.
+        if (hasOperators) noteOperatorQueriesAllowed();
+        reportProviderCall({ provider: "serper", outcome: "ok", status: res.status });
+        return parse(res);
+      }
+      const body = await res.text().catch(() => "");
+      const { outcome, detail } = classifyHttp(res.status, body);
+      reportProviderCall({ provider: "serper", outcome, status: res.status, detail });
+      if (outcome !== "unsupported_query" || !hasOperators) return [];
+      // The free tier refuses site:, quotes, parentheses and OR. The account is healthy and
+      // the credits are unspent, so degrade the query rather than the provider.
+      noteOperatorQueriesRestricted();
+    }
+
+    if (!plain) return [];
+    const res2 = await attempt(plain);
+    if (!(await recordHttp("serper", res2))) return [];
+    return parse(res2);
   },
 });
+
+/**
+ * Whether this Serper account has refused operator syntax recently.
+ *
+ * Time-boxed rather than sticky for one reason that matters to the operator: when they put a
+ * card on the account, nothing in this codebase has to change and nothing has to be
+ * redeployed. The window lapses, the next search sends the full operator query, it succeeds,
+ * and the flag clears itself. A permanent flag would mean a paid plan quietly kept running
+ * degraded queries until someone remembered to restart the service.
+ */
+const OPERATOR_RETRY_MS = 15 * 60 * 1000;
+let operatorRestrictedUntil = 0;
+
+function operatorQueriesRestricted(now = Date.now()): boolean {
+  return operatorRestrictedUntil > now;
+}
+function noteOperatorQueriesRestricted(now = Date.now()) {
+  operatorRestrictedUntil = now + OPERATOR_RETRY_MS;
+}
+function noteOperatorQueriesAllowed() {
+  operatorRestrictedUntil = 0;
+}
+/** Testing seam. */
+export function resetSerperQueryRestriction() {
+  operatorRestrictedUntil = 0;
+}
+
+/**
+ * Strip search operators a restricted plan will not accept, keeping the words.
+ *
+ * `site:linkedin.com/in "Head of Growth" ("India" OR "UAE")` becomes
+ * `linkedin.com/in Head of Growth India UAE`. The domain is kept as a plain term on purpose:
+ * it still biases results toward LinkedIn without using the operator that was refused. This
+ * is a degraded query and is meant to be - it exists so a free account returns something
+ * rather than nothing, not so anyone mistakes it for the targeted search.
+ */
+export function simplifyQuery(query: string): string {
+  return query
+    .replace(/\bsite:(\S+)/gi, "$1")
+    .replace(/\b(OR|AND)\b/g, " ")
+    .replace(/["'()]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
 
 /** SerpAPI - 100 free searches/month. */
 export const serpApiProvider = (apiKey = secret(process.env.SERPAPI_KEY)): SearchProvider => ({
@@ -106,12 +200,16 @@ export const duckDuckGoProvider = (): SearchProvider => ({
     const params = new URLSearchParams({ q: query, kl: opts.country ? `${opts.country}-en` : "wt-wt" });
     if (opts.offset) params.set("s", String(opts.offset));
     const html = await fetchText(`https://html.duckduckgo.com/html/?${params}`, {
-      timeoutMs: 15_000,
+      // 15s per endpoint, twice, meant a single dead provider could cost 30s of a search's
+      // wall clock. Measured in production on 23 Sep 2026: every call timed out at ~20s and
+      // returned nothing. A provider this far down the chain does not get to be the slowest
+      // thing in the request - if it cannot answer quickly it has nothing worth waiting for.
+      timeoutMs: 5_000,
       headers: { referer: "https://html.duckduckgo.com/" },
     });
     if (!html || !html.includes("result__a")) {
       // fallback: lite endpoint
-      const lite = await fetchText(`https://lite.duckduckgo.com/lite/?${params}`, { timeoutMs: 15_000 });
+      const lite = await fetchText(`https://lite.duckduckgo.com/lite/?${params}`, { timeoutMs: 5_000 });
       if (!lite) return [];
       const $l = cheerio.load(lite);
       const outL: SearchResult[] = [];

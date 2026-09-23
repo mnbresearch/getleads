@@ -1,5 +1,5 @@
 import type { SearchResult } from "../types.js";
-import { providerRecentlyRejected, reportProviderCall } from "../providers/health.js";
+import { providerRecentlyRejected, providerRetired, reportProviderCall, retiredReason } from "../providers/health.js";
 import { defaultProviders, type SearchProvider } from "./providers.js";
 
 export interface WebSearchOptions {
@@ -32,8 +32,9 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
   // wasted round trip on every single search into one probe every half hour.
   const all = opts.providers ?? defaultProviders();
   const unavailable = all.filter((p) => !p.available()).map((p) => p.name);
-  const skipped = all.filter((p) => p.available() && providerRecentlyRejected(p.name)).map((p) => p.name);
-  const providers = all.filter((p) => p.available() && !providerRecentlyRejected(p.name));
+  const gone = all.filter((p) => p.available() && providerRetired(p.name)).map((p) => `${p.name} (${retiredReason(p.name)})`);
+  const skipped = all.filter((p) => p.available() && !providerRetired(p.name) && providerRecentlyRejected(p.name)).map((p) => p.name);
+  const providers = all.filter((p) => p.available() && !providerRetired(p.name) && !providerRecentlyRejected(p.name));
   const min = opts.minResults ?? 3;
   let best: SearchResult[] = [];
   /** What each provider actually did, so a silent chain can be explained afterwards. */
@@ -64,6 +65,7 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
       attempts.length ? `tried ${attempts.join(", ")}` : "no providers were eligible",
       unavailable.length ? `unavailable: ${unavailable.join(",")}` : "",
       skipped.length ? `cooling off: ${skipped.join(",")}` : "",
+      gone.length ? `retired: ${gone.join(",")}` : "",
     ].filter(Boolean);
     console.warn(`[search] no results for ${JSON.stringify(query.slice(0, 120))} - ${parts.join("; ")}`);
   } else if (process.env.DEBUG_SEARCH) {

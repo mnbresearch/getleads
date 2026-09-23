@@ -90,6 +90,9 @@ export function keyStatusFrom(configured: boolean, lastOutcome: string | null, r
     case "auth":
       return "rejected";
     case "forbidden":
+    // The credential and plan are fine, one query shape is not. Same operator action as a
+    // plan limit - upgrade - so it reads as gated rather than as a fault.
+    case "unsupported_query":
       return "gated";
     case "rate_limit":
       return "rate_limited";

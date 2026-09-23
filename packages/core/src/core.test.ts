@@ -609,6 +609,107 @@ describe("provider health classification", () => {
     expect(classifyHttp(401, "").detail).toContain("401");
   });
 
+  it("reads a plan-gated query as gated, not as a broken key or a dead provider", async () => {
+    const { classifyHttp } = await import("./providers/health.js");
+    const r = classifyHttp(400, '{"message":"Query pattern not allowed for free accounts."}');
+    expect(r.outcome).toBe("unsupported_query");
+    // Serper answers this as an ordinary client error. Reading it as a rejected key would
+    // send someone to replace a working credential; reading it as forbidden would cool the
+    // provider off for half an hour over one query it was always going to refuse.
+    expect(r.outcome).not.toBe("auth");
+    expect(r.outcome).not.toBe("forbidden");
+  });
+
+  it("does not cool a provider off over a query shape it simply will not run", async () => {
+    const { reportProviderCall, providerRecentlyRejected, resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    reportProviderCall({ provider: "serper", outcome: "unsupported_query", detail: "Query pattern not allowed for free accounts." });
+    // The very next plain query will succeed, so skipping the provider would cost real results.
+    expect(providerRecentlyRejected("serper")).toBe(false);
+    reportProviderCall({ provider: "serper", outcome: "forbidden", detail: "plan limit" });
+    expect(providerRecentlyRejected("serper")).toBe(true);
+    resetProviderSkips();
+  });
+
+  it("strips the operators a restricted plan refuses, and keeps the words", async () => {
+    const { simplifyQuery } = await import("./search/providers.js");
+    expect(simplifyQuery('site:linkedin.com/in "Head of Growth" ("India" OR "UAE")')).toBe(
+      "linkedin.com/in Head of Growth India UAE",
+    );
+    // The domain survives as a plain term, so results still lean toward LinkedIn without
+    // using the operator that was refused.
+    expect(simplifyQuery('site:linkedin.com/in "Founder"')).toContain("linkedin.com/in");
+    // A query with no operators is returned unchanged, so callers can detect "nothing to
+    // simplify" and skip a pointless second round trip.
+    expect(simplifyQuery("founders in india")).toBe("founders in india");
+  });
+
+  it("falls back to a plain query when the plan refuses operators, then heals on upgrade", async () => {
+    const { serperProvider, resetSerperQueryRestriction } = await import("./search/providers.js");
+    const { resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    resetSerperQueryRestriction();
+
+    const sent: string[] = [];
+    let plan: "free" | "paid" = "free";
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (_url: unknown, init: { body?: string } = {}) => {
+      const q = JSON.parse(init.body ?? "{}").q as string;
+      sent.push(q);
+      const operator = /site:|"|\(/.test(q);
+      if (plan === "free" && operator) {
+        return new Response('{"message":"Query pattern not allowed for free accounts."}', { status: 400 });
+      }
+      return new Response(JSON.stringify({ organic: [{ title: "t", link: "https://example.com", snippet: "s" }] }), { status: 200 });
+    }) as unknown as typeof fetch;
+
+    try {
+      const p = serperProvider("test-key");
+      // Free account: the operator query is refused, the stripped one is sent instead, and
+      // the search still returns something rather than nothing.
+      const first = await p.search('site:linkedin.com/in "Founder"');
+      expect(first).toHaveLength(1);
+      expect(sent[0]).toContain("site:");
+      expect(sent[1]).not.toContain("site:");
+
+      // While restricted, the operator query is not retried on every search.
+      sent.length = 0;
+      await p.search('site:linkedin.com/in "CTO"');
+      expect(sent.every((q) => !q.includes("site:"))).toBe(true);
+
+      // A query with no operators is still sent as-is, because the plan accepts those.
+      sent.length = 0;
+      await p.search("founders in india");
+      expect(sent).toEqual(["founders in india"]);
+
+      // The operator: paying lifts the restriction with no code change and no redeploy. Once
+      // the retry window lapses the full query is tried again, succeeds, and the flag clears.
+      plan = "paid";
+      resetSerperQueryRestriction();
+      sent.length = 0;
+      const after = await p.search('site:linkedin.com/in "Founder"');
+      expect(sent).toEqual(['site:linkedin.com/in "Founder"']);
+      expect(after).toHaveLength(1);
+    } finally {
+      globalThis.fetch = realFetch;
+      resetSerperQueryRestriction();
+      resetProviderSkips();
+    }
+  });
+
+  it("drops a retired provider from the chain entirely", async () => {
+    const { retireProvider, providerRetired, retiredReason, resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    expect(providerRetired("google_cse")).toBe(false);
+    retireProvider("google_cse", "closed to new customers");
+    // Permanent for the process, unlike the 30-minute cooling-off: a replaced key fixes a
+    // rejection, but nothing an operator does reopens a closed API.
+    expect(providerRetired("google_cse")).toBe(true);
+    expect(retiredReason("google_cse")).toContain("closed");
+    resetProviderSkips();
+    expect(providerRetired("google_cse")).toBe(false);
+  });
+
   it("reports a thrown search provider instead of swallowing it", async () => {
     const { webSearch } = await import("./search/index.js");
     const { setProviderHealthHook, resetProviderSkips } = await import("./providers/health.js");

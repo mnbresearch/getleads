@@ -33,7 +33,16 @@ export type ProviderOutcome =
   /** The request never completed: DNS, timeout, connection reset. */
   | "network"
   /** 2xx with a body we could not read as expected. */
-  | "bad_response";
+  | "bad_response"
+  /**
+   * The credential and the plan are both fine; this particular QUERY is not supported.
+   *
+   * Serper's free tier refuses operator syntax - site:, quoted phrases, parentheses, OR -
+   * with "Query pattern not allowed for free accounts." That is not a broken key and not a
+   * dead provider, so it must not cool the provider off: the very next plain query will
+   * succeed. It is still actionable, because the fix is a plan upgrade.
+   */
+  | "unsupported_query";
 
 export interface ProviderCall {
   provider: string;
@@ -45,7 +54,7 @@ export interface ProviderCall {
 }
 
 /** Outcomes that mean an operator has something to fix, as opposed to a transient blip. */
-export const ACTIONABLE: ProviderOutcome[] = ["auth", "forbidden", "rate_limit"];
+export const ACTIONABLE: ProviderOutcome[] = ["auth", "forbidden", "rate_limit", "unsupported_query"];
 
 export function isActionable(outcome: ProviderOutcome): boolean {
   return ACTIONABLE.includes(outcome);
@@ -131,6 +140,11 @@ export function classifyHttp(status: number, body = ""): { outcome: ProviderOutc
     return { outcome: "forbidden", detail: summary || "authenticated but not permitted (403); usually the plan or key scope excludes this endpoint" };
   }
   if (status === 429) return { outcome: "rate_limit", detail: summary || "rate limited or out of quota (429)" };
+  if (looksLikeUnsupportedQuery(summary)) {
+    // Checked before the 400/403 branches, because the provider returns this as an ordinary
+    // client error and reading it as a bad key or a dead plan would be wrong in both cases.
+    return { outcome: "unsupported_query", detail: summary };
+  }
   if (status === 400 && looksLikeCredentialProblem(summary)) {
     // Not every API uses 401 for a bad key. Google Programmable Search answers a rejected
     // key with 400 "API key not valid", verified against the live endpoint - reporting that
@@ -140,6 +154,16 @@ export function classifyHttp(status: number, body = ""): { outcome: ProviderOutc
   if (status === 404) return { outcome: "not_found", detail: summary || "not found (404)" };
   if (status >= 500) return { outcome: "server", detail: summary || `provider error (${status})` };
   return { outcome: "bad_response", detail: summary || `unexpected status ${status}` };
+}
+
+/**
+ * Does this message describe a query the plan will not run, rather than a broken credential?
+ *
+ * Narrow on purpose, for the same reason as looksLikeCredentialProblem: a false positive here
+ * would tell someone their plan is the problem when their key is.
+ */
+function looksLikeUnsupportedQuery(message: string): boolean {
+  return /query pattern not allowed|not allowed for free account|unsupported query|operator.{0,20}not (allowed|supported)/i.test(message);
 }
 
 /** Map a thrown fetch error to an outcome. Timeouts and DNS failures are not auth problems. */
@@ -203,13 +227,40 @@ export function providerRecentlyRejected(provider: string, now = Date.now()): bo
 
 /** Only credential and permission failures cool off; a timeout deserves an immediate retry. */
 function noteForSkipping(call: ProviderCall, now = Date.now()) {
+  // Deliberately excludes unsupported_query: the provider is healthy and the next query of a
+  // different shape will work, so cooling it off would turn one rejected query into thirty
+  // minutes of not using a provider that was never broken.
   if (call.outcome === "auth" || call.outcome === "forbidden") skipUntil.set(call.provider, now + SKIP_MS);
   else if (call.outcome === "ok") skipUntil.delete(call.provider);
+}
+
+/**
+ * Providers that are closed for good, not merely failing.
+ *
+ * Distinct from the cooling-off map because the answer is different: a rejected key might be
+ * replaced within the hour, but Google closing Custom Search to new customers is policy. A
+ * retired provider sits first in the chain costing a round trip on every single search while
+ * being incapable of ever answering, so it is dropped for the life of the process rather than
+ * re-probed every half hour. A restart re-probes once, which is the right amount of optimism.
+ */
+const retired = new Map<string, string>();
+
+export function retireProvider(provider: string, reason: string) {
+  if (!retired.has(provider)) retired.set(provider, reason);
+}
+
+export function providerRetired(provider: string): boolean {
+  return retired.has(provider);
+}
+
+export function retiredReason(provider: string): string | undefined {
+  return retired.get(provider);
 }
 
 /** Testing seam: clears the cooling-off state. */
 export function resetProviderSkips() {
   skipUntil.clear();
+  retired.clear();
 }
 
 /** Human sentence for an outcome, used in the admin UI and in check results. */
@@ -223,6 +274,7 @@ export function explainOutcome(outcome: ProviderOutcome, detail?: string): strin
     server: "Provider is erroring",
     network: "Could not reach the provider",
     bad_response: "Unexpected response",
+    unsupported_query: "Key works, but this query type needs a paid plan",
   };
   return detail ? `${base[outcome]}: ${detail}` : base[outcome];
 }
