@@ -609,6 +609,30 @@ describe("provider health classification", () => {
     expect(classifyHttp(401, "").detail).toContain("401");
   });
 
+  it("reports a thrown search provider instead of swallowing it", async () => {
+    const { webSearch } = await import("./search/index.js");
+    const { setProviderHealthHook, resetProviderSkips } = await import("./providers/health.js");
+    resetProviderSkips();
+    const seen: string[] = [];
+    setProviderHealthHook((c) => seen.push(`${c.provider}:${c.outcome}`));
+    try {
+      const results = await webSearch(`unique-${Date.now()}`, {
+        providers: [
+          { name: "boom", available: () => true, search: async () => { throw new Error("connection reset"); } },
+          { name: "quiet", available: () => true, search: async () => [] },
+        ],
+      });
+      expect(results).toEqual([]);
+      // The throw must surface. A provider that dies silently is indistinguishable from a
+      // query nobody matched, which is the bug this whole health layer exists to prevent.
+      expect(seen).toContain("boom:network");
+      // A provider that simply found nothing is not a failure and must not be reported as one.
+      expect(seen.some((s) => s.startsWith("quiet:"))).toBe(false);
+    } finally {
+      setProviderHealthHook(() => {});
+    }
+  });
+
   it("strips the damage a clipboard does to a pasted key", async () => {
     const { readSecret } = await import("./util/secret.js");
     // The three shapes a dashboard actually stores when someone pastes a key.
