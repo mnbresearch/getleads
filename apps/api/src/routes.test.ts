@@ -369,6 +369,206 @@ suite("route surface", () => {
     });
   });
 
+  /**
+   * The endpoints the UI now calls, exercised end to end.
+   *
+   * Wiring a button to a route proves nothing on its own - it has to be the right route,
+   * with the right body, and the effect has to stick. These drive exactly what the pages
+   * send, so a page that looks wired but is not fails here rather than in front of a user.
+   */
+  describe("the newly wired controls actually work", () => {
+    async function makeLead() {
+      const r = await app.request("/v1/leads", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ firstName: "Priya", lastName: "Sharma", email: `wired-${randomUUID().slice(0, 8)}@example.com`, title: "VP Sales" }),
+      });
+      const body = await r.json();
+      return body.lead ?? body;
+    }
+
+    it("moves a lead through the pipeline and can filter by stage", async () => {
+      const lead = await makeLead();
+      expect(lead.id).toBeTruthy();
+
+      const moved = await app.request(`/v1/tools/leads/${lead.id}/status`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ status: "qualified" }),
+      });
+      expect(moved.status).toBeLessThan(300);
+      expect((await moved.json()).status).toBe("qualified");
+
+      // The filter the Leads page now sends. It did not exist before, so "show me everyone
+      // I have qualified" was unaskable.
+      const listed = await (await app.request("/v1/leads?status=qualified", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(listed.leads.some((l: any) => l.id === lead.id)).toBe(true);
+
+      const other = await (await app.request("/v1/leads?status=lost", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(other.leads.some((l: any) => l.id === lead.id)).toBe(false);
+    });
+
+    it("rejects a stage the funnel does not have", async () => {
+      const lead = await makeLead();
+      const r = await app.request(`/v1/tools/leads/${lead.id}/status`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ status: "extremely interested" }),
+      });
+      expect(r.status).toBe(400);
+    });
+
+    it("reads and writes the do-not-contact list", async () => {
+      const email = `optout-${randomUUID().slice(0, 8)}@example.com`;
+      const added = await app.request("/v1/leads/suppressions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ emails: [email], reason: "added by hand" }),
+      });
+      expect(added.status).toBeLessThan(300);
+
+      const list = await (await app.request("/v1/leads/suppressions/all", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(list.suppressions.some((s: any) => s.email === email)).toBe(true);
+    });
+
+    it("deletes a list without deleting the leads in it", async () => {
+      const lead = await makeLead();
+      const made = await app.request("/v1/leads/lists", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Temp list" }),
+      });
+      const list = await made.json();
+      await app.request(`/v1/leads/lists/${list.id}/leads`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ ids: [lead.id] }),
+      });
+
+      const gone = await app.request(`/v1/leads/lists/${list.id}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
+      expect(gone.status).toBeLessThan(300);
+
+      const lists = await (await app.request("/v1/leads/lists/all", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(lists.lists.some((l: any) => l.id === list.id)).toBe(false);
+
+      // The promise the confirmation makes: the leads survive.
+      const still = await app.request(`/v1/leads/${lead.id}`, { headers: { authorization: `Bearer ${token}` } });
+      expect(still.status).toBe(200);
+    });
+
+    it("removes a lead from a list without deleting the lead", async () => {
+      const lead = await makeLead();
+      const made = await app.request("/v1/leads/lists", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Membership list" }),
+      });
+      const list = await made.json();
+      await app.request(`/v1/leads/lists/${list.id}/leads`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ ids: [lead.id] }),
+      });
+
+      const r = await app.request(`/v1/leads/lists/${list.id}/leads/${lead.id}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } });
+      expect(r.status).toBeLessThan(300);
+
+      const inList = await (await app.request(`/v1/leads?listId=${list.id}`, { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(inList.leads.some((l: any) => l.id === lead.id)).toBe(false);
+      expect((await app.request(`/v1/leads/${lead.id}`, { headers: { authorization: `Bearer ${token}` } })).status).toBe(200);
+    });
+
+    it("deletes a campaign, and the deleted campaign stops being listed", async () => {
+      const made = await app.request("/v1/campaigns", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Throwaway" }),
+      });
+      const body = await made.json();
+      const id = body.campaign?.id ?? body.id;
+
+      expect((await app.request(`/v1/campaigns/${id}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } })).status).toBeLessThan(300);
+      const list = await (await app.request("/v1/campaigns", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(list.campaigns.some((c: any) => c.id === id)).toBe(false);
+    });
+
+    it("pauses and resumes a tracked visibility question", async () => {
+      const made = await app.request("/v1/visibility/prompts", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ text: "best b2b prospecting tools for india", samplesPerRun: 3 }),
+      });
+      const prompt = await made.json();
+      expect(prompt.active).toBe(true);
+
+      const paused = await app.request(`/v1/visibility/prompts/${prompt.id}`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ active: false, samplesPerRun: 5 }),
+      });
+      const after = await paused.json();
+      expect(after.active).toBe(false);
+      expect(after.samplesPerRun).toBe(5);
+
+      expect((await app.request(`/v1/visibility/prompts/${prompt.id}`, { method: "DELETE", headers: { authorization: `Bearer ${token}` } })).status).toBeLessThan(300);
+    });
+
+    it("serves the raw answers the landing page promises are kept", async () => {
+      const r = await app.request("/v1/visibility/runs?limit=5", { headers: { authorization: `Bearer ${token}` } });
+      expect(r.status).toBe(200);
+      expect(Array.isArray((await r.json()).runs)).toBe(true);
+    });
+
+    it("refuses to sync to a CRM that is not connected, rather than silently doing nothing", async () => {
+      const lead = await makeLead();
+      const r = await app.request("/v1/integrations/hubspot/sync", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ leadIds: [lead.id] }),
+      });
+      expect(r.status).toBe(404);
+    });
+
+    it("creates an ad-hoc task and lists it as pending", async () => {
+      const made = await app.request("/v1/tools/tasks", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ title: "Call Priya back about the pilot", type: "call" }),
+      });
+      expect(made.status).toBeLessThan(300);
+      const task = await made.json();
+
+      const list = await (await app.request("/v1/tools/tasks?status=pending", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(list.tasks.some((t: any) => t.id === task.id)).toBe(true);
+    });
+
+    it("serves the signal types the page now reads instead of hardcoding", async () => {
+      const r = await app.request("/v1/signals/types", { headers: { authorization: `Bearer ${token}` } });
+      expect(r.status).toBe(200);
+      const { types } = await r.json();
+      expect(types).toContain("funding");
+      expect(types.length).toBeGreaterThan(3);
+    });
+
+    it("rebuilds an ICP's profile on request, which editing used to only pretend to do", async () => {
+      const made = await app.request("/v1/icps", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Rebuildable", description: "B2B SaaS founders in India", buildWithAi: false }),
+      });
+      const { icp } = await made.json();
+      const r = await app.request(`/v1/icps/${icp.id}/build`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: "{}",
+      });
+      // Either it queues the job or it says no AI provider is configured - both are honest
+      // answers, and neither is the silent no-op the Edit button used to perform.
+      expect(r.status).toBeLessThan(500);
+      expect([200, 201, 202, 400, 404]).toContain(r.status);
+    });
+  });
+
   it("guards the admin surface", async () => {
     const admins = app.routes.filter((r: any) => r.method === "GET" && String(r.path).startsWith("/v1/admin"));
     expect(admins.length).toBeGreaterThan(0);

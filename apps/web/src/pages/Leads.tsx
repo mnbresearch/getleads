@@ -234,7 +234,10 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
   const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ subject: string; body: string } | null>(null);
   const [brief, setBrief] = useState<{ summary: string; whyNow: string; angles: string[] } | null>(null);
-  useEffect(() => { setDraft(null); setBrief(null); }, [lead?.id]);
+  // PATCH /v1/leads/:id has always existed and nothing called it, so a typo'd email or a
+  // stale job title could never be corrected from the app - only re-imported over.
+  const [editing, setEditing] = useState<null | { firstName: string; lastName: string; title: string; email: string; phone: string; linkedinUrl: string; location: string }>(null);
+  useEffect(() => { setDraft(null); setBrief(null); setEditing(null); }, [lead?.id]);
   if (!lead) return null;
   const act = async (name: string, fn: () => Promise<unknown>) => {
     setBusy(name);
@@ -276,7 +279,47 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
           </>}
         </div>
       </div>
+      {editing && (
+        <div className="mt-4 space-y-3 rounded-lg border border-black/10 p-4">
+          <div className="text-sm font-medium">Edit details</div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            {([
+              ["firstName", "First name", "text"],
+              ["lastName", "Last name", "text"],
+              ["title", "Title", "text"],
+              ["email", "Email", "email"],
+              ["phone", "Phone", "tel"],
+              ["location", "Location", "text"],
+              ["linkedinUrl", "LinkedIn URL", "url"],
+            ] as const).map(([k, label, type]) => (
+              <div key={k}>
+                <label className="label" htmlFor={`edit-${k}`}>{label}</label>
+                <input id={`edit-${k}`} className="input" type={type} value={editing[k]} onChange={(e) => setEditing({ ...editing, [k]: e.target.value })} />
+              </div>
+            ))}
+          </div>
+          <div className="flex justify-end gap-2">
+            <button className="btn-secondary" onClick={() => setEditing(null)}>Cancel</button>
+            <button
+              className="btn-primary"
+              disabled={busy === "save"}
+              onClick={() => act("save", async () => {
+                // Only send what the user actually filled in: an empty string here means
+                // "no value given", not "erase what is stored".
+                const body: Record<string, string> = {};
+                for (const [k, v] of Object.entries(editing)) if (v.trim()) body[k] = v.trim();
+                await apiFetch("PATCH", `/v1/leads/${lead.id}`, body);
+                toast("Saved");
+                setEditing(null);
+              })}
+            >
+              {busy === "save" ? "…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
       <div className="mt-5 flex flex-wrap gap-2 border-t border-black/5 pt-4">
+        <button className="btn-secondary" disabled={!!busy} onClick={() => setEditing({ firstName: lead.firstName ?? "", lastName: lead.lastName ?? "", title: lead.title ?? "", email: lead.email ?? "", phone: lead.phone ?? "", linkedinUrl: lead.linkedinUrl ?? "", location: lead.location ?? "" })}>Edit details</button>
         <button className="btn-secondary" disabled={!!busy} onClick={() => act("enrich", () => apiFetch("POST", `/v1/leads/${lead.id}/enrich`).then(() => toast("Enrichment queued")))}>{busy === "enrich" ? "…" : "Enrich"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.email} onClick={() => act("verify", () => apiFetch("POST", `/v1/leads/${lead.id}/verify`).then(() => toast("Verified")))}>{busy === "verify" ? "…" : "Verify email"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>

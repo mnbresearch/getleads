@@ -41,6 +41,26 @@ export function VisitorsPage() {
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
+  /**
+   * The ordered journey, not just a page-count map.
+   *
+   * The page subtitle promises "see what they looked at", and the detail modal delivered a
+   * dictionary of page -> count, which tells you nothing about the order or the timing -
+   * whether someone glanced at the blog or went pricing, pricing, contact. That sequence is
+   * the whole buying signal, and the endpoint returning it was never called.
+   */
+  const [journey, setJourney] = useState<{ id: string; page: string | null; referrer: string | null; durationMs: number; visitedAt: string; sessionId: string; city: string | null }[] | null>(null);
+  const [journeyErr, setJourneyErr] = useState<string | null>(null);
+
+  const openDetail = (vc: VC) => {
+    setDetail(vc);
+    setJourney(null);
+    setJourneyErr(null);
+    apiFetch<{ visits: NonNullable<typeof journey> }>("GET", `/v1/visitors/${vc.domain}/visits`)
+      .then((r) => setJourney(r.visits))
+      .catch((e) => setJourneyErr((e as Error).message));
+  };
+
   const setStat = (vc: VC, s: string) => apiFetch("PATCH", `/v1/visitors/${vc.domain}`, { status: s }).then(load);
 
   return (
@@ -70,8 +90,8 @@ export function VisitorsPage() {
                     tabIndex={0}
                     role="button"
                     aria-label={`Open ${v.company?.name ?? v.name ?? v.domain}`}
-                    onClick={() => setDetail(v)}
-                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(v); } }}
+                    onClick={() => openDetail(v)}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); openDetail(v); } }}
                   ><div className="font-medium">{v.company?.name ?? v.name ?? v.domain}</div><div className="text-xs text-ink-400">{v.domain}{v.company?.industry ? ` · ${v.company.industry}` : ""}{v.company?.location ? ` · ${v.company.location}` : ""}</div></td>
                   <td className="td"><ScoreBar score={v.intentScore} /></td>
                   <td className="td text-xs text-ink-300">{Object.entries(v.pages).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([p, n]) => <div key={p}>{p} <span className="text-ink-500">×{n}</span></div>)}</td>
@@ -115,6 +135,33 @@ export function VisitorsPage() {
           {detail.company?.techStack?.length ? <div className="flex flex-wrap gap-1">{detail.company.techStack.map((t) => <span key={t} className="badge bg-black/[0.05] text-ink-300">{t}</span>)}</div> : null}
           <div className="mt-2 font-medium">Pages viewed</div>
           <ul className="text-xs">{Object.entries(detail.pages).sort((a, b) => b[1] - a[1]).map(([p, n]) => <li key={p} className="flex justify-between border-b border-black/5 py-1"><span>{p}</span><span className="text-ink-500">{n}</span></li>)}</ul>
+
+          <div className="mt-4 font-medium">Their journey</div>
+          {journeyErr ? (
+            <div className="text-xs text-red-600">Could not load the visit history: {journeyErr}</div>
+          ) : journey === null ? (
+            <Spinner label="Loading visits…" />
+          ) : journey.length === 0 ? (
+            <div className="text-xs text-ink-400">No individual visits recorded yet.</div>
+          ) : (
+            <ol className="relative space-y-2 border-l border-black/10 pl-4 text-xs">
+              {journey.map((v, i) => {
+                const newSession = i === 0 || journey[i - 1].sessionId !== v.sessionId;
+                return (
+                  <li key={v.id} className="relative">
+                    <span className="absolute -left-[21px] top-1 h-2 w-2 rounded-full bg-brand-600" />
+                    {newSession && <div className="mb-1 text-ink-400">New session{v.city ? ` · ${v.city}` : ""}</div>}
+                    <div className="font-medium text-ink-200">{v.page ?? "/"}</div>
+                    <div className="text-ink-400">
+                      {new Date(v.visitedAt).toLocaleString()}
+                      {v.durationMs > 0 && ` · ${Math.round(v.durationMs / 1000)}s`}
+                      {v.referrer && ` · from ${(() => { try { return new URL(v.referrer).hostname; } catch { return v.referrer; } })()}`}
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+          )}
           <div className="text-xs text-ink-400">First seen {fmtDate(detail.firstSeenAt)} · last seen {fmtDate(detail.lastSeenAt)}</div>
         </div>}
       </Modal>
