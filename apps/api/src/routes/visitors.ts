@@ -9,6 +9,7 @@ import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { collectHit, pixelScript } from "../services/visitors.js";
 import { upsertLead } from "../services/leads.js";
+import { tryConsume } from "../lib/quota.js";
 
 /** Public pixel endpoints (no auth). Mounted at /px */
 export const pixelPublic = new Hono();
@@ -100,14 +101,21 @@ visitorRoutes.post("/:domain/decision-makers", zValidator("json", z.object({ tit
   const company = vc.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, vc.companyId) }) : null;
   const people = await findPeople({ companyName: company?.name ?? vc.name ?? domain.split(".")[0], titles: b.titles, limit: b.limit });
   const saved: string[] = [];
+  let stopped: string | undefined;
   if (b.save) {
     for (const p of people) {
-      const ok = await consume(db, oid, "leads", 1).then(() => true, () => false);
-      if (!ok) break;
-      const { lead } = await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyDomain: domain, companyName: company?.name ?? vc.name ?? undefined, source: "website_visitor", tags: ["visitor", `intent:${Math.round(vc.intentScore)}`] });
+      const { lead, created } = await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyDomain: domain, companyName: company?.name ?? vc.name ?? undefined, source: "website_visitor", tags: ["visitor", `intent:${Math.round(vc.intentScore)}`] });
       saved.push(lead.id);
+      if (!created) continue;
+      const charge = await tryConsume(db, oid, "leads", 1);
+      if (!charge.ok) {
+        // Say which of the two it was. A truncated list with no explanation looks like
+        // "that is all there was", which is the one thing it must never look like.
+        stopped = charge.reason === "quota" ? `Stopped at ${saved.length}: ${charge.message}` : `Stopped at ${saved.length}: could not record usage (${charge.message})`;
+        break;
+      }
     }
     await db.update(visitorCompanies).set({ leadsFound: vc.leadsFound + saved.length, status: vc.status === "new" ? "reviewed" : vc.status }).where(eq(visitorCompanies.id, vc.id));
   }
-  return c.json({ people, savedLeadIds: saved });
+  return c.json({ people, savedLeadIds: saved, stopped });
 });

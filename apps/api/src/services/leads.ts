@@ -21,7 +21,12 @@ export async function upsertCompany(orgId: string, domain: string, data: Partial
     emailPattern: data.emailPattern ?? undefined,
     mxValid: data.mxValid ?? undefined,
     catchAll: data.catchAll ?? undefined,
-    raw: data.emailsFound || data.socials ? { emailsFound: data.emailsFound ?? [], socials: data.socials ?? {} } : undefined,
+    // `[]` and `{}` are truthy, and crawlCompanyWebsite always returns both, so this used
+    // to overwrite `raw` on EVERY call - including one where the crawl reached nothing.
+    // The harvested emailsFound list is what findEmail uses as knownEmails to infer a
+    // domain's address pattern, so wiping it silently degrades every later email discovery
+    // for that company to guessing. Only write it when there is something to write.
+    raw: data.emailsFound?.length || Object.keys(data.socials ?? {}).length ? { emailsFound: data.emailsFound ?? [], socials: data.socials ?? {} } : undefined,
     enrichedAt: data.description || data.techStack?.length ? new Date() : undefined,
     updatedAt: new Date(),
   };
@@ -79,7 +84,11 @@ export async function upsertLead(orgId: string, input: UpsertLeadInput): Promise
   const values: Partial<NewLead> = {
     firstName: input.firstName ?? nm.firstName,
     lastName: input.lastName ?? nm.lastName,
-    fullName: nm.fullName || null,
+    // `null`, unlike `undefined`, survives the `clean` filter below and is written. A
+    // caller with only an email and a title - a perfectly ordinary CSV row - therefore
+    // BLANKED the stored full name of an existing lead. An update must never replace a
+    // real value with nothing; it just has nothing to say about that field.
+    fullName: nm.fullName || undefined,
     title: input.title ?? undefined,
     seniority: inferSeniority(input.title ?? undefined),
     department: inferDepartment(input.title ?? undefined),

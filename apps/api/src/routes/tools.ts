@@ -17,6 +17,7 @@ import { upsertCompany, upsertLead } from "../services/leads.js";
 import { advanceContact } from "../services/campaigns.js";
 import { runAutopilot } from "../services/autopilot.js";
 import { emitEvent } from "../lib/events.js";
+import { tryConsume } from "../lib/quota.js";
 
 export const toolRoutes = new Hono<Env>();
 toolRoutes.use("*", requireAuth);
@@ -117,12 +118,20 @@ toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", 
   if (!name && domain) name = (await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) }))?.name ?? domain.split(".")[0];
   const people = await findPeople({ companyName: name!, titles: b.titles, limit: b.limit });
   const saved: string[] = [];
+  let stopped: string | undefined;
   if (b.save) for (const p of people) {
-    const ok = await consume(db, oid, "leads", 1).then(() => true, () => false);
-    if (!ok) break;
-    saved.push((await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName: name, companyDomain: domain, source: "colleagues" })).lead.id);
+    // Upsert first, charge only for a lead this org did not already have, and say why the
+    // list stopped short rather than returning a truncated one that reads as complete.
+    const { lead, created } = await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName: name, companyDomain: domain, source: "colleagues" });
+    saved.push(lead.id);
+    if (!created) continue;
+    const charge = await tryConsume(db, oid, "leads", 1);
+    if (!charge.ok) {
+      stopped = charge.reason === "quota" ? `Stopped at ${saved.length}: ${charge.message}` : `Stopped at ${saved.length}: could not record usage (${charge.message})`;
+      break;
+    }
   }
-  return c.json({ company: { name, domain }, people, savedLeadIds: saved });
+  return c.json({ company: { name, domain }, people, savedLeadIds: saved, stopped });
 });
 
 /** Decision makers at a company by persona. */
@@ -140,7 +149,7 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
   for (const p of people) {
     let email: string | undefined, status: string | undefined, confidence = 0;
     if (b.findEmails && domain && p.firstName && p.lastName) {
-      const ok = await consume(db, oid, "verifications", 1).then(() => true, () => false);
+      const ok = (await tryConsume(db, oid, "verifications", 1)).ok;
       if (ok) {
         const r = await findEmail({ firstName: p.firstName, lastName: p.lastName, domain }, verifyOpts()).catch(() => null);
         if (r) { email = r.email; status = r.status; confidence = r.confidence; }
@@ -148,7 +157,7 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
     }
     let leadId: string | undefined;
     if (b.save) {
-      const ok = await consume(db, oid, "leads", 1).then(() => true, () => false);
+      const ok = (await tryConsume(db, oid, "leads", 1)).ok;
       if (ok) leadId = (await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName: name, companyDomain: domain, email, emailStatus: status, emailConfidence: confidence, source: "decision_makers" })).lead.id;
     }
     out.push({ ...p, email, emailStatus: status, confidence, leadId });
@@ -168,12 +177,49 @@ toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json
     const prof = await crawlCompanyWebsite(domain).catch(() => null);
     company = await upsertCompany(oid, domain, prof ?? {});
   }
-  const [hiring, news] = await Promise.all([detectHiring(domain, company.name ?? undefined).catch(() => null), company.name ? companyNews(company.name, 60).catch(() => []) : Promise.resolve([])]);
+  // Both lookups can fail, and both used to collapse failure into empty. `intentScore` and
+  // `signalsCount` were then ASSIGNED from those empties, so one news-search outage wrote
+  // 0 over a company that scored 90 the day before and reported the zero as a finding. A
+  // score is only rewritten when the inputs behind it actually arrived.
+  const [hiring, news] = await Promise.all([
+    detectHiring(domain, company.name ?? undefined).catch(() => null),
+    company.name ? companyNews(company.name, 60).catch(() => null) : Promise.resolve([]),
+  ]);
+  const newsOk = news !== null;
+  const items = news ?? [];
+  const hiringOk = !!hiring && hiring.reached;
+
   const { storeSignals } = await import("../services/signals.js");
-  if (news.length) await storeSignals(news.filter((n) => n.type !== "news").map((n) => ({ ...n, companyName: company!.name ?? undefined })), null);
-  const intent = Math.min(100, (hiring?.openRoles ?? 0) * 3 + news.filter((n) => n.type === "funding").length * 25 + news.filter((n) => n.type !== "news").length * 5);
-  await db.update(companies).set({ openRoles: hiring?.openRoles ?? company.openRoles, hiring: hiring ? { byFunction: hiring.byFunction, source: hiring.source, careersUrl: hiring.careersUrl, titles: hiring.titles.slice(0, 20) } : company.hiring, signalsCount: news.filter((n) => n.type !== "news").length, lastSignalAt: news[0]?.occurredAt ?? company.lastSignalAt, intentScore: intent, updatedAt: new Date() }).where(eq(companies.id, company.id));
-  return c.json({ company: { ...company, openRoles: hiring?.openRoles, intentScore: intent }, hiring, news: news.slice(0, 20) });
+  if (items.length) await storeSignals(items.filter((n) => n.type !== "news").map((n) => ({ ...n, companyName: company!.name ?? undefined })), null);
+
+  const nonNews = items.filter((n) => n.type !== "news").length;
+  const intent = Math.min(100, (hiring?.openRoles ?? 0) * 3 + items.filter((n) => n.type === "funding").length * 25 + nonNews * 5);
+  const scoreIsReal = newsOk && hiringOk;
+
+  await db
+    .update(companies)
+    .set({
+      openRoles: hiringOk ? hiring!.openRoles : company.openRoles,
+      hiring: hiringOk ? { byFunction: hiring!.byFunction, source: hiring!.source, careersUrl: hiring!.careersUrl, titles: hiring!.titles.slice(0, 20) } : company.hiring,
+      signalsCount: newsOk ? nonNews : company.signalsCount,
+      lastSignalAt: items[0]?.occurredAt ?? company.lastSignalAt,
+      intentScore: scoreIsReal ? intent : company.intentScore,
+      updatedAt: new Date(),
+    })
+    .where(eq(companies.id, company.id));
+
+  return c.json({
+    company: { ...company, openRoles: hiringOk ? hiring!.openRoles : company.openRoles, intentScore: scoreIsReal ? intent : company.intentScore },
+    hiring,
+    news: items.slice(0, 20),
+    // Say which inputs were actually gathered, so a caller is never left reading a stale
+    // number as though it were fresh, or a zero as though it were a measurement.
+    sources: {
+      hiring: hiringOk ? "ok" : hiring ? "unreachable" : "failed",
+      news: newsOk ? "ok" : "failed",
+      intentScoreUpdated: scoreIsReal,
+    },
+  });
 });
 
 /** Sender domain health (SPF/DKIM/DMARC/MX). */

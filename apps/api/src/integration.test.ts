@@ -443,6 +443,176 @@ suite("database integration", () => {
     });
   });
 
+  /**
+   * Writes that used to destroy data they had nothing to say about.
+   *
+   * An update should be able to add what it knows and leave the rest alone. These two could
+   * not: a caller with only an email blanked the stored name, and a crawl that reached
+   * nothing erased the harvested address list that email discovery depends on.
+   */
+  describe("an update never replaces real data with nothing", () => {
+    let upsertLead: any;
+    let upsertCompany: any;
+
+    beforeAll(async () => {
+      ({ upsertLead, upsertCompany } = await import("./services/leads.js"));
+    });
+
+    it("keeps a lead's name when the next write does not carry one", async () => {
+      const org = await newOrg("upsert-name");
+      const email = `keep-${randomUUID().slice(0, 8)}@example.com`;
+
+      await upsertLead(org.id, { firstName: "Priya", lastName: "Sharma", email, title: "VP Sales" });
+      // A perfectly ordinary CSV row: an email and a title, no name columns.
+      const { lead } = await upsertLead(org.id, { email, title: "SVP Sales" });
+
+      expect(lead.fullName).toBe("Priya Sharma");
+      expect(lead.firstName).toBe("Priya");
+      expect(lead.title).toBe("SVP Sales");
+    });
+
+    it("keeps harvested addresses when a later crawl finds none", async () => {
+      const org = await newOrg("upsert-raw");
+      const domain = `acme-${randomUUID().slice(0, 8)}.test`;
+
+      await upsertCompany(org.id, domain, { emailsFound: ["hello@acme.test", "jobs@acme.test"], socials: { linkedin: "https://www.linkedin.com/company/acme" } });
+      // crawlCompanyWebsite always returns both keys, and [] and {} are truthy - which is
+      // how the empty version used to overwrite the real one.
+      const after = await upsertCompany(org.id, domain, { emailsFound: [], socials: {} });
+
+      expect((after.raw as { emailsFound?: string[] })?.emailsFound).toEqual(["hello@acme.test", "jobs@acme.test"]);
+    });
+
+    it("does record addresses when a crawl actually finds some", async () => {
+      const org = await newOrg("upsert-raw2");
+      const domain = `beta-${randomUUID().slice(0, 8)}.test`;
+      await upsertCompany(org.id, domain, { emailsFound: ["a@beta.test"], socials: {} });
+      const after = await upsertCompany(org.id, domain, { emailsFound: ["a@beta.test", "b@beta.test"], socials: {} });
+      expect((after.raw as { emailsFound?: string[] })?.emailsFound).toHaveLength(2);
+    });
+  });
+
+  /**
+   * `consume(...).then(() => true, () => false)` reported every failure as "out of quota",
+   * including a database fault. The customer was told they hit a cap they had not hit, and
+   * the real error was recorded nowhere.
+   */
+  describe("quota refusals are told apart from faults", () => {
+    let tryConsume: any;
+
+    beforeAll(async () => {
+      ({ tryConsume } = await import("./lib/quota.js"));
+    });
+
+    it("says ok when the org is within its plan", async () => {
+      const org = await newOrg("quota-ok");
+      expect(await tryConsume(db, org.id, "leads", 1)).toEqual({ ok: true });
+    });
+
+    it("calls a plan limit a plan limit", async () => {
+      const org = await newOrg("quota-over");
+      // Pin the limit rather than reading it from the plan table, so this test keeps
+      // testing the same thing when pricing changes - and so it cannot quietly assert
+      // nothing if a limit key is ever renamed.
+      await db.update(schema.organizations).set({ planLimits: { leadsPerMonth: 2 } }).where(schema.eq(schema.organizations.id, org.id));
+
+      expect(await tryConsume(db, org.id, "leads", 1)).toEqual({ ok: true });
+      expect(await tryConsume(db, org.id, "leads", 1)).toEqual({ ok: true });
+
+      const over = await tryConsume(db, org.id, "leads", 1);
+      expect(over.ok).toBe(false);
+      expect(over.reason).toBe("quota");
+      expect(over.message).toMatch(/2\/2|quota/i);
+
+      // And the rollback means the org is not left stuck above its own limit.
+      expect((await getUsage(db, org.id)).usage.leads.used).toBe(2);
+    });
+
+    it("calls a database fault a fault, not a plan limit", async () => {
+      const broken = {
+        query: { organizations: { findFirst: async () => { throw new Error("connection terminated unexpectedly"); } } },
+        select: () => { throw new Error("connection terminated unexpectedly"); },
+        insert: () => { throw new Error("connection terminated unexpectedly"); },
+      };
+      const r = await tryConsume(broken as never, randomUUID(), "leads", 1);
+      expect(r.ok).toBe(false);
+      expect(r.reason).toBe("error");
+      expect(r.message).toMatch(/connection terminated/);
+    });
+  });
+
+  /**
+   * The retry that emailed a prospect twice.
+   *
+   * The BILLING side of a retry was fixed and the SENDING side was not: the provider call
+   * succeeded, the row update or the contact advance then failed - a dropped pool
+   * connection is enough - the handler threw, failJob requeued it, and sendStep re-ran
+   * from the top with currentStep unchanged. For cold outreach a duplicate is the worse
+   * failure: it reads as broken and it costs sending reputation.
+   */
+  describe("a retried send does not email the prospect twice", () => {
+    let sendStep: any;
+
+    beforeAll(async () => {
+      ({ sendStep } = await import("./services/campaigns.js"));
+    });
+
+    async function scenario(priorStatus: "sent" | "sending") {
+      const org = await newOrg("resend");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", emailAccountId: acct.id, status: "active" }).returning();
+      const [step] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "Hi", bodyTemplate: "Hello" }).returning();
+      const [lead] = await db.insert(schema.leads).values({ orgId: org.id, email: `p-${randomUUID().slice(0, 8)}@example.com`, fullName: "P", emailStatus: "valid" }).returning();
+      const [cc] = await db.insert(schema.campaignContacts).values({ orgId: org.id, campaignId: campaign.id, leadId: lead.id, status: "active", currentStep: 0 }).returning();
+
+      // What the crashed first attempt left behind.
+      const [prior] = await db
+        .insert(schema.messages)
+        .values({ orgId: org.id, campaignId: campaign.id, stepId: step.id, leadId: lead.id, toEmail: lead.email!, subject: "Hi", bodyText: "Hello", status: priorStatus })
+        .returning();
+
+      const r = await sendStep(campaign.id, cc.id, step.id, { attempt: 2 });
+      const rows = await db.select().from(schema.messages).where(schema.eq(schema.messages.campaignId, campaign.id));
+      return { r, rows, prior, cc, org };
+    }
+
+    it("does not send again when the first attempt is known to have delivered", async () => {
+      const { r, rows, prior, cc } = await scenario("sent");
+      expect(r.sent).toBeUndefined();
+      expect(String(r.skipped)).toMatch(/already sent/i);
+      // No second message row, so no second email.
+      expect(rows).toHaveLength(1);
+      expect(rows[0].id).toBe(prior.id);
+      // The contact still moves on, so the sequence is not stuck on this step forever.
+      const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
+      expect(after!.currentStep).toBe(1);
+    });
+
+    it("does not gamble a second copy when the first attempt's outcome is unknown", async () => {
+      const { r, rows, prior } = await scenario("sending");
+      expect(String(r.skipped)).toMatch(/unknown/i);
+      expect(rows).toHaveLength(1);
+      const row = await db.query.messages.findFirst({ where: schema.eq(schema.messages.id, prior.id) });
+      // Recorded as uncertain rather than quietly marked sent or silently resent.
+      expect(row!.status).toBe("unknown");
+      expect(row!.error).toMatch(/never confirmed/i);
+    });
+
+    it("leaves a genuinely failed attempt free to be retried", async () => {
+      const org = await newOrg("resend-failed");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", emailAccountId: acct.id, status: "active" }).returning();
+      const [step] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "Hi", bodyTemplate: "Hello" }).returning();
+      const [lead] = await db.insert(schema.leads).values({ orgId: org.id, email: `p-${randomUUID().slice(0, 8)}@example.com`, fullName: "P", emailStatus: "valid" }).returning();
+      const [cc] = await db.insert(schema.campaignContacts).values({ orgId: org.id, campaignId: campaign.id, leadId: lead.id, status: "active", currentStep: 0 }).returning();
+      await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: step.id, leadId: lead.id, toEmail: lead.email!, subject: "Hi", bodyText: "Hello", status: "failed" });
+
+      const r = await sendStep(campaign.id, cc.id, step.id, { attempt: 2 });
+      // A failed row is not evidence of delivery, so the guard must not block the retry.
+      expect(String(r.skipped ?? "")).not.toMatch(/already sent|unknown/i);
+    });
+  });
+
   afterAll(async () => {
     // Nothing to tear down: every test uses a fresh org, and the database is disposable.
   });

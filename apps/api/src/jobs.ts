@@ -7,6 +7,7 @@ import { knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { sendStep, tickCampaign } from "./services/campaigns.js";
 import { syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
+import { tryConsume } from "./lib/quota.js";
 import { identifyVisit } from "./services/visitors.js";
 import { refreshCompanySignals, runSubscription } from "./services/signals.js";
 import { runMonitor } from "./services/monitors.js";
@@ -181,7 +182,9 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const lead = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)) });
     if (!lead?.email) return { skipped: "no email" };
-    await consume(db, lead.orgId, "verifications", 1);
+    // One lookup, one charge, however many times the job is retried - the same guard
+    // lead.enrich already has. verifyEmail and the update after it can both throw.
+    if (job.attempts <= 1) await consume(db, lead.orgId, "verifications", 1);
     const v = await verifyEmail(lead.email, verifyOpts());
     await db.update(leads).set({ emailStatus: v.status, emailConfidence: v.confidence, verifiedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, lead.id));
     await emitEvent(lead.orgId, "lead.verified", { leadId: lead.id, email: lead.email, status: v.status, confidence: v.confidence }, { type: "lead", id: lead.id });
@@ -285,14 +288,19 @@ export const handlers: Record<string, JobHandler> = {
     if (crawled) await upsertCompany(co.orgId, co.domain, { ...prof!, name: prof!.name ?? co.name ?? undefined });
     const { detectHiring } = await import("@prospex/core");
     const h = await detectHiring(co.domain, prof?.name ?? co.name ?? undefined).catch(() => null);
-    if (h) await db.update(companies).set({ openRoles: h.openRoles, hiring: { byFunction: h.byFunction, source: h.source, careersUrl: h.careersUrl } }).where(eq(companies.id, co.id));
+    // `reached: false` means nothing answered, not that nobody is hiring. Writing its 0
+    // over a real count both loses the number and suppresses the next hiring-up alert,
+    // which requires a previous count above zero.
+    const hiringOk = !!h && h.reached;
+    if (hiringOk) await db.update(companies).set({ openRoles: h!.openRoles, hiring: { byFunction: h!.byFunction, source: h!.source, careersUrl: h!.careersUrl } }).where(eq(companies.id, co.id));
     const n = await refreshCompanySignals(co.orgId, co.domain, prof?.name ?? co.name).catch(() => 0);
     return {
       crawled,
       // Not the same as "nothing to find": say which it was, in the job result the admin
       // page shows, rather than reporting a failed crawl as a completed one.
       crawlError: crawled ? undefined : prof ? `no page on ${co.domain} could be fetched (${prof.pagesAttempted ?? 0} tried)` : "crawl threw",
-      openRoles: h?.openRoles ?? 0,
+      openRoles: hiringOk ? h!.openRoles : co.openRoles,
+      hiringError: hiringOk ? undefined : h?.reason ?? "hiring check threw",
       newSignals: n,
     };
   },
@@ -388,8 +396,14 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const ss = await db.query.savedSearches.findFirst({ where: eq(savedSearches.id, String(job.payload.savedSearchId)) });
     if (!ss) return { skipped: true };
-    const ok = await consume(db, ss.orgId, "searches", 1).then(() => true, () => false);
-    if (!ok) return { skipped: "quota" };
+    // Charged once per run, not once per retry, and a database fault is reported as a
+    // database fault rather than as the customer's plan limit. lastRunAt is stamped below
+    // either way, so misfiling this silently cancelled that day's alert digest.
+    if (job.attempts <= 1) {
+      const charge = await tryConsume(db, ss.orgId, "searches", 1);
+      if (!charge.ok && charge.reason === "quota") return { skipped: "quota", detail: charge.message };
+      if (!charge.ok) throw new Error(`could not record search usage: ${charge.message}`);
+    }
     const providerBudget = await remainingPremiumBudget(db, ss.orgId);
     const results = await runLeadPipeline({ ...(ss.query as Record<string, unknown>), limit: Number((ss.query as { limit?: number }).limit ?? 25) }, { ai: createAiProvider(), verify: verifyOpts(), maxProviderLeads: providerBudget });
     let fresh = 0;

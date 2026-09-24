@@ -1,4 +1,4 @@
-import { and, eq } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import { getDb } from "./client.js";
 import { toolRegistry, toolUsage } from "./schema.js";
 
@@ -25,15 +25,22 @@ export async function recordToolUsage(
   if (!reg) return null;
 
   const period = periodKeyFor((reg.period as "day" | "month") ?? "month");
-  const existing = await db.query.toolUsage.findFirst({
-    where: and(eq(toolUsage.provider, provider), eq(toolUsage.period, period)),
-  });
-  const nextCount = (existing?.count ?? 0) + 1;
 
-  await db
+  // Incremented in the database, not read-then-written.
+  //
+  // This is called fire-and-forget from meter() on every outbound provider call, including
+  // from pMap with a concurrency of five and from several worker jobs at once. Computing
+  // `(existing.count ?? 0) + 1` in JS and writing that absolute value meant concurrent
+  // callers all computed the same number and the last writer won, so the counter drifted
+  // steadily below reality. It is the number the "you are at 80% of your free tier" alert
+  // is measured against - so the alert fired late or never, and the operator found out
+  // from the provider's bill instead. usage.ts already does it this way.
+  const [row] = await db
     .insert(toolUsage)
-    .values({ provider, period, count: nextCount })
-    .onConflictDoUpdate({ target: [toolUsage.provider, toolUsage.period], set: { count: nextCount, updatedAt: new Date() } });
+    .values({ provider, period, count: 1 })
+    .onConflictDoUpdate({ target: [toolUsage.provider, toolUsage.period], set: { count: sql`${toolUsage.count} + 1`, updatedAt: new Date() } })
+    .returning();
+  const nextCount = row?.count ?? 1;
 
   let thresholdCrossed = false;
   if (reg.usageLimit && reg.usageLimit > 0) {

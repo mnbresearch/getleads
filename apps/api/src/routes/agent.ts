@@ -6,6 +6,7 @@ import { createAiProvider, generateOutreach, runLeadPipeline } from "@prospex/co
 import { env } from "../env.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { pipelineLeadToInput, upsertLead } from "../services/leads.js";
+import { tryConsume } from "../lib/quota.js";
 
 /**
  * Agent-first endpoints: single calls that do a whole workflow, with plain JSON in/out.
@@ -46,7 +47,7 @@ agentRoutes.post(
       }
       let email: { subject: string; body: string } | undefined;
       if (b.generateEmails && b.sender && r.email) {
-        const okQuota = await consume(db, oid, "aiMessages", 1).then(() => true, () => false);
+        const okQuota = (await tryConsume(db, oid, "aiMessages", 1)).ok;
         if (okQuota) {
           const g = await generateOutreach(ai, { lead: { firstName: r.firstName, lastName: r.lastName, fullName: r.fullName, title: r.title, company: r.company ? { name: r.company.name, domain: r.company.domain, industry: r.company.industry, description: r.company.description } : null }, sender: b.sender });
           email = { subject: g.subject, body: g.body };

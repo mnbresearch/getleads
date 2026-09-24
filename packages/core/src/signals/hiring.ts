@@ -25,6 +25,19 @@ export interface HiringSignal {
   titles: string[];
   source: "careers_page" | "search" | "none";
   careersUrl?: string;
+  /**
+   * True when at least one page was actually fetched, or a search actually answered.
+   *
+   * Without it, "this company has no open roles" and "we could not reach anything" were
+   * the same object: `{ openRoles: 0, source: "none" }`. That number is written to
+   * `companies.openRoles` and compared against the previous value to raise a hiring alert,
+   * and the alert requires `prev > 0` - so a site that blocked the bot once zeroed the
+   * stored count AND suppressed the alert the customer set the monitor up for. Silence
+   * caused by us must not look like silence from them.
+   */
+  reached: boolean;
+  /** Why nothing was reached, when nothing was. */
+  reason?: string;
 }
 
 const TITLE_RE = /^(senior|junior|lead|principal|head of|vp|director|manager|associate|staff|chief)?\s*[A-Za-z][A-Za-z /&+-]{3,60}$/;
@@ -32,9 +45,14 @@ const TITLE_RE = /^(senior|junior|lead|principal|head of|vp|director|manager|ass
 export async function detectHiring(domain: string, companyName?: string): Promise<HiringSignal> {
   const titles = new Set<string>();
   let careersUrl: string | undefined;
+  // Any page that came back at all, even one with no jobs on it, proves the site is
+  // reachable - which is what separates "nobody is hiring" from "we never got through".
+  let fetchedAnyPage = false;
+  let searchAnswered = false;
   for (const p of CAREER_PATHS) {
     const html = await fetchText(`https://${domain}${p}`, { timeoutMs: 8000 });
     if (!html) continue;
+    fetchedAnyPage = true;
     const $ = cheerio.load(html);
     const candidates: string[] = [];
     $("a, h2, h3, h4, li, [class*=job], [class*=position], [class*=opening], [class*=role]").each((_, el) => {
@@ -65,8 +83,9 @@ export async function detectHiring(domain: string, companyName?: string): Promis
   }
   let source: HiringSignal["source"] = titles.size ? "careers_page" : "none";
   if (!titles.size && companyName) {
-    const res = await webSearch(`site:linkedin.com/jobs "${companyName}"`, { count: 20, minResults: 1 }).catch(() => []);
-    for (const r of res) {
+    const res = await webSearch(`site:linkedin.com/jobs "${companyName}"`, { count: 20, minResults: 1 }).catch(() => null);
+    searchAnswered = res !== null;
+    for (const r of res ?? []) {
       const t = r.title.replace(/\s*[-|–].*$/, "").trim();
       if (t.length >= 6 && t.length <= 70) titles.add(t);
     }
@@ -77,5 +96,15 @@ export async function detectHiring(domain: string, companyName?: string): Promis
     const fn = FUNCTION_RULES.find(([re]) => re.test(t))?.[1] ?? "other";
     byFunction[fn] = (byFunction[fn] ?? 0) + 1;
   }
-  return { domain, openRoles: titles.size, byFunction, titles: [...titles].slice(0, 50), source, careersUrl };
+  const reached = fetchedAnyPage || searchAnswered || titles.size > 0;
+  return {
+    domain,
+    openRoles: titles.size,
+    byFunction,
+    titles: [...titles].slice(0, 50),
+    source,
+    careersUrl,
+    reached,
+    reason: reached ? undefined : `no careers page on ${domain} could be fetched${companyName ? " and the job search did not answer" : ""}`,
+  };
 }

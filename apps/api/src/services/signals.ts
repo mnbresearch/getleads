@@ -2,6 +2,7 @@ import { and, companies, consume, eq, getDb, inArray, signalMatches, signalSubsc
 import { companyNews, domainHintFromUrl, findPeople, resolveCompanyDomain, scanSignals, scoreLeadRules, type IcpCriteria, type ParsedSignal, type SignalType } from "@prospex/core";
 import { upsertCompany, upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
+import { tryConsume } from "../lib/quota.js";
 import { enrollLeads } from "./campaigns.js";
 
 /** Persist parsed signals (global scope unless orgId given). Returns inserted rows. */
@@ -70,11 +71,19 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
   const ids: string[] = [];
   const icp = sub.icpId ? await db.query.icps.findFirst({ where: (t, { eq: e }) => e(t.id, sub.icpId!) }) : null;
   for (const p of people) {
-    const ok = await consume(db, sub.orgId, "leads", 1).then(() => true, () => false);
-    if (!ok) break;
     const score = icp ? scoreLeadRules({ title: p.title, location: p.location, company: { name: companyName } }, icp.criteria as IcpCriteria).score : 70;
     const { lead, created: c } = await upsertLead(sub.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName, companyDomain: domain, source: `signal:${type}`, tags: [`signal:${type}`, `sub:${sub.id.slice(0, 8)}`], icpId: sub.icpId, score, custom: { signalId } });
-    if (c) created++;
+    // Charged for a lead the org did not already have. A subscription re-reads the same
+    // people whenever a signal matches again; billing before the upsert charged for those
+    // repeats, which produce nothing.
+    if (c) {
+      created++;
+      const charge = await tryConsume(db, sub.orgId, "leads", 1);
+      if (!charge.ok) {
+        ids.push(lead.id);
+        break;
+      }
+    }
     ids.push(lead.id);
   }
   await db.update(signalMatches).set({ leadsCreated: created, status: created ? "leads_created" : "no_leads" }).where(and(eq(signalMatches.signalId, signalId), eq(signalMatches.subscriptionId, sub.id)));

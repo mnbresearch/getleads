@@ -2,6 +2,7 @@ import { consume, eq, getDb, monitorResults, monitors, type Monitor } from "@pro
 import { companyNews, detectHiring, fetchGoogleNews, linkedinPostEngagers, webSearch } from "@prospex/core";
 import { upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
+import { tryConsume } from "../lib/quota.js";
 
 /**
  * Monitor types:
@@ -21,14 +22,28 @@ export async function runMonitor(m: Monitor, log: (s: string) => void = () => {}
     return r[0];
   };
 
+  let leadQuotaExhausted = false;
   if (m.type === "linkedin_post") {
     const r = await linkedinPostEngagers(m.target);
     if (!r.publicPage) log("post not publicly accessible");
     for (const p of r.people) {
       let leadId: string | undefined;
-      if (cfg.createLeads !== false) {
-        const ok = await consume(db, m.orgId, "leads", 1).then(() => true, () => false);
-        if (ok) leadId = (await upsertLead(m.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, source: "linkedin:post", tags: ["engager", `monitor:${m.id.slice(0, 8)}`] })).lead.id;
+      if (cfg.createLeads !== false && !leadQuotaExhausted) {
+        // Charge for a lead only when one was actually CREATED. A monitor re-reads the
+        // whole engager list every tick, so charging before the upsert billed the org for
+        // the same forty people every six hours, forever, while `onConflictDoNothing` kept
+        // the result table unchanged. A repeat costs nothing because it produces nothing.
+        const { lead, created } = await upsertLead(m.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, source: "linkedin:post", tags: ["engager", `monitor:${m.id.slice(0, 8)}`] });
+        leadId = lead.id;
+        if (created) {
+          const charge = await tryConsume(db, m.orgId, "leads", 1);
+          // Out of plan quota: stop creating for the rest of this run. A database fault is
+          // a different thing and must not be filed under the customer's plan limit.
+          if (!charge.ok) {
+            leadQuotaExhausted = true;
+            log(charge.reason === "quota" ? `lead quota reached: ${charge.message}` : `could not record lead usage: ${charge.message}`);
+          }
+        }
       }
       await insert("person", p.fullName, p.linkedinUrl ?? null, p.title, { postText: r.postText }, leadId);
     }
@@ -47,9 +62,16 @@ export async function runMonitor(m: Monitor, log: (s: string) => void = () => {}
   } else if (m.type === "jobs") {
     const h = await detectHiring(m.target, cfg.companyDomain);
     const prev = (m.lastResult as { openRoles?: number } | null)?.openRoles ?? 0;
-    for (const t of h.titles) await insert("job", t, h.careersUrl ? `${h.careersUrl}#${encodeURIComponent(t)}` : `job:${m.target}:${t}`, undefined, { function: Object.entries(h.byFunction).find(() => true)?.[0] });
-    await db.update(monitors).set({ lastResult: { openRoles: h.openRoles, byFunction: h.byFunction, source: h.source, delta: h.openRoles - prev } }).where(eq(monitors.id, m.id));
-    if (h.openRoles > prev && prev > 0) await emitEvent(m.orgId, "monitor.hiring_up", { monitorId: m.id, domain: m.target, openRoles: h.openRoles, delta: h.openRoles - prev });
+    if (!h.reached) {
+      // Nothing answered. Recording 0 here would erase the baseline AND suppress the next
+      // hiring-up alert, which requires prev > 0 - so the customer would quietly stop
+      // getting the signal this monitor exists to send. Leave the count alone and say why.
+      await db.update(monitors).set({ lastResult: { openRoles: prev, byFunction: (m.lastResult as { byFunction?: Record<string, number> } | null)?.byFunction ?? {}, source: "none", delta: 0, unreachable: true, reason: h.reason } }).where(eq(monitors.id, m.id));
+    } else {
+      for (const t of h.titles) await insert("job", t, h.careersUrl ? `${h.careersUrl}#${encodeURIComponent(t)}` : `job:${m.target}:${t}`, undefined, { function: Object.entries(h.byFunction).find(() => true)?.[0] });
+      await db.update(monitors).set({ lastResult: { openRoles: h.openRoles, byFunction: h.byFunction, source: h.source, delta: h.openRoles - prev } }).where(eq(monitors.id, m.id));
+      if (h.openRoles > prev && prev > 0) await emitEvent(m.orgId, "monitor.hiring_up", { monitorId: m.id, domain: m.target, openRoles: h.openRoles, delta: h.openRoles - prev });
+    }
   }
   await db.update(monitors).set({ lastRunAt: new Date(), resultsCount: m.resultsCount + added }).where(eq(monitors.id, m.id));
   if (added) await emitEvent(m.orgId, "monitor.results", { monitorId: m.id, type: m.type, added }, { type: "monitor", id: m.id });

@@ -1,4 +1,4 @@
-import { and, asc, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, getDb, integrations, leads, lte, messages, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount } from "@prospex/db";
+import { and, asc, inArray, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, getDb, integrations, leads, lte, messages, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount } from "@prospex/db";
 import { allocateVariant, createAiProvider, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type SendingHealth } from "@prospex/core";
 import { decryptJson as decryptCfg } from "../lib/crypto.js";
 import { consume } from "@prospex/db";
@@ -226,6 +226,33 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   const account = campaign.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
   if (!account) return { skipped: "no account" };
 
+  /**
+   * Has this exact step already gone out to this lead?
+   *
+   * The billing side of a retry was fixed (`firstAttempt`); the SENDING side was not. The
+   * provider call succeeded, then the row update or the contact advance failed - a dropped
+   * pool connection is enough - the handler threw, failJob requeued it, and sendStep
+   * re-ran from the top with `cc.currentStep` unchanged. The prospect received the same
+   * email twice, free of charge and entirely visible to them. For cold outreach a
+   * duplicate is the worse failure: it reads as broken and it costs sending reputation.
+   *
+   * A row that says `sent` is proof of delivery, so we advance without resending. A row
+   * left `sending` means a previous attempt reached the provider and we never learned the
+   * outcome; we do not gamble a second copy on it, we record the uncertainty and move on.
+   */
+  if (!firstAttempt) {
+    const prior = await db.query.messages.findFirst({
+      where: and(eq(messages.campaignId, campaign.id), eq(messages.stepId, step.id), eq(messages.leadId, lead.id), inArray(messages.status, ["sent", "sending"])),
+    });
+    if (prior) {
+      if (prior.status === "sending") {
+        await db.update(messages).set({ status: "unknown", error: "a previous attempt reached the provider; outcome never confirmed, so it was not sent again" }).where(eq(messages.id, prior.id));
+      }
+      await advanceContact(cc.id);
+      return { skipped: prior.status === "sent" ? "already sent on an earlier attempt" : "earlier attempt's outcome unknown; not resent", messageId: prior.id };
+    }
+  }
+
   if (firstAttempt) await consume(db, campaign.orgId, "emails", 1);
 
   const s = settingsOf(campaign);
@@ -283,6 +310,10 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     .insert(messages)
     .values({ orgId: campaign.orgId, campaignId: campaign.id, stepId: step.id, leadId: lead.id, toEmail: lead.email, subject, bodyText: text, bodyHtml: html, trackingToken: token, status: "queued", variant: variant.index })
     .returning();
+
+  // Marked before the provider call, so a crash in between leaves evidence that this step
+  // may already have gone out. See the idempotency check above.
+  await db.update(messages).set({ status: "sending" }).where(eq(messages.id, msg.id));
 
   const res = await sendMail(mailerFromAccount(account), {
     from: `${account.fromName} <${account.fromEmail}>`,

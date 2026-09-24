@@ -152,34 +152,38 @@ export async function sampleAcrossEngines(
 
   const samples = opts.samples ?? prompt.samplesPerRun ?? 3;
 
-  /**
-   * Charge here, not in the caller.
-   *
-   * Sampling costs one model call per engine per sample, and it used to be metered by the
-   * manual route only. The scheduled path - visibility.run, fanned out hourly by
-   * visibility.tick to every active prompt in every org - charged nothing at all. So the
-   * one path a customer triggers by hand was billed, and the one that runs by itself
-   * forever was free. Putting the charge in the function that does the work makes that
-   * asymmetry impossible to reintroduce: any future caller is billed by construction.
-   *
-   * Still `.catch(() => {})`, matching the previous behaviour: an org over its limit is not
-   * stopped from measuring, because silently ceasing to sample would corrupt the time
-   * series that the whole feature depends on. The overage is recorded and visible.
-   */
-  await consume(db, orgIdValue, "aiMessages", samples * providers.length).catch(() => {});
-
-  const results: { engine: string; ok: boolean; mentioned: boolean; usable: boolean }[] = [];
+  const results: { engine: string; ok: boolean; mentioned: boolean; usable: boolean; error?: string }[] = [];
   for (const provider of providers) {
     for (let i = 0; i < samples; i++) {
       try {
         const { run } = await runVisibilityPrompt(db, orgIdValue, prompt, { ...opts, provider });
         results.push({ engine: provider.name, ok: true, mentioned: run.mentioned, usable: run.usable });
       } catch (e) {
-        void e;
-        results.push({ engine: provider.name, ok: false, mentioned: false, usable: false });
+        results.push({ engine: provider.name, ok: false, mentioned: false, usable: false, error: (e as Error).message?.slice(0, 200) });
       }
     }
   }
+
+  /**
+   * Charged here, in the function that does the work, and only for calls that happened.
+   *
+   * Two separate mistakes lived on this line. Sampling was metered by the MANUAL route
+   * only, so the scheduled path - visibility.run, fanned out hourly by visibility.tick to
+   * every active prompt in every org - was free, while the one path a customer triggers by
+   * hand was billed. Charging inside this function makes that asymmetry impossible to
+   * reintroduce: any future caller is billed by construction.
+   *
+   * And it was charged UP FRONT for samples x engines, so an engine whose key had expired
+   * billed its full share every hour, every day, and returned nothing. Billing for a call
+   * that failed is the same mistake as counting a failure as a result, pointed at the
+   * invoice instead of the metrics.
+   *
+   * Still `.catch(() => {})`: an org over its limit is not stopped from measuring, because
+   * silently ceasing to sample would corrupt the time series the whole feature depends on.
+   * The overage is recorded and visible.
+   */
+  const billable = results.filter((r) => r.ok).length;
+  if (billable > 0) await consume(db, orgIdValue, "aiMessages", billable).catch(() => {});
   return {
     engines: providers.map((p) => p.name),
     samplesPerEngine: samples,
