@@ -113,6 +113,38 @@ export const apolloProvider = (apiKey = secret(process.env.APOLLO_API_KEY)): Peo
   },
 });
 
+/**
+ * Turn Hunter's two different numbers into one honest verdict.
+ *
+ * Hunter returns a `confidence` score alongside an optional `verification.status`. They are
+ * not the same thing: `confidence` is how sure Hunter is that the address FITS the domain's
+ * pattern, and `verification` is whether the mailbox was actually checked. This mapped any
+ * confidence at or above 80 to "valid" - so a pattern guess arrived labelled the same way a
+ * verified mailbox does, at 0.95 confidence. Downstream that label is load-bearing: it earns
+ * the ICP score's verification credit, it suppresses re-verification, and it decides whether
+ * the address is safe to send to. A guessed address sent to a spam trap costs a domain
+ * reputation, which is not a cost a rounding of vocabulary should be able to incur.
+ *
+ * A guess stays a guess here. It is still returned, still usable, still ranked by how good a
+ * guess it is - it just is not called verified.
+ */
+export function hunterEmailVerdict(status: string | undefined, confidence: number | undefined): { status: "valid" | "invalid" | "catch_all" | "risky" | "unknown"; confidence: number } {
+  const c = (confidence ?? 50) / 100;
+  switch ((status ?? "").toLowerCase()) {
+    case "valid":
+      return { status: "valid", confidence: Math.max(c, 0.9) };
+    case "invalid":
+      return { status: "invalid", confidence: Math.max(c, 0.9) };
+    case "accept_all":
+      return { status: "catch_all", confidence: Math.min(c, 0.6) };
+    default:
+      // Never verified. A strong pattern match is "risky" - worth sending to with care -
+      // and a weak one is "unknown", not a verdict at all. Capped so an unverified address
+      // can never outrank a verified one.
+      return (confidence ?? 0) >= 80 ? { status: "risky", confidence: Math.min(c, 0.75) } : { status: "unknown", confidence: Math.min(c, 0.5) };
+  }
+}
+
 export const hunterProvider = (apiKey = secret(process.env.HUNTER_API_KEY)): PeopleProvider => ({
   name: "hunter",
   available: () => !!apiKey,
@@ -128,7 +160,21 @@ export const hunterProvider = (apiKey = secret(process.env.HUNTER_API_KEY)): Peo
       );
       for (const e of data?.data?.emails ?? []) {
         if (!e.first_name) continue;
-        out.push({ firstName: e.first_name, lastName: e.last_name, fullName: `${e.first_name} ${e.last_name ?? ""}`.trim(), title: e.position, seniority: e.seniority, companyName: data?.data?.organization, companyDomain: domain, linkedinUrl: e.linkedin ? normalizeLinkedinUrl(e.linkedin) ?? undefined : undefined, email: e.value, emailStatus: e.verification?.status === "valid" ? "valid" : (e.confidence ?? 0) >= 80 ? "valid" : "risky", source: "provider:hunter", confidence: (e.confidence ?? 50) / 100 });
+        const v = hunterEmailVerdict(e.verification?.status, e.confidence);
+        out.push({
+          firstName: e.first_name,
+          lastName: e.last_name,
+          fullName: `${e.first_name} ${e.last_name ?? ""}`.trim(),
+          title: e.position,
+          seniority: e.seniority,
+          companyName: data?.data?.organization,
+          companyDomain: domain,
+          linkedinUrl: e.linkedin ? normalizeLinkedinUrl(e.linkedin) ?? undefined : undefined,
+          email: e.value,
+          emailStatus: v.status,
+          source: "provider:hunter",
+          confidence: v.confidence,
+        });
       }
     }
     return out.filter((p) => !q.titles?.length || q.titles.some((t) => p.title?.toLowerCase().includes(t.toLowerCase())));

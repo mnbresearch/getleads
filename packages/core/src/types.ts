@@ -106,6 +106,16 @@ export interface LeadSearchQuery {
 export interface ScoredLead {
   score: number; // 0..100
   reasons: string[];
+  /**
+   * 0..1. The share of the ICP's weight that was decided on data we actually have.
+   *
+   * A score of 90 built from one known field is not the same claim as a score of 90 built
+   * from eight, and ranking treated them as identical. Optional so every existing caller
+   * keeps working; present on every rule-based score.
+   */
+  coverage?: number;
+  /** Criteria the ICP asks about that this lead has no data for. */
+  unknownCriteria?: string[];
 }
 
 export interface AiMessage {

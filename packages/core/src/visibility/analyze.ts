@@ -36,6 +36,17 @@ export interface BrandHit {
   mentions: number;
   /** True when a link to the brand's own domain appeared in the answer. */
   cited: boolean;
+  /**
+   * True when the engine actually wrote the brand's name in the prose.
+   *
+   * A brand can be present without being named - the engine links a source on its domain
+   * without saying who it is. That is real presence and worth counting, but it is weaker
+   * than being named, and it used to be counted as STRONGER: a cited-only brand was given
+   * firstIndex 0, which made prominence 1.0 and put it at position 1, ahead of every brand
+   * the answer actually recommended. The product's headline claim - "you are named first" -
+   * could therefore be produced by a single footnote link.
+   */
+  named: boolean;
   /** The brand's own URLs the engine linked to. */
   citedUrls: string[];
 }
@@ -127,16 +138,33 @@ function hostMatchesDomain(host: string, domain: string): boolean {
   return host === d || host.endsWith(`.${d}`);
 }
 
+/**
+ * The answer with every URL blanked out, offsets preserved.
+ *
+ * A brand's name almost always appears inside its own link, so matching names against the
+ * raw text counted "https://scout.example.com/pricing" in a sources block as the engine
+ * having said "Scout" - turning a footnote into a prose mention, and with it a first-place
+ * ranking. Citations are still detected, from the URLs; they are just not also counted as
+ * the engine naming the brand. Spaces of equal length keep every index comparable.
+ */
+function withoutUrls(text: string): string {
+  return text.replace(URL_RE, (u) => " ".repeat(u.length));
+}
+
 function analyzeBrand(text: string, spec: BrandSpec, urls: string[]): BrandHit | null {
   const names = [spec.name, ...(spec.aliases ?? [])].filter(Boolean);
-  const idxs = matchRanges(text, names).map((r) => r.start);
+  const idxs = matchRanges(withoutUrls(text), names).map((r) => r.start);
   const citedUrls = spec.domain ? urls.filter((u) => hostMatchesDomain(hostOf(u), spec.domain!)) : [];
 
   // A citation counts as presence even when the engine never wrote the brand's name,
   // which happens when it links a source without naming the vendor in prose.
   if (idxs.length === 0 && citedUrls.length === 0) return null;
 
-  const firstIndex = idxs.length > 0 ? idxs[0] : 0;
+  const named = idxs.length > 0;
+  // Cited but never named: rank it where its link actually appears, which is normally in a
+  // sources block at the end, rather than at offset 0 as if it led the answer.
+  const citedAt = citedUrls.map((u) => text.indexOf(u)).filter((i) => i >= 0);
+  const firstIndex = named ? idxs[0] : citedAt.length ? Math.min(...citedAt) : Math.max(0, text.length - 1);
   const prominence = text.length > 0 ? Math.max(0, Math.min(1, 1 - firstIndex / text.length)) : 0;
   return {
     name: spec.name,
@@ -145,6 +173,7 @@ function analyzeBrand(text: string, spec: BrandSpec, urls: string[]): BrandHit |
     prominence: Number(prominence.toFixed(4)),
     mentions: idxs.length,
     cited: citedUrls.length > 0,
+    named,
     citedUrls: Array.from(new Set(citedUrls)),
   };
 }
@@ -177,7 +206,8 @@ export function analyzeAnswer(
   // untracked brand appearing above you is still you losing the answer.
   const untracked = (opts.others ?? [])
     .filter((n) => n && n !== opts.brand.name && !competitorHits.some((c) => c.name === n))
-    .map((n) => ({ name: n, idx: occurrences(text, n)[0] }))
+    // Same reason as analyzeBrand: a name inside a link is not the engine naming it.
+    .map((n) => ({ name: n, idx: occurrences(withoutUrls(text), n)[0] }))
     .filter((x): x is { name: string; idx: number } => x.idx !== undefined);
 
   const ranked = [
