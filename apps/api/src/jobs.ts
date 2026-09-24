@@ -15,6 +15,59 @@ import { sendMail } from "./lib/mailer.js";
 
 const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey });
 
+/**
+ * The six self-perpetuating schedulers, and how long each waits before its next run.
+ *
+ * Named in one place so the boot seeder, the periodic re-seeder and the handlers cannot
+ * drift apart - a scheduler missing from any one of the three stops running with no error.
+ */
+export const RECURRING_JOBS: Record<string, number> = {
+  "campaign.tick": 60_000,
+  "signals.scan": 6 * 3600_000,
+  "monitors.tick": 30 * 60_000,
+  "visibility.tick": 3600_000,
+  "autopilots.tick": 3600_000,
+  "system.cleanup": 6 * 3600_000,
+};
+
+/**
+ * Run a scheduler's body and enqueue its successor WHATEVER HAPPENS.
+ *
+ * These jobs keep themselves alive: each run's last act is to schedule the next one. They
+ * are enqueued with maxAttempts: 1, so `failJob`'s `attempts < maxAttempts` is `1 < 1` -
+ * false - and a failed run goes straight to `failed` with no retry. Previously the
+ * reschedule was the last statement of the handler body, which meant ANY error before it
+ * - one dropped pool connection in the `select` that opens each of these handlers - killed
+ * that scheduler permanently. Campaign sending, monitors, autopilots, visibility sampling
+ * and job cleanup would all simply stop, silently, until someone redeployed. Nothing
+ * reported it, because a job that fails once and is never retried looks like an ordinary
+ * failed job.
+ *
+ * Putting the reschedule in `finally` makes the chain survive its own body failing, which
+ * is the common case. The rarer case - the database itself being unreachable, so even the
+ * enqueue fails - is covered by the periodic re-seed in `startRecurringJobKeeper`.
+ *
+ * The error is rethrown, so a genuinely broken scheduler still records its failure.
+ */
+export async function withReschedule<T>(
+  db: Parameters<typeof enqueue>[0],
+  job: { payload: Record<string, unknown> },
+  type: string,
+  body: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await body();
+  } finally {
+    if (job.payload?.recurring) {
+      const delayMs = RECURRING_JOBS[type] ?? 3600_000;
+      // Best-effort: a failure to reschedule must not replace the body's error, which is
+      // the more informative one. The keeper below is what recovers from this case.
+      await enqueue(db, type, { recurring: true }, { runAt: new Date(Date.now() + delayMs), maxAttempts: 1 }).catch(() => {});
+    }
+  }
+}
+
+
 export const handlers: Record<string, JobHandler> = {
   /** Run a lead search end-to-end and persist results. payload: { searchId, query, icpId?, listId? } */
   "search.run": async (job, ctx) => {
@@ -140,11 +193,12 @@ export const handlers: Record<string, JobHandler> = {
   /** Scheduler: tick every active campaign. Self-reschedules every 60s. */
   "campaign.tick": async (job, ctx) => {
     const { db } = ctx;
-    const active = await db.select().from(campaigns).where(eq(campaigns.status, "active"));
-    const out: Record<string, unknown> = {};
-    for (const c of active) out[c.id] = await tickCampaign(c.id).catch((e) => ({ error: (e as Error).message }));
-    if (job.payload.recurring) await enqueue(db, "campaign.tick", { recurring: true }, { runAt: new Date(Date.now() + 60_000), maxAttempts: 1 });
-    return out;
+    return withReschedule(db, job, "campaign.tick", async () => {
+      const active = await db.select().from(campaigns).where(eq(campaigns.status, "active"));
+      const out: Record<string, unknown> = {};
+      for (const c of active) out[c.id] = await tickCampaign(c.id).catch((e) => ({ error: (e as Error).message }));
+      return out;
+    });
   },
 
   "message.send": async (job) => sendStep(String(job.payload.campaignId), String(job.payload.contactId), String(job.payload.stepId)),
@@ -216,10 +270,11 @@ export const handlers: Record<string, JobHandler> = {
   /** Scheduler: run all active subscriptions every 6h. */
   "signals.scan": async (job, ctx) => {
     const { db } = ctx;
-    const subs = await db.select().from(signalSubscriptions).where(and(eq(signalSubscriptions.active, true), dsql`(${signalSubscriptions.lastRunAt} IS NULL OR ${signalSubscriptions.lastRunAt} < now() - interval '5 hours')`));
-    for (const s of subs) await enqueue(db, "signals.subscription", { subscriptionId: s.id }, { orgId: s.orgId, priority: 1 });
-    if (job.payload.recurring) await enqueue(db, "signals.scan", { recurring: true }, { runAt: new Date(Date.now() + 6 * 3600_000), maxAttempts: 1 });
-    return { queued: subs.length };
+    return withReschedule(db, job, "signals.scan", async () => {
+      const subs = await db.select().from(signalSubscriptions).where(and(eq(signalSubscriptions.active, true), dsql`(${signalSubscriptions.lastRunAt} IS NULL OR ${signalSubscriptions.lastRunAt} < now() - interval '5 hours')`));
+      for (const s of subs) await enqueue(db, "signals.subscription", { subscriptionId: s.id }, { orgId: s.orgId, priority: 1 });
+      return { queued: subs.length };
+    });
   },
 
   "monitor.run": async (job, ctx) => {
@@ -231,10 +286,11 @@ export const handlers: Record<string, JobHandler> = {
   /** Scheduler: run due monitors every 30 min. */
   "monitors.tick": async (job, ctx) => {
     const { db } = ctx;
-    const due = await db.select().from(monitors).where(and(eq(monitors.active, true), dsql`(${monitors.lastRunAt} IS NULL OR ${monitors.lastRunAt} < now() - (${monitors.intervalMinutes} || ' minutes')::interval)`));
-    for (const m of due) await enqueue(db, "monitor.run", { monitorId: m.id }, { orgId: m.orgId, priority: 1 });
-    if (job.payload.recurring) await enqueue(db, "monitors.tick", { recurring: true }, { runAt: new Date(Date.now() + 30 * 60_000), maxAttempts: 1 });
-    return { queued: due.length };
+    return withReschedule(db, job, "monitors.tick", async () => {
+      const due = await db.select().from(monitors).where(and(eq(monitors.active, true), dsql`(${monitors.lastRunAt} IS NULL OR ${monitors.lastRunAt} < now() - (${monitors.intervalMinutes} || ' minutes')::interval)`));
+      for (const m of due) await enqueue(db, "monitor.run", { monitorId: m.id }, { orgId: m.orgId, priority: 1 });
+      return { queued: due.length };
+    });
   },
 
   /**
@@ -258,13 +314,14 @@ export const handlers: Record<string, JobHandler> = {
   /** Scheduler: daily, sample every active visibility prompt not run in the last 20 hours. */
   "visibility.tick": async (job, ctx) => {
     const { db } = ctx;
-    const due = await db
-      .select()
-      .from(visibilityPrompts)
-      .where(and(eq(visibilityPrompts.active, true), dsql`(${visibilityPrompts.lastRunAt} IS NULL OR ${visibilityPrompts.lastRunAt} < now() - interval '20 hours')`));
-    for (const p of due) await enqueue(db, "visibility.run", { promptId: p.id }, { orgId: p.orgId, priority: 3 });
-    if (job.payload.recurring) await enqueue(db, "visibility.tick", { recurring: true }, { runAt: new Date(Date.now() + 3600_000), maxAttempts: 1 });
-    return { queued: due.length };
+    return withReschedule(db, job, "visibility.tick", async () => {
+      const due = await db
+        .select()
+        .from(visibilityPrompts)
+        .where(and(eq(visibilityPrompts.active, true), dsql`(${visibilityPrompts.lastRunAt} IS NULL OR ${visibilityPrompts.lastRunAt} < now() - interval '20 hours')`));
+      for (const p of due) await enqueue(db, "visibility.run", { promptId: p.id }, { orgId: p.orgId, priority: 3 });
+      return { queued: due.length };
+    });
   },
 
   "autopilot.run": async (job, ctx) => {
@@ -276,16 +333,17 @@ export const handlers: Record<string, JobHandler> = {
   /** Scheduler: hourly, run autopilots whose hour matches and haven't run today. */
   "autopilots.tick": async (job, ctx) => {
     const { db } = ctx;
-    const hour = new Date().getUTCHours();
-    const due = await db.select().from(autopilots).where(and(eq(autopilots.active, true), eq(autopilots.runHourUtc, hour), dsql`(${autopilots.lastRunAt} IS NULL OR ${autopilots.lastRunAt} < now() - interval '20 hours')`));
-    for (const ap of due) await enqueue(db, "autopilot.run", { autopilotId: ap.id }, { orgId: ap.orgId, priority: 1 });
-    // saved-search alerts run daily at 02:00 UTC
-    if (hour === 2) {
-      const ss = await db.select().from(savedSearches).where(and(eq(savedSearches.alert, true), dsql`(${savedSearches.lastRunAt} IS NULL OR ${savedSearches.lastRunAt} < now() - interval '20 hours')`));
-      for (const s of ss) await enqueue(db, "savedsearch.run", { savedSearchId: s.id }, { orgId: s.orgId, priority: 1 });
-    }
-    if (job.payload.recurring) await enqueue(db, "autopilots.tick", { recurring: true }, { runAt: new Date(Date.now() + 3600_000), maxAttempts: 1 });
-    return { queued: due.length };
+    return withReschedule(db, job, "autopilots.tick", async () => {
+      const hour = new Date().getUTCHours();
+      const due = await db.select().from(autopilots).where(and(eq(autopilots.active, true), eq(autopilots.runHourUtc, hour), dsql`(${autopilots.lastRunAt} IS NULL OR ${autopilots.lastRunAt} < now() - interval '20 hours')`));
+      for (const ap of due) await enqueue(db, "autopilot.run", { autopilotId: ap.id }, { orgId: ap.orgId, priority: 1 });
+      // saved-search alerts run daily at 02:00 UTC
+      if (hour === 2) {
+        const ss = await db.select().from(savedSearches).where(and(eq(savedSearches.alert, true), dsql`(${savedSearches.lastRunAt} IS NULL OR ${savedSearches.lastRunAt} < now() - interval '20 hours')`));
+        for (const s of ss) await enqueue(db, "savedsearch.run", { savedSearchId: s.id }, { orgId: s.orgId, priority: 1 });
+      }
+      return { queued: due.length };
+    });
   },
 
   /** Re-run a saved search, add new leads to its list, email a digest if alerting. payload: { savedSearchId } */
@@ -320,19 +378,80 @@ export const handlers: Record<string, JobHandler> = {
   /** Housekeeping: prune old done jobs, reset nothing else. */
   "system.cleanup": async (job, ctx) => {
     const { db } = ctx;
-    const { lt, sql } = await import("@prospex/db");
-    await db.delete(jobs).where(and(eq(jobs.status, "done"), lt(jobs.updatedAt, new Date(Date.now() - 7 * 86_400_000))));
-    await db.execute(sql`DELETE FROM events WHERE created_at < now() - interval '90 days'`);
-    if (job.payload.recurring) await enqueue(db, "system.cleanup", { recurring: true }, { runAt: new Date(Date.now() + 6 * 3600_000), maxAttempts: 1 });
-    return {};
+    return withReschedule(db, job, "system.cleanup", async () => {
+      const { lt, sql, ne } = await import("@prospex/db");
+      // Only jobs whose result nothing still points at. A finished `search.run` holds the
+      // lead ids that GET /v1/search/:id reads back out of job.result, and searches.jobId
+      // carries no foreign key, so deleting the job left that endpoint returning an empty
+      // result set for every search older than a week - indistinguishable from a search
+      // that genuinely found nothing. Keeping them is cheap; the lie was not.
+      await db
+        .delete(jobs)
+        .where(and(eq(jobs.status, "done"), ne(jobs.type, "search.run"), lt(jobs.updatedAt, new Date(Date.now() - 7 * 86_400_000))));
+      // Failed jobs were never pruned at all and grew without bound. They are worth keeping
+      // longer than successes, because they are what someone reads when diagnosing.
+      await db.execute(sql`DELETE FROM jobs WHERE status = 'failed' AND updated_at < now() - interval '30 days'`);
+      await db.execute(sql`DELETE FROM events WHERE created_at < now() - interval '90 days'`);
+      return {};
+    });
   },
 };
 
-/** Ensure the recurring scheduler jobs exist exactly once. */
-export async function ensureRecurringJobs() {
+/**
+ * Ensure the recurring scheduler jobs exist exactly once.
+ *
+ * Returns the types it had to (re)create, so a caller can tell "everything was already
+ * running" from "a dead scheduler was just revived" - the second is worth a log line.
+ *
+ * The advisory lock matters because this runs in BOTH the web process and the worker
+ * process (server.ts and worker.ts both call it at boot), which on Render start together.
+ * Without it, two concurrent SELECT-then-INSERT pairs both see zero rows and both insert,
+ * and from then on every scheduler runs twice per cycle forever - doubling campaign ticks,
+ * monitor runs and every bill attached to them. The lock is transaction-scoped, so it is
+ * released even if this throws.
+ */
+export async function ensureRecurringJobs(): Promise<string[]> {
   const { db, sql } = getDb();
-  for (const type of ["campaign.tick", "system.cleanup", "signals.scan", "monitors.tick", "autopilots.tick", "visibility.tick"]) {
-    const rows = await sql`SELECT 1 FROM jobs WHERE type = ${type} AND status IN ('queued','running') AND (payload->>'recurring')::boolean = true LIMIT 1`;
-    if (rows.length === 0) await enqueue(db, type, { recurring: true }, { maxAttempts: 1 });
-  }
+  const revived: string[] = [];
+  await sql.begin(async (tx) => {
+    // One arbitrary but stable key; only this function contends for it.
+    await tx`SELECT pg_advisory_xact_lock(hashtext('prospex:ensure-recurring'))`;
+    for (const type of Object.keys(RECURRING_JOBS)) {
+      const rows = await tx`SELECT 1 FROM jobs WHERE type = ${type} AND status IN ('queued','running') AND (payload->>'recurring')::boolean = true LIMIT 1`;
+      if (rows.length === 0) {
+        await enqueue(db, type, { recurring: true }, { maxAttempts: 1 });
+        revived.push(type);
+      }
+    }
+  });
+  return revived;
+}
+
+/**
+ * Re-seed dead schedulers periodically, not just at boot.
+ *
+ * `withReschedule` keeps a chain alive when the body fails, which is the common case. It
+ * cannot help when the database itself was unreachable at that moment, because the
+ * reschedule is a database write too. Before this existed, that window killed a scheduler
+ * until the next deploy - and nothing said so, because one failed job among thousands is
+ * not a signal anyone sees.
+ *
+ * Checking every few minutes turns "silently stopped until someone notices" into "stopped
+ * for at most one interval". Returns a stop function.
+ */
+export function startRecurringJobKeeper(opts: { intervalMs?: number; log?: (m: string) => void } = {}) {
+  const intervalMs = opts.intervalMs ?? 5 * 60_000;
+  const log = opts.log ?? ((m: string) => console.log(`[jobs] ${m}`));
+  const timer = setInterval(() => {
+    void ensureRecurringJobs()
+      .then((revived) => {
+        // Only speak when something was actually wrong. A heartbeat that logs every tick
+        // is a heartbeat nobody reads.
+        if (revived.length) log(`revived dead scheduler(s): ${revived.join(", ")}`);
+      })
+      .catch((e) => log(`keeper failed: ${(e as Error).message}`));
+  }, intervalMs);
+  // Do not hold the process open for this alone.
+  if (typeof timer.unref === "function") timer.unref();
+  return () => clearInterval(timer);
 }

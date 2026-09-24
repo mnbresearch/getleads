@@ -39,6 +39,9 @@ suite("database integration", () => {
   let icpLearningSamples: any;
   let learnFromOutcomes: any;
   let visibilityOverview: any;
+  let withReschedule: any;
+  let ensureRecurringJobs: any;
+  let RECURRING_JOBS: any;
   let observationsFor: any;
   let knownBrands: any;
 
@@ -51,6 +54,7 @@ suite("database integration", () => {
     ({ icpLearningSamples } = await import("./services/insights.js"));
     ({ visibilityOverview, observationsFor, knownBrands } = await import("./services/visibility.js"));
     ({ learnFromOutcomes } = await import("@prospex/core"));
+    ({ withReschedule, ensureRecurringJobs, RECURRING_JOBS } = await import("./jobs.js"));
   }, 60_000);
 
   /** Each test gets its own org so they cannot contaminate one another. */
@@ -232,6 +236,80 @@ suite("database integration", () => {
       await db.insert(schema.messages).values({ orgId: a.id, leadId: lead.id, toEmail: "a@a.com", subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date() });
       expect(await icpLearningSamples(db, a.id)).toHaveLength(1);
       expect(await icpLearningSamples(db, b.id)).toHaveLength(0);
+    });
+  });
+
+  /**
+   * The schedulers keep themselves alive: each run's last act schedules the next. They are
+   * enqueued with maxAttempts: 1, so a failed run is never retried - which meant that before
+   * `withReschedule`, one transient error killed campaign sending, monitors, autopilots,
+   * visibility sampling or cleanup permanently and silently, until the next deploy.
+   */
+  describe("recurring scheduler survival", () => {
+    async function recurringRows(type: string) {
+      return db
+        .select()
+        .from(schema.jobs)
+        .where(schema.and(schema.eq(schema.jobs.type, type), schema.eq(schema.jobs.status, "queued")));
+    }
+
+    it("schedules the next run even when the body throws", async () => {
+      const type = `test.recurring.${randomUUID().slice(0, 8)}`;
+      const before = await recurringRows(type);
+      expect(before).toHaveLength(0);
+
+      await expect(
+        withReschedule(db, { payload: { recurring: true } }, type, async () => {
+          throw new Error("the select at the top of the handler failed");
+        }),
+      ).rejects.toThrow("the select at the top of the handler failed");
+
+      // The chain survives its own body failing. This is the whole point.
+      const after = await recurringRows(type);
+      expect(after).toHaveLength(1);
+      expect(after[0].payload.recurring).toBe(true);
+      // And it still reports the failure rather than swallowing it - see the rejects above.
+    });
+
+    it("does not reschedule a one-off invocation of the same handler", async () => {
+      const type = `test.oneoff.${randomUUID().slice(0, 8)}`;
+      // A manual "run now" passes no `recurring` flag and must not start a chain.
+      await withReschedule(db, { payload: {} }, type, async () => "ok");
+      expect(await recurringRows(type)).toHaveLength(0);
+    });
+
+    it("revives a scheduler whose chain has died, and reports which", async () => {
+      // Kill one chain the way a real failure does: mark it failed, leaving nothing queued.
+      await db
+        .update(schema.jobs)
+        .set({ status: "failed" })
+        .where(schema.and(schema.eq(schema.jobs.type, "system.cleanup"), schema.eq(schema.jobs.status, "queued")));
+      expect(await recurringRows("system.cleanup")).toHaveLength(0);
+
+      const revived = await ensureRecurringJobs();
+      expect(revived).toContain("system.cleanup");
+      expect(await recurringRows("system.cleanup")).toHaveLength(1);
+    });
+
+    it("is idempotent, so two processes booting together cannot double the chain", async () => {
+      await ensureRecurringJobs();
+      const counts = new Map<string, number>();
+      for (const type of Object.keys(RECURRING_JOBS)) counts.set(type, (await recurringRows(type)).length);
+
+      // Render starts the web service and the worker at the same time and both call this.
+      await Promise.all([ensureRecurringJobs(), ensureRecurringJobs(), ensureRecurringJobs()]);
+
+      for (const type of Object.keys(RECURRING_JOBS)) {
+        expect((await recurringRows(type)).length, `${type} chain count`).toBe(counts.get(type));
+      }
+    });
+
+    it("covers every scheduler the seeder knows about", () => {
+      // A scheduler present in one list and missing from the other stops running with no
+      // error, so the two are derived from the same constant and this pins that.
+      expect(Object.keys(RECURRING_JOBS).sort()).toEqual(
+        ["autopilots.tick", "campaign.tick", "monitors.tick", "signals.scan", "system.cleanup", "visibility.tick"].sort(),
+      );
     });
   });
 

@@ -1,6 +1,6 @@
 import { getDb, runMigrations, startWorker } from "@prospex/db";
 import "./env.js";
-import { ensureRecurringJobs, handlers } from "./jobs.js";
+import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
 
 async function main() {
@@ -9,7 +9,10 @@ async function main() {
   const { db } = getDb();
   await ensureRecurringJobs();
   const stop = startWorker(db, handlers, { concurrency: Number(process.env.WORKER_CONCURRENCY ?? 4) });
+  // Revive any scheduler whose chain died while the database was unreachable.
+  const stopKeeper = startRecurringJobKeeper();
   const shutdown = async () => {
+    stopKeeper();
     await stop();
     process.exit(0);
   };
