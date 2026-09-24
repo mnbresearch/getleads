@@ -88,7 +88,11 @@ export async function checkDomainHealth(domain: string): Promise<DomainHealth> {
       domain,
       resolved,
       mx: { ok: mxHosts.length > 0, hosts: mxHosts },
-      spf: { ok: !!spfRec, record: spfRec, issues: spfIssues },
+      // Same meaning as the resolved branch below: "present AND without problems". It read
+      // `!!spfRec` here, so the same field meant two different things depending on whether
+      // DNS had answered - and the branch where it meant less is the one nobody reads
+      // carefully.
+      spf: { ok: !!spfRec && spfIssues.length === 0, record: spfRec, issues: spfIssues },
       dkim: { ok: selectorsFound.length > 0, selectorsFound },
       dmarc: { ok: !!dmarcRec && policy !== "none", record: dmarcRec, policy, issues: dmarcIssues },
       score: 0,

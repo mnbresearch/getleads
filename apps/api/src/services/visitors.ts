@@ -60,9 +60,12 @@ export async function identifyVisit(visitId: string, ip: string, identify?: Reco
   if (!domain && !id.resolved) {
     // No lookup answered, so we know nothing about this visitor. Writing `isIsp: false,
     // companyDomain: null` would file it as "a person we could not place" - the same row a
-    // genuine residential visit produces - and it would stay that way. Leave the visit
-    // untouched so a later run can try again, and say which it was.
-    return { unresolved: true, reason: "no IP lookup answered - not checked, rather than unidentifiable" };
+    // genuine residential visit produces - and it would stay that way forever.
+    //
+    // Throwing rather than returning, because `visit.identify` is enqueued exactly once
+    // from collectHit and nothing re-enqueues it: RETURNING completes the job, so "a later
+    // run can try again" would have been false. Throwing lets the job's own retry do it.
+    throw new Error("no IP lookup answered for this visit - not checked, rather than unidentifiable");
   }
   if (!domain) {
     if (id.isIsp || id.isHosting) {

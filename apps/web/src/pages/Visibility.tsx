@@ -421,6 +421,7 @@ interface Run {
   engine: string;
   model: string | null;
   answer: string;
+  /** Present at all - named in prose, linked, or both. */
   mentioned: boolean;
   cited: boolean;
   position: number | null;
@@ -428,6 +429,8 @@ interface Run {
   usable: boolean;
   error: string | null;
   createdAt: string;
+  /** Whether the engine wrote the brand's name, as opposed to only linking to it. */
+  analysis?: { brand?: { named?: boolean } | null };
 }
 
 /**
@@ -483,8 +486,12 @@ function AnswersModal({ prompt, onClose }: { prompt: Prompt | null; onClose: () 
                       <span>{new Date(r.createdAt).toLocaleString()}</span>
                       {r.usable ? (
                         <>
-                          {r.mentioned && <span className="badge bg-emerald-50 text-emerald-700">named{r.position ? ` · #${r.position}` : ""}</span>}
-                          {r.cited && <span className="badge bg-brand-50 text-brand-700">linked</span>}
+                          {/* "named" means the engine wrote the name in its answer. A brand
+                              that only appears as a source link is present, but calling
+                              that "named" is the overstatement the analyzer exists to
+                              avoid, so it gets its own, weaker label. */}
+                          {r.analysis?.brand?.named && <span className="badge bg-emerald-50 text-emerald-700">named{r.position ? ` · #${r.position}` : ""}</span>}
+                          {r.cited && <span className="badge bg-brand-50 text-brand-700">{r.analysis?.brand?.named ? "linked" : "linked only, not named"}</span>}
                           {!r.mentioned && !r.cited && <span className="badge bg-black/[0.05] text-ink-300">absent</span>}
                         </>
                       ) : (

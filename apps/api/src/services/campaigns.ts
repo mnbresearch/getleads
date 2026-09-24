@@ -223,7 +223,16 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     await db.update(campaignContacts).set({ status: "unsubscribed", updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
     return { skipped: "suppressed" };
   }
-  const account = campaign.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
+  // Scoped to the campaign's own org as well as the id. THIS is the lookup that matters:
+  // it is the one whose result is handed to mailerFromAccount, which decrypts the SMTP
+  // credentials, sends from that address and increments that account's daily cap. An
+  // earlier pass scoped the lookup in tickCampaign and left this one, which meant a
+  // campaign row written before the route-level check existed could still send through
+  // another tenant's account - tickCampaign only reads it for the cap check and enqueues
+  // the job regardless.
+  const account = campaign.emailAccountId
+    ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, campaign.emailAccountId), eq(emailAccounts.orgId, campaign.orgId)) })
+    : null;
   if (!account) return { skipped: "no account" };
 
   /**
@@ -245,11 +254,29 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
       where: and(eq(messages.campaignId, campaign.id), eq(messages.stepId, step.id), eq(messages.leadId, lead.id), inArray(messages.status, ["sent", "sending"])),
     });
     if (prior) {
-      if (prior.status === "sending") {
-        await db.update(messages).set({ status: "unknown", error: "a previous attempt reached the provider; outcome never confirmed, so it was not sent again" }).where(eq(messages.id, prior.id));
+      // Has the contact already moved past this step? The success path advances it, so a
+      // failure AFTER that point (the stat bump, the lead-status write, the event) leaves a
+      // `sent` row and an already-advanced contact. Advancing again unconditionally skipped
+      // the next step entirely and double-counted the campaign's "sent" number.
+      const alreadyAdvanced = cc.currentStep > step.stepNo - 1;
+
+      if (prior.status === "sent") {
+        if (!alreadyAdvanced) await advanceContact(cc.id);
+        return { skipped: "already sent on an earlier attempt", messageId: prior.id };
       }
-      await advanceContact(cc.id);
-      return { skipped: prior.status === "sent" ? "already sent on an earlier attempt" : "earlier attempt's outcome unknown; not resent", messageId: prior.id };
+
+      // Left at `sending`. sendMail never throws - it returns {ok:false} - so the only way
+      // to land here is that the write recording the outcome failed, and that write is the
+      // same one for a success and for a failure. We therefore genuinely do not know
+      // whether this email went out, and the two ways of guessing are both bad: resending
+      // may deliver a duplicate to a prospect, advancing may silently skip a step forever.
+      // So do neither. Stop this contact's sequence and leave it visible, because a
+      // sequence that quietly drops a step is the failure nobody ever notices.
+      await db.update(messages).set({ status: "unknown", error: "a previous attempt reached the provider and the outcome was never recorded; not sent again, and this contact's sequence was stopped for review" }).where(eq(messages.id, prior.id));
+      if (!alreadyAdvanced) {
+        await db.update(campaignContacts).set({ status: "failed", updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
+      }
+      return { skipped: "earlier attempt's outcome unknown; sequence stopped for review rather than risking a duplicate or a skipped step", messageId: prior.id };
     }
   }
 

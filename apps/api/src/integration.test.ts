@@ -28,6 +28,21 @@ if (TEST_DB) {
   process.env.ENCRYPTION_KEY ??= "y".repeat(48);
 }
 
+/**
+ * Without a database these suites skip rather than fail, so `npm test` stays green on a
+ * machine that has none. That is a deliberate trade - but a skipped suite that says nothing
+ * trains people to read green as "everything passed", so it says something.
+ */
+if (!TEST_DB) {
+  // stderr directly: vitest captures console output and prints it per-test, so a warning
+  // about tests that are NOT running would itself never be shown.
+  process.stderr.write(
+    `\n[!] ${JSON.stringify("database integration")} did NOT run: TEST_DATABASE_URL is not set.\n` +
+      "    These are the tests that cover SQL, auth, tenancy and the job pipeline.\n" +
+      "    Run them with: TEST_DATABASE_URL=postgres://user@localhost:5432/scout_test npm test -w apps/api\n",
+  );
+}
+
 const suite = TEST_DB ? describe : describe.skip;
 
 suite("database integration", () => {
@@ -254,7 +269,18 @@ suite("database integration", () => {
    * org - ran entirely free. The charge now lives in the function that does the work.
    */
   describe("visibility sampling is metered wherever it is triggered", () => {
-    it("charges aiMessages for every engine-sample, from the service itself", async () => {
+    /**
+     * An engine with a dead key must not be billed.
+     *
+     * An earlier version of this test asserted the opposite - that an attempt is billed
+     * whether or not it succeeded - and so locked in the defect it was written next to: an
+     * expired key was charged its full share every hour, every day, forever, and returned
+     * nothing. It also hid a subtler mistake. `runVisibilityPrompt` CATCHES the provider
+     * error and returns a run row with `error` set, so billing keyed off "this call did not
+     * throw" counts a dead key as a successful call. The row's own error field is the only
+     * honest signal, and this test is what holds that distinction in place.
+     */
+    it("does not charge for an engine whose key is dead", async () => {
       const org = await newOrg("vis-quota");
       const [prompt] = await db
         .insert(schema.visibilityPrompts)
@@ -263,16 +289,16 @@ suite("database integration", () => {
 
       const before = (await getUsage(db, org.id)).usage.aiMessages.used;
 
-      // A dummy key makes exactly one engine available; the calls themselves fail, which is
-      // fine - the point is that the work was attempted and therefore billed. Metering only
-      // successful calls would let a broken key run an org's sampling for free forever.
       const prevKey = process.env.GEMINI_API_KEY;
       process.env.GEMINI_API_KEY = "test-key-not-valid";
       try {
         const r = await sampleAcrossEngines(db, org.id, prompt, { samples: 2, plan: "free" });
-        const after = (await getUsage(db, org.id)).usage.aiMessages.used;
-        expect(after - before).toBe(2 * r.engines.length);
         expect(r.engines.length).toBeGreaterThan(0);
+        // Every sample failed, so every sample is recorded as unusable...
+        expect(r.results.every((x: any) => !x.ok)).toBe(true);
+        expect(r.usable).toBe(0);
+        // ...and nothing is billed.
+        expect((await getUsage(db, org.id)).usage.aiMessages.used - before).toBe(0);
       } finally {
         if (prevKey === undefined) delete process.env.GEMINI_API_KEY;
         else process.env.GEMINI_API_KEY = prevKey;
@@ -589,13 +615,41 @@ suite("database integration", () => {
     });
 
     it("does not gamble a second copy when the first attempt's outcome is unknown", async () => {
-      const { r, rows, prior } = await scenario("sending");
+      const { r, rows, prior, cc } = await scenario("sending");
       expect(String(r.skipped)).toMatch(/unknown/i);
       expect(rows).toHaveLength(1);
       const row = await db.query.messages.findFirst({ where: schema.eq(schema.messages.id, prior.id) });
       // Recorded as uncertain rather than quietly marked sent or silently resent.
       expect(row!.status).toBe("unknown");
-      expect(row!.error).toMatch(/never confirmed/i);
+      expect(row!.error).toMatch(/never recorded/i);
+
+      // sendMail returns {ok:false} rather than throwing, so a row stuck at "sending" means
+      // the write recording the outcome failed - and that write is the same one for a
+      // success as for a failure. We cannot know whether it went out, so the contact is
+      // neither advanced (which would skip this step forever) nor left active (which would
+      // resend). It stops, visibly.
+      const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
+      expect(after!.currentStep).toBe(0);
+      expect(after!.status).toBe("failed");
+    });
+
+    it("does not advance a contact twice when the earlier attempt already advanced it", async () => {
+      const org = await newOrg("resend-advanced");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", emailAccountId: acct.id, status: "active" }).returning();
+      const [s1] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "One", bodyTemplate: "One" }).returning();
+      await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 2, channel: "email", subjectTemplate: "Two", bodyTemplate: "Two" });
+      const [lead] = await db.insert(schema.leads).values({ orgId: org.id, email: `p-${randomUUID().slice(0, 8)}@example.com`, fullName: "P", emailStatus: "valid" }).returning();
+      // The first attempt sent AND advanced; something after that threw, so the job retries.
+      const [cc] = await db.insert(schema.campaignContacts).values({ orgId: org.id, campaignId: campaign.id, leadId: lead.id, status: "active", currentStep: 1 }).returning();
+      await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: s1.id, leadId: lead.id, toEmail: lead.email!, subject: "One", bodyText: "One", status: "sent" });
+
+      await sendStep(campaign.id, cc.id, s1.id, { attempt: 2 });
+
+      const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
+      // Still on step 2. Advancing again would have jumped to 3, and step 2 would never
+      // have been sent to this person at all.
+      expect(after!.currentStep).toBe(1);
     });
 
     it("leaves a genuinely failed attempt free to be retried", async () => {
@@ -609,7 +663,10 @@ suite("database integration", () => {
 
       const r = await sendStep(campaign.id, cc.id, step.id, { attempt: 2 });
       // A failed row is not evidence of delivery, so the guard must not block the retry.
-      expect(String(r.skipped ?? "")).not.toMatch(/already sent|unknown/i);
+      // Asserted positively rather than as "not one of these strings", which would also
+      // pass if sendStep bailed out for an unrelated reason like a missing account.
+      expect(r.skipped).toBeUndefined();
+      expect(r.sent).toBe(true);
     });
   });
 

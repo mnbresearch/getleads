@@ -116,6 +116,10 @@ export async function runVisibilityPrompt(
       model: error ? attemptedModel : provider.model,
       answer,
       analysis: analysis as unknown as Record<string, unknown>,
+      // A cited-only brand is present but was never NAMED, and analyzeAnswer now says
+      // which. `mentioned` keeps its historical meaning - present at all - so existing
+      // rows and metrics are unchanged; the distinction rides in the analysis blob, which
+      // is what the UI reads to avoid labelling a footnote link as the engine naming you.
       mentioned: !!analysis.brand,
       cited: analysis.brand?.cited ?? false,
       position: analysis.brand?.position ?? null,
@@ -157,7 +161,12 @@ export async function sampleAcrossEngines(
     for (let i = 0; i < samples; i++) {
       try {
         const { run } = await runVisibilityPrompt(db, orgIdValue, prompt, { ...opts, provider });
-        results.push({ engine: provider.name, ok: true, mentioned: run.mentioned, usable: run.usable });
+        // `ok` must mean "the engine answered", not "this function did not throw".
+        // runVisibilityPrompt CATCHES the provider error and returns a run row with
+        // `error` set, so keying anything off the absence of an exception counts a dead
+        // API key as a successful call - which is how an expired key went on being billed
+        // every hour while returning nothing. The row's own error field is the truth.
+        results.push({ engine: provider.name, ok: !run.error, mentioned: run.mentioned, usable: run.usable, error: run.error ?? undefined });
       } catch (e) {
         results.push({ engine: provider.name, ok: false, mentioned: false, usable: false, error: (e as Error).message?.slice(0, 200) });
       }

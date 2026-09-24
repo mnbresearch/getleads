@@ -56,9 +56,16 @@ export function VisitorsPage() {
     setDetail(vc);
     setJourney(null);
     setJourneyErr(null);
-    apiFetch<{ visits: NonNullable<typeof journey> }>("GET", `/v1/visitors/${vc.domain}/visits`)
-      .then((r) => setJourney(r.visits))
-      .catch((e) => setJourneyErr((e as Error).message));
+    // The endpoint returns newest-first, and a journey read newest-first is the wrong
+    // story: "New session" lands at the END of each session, and "blog, then pricing, then
+    // contact" reads as "contact, then pricing, then blog". Reverse it once, here.
+    //
+    // The domain is captured so a slow response for company A cannot land in company B's
+    // modal after the user has clicked on.
+    const forDomain = vc.domain;
+    apiFetch<{ visits: NonNullable<typeof journey> }>("GET", `/v1/visitors/${forDomain}/visits`)
+      .then((r) => setDetail((cur) => { if (cur?.domain === forDomain) setJourney([...r.visits].reverse()); return cur; }))
+      .catch((e) => setDetail((cur) => { if (cur?.domain === forDomain) setJourneyErr((e as Error).message); return cur; }));
   };
 
   const setStat = (vc: VC, s: string) => apiFetch("PATCH", `/v1/visitors/${vc.domain}`, { status: s }).then(load);

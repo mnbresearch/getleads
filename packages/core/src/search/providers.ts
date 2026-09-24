@@ -23,11 +23,16 @@ export const braveProvider = (apiKey = secret(process.env.BRAVE_SEARCH_API_KEY))
     meter("brave");
     const params = new URLSearchParams({ q: query, count: String(Math.min(opts.count ?? 20, 20)), offset: String(opts.offset ?? 0) });
     if (opts.country) params.set("country", opts.country);
+    // `provider:` so a 401/429 reaches the health table, and `null` -> throw so webSearch
+    // can tell a failure from an empty answer. Without both, a rate-limited paid provider
+    // returns [] and the outage is cached and re-served as "nobody matched that query" -
+    // which is exactly the bug the throwing paths elsewhere in this file exist to prevent.
     const data = await fetchJson<{ web?: { results?: { title: string; url: string; description?: string }[] } }>(
       `https://api.search.brave.com/res/v1/web/search?${params}`,
-      { headers: { "x-subscription-token": apiKey!, accept: "application/json" } },
+      { headers: { "x-subscription-token": apiKey!, accept: "application/json" }, provider: "brave" },
     );
-    return (data?.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description ?? "", provider: "brave" }));
+    if (data === null) throw new ProviderUnavailableError("brave", "network", "brave returned no usable response");
+    return (data.web?.results ?? []).map((r) => ({ title: r.title, url: r.url, snippet: r.description ?? "", provider: "brave" }));
   },
 });
 
@@ -189,8 +194,10 @@ export const serpApiProvider = (apiKey = secret(process.env.SERPAPI_KEY)): Searc
     if (opts.country) params.set("gl", opts.country);
     const data = await fetchJson<{ organic_results?: { title: string; link: string; snippet?: string }[] }>(
       `https://serpapi.com/search.json?${params}`,
+      { provider: "serpapi" },
     );
-    return (data?.organic_results ?? []).map((r) => ({ title: r.title, url: r.link, snippet: r.snippet ?? "", provider: "serpapi" }));
+    if (data === null) throw new ProviderUnavailableError("serpapi", "network", "serpapi returned no usable response");
+    return (data.organic_results ?? []).map((r) => ({ title: r.title, url: r.link, snippet: r.snippet ?? "", provider: "serpapi" }));
   },
 });
 

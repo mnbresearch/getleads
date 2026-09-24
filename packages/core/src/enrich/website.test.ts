@@ -38,7 +38,7 @@ afterEach(async () => {
 describe("a website crawl says whether it reached the site", () => {
   it("marks a crawl that fetched no page at all", async () => {
     // Port 1 on loopback: nothing listens, so every fetch fails fast over both schemes.
-    const profile = await crawlCompanyWebsite("127.0.0.1:1", { maxPages: 2, timeoutMs: 500 });
+    const profile = await crawlCompanyWebsite("127.0.0.1:1", { maxPages: 2, timeoutMs: 500, allowPrivateHosts: true });
     expect(profile.crawlFailed).toBe(true);
     expect(profile.pagesFetched).toBe(0);
     expect(profile.pagesAttempted).toBe(2);
@@ -49,7 +49,7 @@ describe("a website crawl says whether it reached the site", () => {
 
   it("does not mark a reachable site that simply has little on it", async () => {
     const host = await site({ "": "<html><head><title>Quiet Co</title></head><body><p>Hello.</p></body></html>" });
-    const profile = await crawlCompanyWebsite(`http://${host}`, { maxPages: 1, timeoutMs: 2000 });
+    const profile = await crawlCompanyWebsite(`http://${host}`, { maxPages: 1, timeoutMs: 2000, allowPrivateHosts: true });
     expect(profile.crawlFailed).toBe(false);
     expect(profile.pagesFetched).toBe(1);
     expect(profile.name).toBe("Quiet Co");
@@ -61,24 +61,28 @@ describe("a website crawl says whether it reached the site", () => {
       "": `<html><head><title>Acme | Payments</title><meta name="description" content="We do payments."></head>
            <body><script src="/wp-content/x.js"></script>
            <a href="https://www.linkedin.com/company/acme-pay">LinkedIn</a>
-           <p>Reach us at hello@${"127.0.0.1"} or sales@acme.com</p></body></html>`,
+           <p>Reach us at hello@127.0.0.1 or sales@acme.com</p></body></html>`,
       "/about": "<html><body>about</body></html>",
     });
-    const profile = await crawlCompanyWebsite(`http://${host}`, { maxPages: 2, timeoutMs: 2000 });
+    const profile = await crawlCompanyWebsite(`http://${host}`, { maxPages: 2, timeoutMs: 2000, allowPrivateHosts: true });
     expect(profile.name).toBe("Acme");
     expect(profile.description).toBe("We do payments.");
     expect(profile.techStack).toContain("WordPress");
     expect(profile.socials.linkedin).toBe("https://www.linkedin.com/company/acme-pay");
     expect(profile.linkedinUrl).toBe("https://www.linkedin.com/company/acme-pay");
-    // Only addresses at the company's own domain are collected, so sales@acme.com is not
-    // picked up from a site served at another host.
-    expect(profile.emailsFound).not.toContain("sales@acme.com");
+    // Email harvesting is NOT meaningfully covered here, and saying so is better than an
+    // assertion that looks like coverage. These fixtures are served from 127.0.0.1, the
+    // address pattern requires a real TLD, and only addresses at the crawled domain are
+    // kept - so no address on this page can be collected whether the filter works or not.
+    // `expect(emailsFound).not.toContain("sales@acme.com")` would pass either way. What
+    // IS covered here is everything the parser does with the page itself.
+    expect(profile.emailsFound).toEqual([]);
   });
 
   it("falls back to http when https reaches nothing, rather than reporting no web presence", async () => {
     const host = await site({ "": "<html><head><title>Legacy Co</title></head><body>hi</body></html>" });
     // No scheme given, so https is tried first against a plain-http server and fails.
-    const profile = await crawlCompanyWebsite(host, { maxPages: 1, timeoutMs: 2000 });
+    const profile = await crawlCompanyWebsite(host, { maxPages: 1, timeoutMs: 2000, allowPrivateHosts: true });
     expect(profile.crawlFailed).toBe(false);
     expect(profile.insecureFallback).toBe(true);
     expect(profile.name).toBe("Legacy Co");
@@ -86,7 +90,7 @@ describe("a website crawl says whether it reached the site", () => {
 
   it("honours allowInsecureFallback: false", async () => {
     const host = await site({ "": "<html><head><title>Legacy Co</title></head><body>hi</body></html>" });
-    const profile = await crawlCompanyWebsite(host, { maxPages: 1, timeoutMs: 2000, allowInsecureFallback: false });
+    const profile = await crawlCompanyWebsite(host, { maxPages: 1, timeoutMs: 2000, allowPrivateHosts: true, allowInsecureFallback: false });
     expect(profile.crawlFailed).toBe(true);
     expect(profile.insecureFallback).toBeUndefined();
   });

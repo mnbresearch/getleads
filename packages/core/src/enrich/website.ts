@@ -2,6 +2,7 @@ import * as cheerio from "cheerio";
 import type { CompanyProfile, PersonCandidate } from "../types.js";
 import { fetchText, pMap } from "../util/http.js";
 import { rootDomain } from "../util/domain.js";
+import { isPublicHost } from "../util/publicHost.js";
 import { splitName } from "../util/names.js";
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
@@ -48,12 +49,32 @@ export interface CrawlOptions {
    * the difference between enriching that company and silently skipping it.
    */
   allowInsecureFallback?: boolean;
+  /**
+   * Permit loopback and private addresses. Off by default and only used by tests, which
+   * serve their fixtures from 127.0.0.1.
+   */
+  allowPrivateHosts?: boolean;
 }
 
 export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {}): Promise<CompanyProfile> {
   const profile: CompanyProfile = { domain, techStack: [], emailsFound: [], peopleFound: [], socials: {} };
   const paths = PAGES.slice(0, opts.maxPages ?? 6);
   const timeoutMs = opts.timeoutMs ?? 10_000;
+
+  /**
+   * Crawl targets are user input - an ICP's seed domains, a domain typed into a tool - and
+   * whatever a crawl harvests is written to the company record and shown back in the UI.
+   * Pointing one at the machine doing the crawling has to be refused before the first
+   * request, not after. `allowPrivateHosts` exists so the tests can serve from loopback.
+   */
+  const target = /^https?:\/\//i.test(domain) ? domain.slice(domain.indexOf("://") + 3) : domain;
+  if (!opts.allowPrivateHosts && !isPublicHost(target)) {
+    profile.pagesAttempted = 0;
+    profile.pagesFetched = 0;
+    profile.crawlFailed = true;
+    profile.crawlRefused = `${target.split("/")[0]} is not a public web address, so it was not fetched`;
+    return profile;
+  }
 
   const attempt = (scheme: string) =>
     pMap(paths, async (p) => ({ path: p, html: await fetchText(`${scheme}://${domain}${p}`, { timeoutMs }) }), 3);

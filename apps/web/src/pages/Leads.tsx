@@ -45,7 +45,12 @@ export function LeadsPage() {
   // Settings tells people to "push leads from the Leads page (select -> sync)". That
   // control did not exist, on any page, so the sentence described a workflow the product
   // did not have. The connected integrations decide whether it is offered here at all.
-  const [integrations, setIntegrations] = useState<{ provider: string }[]>([]);
+  const [integrations, setIntegrations] = useState<{ provider: string; status: string }[]>([]);
+  // Which providers can actually RECEIVE a lead. The integrations table also holds
+  // channel and data providers (whatsapp, apollo, hunter, ...) that share it for config
+  // only; offering those here would queue jobs that fail three times each while the toast
+  // says the push succeeded. The server already publishes the real list.
+  const [syncable, setSyncable] = useState<string[]>([]);
   const { toast, Toast } = useToast();
   const [listErr, setListErr] = useState<string | null>(null);
 
@@ -72,7 +77,12 @@ export function LeadsPage() {
   // keep the open detail modal in sync with freshly loaded rows
   useEffect(() => { if (detail) { const fresh = rows.find((r) => r.id === detail.id); if (fresh && fresh !== detail) setDetail(fresh); } }, [rows]); // eslint-disable-line
   useEffect(() => { apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)); }, []);
-  useEffect(() => { apiFetch<{ integrations: { provider: string }[] }>("GET", "/v1/integrations").then((r) => setIntegrations(r.integrations ?? [])).catch(() => setIntegrations([])); }, []);
+  useEffect(() => {
+    apiFetch<{ integrations: { provider: string; status: string }[]; providers?: string[] }>("GET", "/v1/integrations")
+      .then((r) => { setIntegrations(r.integrations ?? []); setSyncable(r.providers ?? []); })
+      .catch(() => { setIntegrations([]); setSyncable([]); });
+  }, []);
+  const crmTargets = integrations.filter((i) => syncable.includes(i.provider) && i.status === "active");
 
   const ids = [...sel];
   const bulk = async (action: string) => {
@@ -91,12 +101,24 @@ export function LeadsPage() {
         const status = action.slice(6);
         // No bulk endpoint for this, so it is one call per lead - done in sequence rather
         // than all at once so a rate limit does not turn a 50-lead move into 50 errors.
+        // No bulk endpoint for this, so it is one call per lead, in sequence rather than
+        // all at once so a rate limit does not turn one move into fifty errors. A failure
+        // part-way must not abandon the leads that DID move: the screen would still show
+        // the old stage for all of them and the selection would stay, which reads as
+        // "nothing happened" when in fact half of it did.
         let moved = 0;
+        let failure: string | null = null;
         for (const id of ids) {
-          await apiFetch("POST", `/v1/tools/leads/${id}/status`, { status });
-          moved++;
+          try {
+            await apiFetch("POST", `/v1/tools/leads/${id}/status`, { status });
+            moved++;
+          } catch (e) {
+            failure = (e as Error).message;
+            break;
+          }
         }
-        toast(`Moved ${moved} lead${moved === 1 ? "" : "s"} to ${status}`);
+        if (failure) toast(`Moved ${moved} of ${ids.length} to ${status}, then stopped: ${failure}`, "err");
+        else toast(`Moved ${moved} lead${moved === 1 ? "" : "s"} to ${status}`);
       }
       setSel(new Set());
       load();
@@ -121,8 +143,13 @@ export function LeadsPage() {
       const url = URL.createObjectURL(blob);
       a.href = url;
       a.download = "leads.csv";
+      // The anchor has to be in the document for the click to count in Firefox, and the
+      // blob URL has to outlive the click - revoking it in the same tick cancels the
+      // download in Firefox and Safari, so the export silently produced nothing.
+      a.style.display = "none";
+      document.body.appendChild(a);
       a.click();
-      URL.revokeObjectURL(url);
+      setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 30_000);
     } catch (e) {
       toast((e as Error).message, "err");
     }
@@ -169,10 +196,10 @@ export function LeadsPage() {
           <button className="btn-secondary" onClick={() => bulk("tag")}>Tag</button>
           <select className="input w-40" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Move to pipeline stage"><option value="">Move to stage…</option>{STAGES.map((s) => <option key={s} value={`stage:${s}`}>{s}</option>)}</select>
           <select className="input w-44" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }}><option value="">Add to list…</option>{lists.map((l) => <option key={l.id} value={`list:${l.id}`}>{l.name}</option>)}<option value="newlist">+ New list</option></select>
-          {integrations.length > 0 && (
+          {crmTargets.length > 0 && (
             <select className="input w-40" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Push to a connected CRM">
               <option value="">Push to CRM…</option>
-              {integrations.map((i) => <option key={i.provider} value={`sync:${i.provider}`}>{i.provider}</option>)}
+              {crmTargets.map((i) => <option key={i.provider} value={`sync:${i.provider}`}>{i.provider}</option>)}
             </select>
           )}
           <button className="btn-danger" onClick={() => bulk("delete")}>Delete</button>
@@ -308,6 +335,16 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
                 // "no value given", not "erase what is stored".
                 const body: Record<string, string> = {};
                 for (const [k, v] of Object.entries(editing)) if (v.trim()) body[k] = v.trim();
+                // The table, the modal title and search all read fullName, and PATCH writes
+                // exactly what it is given - so correcting "Jon" to "John" would have
+                // appeared to do nothing at all.
+                const name = [body.firstName, body.lastName].filter(Boolean).join(" ");
+                if (name) body.fullName = name;
+                // A corrected address has never been checked. Carrying the old address's
+                // verdict over would hand a "valid" label to a mailbox nobody has verified,
+                // and that label earns the ICP scoring credit, suppresses re-verification
+                // and clears the campaign send gate.
+                if (body.email && body.email !== (lead.email ?? "")) body.emailStatus = "unknown";
                 await apiFetch("PATCH", `/v1/leads/${lead.id}`, body);
                 toast("Saved");
                 setEditing(null);

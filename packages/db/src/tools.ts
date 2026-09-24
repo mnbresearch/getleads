@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
 import { getDb } from "./client.js";
 import { toolRegistry, toolUsage } from "./schema.js";
 
@@ -46,8 +46,19 @@ export async function recordToolUsage(
   if (reg.usageLimit && reg.usageLimit > 0) {
     const pct = (nextCount / reg.usageLimit) * 100;
     if (pct >= reg.alertThresholdPct && reg.lastAlertPeriod !== period) {
-      thresholdCrossed = true;
-      await db.update(toolRegistry).set({ lastAlertPeriod: period, updatedAt: new Date() }).where(eq(toolRegistry.provider, provider));
+      // The same concurrency that corrupted the counter above also duplicates this alert:
+      // two callers crossing the threshold together both read `lastAlertPeriod !== period`
+      // and both send. Claiming the period in the WHERE clause makes exactly one of them
+      // win - whoever the database lets update the row - so the operator gets one email.
+      const claimed = await db
+        .update(toolRegistry)
+        .set({ lastAlertPeriod: period, updatedAt: new Date() })
+        // `lastAlertPeriod` is null until the first alert ever fires, and in SQL
+        // `NULL <> 'x'` is NULL, not true - so a bare `ne` would silently never match and
+        // the very first alert would never be sent.
+        .where(and(eq(toolRegistry.provider, provider), or(isNull(toolRegistry.lastAlertPeriod), ne(toolRegistry.lastAlertPeriod, period))))
+        .returning({ provider: toolRegistry.provider });
+      thresholdCrossed = claimed.length > 0;
     }
   }
 

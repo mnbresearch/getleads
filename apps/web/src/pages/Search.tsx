@@ -141,9 +141,15 @@ export function SearchPage() {
                       </div>
                     )}
                   </div>
-                ) : <span className={`badge ${s.status === "done" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{s.status}</span>}{s.error && (s.status === "done"
-                  ? <div className="mt-1 text-xs text-amber-700">{s.error} <Link className="underline" to="/settings/billing">See plans</Link></div>
-                  : <div className="text-xs text-red-600">{s.error}</div>)}</td>
+                ) : <span className={`badge ${s.status === "done" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{s.status}</span>}{s.error && (s.status !== "done"
+                  ? <div className="text-xs text-red-600">{s.error}</div>
+                  /* A done search carries a note for two very different reasons: the plan's
+                     limit cut it short, or a data provider could not answer. Only the first
+                     is fixed by upgrading, and putting "See plans" next to the message that
+                     explicitly says the fault is ours reads as billing off our own outage. */
+                  : /plan's limit/i.test(s.error)
+                    ? <div className="mt-1 text-xs text-amber-700">{s.error} <Link className="underline" to="/settings/billing">See plans</Link></div>
+                    : <div className="mt-1 text-xs text-amber-700">{s.error}</div>)}</td>
                 <td className="td tabular-nums">{s.resultCount}</td>
                 <td className="td text-right">{s.status === "done" && s.resultCount > 0 && <Link className="text-brand-600 hover:underline" to={`/leads?tag=search:${s.id.slice(0, 8)}`}>View leads →</Link>}</td>
               </tr>

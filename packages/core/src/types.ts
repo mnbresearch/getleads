@@ -61,6 +61,8 @@ export interface CompanyProfile {
   crawlFailed?: boolean;
   /** True when https reached nothing and the crawl fell back to plain http. */
   insecureFallback?: boolean;
+  /** Set when the target was refused before any request, e.g. a private or loopback address. */
+  crawlRefused?: string;
 }
 
 export type EmailStatus = "valid" | "risky" | "invalid" | "catch_all" | "unknown";

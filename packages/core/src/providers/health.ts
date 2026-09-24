@@ -173,10 +173,6 @@ export function classifyThrown(e: unknown): { outcome: ProviderOutcome; detail: 
 }
 
 /**
- * Record an HTTP response and return whether it was a success, so a call site can stay a
- * one-liner: `if (!ok(res, "apollo")) return null;`
- */
-/**
  * A provider could not answer, as distinct from answering with nothing.
  *
  * Search providers returned `[]` for both, which defeated webSearch's own guard against
@@ -196,6 +192,10 @@ export class ProviderUnavailableError extends Error {
   }
 }
 
+/**
+ * Record an HTTP response and return whether it was a success, so a call site can stay a
+ * one-liner: `if (!ok(res, "apollo")) return null;`
+ */
 export async function recordHttp(provider: string, res: Response): Promise<boolean> {
   if (res.ok) {
     reportProviderCall({ provider, outcome: "ok", status: res.status });

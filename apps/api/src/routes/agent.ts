@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
+import { QuotaExceededError, consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
 import { createAiProvider, generateOutreach, runLeadPipeline } from "@prospex/core";
 import { env } from "../env.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
@@ -39,16 +39,27 @@ agentRoutes.post(
     const providerBudget = await remainingPremiumBudget(db, oid);
     const results = await runLeadPipeline({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey }, country: b.country, maxProviderLeads: providerBudget });
     const out = [];
+    /** Set when a quota or a fault stopped part of this run. Reported, not swallowed. */
+    let emailSkipped: string | null = null;
+    let saveSkipped: string | null = null;
     for (const r of results) {
       let leadId: string | undefined;
       if (b.save) {
-        const okQuota = await consumeLead(db, oid, r.source).then(() => true, () => false);
-        if (okQuota) leadId = (await upsertLead(oid, pipelineLeadToInput(r, { tags: ["agent"] }))).lead.id;
+        // consumeLead throws QuotaExceededError for a plan limit and anything else for a
+        // fault; telling an agent it is out of quota when the database blipped sends it
+        // off to ask the customer to upgrade.
+        try {
+          await consumeLead(db, oid, r.source);
+          leadId = (await upsertLead(oid, pipelineLeadToInput(r, { tags: ["agent"] }))).lead.id;
+        } catch (e) {
+          if (!saveSkipped) saveSkipped = e instanceof QuotaExceededError ? e.message : `could not record usage: ${(e as Error).message}`;
+        }
       }
       let email: { subject: string; body: string } | undefined;
       if (b.generateEmails && b.sender && r.email) {
-        const okQuota = (await tryConsume(db, oid, "aiMessages", 1)).ok;
-        if (okQuota) {
+        const charge = await tryConsume(db, oid, "aiMessages", 1);
+        if (!charge.ok) emailSkipped = charge.reason === "quota" ? charge.message : `could not record usage: ${charge.message}`;
+        if (charge.ok) {
           const g = await generateOutreach(ai, { lead: { firstName: r.firstName, lastName: r.lastName, fullName: r.fullName, title: r.title, company: r.company ? { name: r.company.name, domain: r.company.domain, industry: r.company.industry, description: r.company.description } : null }, sender: b.sender });
           email = { subject: g.subject, body: g.body };
         }
@@ -71,7 +82,15 @@ agentRoutes.post(
         draftEmail: email,
       });
     }
-    return c.json({ query: b.query, count: out.length, leads: out, next: "Use POST /v1/campaigns to sequence these leads, or POST /v1/integrations/{provider}/sync to push to a CRM." });
+    return c.json({
+      query: b.query,
+      count: out.length,
+      leads: out,
+      // An agent acting on this needs to know the difference between "that is everything"
+      // and "we stopped early", and which of the two reasons it was.
+      skipped: saveSkipped || emailSkipped ? { saving: saveSkipped ?? undefined, drafting: emailSkipped ?? undefined } : undefined,
+      next: "Use POST /v1/campaigns to sequence these leads, or POST /v1/integrations/{provider}/sync to push to a CRM.",
+    });
   },
 );
 

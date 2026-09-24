@@ -68,6 +68,7 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
   }
   const people = await findPeople({ companyName, titles: sub.targetTitles, limit: 3 });
   let created = 0;
+  let stoppedBecause: string | null = null;
   const ids: string[] = [];
   const icp = sub.icpId ? await db.query.icps.findFirst({ where: (t, { eq: e }) => e(t.id, sub.icpId!) }) : null;
   for (const p of people) {
@@ -81,12 +82,22 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
       const charge = await tryConsume(db, sub.orgId, "leads", 1);
       if (!charge.ok) {
         ids.push(lead.id);
+        // A plan limit and a database fault both stop the loop, but they are not the same
+        // thing and the run record must not file one as the other.
+        stoppedBecause = charge.reason === "quota" ? `lead quota reached: ${charge.message}` : `could not record lead usage: ${charge.message}`;
         break;
       }
     }
     ids.push(lead.id);
   }
-  await db.update(signalMatches).set({ leadsCreated: created, status: created ? "leads_created" : "no_leads" }).where(and(eq(signalMatches.signalId, signalId), eq(signalMatches.subscriptionId, sub.id)));
+  // "stopped" is deliberately distinct from "no_leads": one means the signal produced
+  // nobody, the other means we stopped part-way and there may be more. No new column for
+  // the reason - it goes to the log, where the admin job view already reads.
+  if (stoppedBecause) console.warn(`[signals] subscription ${sub.id} stopped after ${created} leads: ${stoppedBecause}`);
+  await db
+    .update(signalMatches)
+    .set({ leadsCreated: created, status: stoppedBecause ? "stopped" : created ? "leads_created" : "no_leads" })
+    .where(and(eq(signalMatches.signalId, signalId), eq(signalMatches.subscriptionId, sub.id)));
   if (sub.campaignId && ids.length) {
     // Same org as the subscription, not just the same id: enrolling into a foreign campaign
     // would hand our leads to another tenant's sequence, which then emails them.

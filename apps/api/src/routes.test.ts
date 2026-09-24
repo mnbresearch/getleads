@@ -30,6 +30,21 @@ if (TEST_DB) {
   process.env.PILOT_MODE = "false";
 }
 
+/**
+ * Without a database these suites skip rather than fail, so `npm test` stays green on a
+ * machine that has none. That is a deliberate trade - but a skipped suite that says nothing
+ * trains people to read green as "everything passed", so it says something.
+ */
+if (!TEST_DB) {
+  // stderr directly: vitest captures console output and prints it per-test, so a warning
+  // about tests that are NOT running would itself never be shown.
+  process.stderr.write(
+    `\n[!] ${JSON.stringify("route surface")} did NOT run: TEST_DATABASE_URL is not set.\n` +
+      "    These are the tests that cover SQL, auth, tenancy and the job pipeline.\n" +
+      "    Run them with: TEST_DATABASE_URL=postgres://user@localhost:5432/scout_test npm test -w apps/api\n",
+  );
+}
+
 const suite = TEST_DB ? describe : describe.skip;
 
 suite("route surface", () => {
@@ -149,7 +164,7 @@ suite("route surface", () => {
     });
     expect(made.status).toBeLessThan(300);
     const made_ = await made.json();
-    const key = made_.key ?? made_.apiKey ?? made_.apiKey?.raw;
+    const key = made_.key ?? made_.apiKey;
     expect(typeof key).toBe("string");
     const r = await app.request("/v1/leads", { headers: { "x-api-key": key } });
     expect(r.status).toBe(200);
@@ -182,8 +197,9 @@ suite("route surface", () => {
   it("returns 404, not 500, for a well-formed id that does not exist", async () => {
     for (const path of [`/v1/leads/${randomUUID()}`, `/v1/campaigns/${randomUUID()}`, `/v1/icps/${randomUUID()}`]) {
       const r = await app.request(path, { headers: { authorization: `Bearer ${token}` } });
-      expect([404, 200]).toContain(r.status);
-      expect(r.status).toBeLessThan(500);
+      // A random uuid belongs to nobody, so the only correct answer is 404. Accepting 200
+      // as well - as this test used to - would also pass if the route ignored the id.
+      expect({ path, status: r.status }).toEqual({ path, status: 404 });
     }
   });
 
@@ -193,11 +209,17 @@ suite("route surface", () => {
    * is broken when their URL was. Postgres rejecting a value the CLIENT sent is a 400.
    */
   it("returns 400, not 500, for a malformed id on every route that takes one", async () => {
+    const results: { path: string; status: number; code?: string }[] = [];
     for (const path of ["/v1/leads/not-a-uuid", "/v1/icps/not-a-uuid", "/v1/campaigns/not-a-uuid", "/v1/companies/not-a-uuid"]) {
       const r = await app.request(path, { headers: { authorization: `Bearer ${token}` } });
-      expect({ path, status: r.status }).toEqual({ path, status: expect.any(Number) });
-      expect(r.status).toBeLessThan(500);
-      if (r.status === 400) expect((await r.json()).error.code).toBe("bad_request");
+      const body = await r.json().catch(() => ({}));
+      results.push({ path, status: r.status, code: (body as any)?.error?.code });
+    }
+    // Asserted positively. An earlier version of this test accepted "anything under 500",
+    // which passes for a 200 and for a 404 - so it would have gone on passing if the fix
+    // it exists to protect were reverted to any other non-crashing behaviour.
+    for (const r of results) {
+      expect(r).toEqual({ path: r.path, status: 400, code: "bad_request" });
     }
   });
 
@@ -562,10 +584,15 @@ suite("route surface", () => {
         headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
         body: "{}",
       });
-      // Either it queues the job or it says no AI provider is configured - both are honest
-      // answers, and neither is the silent no-op the Edit button used to perform.
-      expect(r.status).toBeLessThan(500);
-      expect([200, 201, 202, 400, 404]).toContain(r.status);
+      // The route must EXIST and accept the call - a 404 would mean the Edit button is
+      // calling nothing, which is the defect this covers. An earlier version of this test
+      // listed 404 among the acceptable outcomes, so it would have passed with the route
+      // missing entirely.
+      expect(r.status).not.toBe(404);
+      expect(r.status).toBeLessThan(400);
+      // And it must actually queue the work, not just answer politely.
+      const body = await r.json();
+      expect(body.jobId ?? body.queued ?? body.ok).toBeTruthy();
     });
   });
 

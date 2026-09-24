@@ -146,23 +146,32 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
   const name = b.companyName ?? (domain ? ((await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) }))?.name ?? domain.split(".")[0]) : "");
   const people = await findPeople({ companyName: name, titles, limit: b.limit });
   const out = [];
+  /** Why something in this run did less than asked. Reported, not swallowed. */
+  let skipped: string | null = null;
   for (const p of people) {
     let email: string | undefined, status: string | undefined, confidence = 0;
     if (b.findEmails && domain && p.firstName && p.lastName) {
-      const ok = (await tryConsume(db, oid, "verifications", 1)).ok;
-      if (ok) {
+      // Keep WHY the lookup was skipped. Collapsing it back to a boolean here would
+      // reintroduce, one call away, the defect lib/quota.ts exists to fix: a dropped
+      // connection silently skipping the lookup with no record anywhere.
+      const charge = await tryConsume(db, oid, "verifications", 1);
+      if (charge.ok) {
         const r = await findEmail({ firstName: p.firstName, lastName: p.lastName, domain }, verifyOpts()).catch(() => null);
         if (r) { email = r.email; status = r.status; confidence = r.confidence; }
-      }
+      } else if (!skipped) skipped = charge.reason === "quota" ? `Email lookup stopped: ${charge.message}` : `Email lookup stopped: could not record usage (${charge.message})`;
     }
     let leadId: string | undefined;
     if (b.save) {
-      const ok = (await tryConsume(db, oid, "leads", 1)).ok;
-      if (ok) leadId = (await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName: name, companyDomain: domain, email, emailStatus: status, emailConfidence: confidence, source: "decision_makers" })).lead.id;
+      const { lead, created } = await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName: name, companyDomain: domain, email, emailStatus: status, emailConfidence: confidence, source: "decision_makers" });
+      leadId = lead.id;
+      if (created) {
+        const charge = await tryConsume(db, oid, "leads", 1);
+        if (!charge.ok && !skipped) skipped = charge.reason === "quota" ? `Saving stopped: ${charge.message}` : `Saving stopped: could not record usage (${charge.message})`;
+      }
     }
     out.push({ ...p, email, emailStatus: status, confidence, leadId });
   }
-  return c.json({ company: { name, domain }, people: out });
+  return c.json({ company: { name, domain }, people: out, skipped: skipped ?? undefined });
 });
 
 /** Company intelligence: hiring + recent news signals + firmographics, persisted. */
