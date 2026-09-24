@@ -164,7 +164,16 @@ export function mailerFromAccount(a: EmailAccount): MailerConfig | null {
 }
 
 /** Render + personalize + send one sequence step to one contact. */
-export async function sendStep(campaignId: string, contactId: string, stepId: string) {
+/**
+ * Send one step of a sequence to one contact.
+ *
+ * `attempt` is the job's attempt number, and it decides whether quota is charged. A failed
+ * send throws, and message.send retries up to three times - so charging unconditionally
+ * billed an org three emails and three AI messages for one email that never arrived. The
+ * first attempt pays; the retries are the system's problem, not the customer's.
+ */
+export async function sendStep(campaignId: string, contactId: string, stepId: string, opts: { attempt?: number } = {}) {
+  const firstAttempt = (opts.attempt ?? 1) <= 1;
   const { db } = getDb();
   const campaign = await db.query.campaigns.findFirst({ where: eq(campaigns.id, campaignId) });
   const cc = await db.query.campaignContacts.findFirst({ where: eq(campaignContacts.id, contactId) });
@@ -210,7 +219,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   const account = campaign.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
   if (!account) return { skipped: "no account" };
 
-  await consume(db, campaign.orgId, "emails", 1);
+  if (firstAttempt) await consume(db, campaign.orgId, "emails", 1);
 
   const s = settingsOf(campaign);
   const orgSettings = (await db.query.campaigns.findFirst({ where: eq(campaigns.id, campaignId) }))?.settings as Record<string, unknown> | undefined;
@@ -233,7 +242,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   let subject: string;
   let body: string;
   if (step.aiPersonalize) {
-    await consume(db, campaign.orgId, "aiMessages", 1).catch(() => {});
+    if (firstAttempt) await consume(db, campaign.orgId, "aiMessages", 1).catch(() => {});
     const out = await generateOutreach(createAiProvider(), {
       lead: leadForTpl,
       sender,

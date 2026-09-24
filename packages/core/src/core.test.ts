@@ -710,6 +710,70 @@ describe("provider health classification", () => {
     expect(providerRetired("google_cse")).toBe(false);
   });
 
+  it("never re-serves a total provider failure as an empty result", async () => {
+    const { webSearch, resetSearchCache } = await import("./search/index.js");
+    const { setProviderHealthHook, resetProviderSkips } = await import("./providers/health.js");
+    resetSearchCache();
+    resetProviderSkips();
+    setProviderHealthHook(() => {});
+
+    let live = false;
+    let calls = 0;
+    const flaky = {
+      name: "flaky",
+      available: () => true,
+      search: async () => {
+        calls++;
+        if (!live) throw new Error("connection reset");
+        return [{ title: "t", url: "https://example.com/a", snippet: "", provider: "flaky" }];
+      },
+    };
+    const q = `outage-${Date.now()}`;
+
+    expect(await webSearch(q, { providers: [flaky] })).toEqual([]);
+    expect(calls).toBe(1);
+
+    // The old cache stored that emptiness for six hours, so a provider coming back did not
+    // help until the next day. The second call must actually reach the provider again.
+    expect(await webSearch(q, { providers: [flaky] })).toEqual([]);
+    expect(calls).toBe(2);
+
+    live = true;
+    const results = await webSearch(q, { providers: [flaky] });
+    expect(results).toHaveLength(1);
+    expect(calls).toBe(3);
+
+    // A real answer IS worth remembering - re-asking costs a paid credit.
+    expect(await webSearch(q, { providers: [flaky] })).toHaveLength(1);
+    expect(calls).toBe(3);
+    resetSearchCache();
+  });
+
+  it("still trusts a provider that genuinely found nothing, briefly", async () => {
+    const { webSearch, resetSearchCache } = await import("./search/index.js");
+    const { setProviderHealthHook, resetProviderSkips } = await import("./providers/health.js");
+    resetSearchCache();
+    resetProviderSkips();
+    setProviderHealthHook(() => {});
+
+    let calls = 0;
+    const honest = {
+      name: "honest",
+      available: () => true,
+      search: async () => {
+        calls++;
+        return [];
+      },
+    };
+    const q = `genuinely-empty-${Date.now()}`;
+    expect(await webSearch(q, { providers: [honest] })).toEqual([]);
+    // An answered "nothing matched" is a fact, and the cache exists so one pipeline run does
+    // not re-ask the same question for every lead at the same company.
+    expect(await webSearch(q, { providers: [honest] })).toEqual([]);
+    expect(calls).toBe(1);
+    resetSearchCache();
+  });
+
   it("reports a thrown search provider instead of swallowing it", async () => {
     const { webSearch } = await import("./search/index.js");
     const { setProviderHealthHook, resetProviderSkips } = await import("./providers/health.js");

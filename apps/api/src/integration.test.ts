@@ -40,6 +40,8 @@ suite("database integration", () => {
   let learnFromOutcomes: any;
   let visibilityOverview: any;
   let withReschedule: any;
+  let sampleAcrossEngines: any;
+  let getUsage: any;
   let ensureRecurringJobs: any;
   let RECURRING_JOBS: any;
   let observationsFor: any;
@@ -52,7 +54,8 @@ suite("database integration", () => {
     db = dbPkg.getDb().db;
     ({ sendingHealthForAccount, experimentForStep } = await import("./services/campaigns.js"));
     ({ icpLearningSamples } = await import("./services/insights.js"));
-    ({ visibilityOverview, observationsFor, knownBrands } = await import("./services/visibility.js"));
+    ({ visibilityOverview, observationsFor, knownBrands, sampleAcrossEngines } = await import("./services/visibility.js"));
+    ({ getUsage } = await import("@prospex/db"));
     ({ learnFromOutcomes } = await import("@prospex/core"));
     ({ withReschedule, ensureRecurringJobs, RECURRING_JOBS } = await import("./jobs.js"));
   }, 60_000);
@@ -245,6 +248,58 @@ suite("database integration", () => {
    * `withReschedule`, one transient error killed campaign sending, monitors, autopilots,
    * visibility sampling or cleanup permanently and silently, until the next deploy.
    */
+  /**
+   * Sampling costs one model call per engine per sample. It used to be charged by the manual
+   * route only, so the scheduled path - fanned out hourly to every active prompt in every
+   * org - ran entirely free. The charge now lives in the function that does the work.
+   */
+  describe("visibility sampling is metered wherever it is triggered", () => {
+    it("charges aiMessages for every engine-sample, from the service itself", async () => {
+      const org = await newOrg("vis-quota");
+      const [prompt] = await db
+        .insert(schema.visibilityPrompts)
+        .values({ orgId: org.id, text: "What is the best B2B prospecting tool?", intent: "category", samplesPerRun: 2 })
+        .returning();
+
+      const before = (await getUsage(db, org.id)).usage.aiMessages.used;
+
+      // A dummy key makes exactly one engine available; the calls themselves fail, which is
+      // fine - the point is that the work was attempted and therefore billed. Metering only
+      // successful calls would let a broken key run an org's sampling for free forever.
+      const prevKey = process.env.GEMINI_API_KEY;
+      process.env.GEMINI_API_KEY = "test-key-not-valid";
+      try {
+        const r = await sampleAcrossEngines(db, org.id, prompt, { samples: 2, plan: "free" });
+        const after = (await getUsage(db, org.id)).usage.aiMessages.used;
+        expect(after - before).toBe(2 * r.engines.length);
+        expect(r.engines.length).toBeGreaterThan(0);
+      } finally {
+        if (prevKey === undefined) delete process.env.GEMINI_API_KEY;
+        else process.env.GEMINI_API_KEY = prevKey;
+      }
+    }, 120_000);
+
+    it("charges nothing when no engine is configured, because no work happens", async () => {
+      const org = await newOrg("vis-noengine");
+      const [prompt] = await db
+        .insert(schema.visibilityPrompts)
+        .values({ orgId: org.id, text: "q", intent: "category", samplesPerRun: 3 })
+        .returning();
+      const saved: Record<string, string | undefined> = {};
+      for (const k of ["GEMINI_API_KEY", "GROQ_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY"]) {
+        saved[k] = process.env[k];
+        delete process.env[k];
+      }
+      try {
+        const before = (await getUsage(db, org.id)).usage.aiMessages.used;
+        await expect(sampleAcrossEngines(db, org.id, prompt, { plan: "free" })).rejects.toThrow(/No AI provider/i);
+        expect((await getUsage(db, org.id)).usage.aiMessages.used).toBe(before);
+      } finally {
+        for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;
+      }
+    });
+  });
+
   describe("recurring scheduler survival", () => {
     async function recurringRows(type: string) {
       return db

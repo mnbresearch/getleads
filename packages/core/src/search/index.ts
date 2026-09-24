@@ -11,8 +11,24 @@ export interface WebSearchOptions {
   minResults?: number;
 }
 
-const cache = new Map<string, { at: number; results: SearchResult[] }>();
+const cache = new Map<string, { at: number; expiresAt: number; results: SearchResult[] }>();
+
+/** A real answer is stable for hours; re-asking the same question wastes a paid credit. */
 const CACHE_TTL = 6 * 60 * 60 * 1000;
+
+/**
+ * How long an EMPTY answer is trusted.
+ *
+ * Deliberately short. A search where every provider failed used to be cached for the full
+ * six hours, so one outage - or one cooling-off window - was re-served as "nobody matched
+ * that query" long after the providers came back. That is this codebase's cardinal sin,
+ * committed by the function every discovery path funnels through.
+ *
+ * Five minutes still absorbs the duplicate queries a single pipeline run fires (the same
+ * company name resolved for several leads), which is what the cache is really for, while
+ * making a transient failure cost minutes rather than the rest of the working day.
+ */
+const EMPTY_CACHE_TTL = 5 * 60 * 1000;
 
 /**
  * Search the web with automatic provider fallback.
@@ -20,12 +36,14 @@ const CACHE_TTL = 6 * 60 * 60 * 1000;
  * since webSearch stops at the first provider returning enough results: Google CSE is free but
  * closed to new customers as of Sep 2026, Serper is ~30x cheaper per query than SerpAPI, and
  * Brave has had no free tier since Feb 2026. Providers that recently rejected us are skipped.
- * A provider that errors or returns nothing is skipped; results are cached 6h in-process.
+ * A provider that errors or returns nothing is skipped. Results are cached 6h in-process;
+ * an empty result only 5 minutes, and a run in which every provider threw is not cached at
+ * all, so an outage cannot be re-served as absence.
  */
 export async function webSearch(query: string, opts: WebSearchOptions = {}): Promise<SearchResult[]> {
   const key = JSON.stringify([query, opts.count, opts.offset, opts.country]);
   const hit = cache.get(key);
-  if (hit && Date.now() - hit.at < CACHE_TTL) return hit.results;
+  if (hit && Date.now() < hit.expiresAt) return hit.results;
 
   // A provider that just rejected the credential will reject the next one too. Skipping it
   // for a while turns a permanently closed door (Google CSE, closed to new customers) from a
@@ -73,8 +91,28 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
   }
 
   const deduped = dedupe(best);
-  cache.set(key, { at: Date.now(), results: deduped });
+
+  // What gets remembered, and for how long, depends on whether this was an answer or a
+  // failure. `threw` counts providers that raised; a provider returning [] after a 4xx has
+  // already been reported to health by its own recordHttp call, and lands in the empty case.
+  const threw = attempts.filter((a) => a.includes("=threw:")).length;
+  const everyProviderFailed = attempts.length > 0 && threw === attempts.length;
+  const nothingWasEligible = attempts.length === 0;
+
+  if (deduped.length) {
+    cache.set(key, { at: Date.now(), expiresAt: Date.now() + CACHE_TTL, results: deduped });
+  } else if (!everyProviderFailed && !nothingWasEligible) {
+    // At least one provider answered and genuinely had nothing. Believe it, briefly.
+    cache.set(key, { at: Date.now(), expiresAt: Date.now() + EMPTY_CACHE_TTL, results: deduped });
+  }
+  // Otherwise: cache nothing. The next caller gets a real attempt rather than our bad day.
+
   return deduped;
+}
+
+/** Testing seam: forget everything remembered so far. */
+export function resetSearchCache() {
+  cache.clear();
 }
 
 export function dedupe(results: SearchResult[]) {

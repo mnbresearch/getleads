@@ -92,11 +92,14 @@ export const handlers: Record<string, JobHandler> = {
       });
       let created = 0;
       const ids: string[] = [];
+      /** Set when the plan's lead quota, not the data, ended the run. */
+      let quotaStopped: string | null = null;
       for (const r of results) {
         try {
           await consumeLead(db, orgId, r.source);
         } catch (e) {
-          ctx.log(`quota hit: ${(e as Error).message}`);
+          quotaStopped = (e as Error).message;
+          ctx.log(`quota hit: ${quotaStopped}`);
           break;
         }
         const { lead, created: c } = await upsertLead(orgId, pipelineLeadToInput(r, { icpId, source: r.source, tags: [`search:${searchId.slice(0, 8)}`] }));
@@ -107,9 +110,27 @@ export const handlers: Record<string, JobHandler> = {
         const { listLeads } = await import("@prospex/db");
         for (const leadId of ids) await db.insert(listLeads).values({ listId: String(job.payload.listId), leadId }).onConflictDoNothing();
       }
-      await db.update(searches).set({ status: "done", resultCount: ids.length, completedAt: new Date() }).where(eq(searches.id, searchId));
-      await emitEvent(orgId, "search.completed", { searchId, results: ids.length, created }, { type: "search", id: searchId });
-      return { results: ids.length, created, leadIds: ids };
+      // A search cut short by quota used to be written as plainly "done", so a customer who
+      // hit their limit saw a completed search with fewer leads and no reason. The pipeline
+      // found more; the plan would not let them have them. Saying so is the difference
+      // between an upgrade prompt and a silent quality complaint.
+      const truncated = quotaStopped !== null && results.length > ids.length;
+      await db
+        .update(searches)
+        .set({
+          status: "done",
+          resultCount: ids.length,
+          error: truncated ? `Stopped at your plan's limit: ${results.length - ids.length} more matching leads were found but not saved. ${quotaStopped}` : null,
+          completedAt: new Date(),
+        })
+        .where(eq(searches.id, searchId));
+      await emitEvent(
+        orgId,
+        "search.completed",
+        { searchId, results: ids.length, created, found: results.length, quotaTruncated: truncated },
+        { type: "search", id: searchId },
+      );
+      return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated };
     } catch (e) {
       await db.update(searches).set({ status: "failed", error: (e as Error).message, completedAt: new Date() }).where(eq(searches.id, searchId));
       throw e;
@@ -119,6 +140,9 @@ export const handlers: Record<string, JobHandler> = {
   /** Enrich one lead: crawl company site, find + verify email, rescore. payload: { leadId } */
   "lead.enrich": async (job, ctx) => {
     const { db } = ctx;
+    // Charged on the first attempt only. Enrichment is retried up to three times, and
+    // billing each attempt charged an org three verifications for one lookup.
+    const firstAttempt = job.attempts <= 1;
     const lead = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)) });
     if (!lead) return { skipped: "missing" };
     let company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
@@ -130,12 +154,12 @@ export const handlers: Record<string, JobHandler> = {
     const patch: Record<string, unknown> = {};
     const knownPattern = company?.emailPattern ?? undefined;
     if (!lead.email && company && lead.firstName && lead.lastName) {
-      await consume(db, lead.orgId, "verifications", 1);
+      if (firstAttempt) await consume(db, lead.orgId, "verifications", 1);
       const r = await findEmail({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, verifyOpts());
       if (r.email) Object.assign(patch, { email: r.email, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: new Date() });
       if (r.pattern && !company.emailPattern) await db.update(companies).set({ emailPattern: r.pattern }).where(eq(companies.id, company.id));
     } else if (lead.email && lead.emailStatus === "unknown") {
-      await consume(db, lead.orgId, "verifications", 1);
+      if (firstAttempt) await consume(db, lead.orgId, "verifications", 1);
       const v = await verifyEmail(lead.email, verifyOpts());
       Object.assign(patch, { emailStatus: v.status, emailConfidence: v.confidence, verifiedAt: new Date() });
     }
@@ -201,7 +225,9 @@ export const handlers: Record<string, JobHandler> = {
     });
   },
 
-  "message.send": async (job) => sendStep(String(job.payload.campaignId), String(job.payload.contactId), String(job.payload.stepId)),
+  "message.send": async (job) =>
+    // The attempt number reaches sendStep so a retried send is not billed twice.
+    sendStep(String(job.payload.campaignId), String(job.payload.contactId), String(job.payload.stepId), { attempt: job.attempts }),
 
   /** Deliver one event to one webhook with HMAC signature. */
   "webhook.deliver": async (job, ctx) => {

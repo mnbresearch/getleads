@@ -99,10 +99,9 @@ visibilityRoutes.post("/prompts/:id/run", zValidator("json", z.object({ samples:
   const plan = org?.plan ?? "free";
   const others = await knownBrands(db, oid);
   const samples = c.req.valid("json")?.samples ?? prompt.samplesPerRun;
-  // Quota is charged per actual model call, so sampling N engines costs N times as much.
-  const engineCount = Math.max(1, enginesForPlan(plan).length);
-  await consume(db, oid, "aiMessages", samples * engineCount).catch(() => {});
-
+  // Quota is charged per actual model call inside sampleAcrossEngines, so this path and the
+  // scheduled one bill identically. It used to be charged here and nowhere else, which left
+  // the hourly scheduled sampling entirely unmetered.
   const r = await sampleAcrossEngines(db, oid, prompt, { others, samples, plan });
   return c.json({
     ...r,

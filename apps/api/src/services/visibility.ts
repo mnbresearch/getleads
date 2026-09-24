@@ -1,4 +1,4 @@
-import { and, desc, eq, getDb, icps, organizations, sql, visibilityPrompts, visibilityRuns, type IcpCriteria } from "@prospex/db";
+import { and, consume, desc, eq, getDb, icps, organizations, sql, type IcpCriteria, visibilityPrompts, visibilityRuns } from "@prospex/db";
 import {
   analyzeAnswer,
   availableAiProvidersForPlan,
@@ -151,6 +151,23 @@ export async function sampleAcrossEngines(
   if (providers.length === 0) throw new Error("No AI provider configured");
 
   const samples = opts.samples ?? prompt.samplesPerRun ?? 3;
+
+  /**
+   * Charge here, not in the caller.
+   *
+   * Sampling costs one model call per engine per sample, and it used to be metered by the
+   * manual route only. The scheduled path - visibility.run, fanned out hourly by
+   * visibility.tick to every active prompt in every org - charged nothing at all. So the
+   * one path a customer triggers by hand was billed, and the one that runs by itself
+   * forever was free. Putting the charge in the function that does the work makes that
+   * asymmetry impossible to reintroduce: any future caller is billed by construction.
+   *
+   * Still `.catch(() => {})`, matching the previous behaviour: an org over its limit is not
+   * stopped from measuring, because silently ceasing to sample would corrupt the time
+   * series that the whole feature depends on. The overage is recorded and visible.
+   */
+  await consume(db, orgIdValue, "aiMessages", samples * providers.length).catch(() => {});
+
   const results: { engine: string; ok: boolean; mentioned: boolean; usable: boolean }[] = [];
   for (const provider of providers) {
     for (let i = 0; i < samples; i++) {
