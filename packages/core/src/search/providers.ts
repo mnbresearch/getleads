@@ -69,7 +69,9 @@ export const googleCseProvider = (apiKey = secret(process.env.GOOGLE_CSE_API_KEY
     }
     reportProviderCall({ provider: "google_cse", outcome: "ok", status: res.status });
     const data = (await res.json().catch(() => null)) as { items?: { title: string; link: string; snippet?: string }[] } | null;
-    return (data?.items ?? []).map((r) => ({ title: r.title, url: r.link, snippet: r.snippet ?? "", provider: "google_cse" }));
+    // A 200 with a body we cannot read is a provider problem, not a query with no matches.
+    if (data === null) throw new ProviderUnavailableError("google_cse", "bad_response", "200 with a body that is not JSON");
+    return (data.items ?? []).map((r) => ({ title: r.title, url: r.link, snippet: r.snippet ?? "", provider: "google_cse" }));
   },
 });
 
@@ -102,7 +104,10 @@ export const serperProvider = (apiKey = secret(process.env.SERPER_API_KEY)): Sea
 
     const parse = async (res: Response): Promise<SearchResult[]> => {
       const data = (await res.json().catch(() => null)) as { organic?: { title?: string; link?: string; snippet?: string }[] } | null;
-      return (data?.organic ?? [])
+      // Same as the other providers: an unreadable 200 is a failure, and returning [] here
+      // would let it be cached and re-served as "nobody matched that query".
+      if (data === null) throw new ProviderUnavailableError("serper", "bad_response", "200 with a body that is not JSON");
+      return (data.organic ?? [])
         .filter((r) => r.link)
         .map((r) => ({ title: r.title ?? "", url: r.link!, snippet: r.snippet ?? "", provider: "serper" }));
     };

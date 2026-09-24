@@ -42,7 +42,8 @@ export interface HiringSignal {
 
 const TITLE_RE = /^(senior|junior|lead|principal|head of|vp|director|manager|associate|staff|chief)?\s*[A-Za-z][A-Za-z /&+-]{3,60}$/;
 
-export async function detectHiring(domain: string, companyName?: string): Promise<HiringSignal> {
+export async function detectHiring(domain: string, companyName?: string, opts: { allowPrivateHosts?: boolean } = {}): Promise<HiringSignal> {
+  const allowPrivateHosts = opts.allowPrivateHosts ?? false;
   const titles = new Set<string>();
   let careersUrl: string | undefined;
   // Any page that came back at all, even one with no jobs on it, proves the site is
@@ -50,7 +51,9 @@ export async function detectHiring(domain: string, companyName?: string): Promis
   let fetchedAnyPage = false;
   let searchAnswered = false;
   for (const p of CAREER_PATHS) {
-    const html = await fetchText(`https://${domain}${p}`, { timeoutMs: 8000 });
+    // Same user-supplied domain the crawler takes, and until now with no address check at
+    // all - eight requests per call straight at whatever was typed.
+    const html = await fetchText(`https://${domain}${p}`, { timeoutMs: 8000, publicOnly: true, allowPrivateHosts });
     if (!html) continue;
     fetchedAnyPage = true;
     const $ = cheerio.load(html);
@@ -67,7 +70,7 @@ export async function detectHiring(domain: string, companyName?: string): Promis
     // Embedded ATS (Lever/Greenhouse/Workable/Keka/Zoho Recruit) links
     const ats = html.match(/https?:\/\/(?:jobs\.lever\.co|boards\.greenhouse\.io|apply\.workable\.com|[a-z0-9-]+\.keka\.com\/careers|[a-z0-9-]+\.zohorecruit\.(?:com|in)\/jobs|wellfound\.com\/company\/[a-z0-9-]+\/jobs|jobs\.ashbyhq\.com)[^"'\s]*/i)?.[0];
     if (ats) {
-      const atsHtml = await fetchText(ats, { timeoutMs: 8000 });
+      const atsHtml = await fetchText(ats, { timeoutMs: 8000, publicOnly: true, allowPrivateHosts });
       if (atsHtml) {
         const $a = cheerio.load(atsHtml);
         $a("a, h3, h4, [class*=posting], [class*=opening]").each((_, el) => {

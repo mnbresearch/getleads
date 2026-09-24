@@ -338,13 +338,17 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
                 // The table, the modal title and search all read fullName, and PATCH writes
                 // exactly what it is given - so correcting "Jon" to "John" would have
                 // appeared to do nothing at all.
-                const name = [body.firstName, body.lastName].filter(Boolean).join(" ");
+                //
+                // Rebuilt from what is on SCREEN, not from `body`. `body` drops empty
+                // fields, so a lead with no stored last name - or one whose last-name box
+                // the user cleared - would have had its full name rewritten to the first
+                // name alone, losing the surname from every screen.
+                const name = [editing.firstName.trim(), editing.lastName.trim()].filter(Boolean).join(" ");
                 if (name) body.fullName = name;
-                // A corrected address has never been checked. Carrying the old address's
-                // verdict over would hand a "valid" label to a mailbox nobody has verified,
-                // and that label earns the ICP scoring credit, suppresses re-verification
-                // and clears the campaign send gate.
-                if (body.email && body.email !== (lead.email ?? "")) body.emailStatus = "unknown";
+
+                // Changing the address clears its verification verdict - the server does
+                // that itself on every PATCH that changes the email, so it cannot be
+                // bypassed by a caller that forgets, and this form does not have to.
                 await apiFetch("PATCH", `/v1/leads/${lead.id}`, body);
                 toast("Saved");
                 setEditing(null);

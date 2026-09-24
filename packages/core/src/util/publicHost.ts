@@ -40,39 +40,70 @@ function isPrivateV4(host: string): boolean {
 }
 
 function isPrivateV6(host: string): boolean {
-  const h = host.replace(/^\[|\]$/g, "").toLowerCase();
+  // A zone id ("fe80::1%eth0") is not part of the address for this purpose.
+  const h = host.replace(/^\[|\]$/g, "").split("%")[0].toLowerCase();
   if (!h.includes(":")) return false;
   if (h === "::1" || h === "::") return true;
   if (/^f[cd]/.test(h)) return true; // unique-local
   if (/^fe[89ab]/.test(h)) return true; // link-local
-  // ::ffff:127.0.0.1 and friends
-  const mapped = h.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-  if (mapped) return isPrivateV4(mapped[1]);
+  // IPv4-mapped, in both spellings: ::ffff:127.0.0.1 and ::ffff:7f00:1. Only the dotted
+  // one was handled at first, so the hex form walked straight through to loopback.
+  const dotted = h.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
+  if (dotted) return isPrivateV4(dotted[1]);
+  const hex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  if (hex) {
+    const n = (parseInt(hex[1], 16) << 16) | parseInt(hex[2], 16);
+    return isPrivateV4([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join("."));
+  }
   return false;
 }
 
 /**
- * True when this host is safe to fetch: a public name or a public address.
+ * Normalise a host the way a fetch will, then judge THAT.
  *
- * `host` may carry a port; it must not carry a scheme or a path.
+ * Pattern-matching the raw string is not enough, and a first attempt at this file proved
+ * it. WHATWG URL parsing - which is what `fetch` uses - applies inet_aton semantics and
+ * strips userinfo, so all of these reach loopback or the metadata endpoint while looking
+ * innocent to a dotted-quad regex:
+ *
+ *   0177.0.0.1            -> 127.0.0.1   (octal)
+ *   0x7f.0.0.1            -> 127.0.0.1   (hex)
+ *   127.1                 -> 127.0.0.1   (short form)
+ *   example.com@169.254.169.254 -> 169.254.169.254  (userinfo, the host is what follows @)
+ *   localhost.            -> localhost   (root label)
+ *
+ * So the check parses first and inspects the parsed hostname. Anything that will not parse
+ * is refused rather than guessed at.
+ */
+function normalizeHostname(host: string): string | null {
+  try {
+    // A bare host needs a scheme to parse; one that already has a scheme keeps it.
+    const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(host) ? host : `http://${host}`);
+    // Userinfo means the string is not what it appears to be. Refuse rather than accept
+    // the real host, because a value shaped like that is never a legitimate company domain.
+    if (u.username || u.password) return null;
+    // A trailing root label ("localhost.") resolves the same as without it.
+    return u.hostname.replace(/\.$/, "").toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * True when this host is safe to fetch on a user's behalf.
+ *
+ * `host` may be a bare hostname, a host:port, or a full URL.
+ *
+ * This is a check on the ADDRESS, not on where a name resolves. A hostname whose DNS
+ * record points at a private address still passes, and a public host that redirects to a
+ * private one is caught separately, by the per-hop check in `fetchPublic`.
  */
 export function isPublicHost(host: string): boolean {
-  const bare = host.split("/")[0].trim().toLowerCase();
-  if (!bare) return false;
-
-  // Strip a port. A bracketed literal keeps its brackets; a BARE IPv6 address has several
-  // colons and no port, and stripping ":1" off "::1" would turn loopback into something
-  // this function no longer recognises - which is the one mistake that must not happen here.
-  const bareIpv6 = !bare.startsWith("[") && (bare.match(/:/g) ?? []).length > 1;
-  const hostname = bare.startsWith("[")
-    ? bare.slice(0, bare.indexOf("]") + 1)
-    : bareIpv6
-      ? bare
-      : bare.replace(/:\d+$/, "");
+  const hostname = normalizeHostname(host);
   if (!hostname) return false;
 
   if (BLOCKED_HOSTNAMES.has(hostname)) return false;
-  // `.local`, `.internal`, `.home.arpa` and bare single-label names are not on the public web.
+  // `.local`, `.internal`, `.home.arpa` and friends are not on the public web.
   if (/\.(local|internal|localdomain|home\.arpa|lan|intranet)$/.test(hostname)) return false;
   if (isPrivateV4(hostname)) return false;
   if (isPrivateV6(hostname)) return false;

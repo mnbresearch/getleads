@@ -201,6 +201,18 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     const os = campaign.settings as Record<string, unknown>;
     const vars = leadVars({ ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, { name: String(os.senderName ?? ""), company: String(os.senderCompany ?? "") });
     const text = renderTemplate(pickVariant(step, cc.variant).bodyTemplate, vars);
+    // Same idempotency question as the email path: a retry must not send a second message.
+    // WhatsApp writes its row after the send, so a prior row for this exact step is proof
+    // it already went out.
+    if (!firstAttempt) {
+      const priorWa = await db.query.messages.findFirst({
+        where: and(eq(messages.campaignId, campaign.id), eq(messages.stepId, step.id), eq(messages.leadId, lead.id), eq(messages.status, "sent")),
+      });
+      if (priorWa) {
+        if (cc.currentStep <= step.stepNo - 1) await advanceContact(cc.id);
+        return { skipped: "already sent on an earlier attempt", messageId: priorWa.id, channel: "whatsapp" };
+      }
+    }
     const r = await sendWhatsAppStep(campaign.orgId, phone, text);
     const [wm] = await db.insert(messages).values({ orgId: campaign.orgId, campaignId: campaign.id, stepId: step.id, leadId: lead.id, channel: "whatsapp", toEmail: phone, subject: "(whatsapp)", bodyText: text, status: r.ok ? "sent" : "failed", providerMessageId: r.messageId, error: r.error, sentAt: r.ok ? new Date() : null }).returning();
     if (!r.ok) throw new Error(`whatsapp: ${r.error}`);
@@ -262,6 +274,11 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
 
       if (prior.status === "sent") {
         if (!alreadyAdvanced) await advanceContact(cc.id);
+        // advanceContact bumps the "sent" stat, so a retry that finds the contact ALREADY
+        // advanced would leave the counter one short forever - the mirror image of the
+        // double-advance this guard was added to prevent. The message row is the record of
+        // truth for what went out; the stat is recomputed from it rather than guessed.
+        else await recountSentStat(campaign.id);
         return { skipped: "already sent on an earlier attempt", messageId: prior.id };
       }
 
@@ -274,6 +291,9 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
       // sequence that quietly drops a step is the failure nobody ever notices.
       await db.update(messages).set({ status: "unknown", error: "a previous attempt reached the provider and the outcome was never recorded; not sent again, and this contact's sequence was stopped for review" }).where(eq(messages.id, prior.id));
       if (!alreadyAdvanced) {
+        // "failed" is terminal - the tick only picks up queued/active - so this needs a way
+        // back, or one dropped connection ends that prospect's sequence forever with no
+        // remedy but hand-written SQL. resumeContact below is that way back.
         await db.update(campaignContacts).set({ status: "failed", updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
       }
       return { skipped: "earlier attempt's outcome unknown; sequence stopped for review rather than risking a duplicate or a skipped step", messageId: prior.id };
@@ -425,6 +445,54 @@ export async function createStepTask(campaign: Campaign, contactId: string, lead
 }
 
 /** Advance a contact after a manual/task step is completed. */
+/**
+ * Recompute a campaign's "sent" count from the messages that actually went out.
+ *
+ * The counter is incremented as a side effect of advancing a contact, so any path that
+ * skips the advance also skips the increment. Counting the rows is both correct and cheap
+ * at this size, and it cannot drift.
+ */
+export async function recountSentStat(campaignId: string) {
+  const { db } = getDb();
+  const [{ n }] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(messages)
+    .where(and(eq(messages.campaignId, campaignId), eq(messages.direction, "outbound"), inArray(messages.status, ["sent", "opened", "clicked", "replied"])));
+  const c = await db.query.campaigns.findFirst({ where: eq(campaigns.id, campaignId) });
+  if (!c) return;
+  await db.update(campaigns).set({ stats: { ...(c.stats ?? {}), sent: n } }).where(eq(campaigns.id, campaignId));
+}
+
+/**
+ * Put a stopped contact back into its sequence.
+ *
+ * A contact is set to "failed" when a send's outcome could not be established, because
+ * neither resending nor advancing is safe without knowing. That is the right call in the
+ * moment and the wrong place to leave someone permanently, so a human who has checked the
+ * mailbox can say which way it went: `resend: false` means it arrived, move on; `true`
+ * means it did not, try that step again.
+ */
+export async function resumeContact(contactId: string, opts: { resend?: boolean } = {}) {
+  const { db } = getDb();
+  const cc = await db.query.campaignContacts.findFirst({ where: eq(campaignContacts.id, contactId) });
+  if (!cc) return { ok: false as const, error: "No such contact" };
+  if (cc.status !== "failed") return { ok: false as const, error: `This contact is "${cc.status}", not stopped` };
+
+  if (opts.resend) {
+    // Clear the uncertain row so the guard does not immediately stop it again.
+    await db
+      .update(messages)
+      .set({ status: "failed", error: "superseded: a person confirmed this never arrived and asked for it to be sent again" })
+      .where(and(eq(messages.campaignId, cc.campaignId), eq(messages.leadId, cc.leadId), eq(messages.status, "unknown")));
+    await db.update(campaignContacts).set({ status: "active", nextSendAt: new Date(), updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
+    return { ok: true as const, resumed: "will retry this step" };
+  }
+
+  await db.update(campaignContacts).set({ status: "active", updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
+  await advanceContact(cc.id);
+  return { ok: true as const, resumed: "moved on to the next step" };
+}
+
 export async function advanceContact(contactId: string) {
   const { db } = getDb();
   const cc = await db.query.campaignContacts.findFirst({ where: eq(campaignContacts.id, contactId) });

@@ -148,6 +148,8 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
   const out = [];
   /** Why something in this run did less than asked. Reported, not swallowed. */
   let skipped: string | null = null;
+  /** Set once saving must stop, so the limit is enforced rather than merely noted. */
+  let saveStopped: string | null = null;
   for (const p of people) {
     let email: string | undefined, status: string | undefined, confidence = 0;
     if (b.findEmails && domain && p.firstName && p.lastName) {
@@ -161,12 +163,20 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
       } else if (!skipped) skipped = charge.reason === "quota" ? `Email lookup stopped: ${charge.message}` : `Email lookup stopped: could not record usage (${charge.message})`;
     }
     let leadId: string | undefined;
-    if (b.save) {
+    if (b.save && !saveStopped) {
       const { lead, created } = await upsertLead(oid, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName: name, companyDomain: domain, email, emailStatus: status, emailConfidence: confidence, source: "decision_makers" });
       leadId = lead.id;
       if (created) {
         const charge = await tryConsume(db, oid, "leads", 1);
-        if (!charge.ok && !skipped) skipped = charge.reason === "quota" ? `Saving stopped: ${charge.message}` : `Saving stopped: could not record usage (${charge.message})`;
+        if (!charge.ok) {
+          // Charging after the upsert is what stops a repeat being billed - but it also
+          // means the limit is enforced by STOPPING here, not by skipping this one row.
+          // Without the flag, an org at its limit had every remaining person saved anyway,
+          // over quota, with a soft note in the response. One row over is the unavoidable
+          // cost of not billing for repeats; the rest of the page is not.
+          saveStopped = charge.reason === "quota" ? `Saving stopped at ${out.length + 1}: ${charge.message}` : `Saving stopped at ${out.length + 1}: could not record usage (${charge.message})`;
+          if (!skipped) skipped = saveStopped;
+        }
       }
     }
     out.push({ ...p, email, emailStatus: status, confidence, leadId });

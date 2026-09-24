@@ -298,7 +298,33 @@ export function CampaignDetail() {
                   <td className="td"><StatusBadge s={x.status} /></td>
                   <td className="td tabular-nums">{x.currentStep}/{c.steps?.length ?? 0}</td>
                   <td className="td text-xs text-ink-400">{fmtDate(x.nextSendAt)}</td>
-                  <td className="td text-right"><button className="text-brand-600 hover:underline" onClick={() => apiFetch<{ subject: string; body: string }>("POST", `/v1/campaigns/${c.id}/preview`, { leadId: x.lead.id, stepNo: Math.min((c.steps?.length ?? 1), x.currentStep + 1) }).then(setPreview).catch((e) => toast(e.message, "err"))}>Preview</button></td>
+                  <td className="td text-right">
+                    <div className="flex items-center justify-end gap-3">
+                      {/* A contact is stopped when a send's outcome could not be
+                          established - neither resending nor moving on is safe without
+                          knowing which way it went. Somebody who checks the mailbox can
+                          settle it, and without this the sequence ends there permanently. */}
+                      {x.status === "failed" && (
+                        <>
+                          <button
+                            className="text-xs text-brand-600 hover:underline"
+                            title="The prospect did receive it - continue to the next step"
+                            onClick={() => apiFetch("POST", `/v1/campaigns/${c.id}/contacts/${x.id}/resume`, { resend: false }).then(() => { toast("Moved on to the next step"); load(); }).catch((e) => toast((e as Error).message, "err"))}
+                          >
+                            It arrived
+                          </button>
+                          <button
+                            className="text-xs text-brand-600 hover:underline"
+                            title="The prospect never received it - send this step again"
+                            onClick={() => apiFetch("POST", `/v1/campaigns/${c.id}/contacts/${x.id}/resume`, { resend: true }).then(() => { toast("Will send that step again"); load(); }).catch((e) => toast((e as Error).message, "err"))}
+                          >
+                            Send again
+                          </button>
+                        </>
+                      )}
+                      <button className="text-brand-600 hover:underline" onClick={() => apiFetch<{ subject: string; body: string }>("POST", `/v1/campaigns/${c.id}/preview`, { leadId: x.lead.id, stepNo: Math.min((c.steps?.length ?? 1), x.currentStep + 1) }).then(setPreview).catch((e) => toast(e.message, "err"))}>Preview</button>
+                    </div>
+                  </td>
                 </tr>
               ))}
               {contacts.length === 0 && <tr><td colSpan={6} className="td py-8 text-center text-ink-400">No contacts enrolled. Use "Enroll leads".</td></tr>}

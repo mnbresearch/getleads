@@ -24,8 +24,18 @@ const TEST_DB = process.env.TEST_DATABASE_URL;
 // Configure the connection before anything imports the db singleton.
 if (TEST_DB) {
   process.env.DATABASE_URL = TEST_DB;
+  process.env.NODE_ENV = "test";
   process.env.JWT_SECRET ??= "x".repeat(48);
   process.env.ENCRYPTION_KEY ??= "y".repeat(48);
+  // Pinned, not defaulted. The send tests exercise the real sendStep, and a developer with
+  // RESEND_API_KEY or SMTP_HOST in their shell or .env would otherwise have this suite make
+  // live API calls - failing on an expired key, and on a working one actually sending mail
+  // to the fake addresses these tests invent and burning their quota.
+  delete process.env.RESEND_API_KEY;
+  delete process.env.SMTP_HOST;
+  delete process.env.SMTP_USER;
+  delete process.env.SMTP_PASS;
+  process.env.SMTP_PROBE_ENABLED = "false";
 }
 
 /**
@@ -599,7 +609,7 @@ suite("database integration", () => {
 
       const r = await sendStep(campaign.id, cc.id, step.id, { attempt: 2 });
       const rows = await db.select().from(schema.messages).where(schema.eq(schema.messages.campaignId, campaign.id));
-      return { r, rows, prior, cc, org };
+      return { r, rows, prior, cc, org, campaign };
     }
 
     it("does not send again when the first attempt is known to have delivered", async () => {
@@ -631,6 +641,43 @@ suite("database integration", () => {
       const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
       expect(after!.currentStep).toBe(0);
       expect(after!.status).toBe("failed");
+    });
+
+    it("gives a stopped contact a way back into its sequence", async () => {
+      const { cc, campaign } = await scenario("sending");
+      const stopped = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
+      expect(stopped!.status).toBe("failed");
+
+      // "failed" is terminal - the tick only picks up queued/active - so without a way back
+      // one dropped connection would end this prospect's sequence forever.
+      const { resumeContact } = await import("./services/campaigns.js");
+      const r = await resumeContact(cc.id, { resend: false });
+      expect(r.ok).toBe(true);
+
+      const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
+      expect(after!.status).not.toBe("failed");
+      expect(after!.currentStep).toBe(1);
+      void campaign;
+    });
+
+    it("clears the uncertain message when a person says it never arrived", async () => {
+      const { cc, prior } = await scenario("sending");
+      const { resumeContact } = await import("./services/campaigns.js");
+      await resumeContact(cc.id, { resend: true });
+
+      const msg = await db.query.messages.findFirst({ where: schema.eq(schema.messages.id, prior.id) });
+      // Left at "unknown", the guard would stop the very next attempt again.
+      expect(msg!.status).toBe("failed");
+      const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
+      expect(after!.status).toBe("active");
+      expect(after!.currentStep).toBe(0);
+    });
+
+    it("refuses to resume a contact that is not stopped", async () => {
+      const { cc } = await scenario("sent");
+      const { resumeContact } = await import("./services/campaigns.js");
+      const r = await resumeContact(cc.id, { resend: false });
+      expect(r.ok).toBe(false);
     });
 
     it("does not advance a contact twice when the earlier attempt already advanced it", async () => {

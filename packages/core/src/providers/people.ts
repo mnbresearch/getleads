@@ -10,7 +10,7 @@ import { fetchJson, fetchWithTimeout } from "../util/http.js";
 import { splitName } from "../util/names.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { meter } from "../util/meter.js";
-import { recordHttp } from "./health.js";
+import { ProviderUnavailableError, recordHttp } from "./health.js";
 import { secret } from "../util/secret.js";
 
 export interface PeopleProviderQuery {
@@ -158,7 +158,12 @@ export const hunterProvider = (apiKey = secret(process.env.HUNTER_API_KEY)): Peo
         `https://api.hunter.io/v2/domain-search?domain=${encodeURIComponent(domain)}&limit=${Math.min(q.limit ?? 25, 100)}&api_key=${apiKey}${q.seniorities?.length ? `&seniority=${encodeURIComponent(q.seniorities.map((s) => (s === "c_level" ? "executive" : s)).join(","))}` : ""}`,
         { timeoutMs: 20_000, provider: "hunter" },
       );
-      for (const e of data?.data?.emails ?? []) {
+      // `fetchJson` returns null on 401/429/timeout, and `?? []` would turn a rejected key
+      // into "this domain has nobody" - after which searchProvidersDetailed would list
+      // hunter among the providers that ANSWERED. That is the shape this file's own doc
+      // comment says was fixed, so it has to throw like the search providers do.
+      if (data === null) throw new ProviderUnavailableError("hunter", "network", `hunter returned no usable response for ${domain}`);
+      for (const e of data.data?.emails ?? []) {
         if (!e.first_name) continue;
         const v = hunterEmailVerdict(e.verification?.status, e.confidence);
         out.push({

@@ -202,9 +202,24 @@ leadRoutes.patch("/:id", zValidator("json", leadInput.partial().extend({ emailSt
   const existing = await db.query.leads.findFirst({ where: and(eq(leads.id, c.req.param("id")), eq(leads.orgId, oid)) });
   if (!existing) throw notFound("Lead");
   const b = c.req.valid("json");
+  const email = b.email?.toLowerCase();
+
+  /**
+   * A corrected address has never been checked.
+   *
+   * Enforced here rather than left to the caller, because the verdict this clears is
+   * load-bearing: `valid` earns the ICP score's verification credit and clears the
+   * campaign send gate, so carrying it across to a different mailbox would mark an
+   * unchecked address as safe to send to. The confidence and the verification date go with
+   * it - otherwise the detail view and the CSV export read "unknown, 95%, verified today",
+   * which is three statements that cannot all be true.
+   */
+  const emailChanged = !!email && email !== (existing.email ?? "").toLowerCase();
+  const resetVerification = emailChanged ? { emailStatus: "unknown", emailConfidence: 0, verifiedAt: null } : {};
+
   const [row] = await db
     .update(leads)
-    .set({ ...b, email: b.email?.toLowerCase(), updatedAt: new Date() })
+    .set({ ...b, ...resetVerification, email, updatedAt: new Date() })
     .where(eq(leads.id, existing.id))
     .returning();
   return c.json(row);

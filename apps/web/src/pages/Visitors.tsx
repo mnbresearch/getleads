@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 
@@ -51,6 +51,8 @@ export function VisitorsPage() {
    */
   const [journey, setJourney] = useState<{ id: string; page: string | null; referrer: string | null; durationMs: number; visitedAt: string; sessionId: string; city: string | null }[] | null>(null);
   const [journeyErr, setJourneyErr] = useState<string | null>(null);
+  /** Only the newest journey request is allowed to write its result. */
+  const journeyToken = useRef(0);
 
   const openDetail = (vc: VC) => {
     setDetail(vc);
@@ -60,12 +62,15 @@ export function VisitorsPage() {
     // story: "New session" lands at the END of each session, and "blog, then pricing, then
     // contact" reads as "contact, then pricing, then blog". Reverse it once, here.
     //
-    // The domain is captured so a slow response for company A cannot land in company B's
-    // modal after the user has clicked on.
-    const forDomain = vc.domain;
-    apiFetch<{ visits: NonNullable<typeof journey> }>("GET", `/v1/visitors/${forDomain}/visits`)
-      .then((r) => setDetail((cur) => { if (cur?.domain === forDomain) setJourney([...r.visits].reverse()); return cur; }))
-      .catch((e) => setDetail((cur) => { if (cur?.domain === forDomain) setJourneyErr((e as Error).message); return cur; }));
+    // A token rather than a domain comparison: comparing domains lets a slow response for
+    // company A land after the user has closed and REOPENED company A, overwriting the
+    // fresh journey with the stale one. Only the most recent request may write, and the
+    // check happens in the callback rather than inside a state updater - React requires
+    // those to be pure, and StrictMode double-invokes them.
+    const token = ++journeyToken.current;
+    apiFetch<{ visits: NonNullable<typeof journey> }>("GET", `/v1/visitors/${vc.domain}/visits`)
+      .then((r) => { if (journeyToken.current === token) setJourney([...r.visits].reverse()); })
+      .catch((e) => { if (journeyToken.current === token) setJourneyErr((e as Error).message); });
   };
 
   const setStat = (vc: VC, s: string) => apiFetch("PATCH", `/v1/visitors/${vc.domain}`, { status: s }).then(load);

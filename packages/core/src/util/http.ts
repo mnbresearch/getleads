@@ -1,4 +1,5 @@
 import { classifyHttp, classifyThrown, reportProviderCall } from "../providers/health.js";
+import { isPublicHost } from "./publicHost.js";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ProspexBot/0.1 (+https://prospex.dev/bot)";
@@ -14,6 +15,12 @@ export interface FetchOpts extends RequestInit {
    * Set it only for calls against a credentialed API we actually care about the health of.
    */
   provider?: string;
+  /** fetchText / fetchPublic: refuse a URL, or a redirect, that points at a private address. */
+  publicOnly?: boolean;
+  /** Escape hatch for tests, which serve fixtures from loopback. */
+  allowPrivateHosts?: boolean;
+  /** How many redirects fetchPublic will follow before giving up. Default 5. */
+  maxRedirects?: number;
 }
 
 /**
@@ -84,10 +91,44 @@ export async function readCapped(res: Response, max: number): Promise<Uint8Array
   return out;
 }
 
+/**
+ * Fetch a URL that came from a user, checking every hop.
+ *
+ * `isPublicHost` is a pre-flight check on the address we were given, and on its own it is
+ * defeated by one redirect: a host the guard allows answers `302 Location:
+ * http://169.254.169.254/...`, undici follows it because `redirect: "follow"` is the
+ * default here, and the metadata response is what gets parsed, stored on the company
+ * record and shown back in the UI.
+ *
+ * So redirects are followed by hand, and the guard runs against each new location. A
+ * redirect to a private address ends the walk rather than being followed.
+ */
+export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Response | null> {
+  const max = opts.maxRedirects ?? 5;
+  let current = url;
+  for (let hop = 0; hop <= max; hop++) {
+    if (!(opts.allowPrivateHosts ?? false) && !isPublicHost(current)) return null;
+    const res = await fetchWithTimeout(current, { ...opts, redirect: "manual" });
+    if (res.status < 300 || res.status >= 400) return res;
+    const location = res.headers.get("location");
+    if (!location) return res;
+    // Cancel the redirect body so the connection is not left hanging.
+    await res.body?.cancel().catch(() => {});
+    try {
+      current = new URL(location, current).toString();
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
 export async function fetchText(url: string, opts: FetchOpts = {}): Promise<string | null> {
   try {
-    const res = await fetchWithTimeout(url, opts);
-    if (!res.ok) return null;
+    // `publicOnly` routes through the per-hop check. Callers fetching a URL the USER chose
+    // - a company domain, a careers page - set it; callers hitting a known API do not.
+    const res = opts.publicOnly ? await fetchPublic(url, opts) : await fetchWithTimeout(url, opts);
+    if (!res || !res.ok) return null;
     const ct = res.headers.get("content-type") ?? "";
     if (!/text|html|json|xml/.test(ct)) return null;
     const max = opts.maxBytes ?? 1_500_000;
@@ -108,8 +149,20 @@ export async function fetchJson<T = unknown>(url: string, opts: FetchOpts = {}):
       }
       return null;
     }
+    // Parse BEFORE declaring success. Reporting "ok" and then having res.json() throw
+    // recorded the same call as both a success and a network failure, and stamped lastOkAt
+    // on a call that produced nothing usable.
+    let parsed: T;
+    try {
+      parsed = (await res.json()) as T;
+    } catch (e) {
+      if (opts.provider) {
+        reportProviderCall({ provider: opts.provider, outcome: "bad_response", status: res.status, detail: `HTTP ${res.status} with a body that is not JSON: ${(e as Error).message}`.slice(0, 200) });
+      }
+      return null;
+    }
     if (opts.provider) reportProviderCall({ provider: opts.provider, outcome: "ok", status: res.status });
-    return (await res.json()) as T;
+    return parsed;
   } catch (e) {
     if (opts.provider) {
       const { outcome, detail } = classifyThrown(e);

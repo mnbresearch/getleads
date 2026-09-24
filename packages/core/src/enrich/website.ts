@@ -76,8 +76,10 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
     return profile;
   }
 
+  // publicOnly so the guard applies to every redirect hop, not just the address we were
+  // handed. A pre-flight check alone is defeated by one 302.
   const attempt = (scheme: string) =>
-    pMap(paths, async (p) => ({ path: p, html: await fetchText(`${scheme}://${domain}${p}`, { timeoutMs }) }), 3);
+    pMap(paths, async (p) => ({ path: p, html: await fetchText(`${scheme}://${domain}${p}`, { timeoutMs, publicOnly: true, allowPrivateHosts: opts.allowPrivateHosts }) }), 3);
 
   // A domain handed in with an explicit scheme is honoured as written rather than
   // double-prefixed into an unfetchable URL.

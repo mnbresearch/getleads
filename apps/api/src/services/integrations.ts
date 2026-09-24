@@ -1,3 +1,4 @@
+import { isPublicHost } from "@prospex/core";
 import { and, companies, eq, getDb, integrations, leads, type Integration, type Lead } from "@prospex/db";
 import { decryptJson } from "../lib/crypto.js";
 
@@ -66,6 +67,12 @@ async function zoho(cfg: Cfg, lead: Lead, company: { name?: string | null } | nu
 
 /** Generic JSON POST (Cortex, Zapier/Make webhooks, Google Apps Script, n8n...). */
 async function webhook(cfg: Cfg, lead: Lead, company: unknown) {
+  // The URL is whatever the customer typed into Settings, and this POSTs a full lead
+  // record to it from inside our network. A private address here is OUR private network,
+  // never theirs, so it is refused with a reason rather than attempted.
+  if (!isPublicHost(cfg.url)) {
+    return { ok: false, error: `${cfg.url} is not a public address, so nothing was sent to it` };
+  }
   const res = await fetch(cfg.url, {
     method: "POST",
     headers: { "content-type": "application/json", ...(cfg.authHeader ? { authorization: cfg.authHeader } : {}) },

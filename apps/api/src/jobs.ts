@@ -1,5 +1,5 @@
 import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, visibilityPrompts, webhooks, sql as dsql, type JobHandler } from "@prospex/db";
-import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
+import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, isPublicHost, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
 import { pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
@@ -251,6 +251,9 @@ export const handlers: Record<string, JobHandler> = {
     const hook = await db.query.webhooks.findFirst({ where: eq(webhooks.id, String(job.payload.webhookId)) });
     const ev = await db.query.events.findFirst({ where: eq(events.id, String(job.payload.eventId)) });
     if (!hook || !ev || !hook.active) return { skipped: true };
+    // Same reasoning as the CRM webhook: a customer-supplied URL, called from inside our
+    // network, carrying event data. A private address is ours, not theirs.
+    if (!isPublicHost(hook.url)) return { skipped: `${hook.url} is not a public address` };
     const body = JSON.stringify({ id: ev.id, type: ev.type, createdAt: ev.createdAt, data: ev.data, entity: { type: ev.entityType, id: ev.entityId } });
     const ts = String(Date.now());
     const res = await fetch(hook.url, {

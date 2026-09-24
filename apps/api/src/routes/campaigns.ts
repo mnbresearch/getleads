@@ -9,7 +9,7 @@ import { badRequest, notFound } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, tickCampaign } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, resumeContact, tickCampaign } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 
@@ -183,6 +183,30 @@ campaignRoutes.post("/:id/pause", async (c) => {
   return c.json({ status: "paused" });
 });
 
+/**
+ * Put a stopped contact back into its sequence.
+ *
+ * sendStep stops a contact when a send's outcome could not be established - neither
+ * resending nor advancing is safe without knowing which way it went. A person who checks
+ * the mailbox can settle it: `resend: false` means it arrived, move on; `true` means it
+ * did not, try that step again. Without this, one dropped connection ended that prospect's
+ * sequence permanently, recoverable only by hand-written SQL.
+ */
+campaignRoutes.post("/:id/contacts/:contactId/resume", zValidator("json", z.object({ resend: z.boolean().default(false) }).optional()), async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  // campaign_contacts has no orgId of its own, so ownership comes through the campaign.
+  const campaign = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, oid)) });
+  if (!campaign) throw notFound("Campaign");
+  const cc = await db.query.campaignContacts.findFirst({
+    where: and(eq(campaignContacts.id, c.req.param("contactId")), eq(campaignContacts.campaignId, campaign.id)),
+  });
+  if (!cc) throw notFound("Contact");
+  const r = await resumeContact(cc.id, { resend: c.req.valid("json")?.resend });
+  if (!r.ok) throw badRequest(r.error);
+  return c.json(r);
+});
+
 campaignRoutes.get("/:id/contacts", async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
@@ -339,8 +363,11 @@ campaignRoutes.post(
     const lead = await db.query.leads.findFirst({ where: eq(leads.id, inbound.leadId) });
     if (!lead?.email) throw badRequest("Lead has no email");
 
-    const campaign = inbound.campaignId ? await db.query.campaigns.findFirst({ where: eq(campaigns.id, inbound.campaignId) }) : null;
-    let account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
+    // Both scoped to the caller's org. This path also reaches mailerFromAccount, so it
+    // decrypts SMTP credentials and sends from that address - exactly what the sendStep
+    // scoping was for, in a second place an earlier pass missed.
+    const campaign = inbound.campaignId ? await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, inbound.campaignId), eq(campaigns.orgId, oid)) }) : null;
+    let account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, campaign.emailAccountId), eq(emailAccounts.orgId, oid)) }) : null;
     if (!account) account = await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.orgId, oid), orderBy: desc(emailAccounts.createdAt) });
     if (!account) throw badRequest("No email sending account configured for this org");
 
