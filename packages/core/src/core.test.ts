@@ -1,7 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parseLinkedinTitle, extractPeopleFromResults } from "./discovery/people.js";
 import { applyPattern, candidatesFor, inferPattern, inferPatternFromEmails } from "./email/pattern.js";
-import { verifyEmail } from "./email/verify.js";
+import { resetMxCache, resolveMxDetailed, setMxResolver, verifyEmail } from "./email/verify.js";
 import { scoreLeadRules } from "./icp/score.js";
 import { computeLeadPriority } from "./icp/priority.js";
 import { learnFromOutcomes, wilsonInterval } from "./icp/learn.js";
@@ -90,6 +90,85 @@ describe("verify", () => {
   it("rejects bad syntax and disposable", async () => {
     expect((await verifyEmail("not-an-email")).status).toBe("invalid");
     expect((await verifyEmail("x@mailinator.com")).status).toBe("invalid");
+  });
+});
+
+/**
+ * The difference between "this domain takes no mail" and "we could not ask".
+ *
+ * Both used to come back as `null` from resolveMx, and the caller turned both into
+ * status "invalid" at 0.95 confidence, cached for twelve hours. One resolver blip
+ * therefore condemned every lead at every affected domain for half a working day, with
+ * nothing downstream able to tell the verdict apart from a real one.
+ */
+describe("email verification separates a DNS failure from a DNS answer", () => {
+  const fail = (code: string) => async () => {
+    const e = new Error(`query failed: ${code}`) as NodeJS.ErrnoException;
+    e.code = code;
+    throw e;
+  };
+
+  beforeEach(() => resetMxCache());
+  afterEach(() => {
+    setMxResolver(null);
+    resetMxCache();
+  });
+
+  it("reports a resolver failure as unknown, not as a bad address", async () => {
+    setMxResolver({ resolveMx: fail("SERVFAIL"), resolve4: fail("SERVFAIL") });
+    const r = await verifyEmail("someone@bigcustomer.com", { smtp: false });
+    expect(r.status).toBe("unknown");
+    expect(r.confidence).toBe(0);
+    expect(r.reason).toMatch(/not checked/i);
+  });
+
+  it("still reports a domain that genuinely has no mail as invalid", async () => {
+    setMxResolver({ resolveMx: fail("ENOTFOUND"), resolve4: fail("ENOTFOUND") });
+    const r = await verifyEmail("someone@no-such-domain-anywhere.test", { smtp: false });
+    expect(r.status).toBe("invalid");
+    expect(r.confidence).toBeGreaterThan(0.9);
+    expect(r.reason).toMatch(/no MX/i);
+  });
+
+  it("treats a timeout on MX with a live A record as an answer", async () => {
+    setMxResolver({ resolveMx: fail("ETIMEDOUT"), resolve4: async () => ["203.0.113.7"] });
+    const r = await resolveMxDetailed("a-record-only.test");
+    expect(r.answered).toBe(true);
+    expect(r.hosts?.[0].exchange).toBe("a-record-only.test");
+  });
+
+  it("does not cache a lookup the resolver never answered", async () => {
+    let calls = 0;
+    setMxResolver({
+      resolveMx: async () => {
+        calls++;
+        return fail("SERVFAIL")();
+      },
+      resolve4: fail("SERVFAIL"),
+    });
+    await resolveMxDetailed("flaky.test");
+    await resolveMxDetailed("flaky.test");
+    // A failure cached for twelve hours is the blip outliving itself, which is the bug.
+    expect(calls).toBe(2);
+
+    setMxResolver({ resolveMx: async () => [{ exchange: "mx.flaky.test", priority: 10 }], resolve4: fail("ENODATA") });
+    const healed = await resolveMxDetailed("flaky.test");
+    expect(healed.answered).toBe(true);
+    expect(healed.hosts?.[0].exchange).toBe("mx.flaky.test");
+  });
+
+  it("does cache a real answer, so a pipeline run asks once per domain", async () => {
+    let calls = 0;
+    setMxResolver({
+      resolveMx: async () => {
+        calls++;
+        return [{ exchange: "mx.acme.test", priority: 10 }];
+      },
+      resolve4: fail("ENODATA"),
+    });
+    await resolveMxDetailed("acme.test");
+    await resolveMxDetailed("acme.test");
+    expect(calls).toBe(1);
   });
 });
 

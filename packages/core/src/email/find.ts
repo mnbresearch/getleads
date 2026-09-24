@@ -1,6 +1,6 @@
 import type { EmailFindResult, EmailStatus } from "../types.js";
 import { candidatesFor, inferPatternFromEmails, PATTERNS } from "./pattern.js";
-import { isCatchAll, resolveMx, smtpProbe, verifyEmail, type VerifyOptions } from "./verify.js";
+import { isCatchAll, resolveMxDetailed, smtpProbe, verifyEmail, type VerifyOptions } from "./verify.js";
 import { fetchJson } from "../util/http.js";
 import { webSearch } from "../search/index.js";
 import { meter } from "../util/meter.js";
@@ -55,8 +55,14 @@ export async function findEmail(input: FindEmailInput, opts: VerifyOptions = {})
     }
   } catch {}
 
-  const mx = await resolveMx(domain);
-  if (!mx) return { status: "invalid", confidence: 0.9, candidates };
+  const { hosts: mx, answered: dnsAnswered } = await resolveMxDetailed(domain);
+  if (!mx) {
+    // Same distinction as verifyEmail: a resolver that never answered tells us nothing
+    // about this domain, and reporting "invalid" at 0.9 off a DNS blip poisoned every lead
+    // at that company for as long as the lookup stayed cached.
+    if (!dnsAnswered) return { status: "unknown", confidence: 0, candidates };
+    return { status: "invalid", confidence: 0.9, candidates };
+  }
   const mxHost = mx[0].exchange;
   const preferred = input.knownPattern ?? inferPatternFromEmails(input.knownEmails ?? [])?.pattern ?? null;
   const list = candidatesFor(firstName, lastName, domain, preferred);

@@ -20,24 +20,95 @@ const mxCache = new Map<string, { at: number; hosts: { exchange: string; priorit
 const catchAllCache = new Map<string, { at: number; value: boolean | null }>();
 const TTL = 12 * 60 * 60 * 1000;
 
-export async function resolveMx(domain: string) {
+/**
+ * Codes the resolver returns when the DOMAIN has no mail, as opposed to when WE could not ask.
+ *
+ * NXDOMAIN means no such domain. NODATA/ENODATA means the domain exists and has no record of
+ * that type. Both are answers. SERVFAIL, REFUSED, TIMEOUT, ECONNREFUSED and friends are not
+ * answers - they are the resolver failing - and must never be read as "this address is bad".
+ */
+const DNS_SAYS_NO = new Set(["ENOTFOUND", "ENODATA", "NXDOMAIN", "NODATA"]);
+
+export interface MxLookup {
+  hosts: { exchange: string; priority: number }[] | null;
+  /**
+   * True when the resolver actually answered, whatever it said.
+   *
+   * This is the whole point of the type. Before it existed, `resolveMx` returned `null` for
+   * "this domain accepts no mail" AND for "the resolver timed out", the caller returned
+   * status "invalid" at 0.95 confidence, and the result was cached for twelve hours. One
+   * resolver blip therefore marked every lead at every affected domain as a confidently
+   * invalid address, and the cache made the blip outlive itself by half a day. A false
+   * negative written with high confidence is worse than no answer at all, because nothing
+   * downstream can tell it was a guess.
+   */
+  answered: boolean;
+}
+
+/**
+ * The DNS calls, behind a seam.
+ *
+ * Injectable purely so the distinction above can be tested. The bug this module guards
+ * against only appears when the resolver misbehaves, and a test that cannot make the
+ * resolver misbehave cannot prove the guard works - which is how the bug survived in the
+ * first place. Production always uses the real resolver.
+ */
+export interface MxResolver {
+  resolveMx(domain: string): Promise<{ exchange: string; priority: number }[]>;
+  resolve4(domain: string): Promise<string[]>;
+}
+
+const REAL_RESOLVER: MxResolver = {
+  resolveMx: (d) => dns.resolveMx(d),
+  resolve4: (d) => dns.resolve4(d),
+};
+
+let resolver: MxResolver = REAL_RESOLVER;
+
+/** Testing seam. Passing null restores the real resolver. */
+export function setMxResolver(r: MxResolver | null) {
+  resolver = r ?? REAL_RESOLVER;
+}
+
+/** Testing seam: forget every cached lookup. */
+export function resetMxCache() {
+  mxCache.clear();
+  catchAllCache.clear();
+}
+
+export async function resolveMxDetailed(domain: string): Promise<MxLookup> {
   const c = mxCache.get(domain);
-  if (c && Date.now() - c.at < TTL) return c.hosts;
+  // Only a real answer is ever cached, so a cache hit is always `answered`.
+  if (c && Date.now() - c.at < TTL) return { hosts: c.hosts, answered: true };
+
   let hosts: { exchange: string; priority: number }[] | null = null;
+  let answered = false;
   try {
-    hosts = (await dns.resolveMx(domain)).sort((a, b) => a.priority - b.priority);
+    hosts = (await resolver.resolveMx(domain)).sort((a, b) => a.priority - b.priority);
     if (hosts.length === 0) hosts = null;
-  } catch {
+    answered = true;
+  } catch (e) {
+    const code = (e as NodeJS.ErrnoException)?.code ?? "";
     try {
-      // Fallback: A record means mail may still be accepted per RFC 5321
-      const a = await dns.resolve4(domain);
+      // Fallback: an A record means mail may still be accepted per RFC 5321.
+      const a = await resolver.resolve4(domain);
       hosts = a.length ? [{ exchange: domain, priority: 0 }] : null;
-    } catch {
+      answered = true;
+    } catch (e2) {
+      const code2 = (e2 as NodeJS.ErrnoException)?.code ?? "";
+      // Both lookups failed. Only call it an answer when the resolver said "no such thing".
+      answered = DNS_SAYS_NO.has(code) && DNS_SAYS_NO.has(code2);
       hosts = null;
     }
   }
-  mxCache.set(domain, { at: Date.now(), hosts });
-  return hosts;
+
+  if (answered) mxCache.set(domain, { at: Date.now(), hosts });
+  return { hosts, answered };
+}
+
+/** Back-compatible shape: the hosts alone, for callers that do not need the distinction. */
+export async function resolveMx(domain: string) {
+  return (await resolveMxDetailed(domain)).hosts;
 }
 
 export interface SmtpProbeResult {
@@ -149,9 +220,14 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
   checks.roleAccount = ROLE_LOCALS.has(local);
   checks.freeProvider = FREE_PROVIDERS.has(domain);
 
-  const mx = await resolveMx(domain);
+  const { hosts: mx, answered: dnsAnswered } = await resolveMxDetailed(domain);
   checks.mx = !!mx;
-  if (!mx) return result("invalid", 0.95, "no MX / A record");
+  if (!mx) {
+    // The resolver never answered, so we know nothing about this address. Saying "invalid"
+    // here used to write a 0.95-confidence false negative off a transient DNS failure.
+    if (!dnsAnswered) return result("unknown", 0, "could not resolve DNS for this domain - not checked, rather than bad");
+    return result("invalid", 0.95, "no MX / A record");
+  }
   const mxHost = mx[0].exchange;
 
   // Optional external verifiers (free tiers) take precedence when configured
