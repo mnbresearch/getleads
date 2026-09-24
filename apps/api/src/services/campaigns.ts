@@ -232,7 +232,14 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     // ordinary retry instead of stranding the contact for human review. Only the step that
     // might actually deliver something sits inside the uncertain window.
     const wa = await whatsappSender(campaign.orgId);
-    if (!wa.ok) return { skipped: wa.error };
+    if (!wa.ok) {
+      // Not a silent skip. tickCampaign has already cleared nextSendAt, and the due query
+      // requires a date, so simply returning would leave this contact reading "active"
+      // with nothing on earth able to pick it up again - and no failed row, no failed job,
+      // nothing in the UI. Hand it to a person, the same way a missing phone number does.
+      await createStepTask(campaign, cc.id, lead.id, step, 0);
+      return { skipped: `${wa.error} - handed to a person as a task` };
+    }
 
     const [wm] = await db
       .insert(messages)
@@ -273,7 +280,13 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   const account = campaign.emailAccountId
     ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, campaign.emailAccountId), eq(emailAccounts.orgId, campaign.orgId)) })
     : null;
-  if (!account) return { skipped: "no account" };
+  if (!account) {
+    // Same reasoning as the WhatsApp branch: tickCampaign cleared nextSendAt before
+    // enqueueing, so a bare return leaves this contact "active" and permanently
+    // unreachable. Stopping it is visible; stalling it is not.
+    await db.update(campaignContacts).set({ status: "failed", updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
+    return { skipped: "no sending account configured for this campaign" };
+  }
 
   /**
    * Has this exact step already gone out to this lead?

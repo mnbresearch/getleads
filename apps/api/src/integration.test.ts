@@ -705,6 +705,24 @@ suite("database integration", () => {
       expect(after1!.status).toBe("unknown");
     });
 
+    it("does not leave a contact silently stuck when there is no sending account", async () => {
+      // tickCampaign clears nextSendAt before enqueueing, and the due query needs a date -
+      // so a bare `return { skipped }` here left the contact reading "active" with nothing
+      // able to pick it up again, and nothing anywhere saying so.
+      const org = await newOrg("no-account");
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", status: "active" }).returning();
+      const [step] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "Hi", bodyTemplate: "Hello" }).returning();
+      const [lead] = await db.insert(schema.leads).values({ orgId: org.id, email: `p-${randomUUID().slice(0, 8)}@example.com`, fullName: "P", emailStatus: "valid" }).returning();
+      const [cc] = await db.insert(schema.campaignContacts).values({ campaignId: campaign.id, leadId: lead.id, status: "active", currentStep: 0 }).returning();
+
+      const r = await sendStep(campaign.id, cc.id, step.id, { attempt: 1 });
+      expect(String(r.skipped)).toMatch(/no sending account/i);
+
+      const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
+      // Visible, and recoverable through resumeContact - not "active" forever.
+      expect(after!.status).toBe("failed");
+    });
+
     it("refuses to resume a contact that is not stopped", async () => {
       const { cc } = await scenario("sent");
       const { resumeContact } = await import("./services/campaigns.js");

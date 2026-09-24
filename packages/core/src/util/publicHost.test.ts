@@ -196,3 +196,61 @@ describe("userinfo is judged differently for a crawl target and a customer's own
     expect(isPublicHost("[::7f00:1]")).toBe(false);
   });
 });
+
+/**
+ * Credentials must not follow a redirect to another origin, and ordinary headers must.
+ *
+ * The first version of this stripping returned a `Headers` instance, which fetchWithTimeout
+ * then merged by object spread - and spreading a Headers gives `{}`, because its entries
+ * live in internal slots. So every header was silently discarded and the intended result
+ * was reached only by accident. Nothing noticed, because nothing looked.
+ */
+describe("credentials do not follow a redirect off-origin", () => {
+  it("drops Authorization and Cookie across origins, and keeps everything else", async () => {
+    const { createServer } = await import("node:http");
+    const { fetchPublic } = await import("./http.js");
+
+    const seen: Record<string, string | undefined>[] = [];
+    const record = (req: import("node:http").IncomingMessage) =>
+      seen.push({ auth: req.headers.authorization, cookie: req.headers.cookie, apiKey: req.headers["x-api-key"] as string | undefined });
+
+    // Two servers on two ports: same host, different origin, which is what matters.
+    const second = createServer((req, res) => {
+      record(req);
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end("done");
+    });
+    await new Promise<void>((r) => second.listen(0, "127.0.0.1", r));
+    const secondAddr = second.address();
+    if (typeof secondAddr === "string" || !secondAddr) throw new Error("no address");
+
+    const first = createServer((req, res) => {
+      record(req);
+      res.writeHead(302, { location: `http://127.0.0.1:${secondAddr.port}/next` });
+      res.end();
+    });
+    await new Promise<void>((r) => first.listen(0, "127.0.0.1", r));
+    const firstAddr = first.address();
+    if (typeof firstAddr === "string" || !firstAddr) throw new Error("no address");
+
+    try {
+      const res = await fetchPublic(`http://127.0.0.1:${firstAddr.port}/start`, {
+        timeoutMs: 2000,
+        allowPrivateHosts: true,
+        headers: { authorization: "Bearer secret", cookie: "session=secret", "x-api-key": "not-a-credential" },
+      });
+      expect(await res!.text()).toBe("done");
+      expect(seen).toHaveLength(2);
+
+      // Hop one keeps everything: it is the request the caller actually made.
+      expect(seen[0]).toEqual({ auth: "Bearer secret", cookie: "session=secret", apiKey: "not-a-credential" });
+      // Hop two is a different origin, so the credentials are gone - and only those.
+      expect(seen[1]).toEqual({ auth: undefined, cookie: undefined, apiKey: "not-a-credential" });
+    } finally {
+      first.closeAllConnections?.();
+      second.closeAllConnections?.();
+      await new Promise<void>((r) => first.close(() => r()));
+      await new Promise<void>((r) => second.close(() => r()));
+    }
+  });
+});

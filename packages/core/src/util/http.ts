@@ -54,7 +54,11 @@ export async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
     return await fetch(url, {
       ...opts,
       signal: ctl.signal,
-      headers: { "user-agent": UA, accept: "text/html,application/json,*/*", "accept-language": "en", ...(opts.headers ?? {}) },
+      // Merged through Headers rather than object spread. Spreading only works for a plain
+      // object: an array of pairs becomes {"0": [...]} and a Headers instance becomes {},
+      // because its entries live in internal slots. That second case silently threw away
+      // every header fetchPublic had carefully stripped credentials out of.
+      headers: mergeHeaders({ "user-agent": UA, accept: "text/html,application/json,*/*", "accept-language": "en" }, opts.headers),
       // `?? "follow"`, not a hardcoded "follow". Spread order made this override the
       // caller's choice, so fetchPublic's `redirect: "manual"` never took effect and its
       // entire per-hop SSRF check was dead code - while both of its tests passed, because
@@ -115,6 +119,20 @@ export async function readCapped(res: Response, max: number): Promise<Uint8Array
  * So redirects are followed by hand, and the guard runs against each new location. A
  * redirect to a private address ends the walk rather than being followed.
  */
+/** True only for a body that cannot be sent twice. */
+function isSingleUseBody(body: BodyInit | null | undefined): boolean {
+  if (body === null || body === undefined) return false;
+  return typeof (body as { getReader?: unknown }).getReader === "function";
+}
+
+function mergeHeaders(base: Record<string, string>, extra: HeadersInit | undefined): Headers {
+  const h = new Headers(base);
+  // forEach rather than iteration: the TS lib in this project types Headers without
+  // Symbol.iterator, and forEach is on every runtime this ships to.
+  if (extra) new Headers(extra).forEach((v, k) => h.set(k, v));
+  return h;
+}
+
 function sameOrigin(a: string, b: string): boolean {
   try {
     return new URL(a).origin === new URL(b).origin;
@@ -129,7 +147,9 @@ function stripCredentials(headers: HeadersInit | undefined): HeadersInit | undef
   out.delete("authorization");
   out.delete("cookie");
   out.delete("proxy-authorization");
-  return out;
+  const plain: Record<string, string> = {};
+  out.forEach((v, k) => { plain[k] = v; });
+  return plain;
 }
 
 export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Response | null> {
@@ -156,10 +176,11 @@ export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Re
     if (res.status !== 307 && res.status !== 308) {
       method = "GET";
       body = undefined;
-    } else if (body !== undefined && typeof body !== "string") {
-      // 307/308 must replay the body, and a stream or FormData is single-use - it has
-      // already been consumed by the first hop and would throw on the second. Refusing is
-      // honest; silently sending an empty body would not be.
+    } else if (isSingleUseBody(body)) {
+      // 307/308 must replay the body. A stream is genuinely single-use - the first hop has
+      // already consumed it - so replaying would throw. Everything else undici re-serializes
+      // per request and replays fine; an earlier version rejected all of them, which turned
+      // an ordinary POST behind a 308 into something indistinguishable from an SSRF refusal.
       return null;
     }
     try {
