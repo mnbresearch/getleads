@@ -8,7 +8,7 @@ export type Env = { Variables: { auth: AuthContext } };
 export const requireAuth: MiddlewareHandler<Env> = async (c, next) => {
   const header = c.req.header("authorization") ?? (c.req.header("x-api-key") ? `ApiKey ${c.req.header("x-api-key")}` : undefined);
   const auth = await authenticate(header);
-  if (!auth) throw new ApiError(401, "Authentication required. Use `Authorization: Bearer <jwt>` or `x-api-key: gl_...`", "unauthorized");
+  if (!auth) throw new ApiError(401, "Authentication required. Use `Authorization: Bearer <jwt>` or `x-api-key: px_live_...`", "unauthorized");
   if (auth.org.status === "deactivated" || auth.org.status === "revoked") {
     throw new ApiError(403, "This account has been suspended. Contact support to reactivate it.", "account_suspended");
   }

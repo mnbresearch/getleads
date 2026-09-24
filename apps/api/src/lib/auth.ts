@@ -40,12 +40,30 @@ export async function verifyAdminJwt(token: string): Promise<boolean> {
   }
 }
 
+/**
+ * Every prefix an API key has ever been issued under.
+ *
+ * `generateApiKey` produced `gl_...` originally and `px_live_...` after the rebrand, but
+ * this check was never updated, so from the rebrand onward EVERY key the product issued was
+ * rejected: the key shown once at signup, every key created in Settings, and with them the
+ * SDK and the MCP server, which have no other way to authenticate. The 401 even told people
+ * to send a `gl_` key, which the product no longer hands out.
+ *
+ * A key is matched by its hash, so accepting several prefixes costs nothing and keeps every
+ * key ever issued working. New prefixes get added here, not swapped in.
+ */
+const API_KEY_PREFIXES = ["px_live_", "px_test_", "gl_"];
+
+export function looksLikeApiKey(token: string): boolean {
+  return API_KEY_PREFIXES.some((p) => token.startsWith(p));
+}
+
 export async function authenticate(header: string | undefined): Promise<AuthContext | null> {
   if (!header) return null;
   const [scheme, token] = header.split(" ");
   if (!token) return null;
   const { db } = getDb();
-  if (token.startsWith("gl_")) {
+  if (looksLikeApiKey(token)) {
     const key = await db.query.apiKeys.findFirst({ where: eq(apiKeys.keyHash, sha256(token)) });
     if (!key || key.revokedAt) return null;
     const org = await db.query.organizations.findFirst({ where: eq(organizations.id, key.orgId) });
