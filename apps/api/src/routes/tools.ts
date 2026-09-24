@@ -175,13 +175,16 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
           // over quota, with a soft note in the response. One row over is the unavoidable
           // cost of not billing for repeats; the rest of the page is not.
           saveStopped = charge.reason === "quota" ? `Saving stopped at ${out.length + 1}: ${charge.message}` : `Saving stopped at ${out.length + 1}: could not record usage (${charge.message})`;
-          if (!skipped) skipped = saveStopped;
         }
       }
     }
     out.push({ ...p, email, emailStatus: status, confidence, leadId });
   }
-  return c.json({ company: { name, domain }, people: out, skipped: skipped ?? undefined });
+  // Both, separately. Folding them into one field meant that when the email lookup failed
+  // first, the fact that SAVING also stopped was discarded - so people came back with no
+  // leadId and no explanation anywhere, which is the exact silence this field exists to
+  // break.
+  return c.json({ company: { name, domain }, people: out, skipped: skipped ?? undefined, saveStopped: saveStopped ?? undefined });
 });
 
 /** Company intelligence: hiring + recent news signals + firmographics, persisted. */

@@ -339,12 +339,26 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
                 // exactly what it is given - so correcting "Jon" to "John" would have
                 // appeared to do nothing at all.
                 //
-                // Rebuilt from what is on SCREEN, not from `body`. `body` drops empty
-                // fields, so a lead with no stored last name - or one whose last-name box
-                // the user cleared - would have had its full name rewritten to the first
-                // name alone, losing the surname from every screen.
-                const name = [editing.firstName.trim(), editing.lastName.trim()].filter(Boolean).join(" ");
-                if (name) body.fullName = name;
+                // Only rewrite the full name when a name field was actually EDITED.
+                //
+                // Rebuilding it from the two boxes looks right and is not: a lead imported
+                // with fullName "Priya Raman" and no separate last name - ordinary for a
+                // CSV that carried only a full name - has an empty last-name box, so the
+                // rebuild produced "Priya" and deleted the surname from the table, the
+                // modal title, search and the export. An earlier attempt at this rebuilt
+                // from `editing` instead of `body`, which is the same string for every
+                // possible input and fixed nothing.
+                const firstChanged = editing.firstName.trim() !== (lead.firstName ?? "");
+                const lastChanged = editing.lastName.trim() !== (lead.lastName ?? "");
+                if (firstChanged || lastChanged) {
+                  const rebuilt = [editing.firstName.trim(), editing.lastName.trim()].filter(Boolean).join(" ");
+                  if (rebuilt) body.fullName = rebuilt;
+                  // A cleared box is an intentional erasure of that part of the name, and
+                  // has to be sent as such - `body` drops empty strings, so without this
+                  // the stored value would survive and disagree with the full name.
+                  if (lastChanged && !editing.lastName.trim()) body.lastName = "";
+                  if (firstChanged && !editing.firstName.trim()) body.firstName = "";
+                }
 
                 // Changing the address clears its verification verdict - the server does
                 // that itself on every PATCH that changes the email, so it cannot be

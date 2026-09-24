@@ -644,7 +644,7 @@ suite("database integration", () => {
     });
 
     it("gives a stopped contact a way back into its sequence", async () => {
-      const { cc, campaign } = await scenario("sending");
+      const { cc, prior } = await scenario("sending");
       const stopped = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
       expect(stopped!.status).toBe("failed");
 
@@ -655,9 +655,16 @@ suite("database integration", () => {
       expect(r.ok).toBe(true);
 
       const after = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.id, cc.id) });
-      expect(after!.status).not.toBe("failed");
+      // "completed", not "active": this scenario's campaign has a single step, so moving on
+      // from it finishes the sequence. The point is that it is no longer stuck at "failed".
+      expect(after!.status).toBe("completed");
       expect(after!.currentStep).toBe(1);
-      void campaign;
+
+      // The message is resolved too. Left at "unknown", a delivered message stays filed as
+      // uncertain forever and any later count of what was sent disagrees with the
+      // contact's own progress.
+      const msg = await db.query.messages.findFirst({ where: schema.eq(schema.messages.id, prior.id) });
+      expect(msg!.status).toBe("sent");
     });
 
     it("clears the uncertain message when a person says it never arrived", async () => {

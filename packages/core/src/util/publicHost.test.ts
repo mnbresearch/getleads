@@ -87,54 +87,105 @@ describe("only public web addresses are fetched on a user's behalf", () => {
  * guard allows answers `302 Location: http://169.254.169.254/...`, the client follows it,
  * and the metadata response is what gets parsed and stored. So the guard has to run on
  * every hop, which is what fetchPublic does.
+ *
+ * The first version of these tests could not tell whether it did. One started on loopback
+ * with the guard ON, so it was refused at hop zero and the redirect never happened; the
+ * other turned the guard OFF entirely, so undici followed the redirect itself. Both passed
+ * against a fetchPublic whose loop body was dead code - which is exactly what it was, since
+ * fetchWithTimeout was overriding `redirect: "manual"` with a hardcoded "follow".
+ *
+ * So these tests decide the two questions separately: is the redirect followed BY THE LOOP
+ * (count the requests the server sees), and is a hop that fails the guard refused.
  */
 describe("the guard survives a redirect", () => {
-  it("refuses to follow a redirect into a private address", async () => {
+  async function fixture(handler: (url: string) => { status: number; location?: string; body?: string }) {
     const { createServer } = await import("node:http");
-    const { fetchPublic } = await import("./http.js");
-
-    const server = createServer((_req, res) => {
-      res.writeHead(302, { location: "http://169.254.169.254/latest/meta-data/" });
-      res.end();
+    const hits: string[] = [];
+    const server = createServer((req, res) => {
+      hits.push(req.url ?? "/");
+      const r = handler(req.url ?? "/");
+      if (r.location) {
+        res.writeHead(r.status, { location: r.location });
+        return res.end();
+      }
+      res.writeHead(r.status, { "content-type": "text/plain" });
+      res.end(r.body ?? "");
     });
     await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
     const addr = server.address();
     if (typeof addr === "string" || !addr) throw new Error("no address");
+    return {
+      base: `http://127.0.0.1:${addr.port}`,
+      hits,
+      async close() {
+        server.closeAllConnections?.();
+        await new Promise<void>((r) => server.close(() => r()));
+      },
+    };
+  }
 
+  it("refuses to follow a redirect into a private address", async () => {
+    const { fetchPublic } = await import("./http.js");
+    // The guard is ON. The first hop is permitted explicitly, so the ONLY thing that can
+    // refuse the second hop is the per-hop check - which is what this test exists to prove.
+    const f = await fixture((u) => (u === "/start" ? { status: 302, location: "http://169.254.169.254/latest/meta-data/" } : { status: 200, body: "should not be reached" }));
     try {
-      // allowPrivateHosts lets the FIRST hop through (the fixture is on loopback); the
-      // redirect target is judged on its own, which is the point of the per-hop check.
-      const res = await fetchPublic(`http://127.0.0.1:${addr.port}/`, { timeoutMs: 2000, allowPrivateHosts: false });
+      const res = await fetchPublic(`${f.base}/start`, { timeoutMs: 2000, allowFirstHop: true });
       expect(res).toBeNull();
+      // The fixture WAS contacted - so the test really did reach the redirect, rather than
+      // being refused before it started, which is how the previous version passed vacuously.
+      expect(f.hits).toEqual(["/start"]);
     } finally {
-      server.closeAllConnections?.();
-      await new Promise<void>((r) => server.close(() => r()));
+      await f.close();
     }
   });
 
-  it("follows an ordinary redirect between public addresses", async () => {
-    const { createServer } = await import("node:http");
+  it("follows an ordinary redirect itself, rather than letting the client do it", async () => {
     const { fetchPublic } = await import("./http.js");
-
-    const server = createServer((req, res) => {
-      if (req.url === "/start") {
-        res.writeHead(302, { location: "/end" });
-        return res.end();
-      }
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end("arrived");
-    });
-    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
-    const addr = server.address();
-    if (typeof addr === "string" || !addr) throw new Error("no address");
-
+    const f = await fixture((u) => (u === "/start" ? { status: 302, location: "/end" } : { status: 200, body: "arrived" }));
     try {
-      const res = await fetchPublic(`http://127.0.0.1:${addr.port}/start`, { timeoutMs: 2000, allowPrivateHosts: true });
+      const res = await fetchPublic(`${f.base}/start`, { timeoutMs: 2000, allowPrivateHosts: true });
       expect(res).not.toBeNull();
       expect(await res!.text()).toBe("arrived");
+      // Both hops came through this loop. If fetchWithTimeout were following redirects
+      // internally the loop would be bypassed, and the assertion above would still pass -
+      // this is the one that notices.
+      expect(f.hits).toEqual(["/start", "/end"]);
     } finally {
-      server.closeAllConnections?.();
-      await new Promise<void>((r) => server.close(() => r()));
+      await f.close();
     }
+  });
+
+  it("gives up rather than following a redirect loop forever", async () => {
+    const { fetchPublic } = await import("./http.js");
+    const f = await fixture(() => ({ status: 302, location: "/round" }));
+    try {
+      expect(await fetchPublic(`${f.base}/round`, { timeoutMs: 2000, allowPrivateHosts: true, maxRedirects: 3 })).toBeNull();
+      expect(f.hits.length).toBe(4);
+    } finally {
+      await f.close();
+    }
+  });
+});
+
+describe("userinfo is judged differently for a crawl target and a customer's own webhook", () => {
+  it("refuses a host smuggled after userinfo when crawling", () => {
+    expect(isPublicHost("example.com@169.254.169.254")).toBe(false);
+  });
+
+  it("allows HTTP Basic credentials in a webhook URL, and still judges the host", () => {
+    // Refusing every URL with credentials silently stopped customers whose self-hosted
+    // endpoint uses Basic auth in the URL - an ordinary pattern - from receiving leads.
+    expect(isPublicHost("https://user:pass@hooks.acme.com/prospex", { allowUserinfo: true })).toBe(true);
+    // The host behind the credentials is still judged on its merits.
+    expect(isPublicHost("https://user:pass@127.0.0.1/steal", { allowUserinfo: true })).toBe(false);
+    expect(isPublicHost("https://acme.com@169.254.169.254/", { allowUserinfo: true })).toBe(false);
+  });
+
+  it("refuses the deprecated IPv4-compatible IPv6 spelling", () => {
+    // [::127.0.0.1] canonicalises to [::7f00:1], which matched neither mapped-address
+    // branch when this guard was first written.
+    expect(isPublicHost("[::127.0.0.1]")).toBe(false);
+    expect(isPublicHost("[::7f00:1]")).toBe(false);
   });
 });

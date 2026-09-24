@@ -253,7 +253,7 @@ export const handlers: Record<string, JobHandler> = {
     if (!hook || !ev || !hook.active) return { skipped: true };
     // Same reasoning as the CRM webhook: a customer-supplied URL, called from inside our
     // network, carrying event data. A private address is ours, not theirs.
-    if (!isPublicHost(hook.url)) return { skipped: `${hook.url} is not a public address` };
+    if (!isPublicHost(hook.url, { allowUserinfo: true })) return { skipped: `${hook.url} is not a public address` };
     const body = JSON.stringify({ id: ev.id, type: ev.type, createdAt: ev.createdAt, data: ev.data, entity: { type: ev.entityType, id: ev.entityId } });
     const ts = String(Date.now());
     const res = await fetch(hook.url, {

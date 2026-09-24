@@ -17,8 +17,16 @@ export interface FetchOpts extends RequestInit {
   provider?: string;
   /** fetchText / fetchPublic: refuse a URL, or a redirect, that points at a private address. */
   publicOnly?: boolean;
-  /** Escape hatch for tests, which serve fixtures from loopback. */
+  /** Escape hatch for tests, which serve fixtures from loopback. Applies to every hop. */
   allowPrivateHosts?: boolean;
+  /**
+   * Permit the FIRST hop unconditionally, and judge every later one.
+   *
+   * Only for tests that need to serve a redirect from loopback while still proving the
+   * per-hop check refuses the target. `allowPrivateHosts` is all-or-nothing and cannot
+   * express that, which is how a test of this guard came to pass without exercising it.
+   */
+  allowFirstHop?: boolean;
   /** How many redirects fetchPublic will follow before giving up. Default 5. */
   maxRedirects?: number;
 }
@@ -47,7 +55,11 @@ export async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
       ...opts,
       signal: ctl.signal,
       headers: { "user-agent": UA, accept: "text/html,application/json,*/*", "accept-language": "en", ...(opts.headers ?? {}) },
-      redirect: "follow",
+      // `?? "follow"`, not a hardcoded "follow". Spread order made this override the
+      // caller's choice, so fetchPublic's `redirect: "manual"` never took effect and its
+      // entire per-hop SSRF check was dead code - while both of its tests passed, because
+      // undici followed the redirect internally and produced the expected result anyway.
+      redirect: opts.redirect ?? "follow",
     });
   } catch (e) {
     clearTimeout(t);
@@ -106,14 +118,24 @@ export async function readCapped(res: Response, max: number): Promise<Uint8Array
 export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Response | null> {
   const max = opts.maxRedirects ?? 5;
   let current = url;
+  let method = opts.method;
+  let body = opts.body;
   for (let hop = 0; hop <= max; hop++) {
-    if (!(opts.allowPrivateHosts ?? false) && !isPublicHost(current)) return null;
-    const res = await fetchWithTimeout(current, { ...opts, redirect: "manual" });
+    const permitted = (opts.allowPrivateHosts ?? false) || (hop === 0 && (opts.allowFirstHop ?? false));
+    if (!permitted && !isPublicHost(current)) return null;
+    const res = await fetchWithTimeout(current, { ...opts, method, body, redirect: "manual" });
     if (res.status < 300 || res.status >= 400) return res;
     const location = res.headers.get("location");
     if (!location) return res;
     // Cancel the redirect body so the connection is not left hanging.
     await res.body?.cancel().catch(() => {});
+    // 301, 302 and 303 turn into a GET with no body, as the spec requires and as every
+    // browser does; 307 and 308 preserve both. Replaying a POST body across a 302 would
+    // send the same payload somewhere the caller never addressed.
+    if (res.status !== 307 && res.status !== 308) {
+      method = "GET";
+      body = undefined;
+    }
     try {
       current = new URL(location, current).toString();
     } catch {

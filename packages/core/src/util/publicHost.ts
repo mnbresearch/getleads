@@ -50,7 +50,9 @@ function isPrivateV6(host: string): boolean {
   // one was handled at first, so the hex form walked straight through to loopback.
   const dotted = h.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
   if (dotted) return isPrivateV4(dotted[1]);
-  const hex = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
+  // Both the mapped (::ffff:a:b) and the deprecated compatible (::a:b) forms. URL
+  // canonicalisation turns [::127.0.0.1] into [::7f00:1], which matched neither branch.
+  const hex = h.match(/^::(?:ffff:)?([0-9a-f]{1,4}):([0-9a-f]{1,4})$/);
   if (hex) {
     const n = (parseInt(hex[1], 16) << 16) | parseInt(hex[2], 16);
     return isPrivateV4([(n >>> 24) & 255, (n >>> 16) & 255, (n >>> 8) & 255, n & 255].join("."));
@@ -75,13 +77,19 @@ function isPrivateV6(host: string): boolean {
  * So the check parses first and inspects the parsed hostname. Anything that will not parse
  * is refused rather than guessed at.
  */
-function normalizeHostname(host: string): string | null {
+function normalizeHostname(host: string, opts: { allowUserinfo?: boolean } = {}): string | null {
   try {
     // A bare host needs a scheme to parse; one that already has a scheme keeps it.
     const u = new URL(/^[a-z][a-z0-9+.-]*:\/\//i.test(host) ? host : `http://${host}`);
-    // Userinfo means the string is not what it appears to be. Refuse rather than accept
-    // the real host, because a value shaped like that is never a legitimate company domain.
-    if (u.username || u.password) return null;
+    // For a CRAWL TARGET, userinfo means the string is not what it appears to be -
+    // `example.com@169.254.169.254` reads as a company domain and fetches the metadata
+    // endpoint - and no legitimate company domain is written that way, so it is refused.
+    //
+    // For a URL the customer typed into their own settings it is different: HTTP Basic in
+    // the URL is an ordinary way to secure a self-hosted webhook, and refusing it silently
+    // stopped those customers receiving their leads. There the credentials are stripped and
+    // the host behind them is judged on its merits.
+    if ((u.username || u.password) && !opts.allowUserinfo) return null;
     // A trailing root label ("localhost.") resolves the same as without it.
     return u.hostname.replace(/\.$/, "").toLowerCase();
   } catch {
@@ -98,8 +106,8 @@ function normalizeHostname(host: string): string | null {
  * record points at a private address still passes, and a public host that redirects to a
  * private one is caught separately, by the per-hop check in `fetchPublic`.
  */
-export function isPublicHost(host: string): boolean {
-  const hostname = normalizeHostname(host);
+export function isPublicHost(host: string, opts: { allowUserinfo?: boolean } = {}): boolean {
+  const hostname = normalizeHostname(host, opts);
   if (!hostname) return false;
 
   if (BLOCKED_HOSTNAMES.has(hostname)) return false;

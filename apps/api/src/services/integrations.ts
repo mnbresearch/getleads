@@ -70,7 +70,7 @@ async function webhook(cfg: Cfg, lead: Lead, company: unknown) {
   // The URL is whatever the customer typed into Settings, and this POSTs a full lead
   // record to it from inside our network. A private address here is OUR private network,
   // never theirs, so it is refused with a reason rather than attempted.
-  if (!isPublicHost(cfg.url)) {
+  if (!isPublicHost(cfg.url, { allowUserinfo: true })) {
     return { ok: false, error: `${cfg.url} is not a public address, so nothing was sent to it` };
   }
   const res = await fetch(cfg.url, {
