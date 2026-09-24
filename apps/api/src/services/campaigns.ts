@@ -99,7 +99,14 @@ export async function tickCampaign(campaignId: string) {
   if (!campaign || campaign.status !== "active") return { sent: 0, reason: "not active" };
   const s = settingsOf(campaign);
   if (!inSendWindow(s)) return { sent: 0, reason: "outside send window" };
-  const account = campaign.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
+  // Scoped to the campaign's own org as well as the id. The route now rejects a foreign
+  // emailAccountId outright (lib/ownership.ts), and this is the second lock on the same
+  // door: nothing should be able to reach another tenant's decrypted SMTP credentials,
+  // send from their address, or consume their daily sending cap - including any row that
+  // was written before that check existed.
+  const account = campaign.emailAccountId
+    ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, campaign.emailAccountId), eq(emailAccounts.orgId, campaign.orgId)) })
+    : null;
   const steps = await db.select().from(sequenceSteps).where(eq(sequenceSteps.campaignId, campaign.id)).orderBy(asc(sequenceSteps.stepNo));
   if (steps.length === 0) return { sent: 0, reason: "no steps" };
   const needsEmail = steps.some((st) => st.channel === "email");

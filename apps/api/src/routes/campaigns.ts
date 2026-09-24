@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, asc, inArray, campaignContacts, campaigns, companies, consume, desc, emailAccounts, enqueue, eq, getDb, leads, listLeads, messages, organizations, sequenceSteps, sql } from "@prospex/db";
+import { and, asc, inArray, campaignContacts, campaigns, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql } from "@prospex/db";
 import { createAiProvider, createAiProviderForPlan, generateOutreach, classifyReply, draftReplyToInbound } from "@prospex/core";
 import { env } from "../env.js";
 import { encryptJson } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
+import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, tickCampaign } from "../services/campaigns.js";
@@ -86,6 +87,10 @@ campaignRoutes.post("/", zValidator("json", campaignInput), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
+  // Every id in the body names a row this org must actually own. See lib/ownership.ts.
+  await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account");
+  await assertOwned(icps, b.icpId, oid, "ICP");
+  await assertOwned(lists, b.listId, oid, "List");
   const [row] = await db.insert(campaigns).values({ orgId: oid, name: b.name, icpId: b.icpId, listId: b.listId, emailAccountId: b.emailAccountId, settings: b.settings ?? {} }).returning();
   if (b.steps?.length) await db.insert(sequenceSteps).values(b.steps.map((s, i) => ({ campaignId: row.id, stepNo: i + 1, ...s })));
   return c.json(await fullCampaign(oid, row.id), 201);
@@ -103,6 +108,9 @@ campaignRoutes.patch("/:id", zValidator("json", campaignInput.partial()), async 
   const { db } = getDb();
   const existing = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, oid)) });
   if (!existing) throw notFound("Campaign");
+  await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account");
+  await assertOwned(icps, b.icpId, oid, "ICP");
+  await assertOwned(lists, b.listId, oid, "List");
   await db
     .update(campaigns)
     .set({ ...(b.name ? { name: b.name } : {}), ...(b.icpId !== undefined ? { icpId: b.icpId } : {}), ...(b.listId !== undefined ? { listId: b.listId } : {}), ...(b.emailAccountId !== undefined ? { emailAccountId: b.emailAccountId } : {}), ...(b.settings ? { settings: { ...existing.settings, ...b.settings } } : {}), updatedAt: new Date() })

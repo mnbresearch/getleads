@@ -148,7 +148,8 @@ suite("route surface", () => {
       body: JSON.stringify({ name: "From settings" }),
     });
     expect(made.status).toBeLessThan(300);
-    const key = (await made.json()).key ?? (await made.clone().json()).apiKey;
+    const made_ = await made.json();
+    const key = made_.key ?? made_.apiKey ?? made_.apiKey?.raw;
     expect(typeof key).toBe("string");
     const r = await app.request("/v1/leads", { headers: { "x-api-key": key } });
     expect(r.status).toBe(200);
@@ -261,6 +262,111 @@ suite("route surface", () => {
     const list = await (await app.request("/v1/icps", { headers: { authorization: `Bearer ${otherToken}` } })).json();
     const rows = Array.isArray(list) ? list : (list.icps ?? []);
     expect(rows.some((r: any) => r.id === icp.id)).toBe(false);
+  });
+
+  /**
+   * Reading was scoped consistently; REFERENCES were not. A field validated only as
+   * `z.string().uuid()` could name a row in another workspace, and the write went through -
+   * a campaign pointing at a foreign email account decrypts that tenant's SMTP credentials,
+   * sends from their address and burns their daily cap; a signal subscription pointing at a
+   * foreign campaign enrolls our leads into their sequence, which then emails them.
+   */
+  describe("cross-workspace references", () => {
+    let otherToken = "";
+    let otherEmailAccountId = "";
+    let otherCampaignId = "";
+
+    beforeAll(async () => {
+      const signup = await app.request("/v1/auth/signup", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ email: `victim-${randomUUID()}@example.com`, password: "correct-horse-battery", orgName: "Victim Co" }),
+      });
+      otherToken = (await signup.json()).token;
+
+      const dbPkg = await import("@prospex/db");
+      const db = dbPkg.getDb().db;
+      const me = await (await app.request("/v1/auth/me", { headers: { authorization: `Bearer ${otherToken}` } })).json();
+      const victimOrg = me.org.id;
+
+      const [acct] = await db
+        .insert(dbPkg.emailAccounts)
+        .values({ orgId: victimOrg, provider: "smtp", fromEmail: "victim@victim.test", fromName: "Victim", config: {} as never })
+        .returning();
+      otherEmailAccountId = acct.id;
+
+      const made = await app.request("/v1/campaigns", {
+        method: "POST",
+        headers: { authorization: `Bearer ${otherToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Victim campaign" }),
+      });
+      const created = await made.json();
+      otherCampaignId = created.campaign?.id ?? created.id;
+    });
+
+    it("refuses a campaign that points at another workspace's email account", async () => {
+      const r = await app.request("/v1/campaigns", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Borrowed sender", emailAccountId: otherEmailAccountId }),
+      });
+      expect(r.status).toBe(404);
+    });
+
+    it("refuses to move an existing campaign onto another workspace's email account", async () => {
+      const mine = await app.request("/v1/campaigns", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Mine" }),
+      });
+      const mineBody = await mine.json();
+      const id = mineBody.campaign?.id ?? mineBody.id;
+      const r = await app.request(`/v1/campaigns/${id}`, {
+        method: "PATCH",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ emailAccountId: otherEmailAccountId }),
+      });
+      expect(r.status).toBe(404);
+    });
+
+    it("refuses a signal subscription that enrolls into another workspace's campaign", async () => {
+      expect(otherCampaignId).toBeTruthy();
+      const r = await app.request("/v1/signals/subscriptions", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Piggyback", types: ["funding"], autoCreateLeads: true, campaignId: otherCampaignId }),
+      });
+      expect(r.status).toBe(404);
+    });
+
+    it("refuses to remove a lead from another workspace's list", async () => {
+      const made = await app.request("/v1/leads/lists", {
+        method: "POST",
+        headers: { authorization: `Bearer ${otherToken}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Victim list" }),
+      });
+      const listId = (await made.json()).id;
+      const r = await app.request(`/v1/leads/lists/${listId}/leads/${randomUUID()}`, {
+        method: "DELETE",
+        headers: { authorization: `Bearer ${token}` },
+      });
+      expect(r.status).toBe(404);
+    });
+
+    it("still accepts a reference to the caller's own row", async () => {
+      const icp = await app.request("/v1/icps", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Own icp", buildWithAi: false }),
+      });
+      const icpId = (await icp.json()).icp.id;
+      const r = await app.request("/v1/campaigns", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Own everything", icpId }),
+      });
+      expect(r.status).toBeLessThan(300);
+    });
   });
 
   it("guards the admin surface", async () => {

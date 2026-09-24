@@ -309,7 +309,12 @@ leadRoutes.post("/lists/:listId/leads", zValidator("json", z.object({ ids: z.arr
 });
 leadRoutes.delete("/lists/:listId/leads/:leadId", async (c) => {
   const { db } = getDb();
-  await db.delete(listLeads).where(and(eq(listLeads.listId, c.req.param("listId")), eq(listLeads.leadId, c.req.param("leadId"))));
+  // listLeads has no orgId of its own, so ownership has to be established through the list
+  // first - exactly as the sibling POST does. Without it, one tenant could remove rows from
+  // another tenant's list given only the two ids.
+  const list = await db.query.lists.findFirst({ where: and(eq(lists.id, c.req.param("listId")), eq(lists.orgId, orgId(c))) });
+  if (!list) throw notFound("List");
+  await db.delete(listLeads).where(and(eq(listLeads.listId, list.id), eq(listLeads.leadId, c.req.param("leadId"))));
   return c.json({ ok: true });
 });
 

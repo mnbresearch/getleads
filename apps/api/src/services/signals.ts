@@ -79,7 +79,9 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
   }
   await db.update(signalMatches).set({ leadsCreated: created, status: created ? "leads_created" : "no_leads" }).where(and(eq(signalMatches.signalId, signalId), eq(signalMatches.subscriptionId, sub.id)));
   if (sub.campaignId && ids.length) {
-    const cp = await db.query.campaigns.findFirst({ where: (t, { eq: e }) => e(t.id, sub.campaignId!) });
+    // Same org as the subscription, not just the same id: enrolling into a foreign campaign
+    // would hand our leads to another tenant's sequence, which then emails them.
+    const cp = await db.query.campaigns.findFirst({ where: (t, { eq: e, and: a }) => a(e(t.id, sub.campaignId!), e(t.orgId, sub.orgId)) });
     if (cp) await enrollLeads(cp, ids);
   }
   return created;

@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, desc, enqueue, eq, getDb, inArray, monitorResults, monitors, or, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
+import { and, campaigns, desc, enqueue, eq, getDb, icps, inArray, monitorResults, monitors, or, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
 import { notFound } from "../lib/errors.js";
+import { assertOwned } from "../lib/ownership.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { runSubscription } from "../services/signals.js";
 import { runMonitor } from "../services/monitors.js";
@@ -48,13 +49,23 @@ signalRoutes.get("/subscriptions", async (c) => {
 });
 signalRoutes.post("/subscriptions", zValidator("json", subInput), async (c) => {
   const { db } = getDb();
-  const [row] = await db.insert(signalSubscriptions).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
+  const oid = orgId(c);
+  const b = c.req.valid("json");
+  // A subscription with autoCreateLeads enrolls into this campaign. Without this check a
+  // foreign campaign id would put our leads into someone else's sequence, which emails them.
+  await assertOwned(campaigns, b.campaignId, oid, "Campaign");
+  await assertOwned(icps, b.icpId, oid, "ICP");
+  const [row] = await db.insert(signalSubscriptions).values({ orgId: oid, ...b }).returning();
   await enqueue(db, "signals.subscription", { subscriptionId: row.id }, { orgId: row.orgId, priority: 2 });
   return c.json(row, 201);
 });
 signalRoutes.patch("/subscriptions/:id", zValidator("json", subInput.partial()), async (c) => {
   const { db } = getDb();
-  const [row] = await db.update(signalSubscriptions).set(c.req.valid("json")).where(and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, orgId(c)))).returning();
+  const oid = orgId(c);
+  const b = c.req.valid("json");
+  await assertOwned(campaigns, b.campaignId, oid, "Campaign");
+  await assertOwned(icps, b.icpId, oid, "ICP");
+  const [row] = await db.update(signalSubscriptions).set(b).where(and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, oid))).returning();
   if (!row) throw notFound("Subscription");
   return c.json(row);
 });
