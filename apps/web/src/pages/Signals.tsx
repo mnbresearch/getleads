@@ -1,17 +1,39 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
+import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 
 interface Signal { id: string; type: string; companyName: string | null; companyDomain: string | null; title: string; summary: string | null; url: string; source: string | null; amountUsd: number | null; round: string | null; confidence: number; occurredAt: string | null; createdAt: string; match: { status: string; leadsCreated: number } | null }
 interface Sub { id: string; name: string; types: string[]; keywords: string[]; industries: string[]; locations: string[]; targetTitles: string[]; autoCreateLeads: boolean; active: boolean; lastRunAt: string | null; stats: Record<string, number> }
 interface Monitor { id: string; type: string; name: string; target: string; active: boolean; intervalMinutes: number; lastRunAt: string | null; resultsCount: number; lastResult: Record<string, unknown> | null }
 interface Result { id: string; kind: string; title: string; url: string | null; snippet: string | null; leadId: string | null; foundAt: string; data: Record<string, unknown> }
 
-const TYPES = ["funding", "acquisition", "hiring", "leadership", "expansion", "launch", "partnership"];
+/**
+ * Fallback only. The authoritative list is GET /v1/signals/types.
+ *
+ * This array used to BE the list, and the server validates a subscription's types against
+ * its own enum - so a type added on the server never appeared here, and one removed there
+ * surfaced as a validation error on save rather than as a missing option. Fetched once on
+ * mount; this stands in until it arrives, and if the request fails.
+ */
+const FALLBACK_TYPES = ["funding", "acquisition", "hiring", "leadership", "expansion", "launch", "partnership"];
+
+let cachedTypes: string[] | null = null;
+
+function useSignalTypes() {
+  const [types, setTypes] = useState<string[]>(cachedTypes ?? FALLBACK_TYPES);
+  useEffect(() => {
+    if (cachedTypes) return;
+    apiFetch<{ types: string[] }>("GET", "/v1/signals/types")
+      .then((r) => { if (r.types?.length) { cachedTypes = r.types; setTypes(r.types); } })
+      .catch(() => {});
+  }, []);
+  return types;
+}
 const money = (n: number | null) => (n ? (n >= 1e9 ? `$${(n / 1e9).toFixed(1)}B` : n >= 1e6 ? `$${(n / 1e6).toFixed(1)}M` : `$${Math.round(n / 1e3)}K`) : "");
 const TypeBadge = ({ t }: { t: string }) => <span className={`badge ${{ funding: "bg-emerald-50 text-emerald-700", acquisition: "bg-purple-50 text-purple-700", hiring: "bg-brand-50 text-brand-700", leadership: "bg-amber-50 text-amber-700" }[t] ?? "bg-black/[0.05] text-ink-300"}`}>{t}</span>;
 
 export function SignalsPage() {
+  const TYPES = useSignalTypes();
   const [tab, setTab] = useState<"feed" | "subscriptions" | "monitors">("feed");
   const [signals, setSignals] = useState<Signal[]>([]);
   const [subs, setSubs] = useState<Sub[]>([]);
@@ -77,7 +99,23 @@ export function SignalsPage() {
         <div className="grid gap-3 md:grid-cols-2">
           {subs.map((s) => (
             <div key={s.id} className="card p-4">
-              <div className="flex items-start justify-between"><div className="font-semibold">{s.name}</div><div className="flex gap-2"><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/signals/subscriptions/${s.id}/run`).then((r) => { toast(`Run: ${JSON.stringify(r)}`); load(); })}>Run now</button><button className="text-xs text-red-600" onClick={() => apiFetch("DELETE", `/v1/signals/subscriptions/${s.id}`).then(load)}>Delete</button></div></div>
+              <div className="flex items-start justify-between gap-2">
+                <div className="font-semibold">{s.name}{s.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}</div>
+                <div className="flex gap-2">
+                  <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/signals/subscriptions/${s.id}/run`).then((r) => { toast(`Run: ${JSON.stringify(r)}`); load(); })}>Run now</button>
+                  {/* A subscription that scans every six hours and auto-creates leads could
+                      only be stopped by deleting it, which threw away its match history and
+                      stats too. Pausing keeps both. */}
+                  <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("PATCH", `/v1/signals/subscriptions/${s.id}`, { active: s.active === false }).then(load).catch((e) => toast((e as Error).message, "err"))}>{s.active === false ? "Resume" : "Pause"}</button>
+                  <DeleteButton
+                    what={`the subscription "${s.name}"`}
+                    consequence="Its match history and stats go with it. Pause it instead if you only want it to stop scanning."
+                    className="text-xs"
+                    onDelete={async () => { await apiFetch("DELETE", `/v1/signals/subscriptions/${s.id}`); load(); }}
+                    onError={(m2) => toast(m2, "err")}
+                  />
+                </div>
+              </div>
               <div className="mt-2 flex flex-wrap gap-1">{s.types.map((t) => <TypeBadge key={t} t={t} />)}</div>
               <div className="mt-2 text-xs text-ink-400">Keywords: {[...s.keywords, ...s.industries, ...s.locations].join(", ") || "any"} · Targets: {s.targetTitles.join(", ")}</div>
               <div className="mt-1 text-xs text-ink-400">{s.autoCreateLeads ? "Auto-creates leads" : "Match only"} · matched {s.stats.matched ?? 0} · leads {s.stats.leadsCreated ?? 0} · last run {fmtDate(s.lastRunAt)}</div>
@@ -91,10 +129,17 @@ export function SignalsPage() {
           {mons.map((m) => (
             <div key={m.id} className="flex flex-wrap items-center gap-3 p-3">
               <span className="badge bg-black/[0.05] text-ink-200">{m.type.replace("_", " ")}</span>
-              <div className="min-w-0 flex-1"><div className="font-medium">{m.name}</div><div className="truncate text-xs text-ink-400">{m.target} · every {m.intervalMinutes >= 60 ? `${Math.round(m.intervalMinutes / 60)}h` : `${m.intervalMinutes}m`} · {m.resultsCount} results · last {fmtDate(m.lastRunAt)}{m.lastResult && "openRoles" in m.lastResult ? ` · ${m.lastResult.openRoles} open roles` : ""}{m.lastResult && "publicPage" in m.lastResult && !m.lastResult.publicPage ? " · post not public" : ""}</div></div>
+              <div className="min-w-0 flex-1"><div className="font-medium">{m.name}{m.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}</div><div className="truncate text-xs text-ink-400">{m.target} · every {m.intervalMinutes >= 60 ? `${Math.round(m.intervalMinutes / 60)}h` : `${m.intervalMinutes}m`} · {m.resultsCount} results · last {fmtDate(m.lastRunAt)}{m.lastResult && "openRoles" in m.lastResult ? ` · ${m.lastResult.openRoles} open roles` : ""}{m.lastResult && "publicPage" in m.lastResult && !m.lastResult.publicPage ? " · post not public" : ""}</div></div>
               <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ results: Result[] }>("GET", `/v1/signals/monitors/${m.id}/results`).then((r) => setResults({ m, rows: r.results }))}>Results</button>
               <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ added: number }>("POST", `/v1/signals/monitors/${m.id}/run`).then((r) => { toast(`Added ${r.added}`); load(); }).catch((e) => toast(e.message, "err"))}>Run</button>
-              <button className="text-xs text-red-600" onClick={() => apiFetch("DELETE", `/v1/signals/monitors/${m.id}`).then(load)}>Delete</button>
+              <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("PATCH", `/v1/signals/monitors/${m.id}`, { active: m.active === false }).then(load).catch((e) => toast((e as Error).message, "err"))}>{m.active === false ? "Resume" : "Pause"}</button>
+              <DeleteButton
+                what={`the monitor "${m.name}"`}
+                consequence={`${m.resultsCount} recorded results go with it. Pause it instead if you only want it to stop checking.`}
+                className="text-xs"
+                onDelete={async () => { await apiFetch("DELETE", `/v1/signals/monitors/${m.id}`); load(); }}
+                onError={(msg) => toast(msg, "err")}
+              />
             </div>
           ))}
         </div>
@@ -113,6 +158,7 @@ export function SignalsPage() {
 }
 
 function SubModal({ open, onClose, onDone, toast }: { open: boolean; onClose: () => void; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  const TYPES = useSignalTypes();
   const [f, setF] = useState({ name: "", types: ["funding", "leadership"] as string[], keywords: [] as string[], industries: [] as string[], locations: ["India"] as string[], targetTitles: ["CEO", "Founder", "Head of Sales", "Head of Marketing"] as string[], autoCreateLeads: true });
   const [busy, setBusy] = useState(false);
   return (

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
+import { DeleteButton, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 
 interface Pixel { id: string; key: string; name: string; snippet: string; active: boolean; createdAt: string }
 interface VC { id: string; domain: string; name: string | null; firstSeenAt: string; lastSeenAt: string; visits: number; sessions: number; pages: Record<string, number>; intentScore: number; status: string; leadsFound: number; company: { name: string | null; industry: string | null; description: string | null; location: string | null; techStack: string[]; openRoles: number | null } | null }
@@ -87,7 +87,25 @@ export function VisitorsPage() {
       )}
       <Modal open={setup} onClose={() => setSetup(false)} title="Install the visitor pixel" wide>
         <p className="mb-3 text-sm text-ink-300">Paste before <code>&lt;/head&gt;</code> on every page (or in Google Tag Manager as a Custom HTML tag). It is cookieless and under 1KB. Optionally call <code>window.prospex.identify({"{"}email, company{"}"})</code> after a login or form submit to identify visitors exactly.</p>
-        {pixels.map((p) => <div key={p.id} className="mb-3"><div className="text-sm font-medium">{p.name}</div><pre className="overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{p.snippet}</pre><button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied"))}>Copy</button></div>)}
+        {pixels.map((p) => (
+          <div key={p.id} className="mb-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-sm font-medium">{p.name}</div>
+              {/* Pixels were created from a bare prompt() with no confirmation and no way
+                  back out, so every typo stayed in this list permanently. */}
+              <DeleteButton
+                what={`the pixel "${p.name}"`}
+                consequence="Any site still running this snippet stops being tracked. Visits already recorded are kept."
+                label="Remove"
+                className="text-xs"
+                onDelete={async () => { await apiFetch("DELETE", `/v1/visitors/pixels/${p.id}`); toast("Pixel removed"); load(); }}
+                onError={(m) => toast(m, "err")}
+              />
+            </div>
+            <pre className="overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{p.snippet}</pre>
+            <button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied"))}>Copy</button>
+          </div>
+        ))}
         {pixels.length === 0 && <button className="btn-primary" onClick={createPixel}>Create your first pixel</button>}
       </Modal>
       <Modal open={!!detail} onClose={() => setDetail(null)} title={detail?.company?.name ?? detail?.domain ?? ""} wide>

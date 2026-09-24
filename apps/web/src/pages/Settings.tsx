@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { API_URL, apiFetch, fmtDate } from "../lib/api";
-import { LoadError, Page, Spinner, useToast } from "../components/ui";
+import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/ui";
 
 export function SettingsPage() {
   const tabs = [["", "Workspace"], ["team", "Team"], ["api-keys", "API keys"], ["webhooks", "Webhooks"], ["integrations", "Integrations"], ["billing", "Plan & usage"]];
@@ -129,8 +129,11 @@ function Integrations() {
       </div>
       <div className="card p-5">
         <div className="mb-3 font-medium">Connected</div>
-        <ul className="divide-y divide-slate-100 text-sm">{list.map((i) => <li key={i.provider} className="flex items-center justify-between py-2"><div><div className="font-medium">{PROVIDER_FIELDS[i.provider]?.label ?? i.provider}</div><div className="text-xs text-ink-400">last sync {fmtDate(i.lastSyncAt)}</div></div><button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/integrations/${i.provider}`).then(load)}>Disconnect</button></li>)}{list.length === 0 && <li className="py-2 text-ink-400">Nothing connected yet.</li>}</ul>
-        <p className="mt-3 text-xs text-ink-400">Push leads from the Leads page (select → sync) or via <code>POST /v1/integrations/{"{provider}"}/sync</code>.</p>
+        <ul className="divide-y divide-slate-100 text-sm">{list.map((i) => <li key={i.provider} className="flex items-center justify-between py-2"><div><div className="font-medium">{PROVIDER_FIELDS[i.provider]?.label ?? i.provider}</div><div className="text-xs text-ink-400">{i.lastSyncAt ? `last sync ${fmtDate(i.lastSyncAt)}` : "nothing pushed yet"}</div></div><button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/integrations/${i.provider}`).then(load)}>Disconnect</button></li>)}{list.length === 0 && <li className="py-2 text-ink-400">Nothing connected yet.</li>}</ul>
+        <p className="mt-3 text-xs text-ink-400">
+          Push leads from the Leads page: select them, then choose <strong>Push to CRM</strong> in the bar that appears. Or call{" "}
+          <code>POST /v1/integrations/{"{provider}"}/sync</code> directly.
+        </p>
       </div>
     </div>
   );
@@ -179,7 +182,27 @@ function Team() {
       {Toast}
       <div className="card p-5">
         <div className="mb-3 flex items-center justify-between"><div className="font-medium">Members <span className="text-sm text-ink-400">{d.seats.used} / {d.seats.limit} seats</span></div></div>
-        <ul className="divide-y divide-slate-100 text-sm">{d.members.map((m) => <li key={m.id} className="flex items-center justify-between py-2"><div>{m.name || m.email} <span className="text-ink-400">{m.email}</span> <span className="badge ml-2 bg-black/[0.05] text-ink-300">{m.role}</span></div><span className="text-xs text-ink-500">last login {fmtDate(m.lastLoginAt)}</span></li>)}</ul>
+        <ul className="divide-y divide-slate-100 text-sm">{d.members.map((m) => (
+          <li key={m.id} className="flex items-center justify-between gap-3 py-2">
+            <div>{m.name || m.email} <span className="text-ink-400">{m.email}</span> <span className="badge ml-2 bg-black/[0.05] text-ink-300">{m.role}</span></div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-ink-500">last login {fmtDate(m.lastLoginAt)}</span>
+              {/* Seats could be consumed but never freed, so a departed colleague kept
+                  access to the workspace and kept occupying a seat on the plan. The owner
+                  cannot be removed and cannot remove themselves - the server enforces both. */}
+              {m.role !== "owner" && (
+                <DeleteButton
+                  what={`${m.name || m.email} from this workspace`}
+                  consequence="They lose access immediately and the seat is freed. Leads, campaigns and anything else they created stay."
+                  label="Remove"
+                  className="text-xs"
+                  onDelete={async () => { await apiFetch("DELETE", `/v1/tools/team/${m.id}`); toast("Removed"); await load(); }}
+                  onError={(msg) => toast(msg, "err")}
+                />
+              )}
+            </div>
+          </li>
+        ))}</ul>
         <div className="mt-4 flex flex-wrap gap-2"><input className="input flex-1" placeholder="colleague@company.com" value={email} onChange={(e) => setEmail(e.target.value)} /><select className="input w-32" value={role} onChange={(e) => setRole(e.target.value)}><option value="member">member</option><option value="admin">admin</option></select><button className="btn-primary" disabled={!email} onClick={() => apiFetch<{ link: string }>("POST", "/v1/tools/team/invite", { email, role }).then((r) => { setLink(r.link); setEmail(""); load(); toast("Invite sent"); }).catch((e) => toast(e.message, "err"))}>Invite</button></div>
         {link && <div className="mt-2 text-xs text-ink-400">Invite link (also emailed if a mail provider is configured): <code className="break-all">{link}</code></div>}
         {d.invites.length > 0 && <div className="mt-3 text-xs text-ink-400">Pending: {d.invites.map((i) => i.email).join(", ")}</div>}

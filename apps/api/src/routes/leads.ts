@@ -41,6 +41,9 @@ const listQuery = z.object({
   seniority: z.string().optional(),
   department: z.string().optional(),
   hasEmail: z.enum(["true", "false"]).optional(),
+  // The pipeline stage. The column and the transition endpoint both existed; there was no
+  // way to filter by it, so "show me everyone I have contacted" was unaskable.
+  status: z.string().optional(),
   sort: z.enum(["score", "created", "updated", "name"]).default("created"),
   order: z.enum(["asc", "desc"]).default("desc"),
   limit: z.coerce.number().min(1).max(500).default(50),
@@ -58,6 +61,7 @@ async function buildWhere(oid: string, q: z.infer<typeof listQuery>) {
   if (q.department) conds.push(inArray(leads.department, q.department.split(",")));
   if (q.hasEmail === "true") conds.push(sql`${leads.email} IS NOT NULL`);
   if (q.hasEmail === "false") conds.push(sql`${leads.email} IS NULL`);
+  if (q.status) conds.push(inArray(leads.status, q.status.split(",")));
   if (q.listId) conds.push(sql`${leads.id} IN (SELECT lead_id FROM list_leads WHERE list_id = ${q.listId})`);
   if (q.companyDomain) conds.push(sql`${leads.companyId} IN (SELECT id FROM companies WHERE org_id = ${oid} AND domain = ${q.companyDomain})`);
   return and(...conds);

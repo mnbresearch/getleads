@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
-import { EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
+import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 
 interface Step { delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
 interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; steps?: Step[]; createdAt: string }
@@ -218,6 +218,7 @@ function AccountsModal({ open, onClose, accounts, sysAvail, onChanged, toast }: 
 
 export function CampaignDetail() {
   const { id } = useParams();
+  const navigate = useNavigate();
   const [c, setC] = useState<Campaign | null>(null);
   const [stats, setStats] = useState<{ messages: Record<string, number>; contacts: Record<string, number>; rates: Record<string, number>; variants?: { stepId: string | null; variant: number; sent: number; opened: number; replied: number }[] } | null>(null);
   const [contacts, setContacts] = useState<{ id: string; status: string; currentStep: number; nextSendAt: string | null; lead: { id: string; fullName: string | null; email: string | null; emailStatus: string; title: string | null; company: { name: string | null } | null } }[]>([]);
@@ -263,6 +264,16 @@ export function CampaignDetail() {
       <button className="btn-secondary" onClick={() => setEditOpen(true)}>Edit</button>
       <button className="btn-secondary" onClick={() => setEnrollOpen(true)}>Enroll leads</button>
       {c.status === "active" ? <button className="btn-secondary" onClick={() => act("pause")}>Pause</button> : <button className="btn-primary" onClick={() => act("start")}>Start</button>}
+      <DeleteButton
+        what={`the campaign "${c.name}"`}
+        consequence={`${c.contacts} enrolled contacts and this campaign's send history go with it. Campaigns count towards your plan limit, so a test campaign you cannot delete permanently occupies a slot.`}
+        onDelete={async () => {
+          await apiFetch("DELETE", `/v1/campaigns/${c.id}`);
+          navigate("/campaigns");
+        }}
+        onError={(msg) => toast(msg, "err")}
+        className="btn-secondary"
+      />
     </>}>
       {Toast}
       <div className="mb-4 flex items-center gap-2"><StatusBadge s={c.status} /><span className="text-sm text-ink-400">Sends only inside the send window and daily limit. Sequences stop automatically on reply or unsubscribe.</span></div>
@@ -415,7 +426,7 @@ function EnrollModal({ open, onClose, campaign, lists, onDone, toast }: { open: 
       <div className="space-y-3 text-sm">
         <label className="flex items-center gap-2"><input type="radio" checked={mode === "list"} onChange={() => setMode("list")} /> Everyone in the campaign's list {list ? `(${list.name}, ${list.count})` : "(no list attached - edit campaign)"}</label>
         <label className="flex items-center gap-2"><input type="radio" checked={mode === "score"} onChange={() => setMode("score")} /> All leads with ICP score ≥ <input type="number" className="input w-20" value={minScore} onChange={(e) => setMinScore(Number(e.target.value))} /></label>
-        <p className="text-xs text-ink-400">Only leads with a non-invalid email are enrolled. Suppressed/unsubscribed addresses are always skipped.</p>
+        <p className="text-xs text-ink-400">Only leads with a non-invalid email are enrolled. Suppressed/unsubscribed addresses are always skipped - see the do-not-contact list on the Leads page.</p>
         <button className="btn-primary w-full justify-center" disabled={busy || (mode === "list" && !list)} onClick={go}>{busy ? "Enrolling…" : "Enroll"}</button>
       </div>
     </Modal>

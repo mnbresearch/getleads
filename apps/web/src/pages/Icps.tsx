@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "../lib/api";
-import { Empty, Modal, Page, TagInput, useToast } from "../components/ui";
+import { DeleteButton, Empty, LoadError, Modal, Page, TagInput, useToast } from "../components/ui";
 
 interface Icp { id: string; name: string; description: string | null; criteria: Record<string, string[] | undefined>; seedDomains: string[]; aiProfile: { summary?: string; searchQueries?: string[] } | null; chatHistory: { role: "user" | "assistant"; content: string }[]; leadCount: number; createdAt: string }
 
@@ -21,17 +21,32 @@ export function IcpPage() {
   const [chatIcp, setChatIcp] = useState<Icp | null>(null);
   const [busy, setBusy] = useState(false);
   const { toast, Toast } = useToast();
-  const load = () => apiFetch<{ icps: Icp[] }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const load = () => apiFetch<{ icps: Icp[] }>("GET", "/v1/icps").then((r) => { setIcps(r.icps); setLoadErr(null); }).catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
+
+  const remove = async (i: Icp) => {
+    await apiFetch("DELETE", `/v1/icps/${i.id}`);
+    toast(`Deleted "${i.name}"`);
+    load();
+  };
 
   const save = async () => {
     if (!edit) return;
     setBusy(true);
     try {
       const body = { name: edit.name, description: edit.description, criteria: edit.criteria ?? {}, seedDomains: edit.seedDomains ?? [], buildWithAi: true };
-      if (edit.id) await apiFetch("PATCH", `/v1/icps/${edit.id}`, body);
-      else await apiFetch("POST", "/v1/icps", body);
-      toast(edit.id ? "Saved" : "ICP created - AI is building the lookalike profile");
+      if (edit.id) {
+        await apiFetch("PATCH", `/v1/icps/${edit.id}`, body);
+        // PATCH accepts buildWithAi and then ignores it - only POST enqueues the build job.
+        // So editing a description never rebuilt the profile, and the card went on saying
+        // "AI profile building..." forever, blaming a missing server key for a route that
+        // was never called. Ask for the rebuild explicitly.
+        if (edit.description || edit.seedDomains?.length) {
+          await apiFetch("POST", `/v1/icps/${edit.id}/build`, {}).catch(() => {});
+        }
+      } else await apiFetch("POST", "/v1/icps", body);
+      toast(edit.id ? "Saved - rebuilding the lookalike profile" : "ICP created - AI is building the lookalike profile");
       setEdit(null);
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
@@ -48,13 +63,13 @@ export function IcpPage() {
     <Page title="Ideal customer profiles" subtitle="Describe your best customers (or give example domains) and Scout builds lookalike criteria to score every lead." actions={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>New ICP</button>}>
       {Toast}
       <IcpLearningPanel />
-      {icps.length === 0 ? <Empty title="No ICPs yet" hint="Create one from a description like 'B2B SaaS founders in India with 20-200 employees' or from 3-5 of your best customers' websites." action={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>Create ICP</button>} /> : (
+      {loadErr ? <LoadError message={loadErr} onRetry={load} /> : icps.length === 0 ? <Empty title="No ICPs yet" hint="Create one from a description like 'B2B SaaS founders in India with 20-200 employees' or from 3-5 of your best customers' websites." action={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>Create ICP</button>} /> : (
         <div className="grid gap-4 md:grid-cols-2">
           {icps.map((i) => (
             <div key={i.id} className="card p-5">
               <div className="flex items-start justify-between gap-2">
                 <div><div className="font-semibold">{i.name}</div><div className="text-xs text-ink-400">{i.leadCount} leads assigned</div></div>
-                <div className="flex gap-2"><button className="btn-secondary" onClick={() => score(i)}>Score leads</button><button className="btn-secondary" onClick={() => setChatIcp(i)}>Chat</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button></div>
+                <div className="flex gap-2"><button className="btn-secondary" onClick={() => score(i)}>Score leads</button><button className="btn-secondary" onClick={() => setChatIcp(i)}>Chat</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button><DeleteButton what={`the ICP "${i.name}"`} consequence={i.leadCount > 0 ? `${i.leadCount} leads are scored against it and will lose that score. It is also selectable in Search, Campaigns and Autopilot.` : "It is selectable in Search, Campaigns and Autopilot."} onDelete={() => remove(i)} onError={(m) => toast(m, "err")} className="btn-secondary" /></div>
               </div>
               {i.aiProfile?.summary ? <p className="mt-3 text-sm text-ink-300">{i.aiProfile.summary}</p> : i.description ? <p className="mt-3 text-sm text-ink-300">{i.description}</p> : null}
               <div className="mt-3 space-y-1 text-xs">

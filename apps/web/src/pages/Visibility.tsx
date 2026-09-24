@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../lib/api";
-import { Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
+import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 
 interface Rate { value: number; ci: { lower: number; upper: number }; n: number; positives: number }
 interface Prompt { id: string; text: string; topic: string | null; samplesPerRun: number; active: boolean; lastRunAt: string | null }
@@ -30,6 +30,21 @@ export function VisibilityPage() {
   const { toast, Toast } = useToast();
 
   const [loadErr, setLoadErr] = useState<string | null>(null);
+
+  const [answersFor, setAnswersFor] = useState<Prompt | null>(null);
+
+  const patch = async (p: Prompt, body: Record<string, unknown>) => {
+    try {
+      await apiFetch("PATCH", `/v1/visibility/prompts/${p.id}`, body);
+      load();
+    } catch (e) { toast((e as Error).message, "err"); }
+  };
+
+  const remove = async (p: Prompt) => {
+    await apiFetch("DELETE", `/v1/visibility/prompts/${p.id}`);
+    toast("Stopped tracking that question");
+    load();
+  };
 
   const load = useCallback(() => {
     setLoadErr(null);
@@ -196,10 +211,38 @@ export function VisibilityPage() {
             {prompts.map((p) => (
               <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
                 <div className="min-w-0">
-                  <div className="truncate font-medium">{p.text}</div>
+                  <div className="truncate font-medium">
+                    {p.text}
+                    {p.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}
+                  </div>
                   <div className="text-xs text-ink-400">{p.samplesPerRun} samples/day{p.topic ? ` · ${p.topic}` : ""}{p.lastRunAt ? ` · last ${new Date(p.lastRunAt).toLocaleDateString()}` : " · never run"}</div>
                 </div>
-                <button className="btn-secondary" disabled={busy === p.id} onClick={() => run(p)}>{busy === p.id ? "Sampling…" : "Sample now"}</button>
+                <div className="flex items-center gap-2">
+                  {/* "Suggest more" installs up to ten of these in one click, so every one of
+                      them needs a way back out. Pausing keeps the history a resumed question
+                      is measured against; deleting does not. */}
+                  <select
+                    className="input w-auto py-1 text-xs"
+                    value={p.samplesPerRun}
+                    aria-label={`Samples per day for "${p.text}"`}
+                    onChange={(e) => patch(p, { samplesPerRun: Number(e.target.value) })}
+                  >
+                    {[1, 2, 3, 5, 10].map((n) => <option key={n} value={n}>{n}/day</option>)}
+                  </select>
+                  <button className="btn-secondary py-1 text-xs" onClick={() => patch(p, { active: p.active === false })}>
+                    {p.active === false ? "Resume" : "Pause"}
+                  </button>
+                  <button className="btn-secondary py-1 text-xs" onClick={() => setAnswersFor(p)}>Answers</button>
+                  <button className="btn-secondary" disabled={busy === p.id} onClick={() => run(p)}>{busy === p.id ? "Sampling…" : "Sample now"}</button>
+                  <DeleteButton
+                    what={`the tracked question "${p.text.slice(0, 60)}${p.text.length > 60 ? "…" : ""}"`}
+                    consequence="Answers already recorded for it stay in your history, but it stops being sampled. Pause it instead if you only want to stop for now."
+                    onDelete={() => remove(p)}
+                    onError={(m) => toast(m, "err")}
+                    label="Remove"
+                    className="text-xs"
+                  />
+                </div>
               </li>
             ))}
           </ul>
@@ -209,6 +252,7 @@ export function VisibilityPage() {
       <ConfigModal open={cfgOpen} onClose={() => setCfgOpen(false)} onSaved={() => { setCfgOpen(false); load(); }} toast={toast} />
       <AddPromptModal open={addOpen} onClose={() => setAddOpen(false)} onSaved={() => { setAddOpen(false); load(); }} toast={toast} />
       <SuggestModal open={suggestOpen} onClose={() => setSuggestOpen(false)} onSaved={() => { setSuggestOpen(false); load(); }} toast={toast} />
+      <AnswersModal prompt={answersFor} onClose={() => setAnswersFor(null)} />
     </Page>
   );
 }
@@ -368,6 +412,99 @@ function SuggestModal({ open, onClose, onSaved, toast }: { open: boolean; onClos
           {busy ? "Saving…" : `Track ${chosen.length} question${chosen.length === 1 ? "" : "s"}`}
         </button>
       </div>
+    </Modal>
+  );
+}
+
+interface Run {
+  id: string;
+  engine: string;
+  model: string | null;
+  answer: string;
+  mentioned: boolean;
+  cited: boolean;
+  position: number | null;
+  brands: string[];
+  usable: boolean;
+  error: string | null;
+  createdAt: string;
+}
+
+/**
+ * The raw answers behind the numbers.
+ *
+ * Every answer has always been stored, and the landing page says so - "keeps every raw
+ * answer verbatim, so any number traces back to the text it came from" - but there was no
+ * screen anywhere in the product that would show you one. A traceability claim you cannot
+ * act on is not traceability, it is a sentence. This is the screen.
+ *
+ * Refusals and errors are shown too, marked as excluded, because the honest version of
+ * "you were mentioned in 40% of answers" includes which answers were left out of the
+ * denominator and why.
+ */
+function AnswersModal({ prompt, onClose }: { prompt: Prompt | null; onClose: () => void }) {
+  const [runs, setRuns] = useState<Run[]>([]);
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!prompt) return;
+    setState("loading");
+    setErr(null);
+    apiFetch<{ runs: Run[] }>("GET", `/v1/visibility/runs?promptId=${prompt.id}&limit=50`)
+      .then((r) => { setRuns(r.runs); setState("idle"); })
+      .catch((e) => { setErr((e as Error).message); setState("error"); });
+  }, [prompt]);
+
+  const usable = runs.filter((r) => r.usable);
+  const excluded = runs.length - usable.length;
+
+  return (
+    <Modal open={!!prompt} onClose={onClose} title="What the engines actually said" wide>
+      {prompt && (
+        <div className="space-y-3">
+          <div className="text-sm text-ink-300">{prompt.text}</div>
+          {state === "loading" && <Spinner label="Loading answers…" />}
+          {state === "error" && <LoadError message={err ?? undefined} />}
+          {state === "idle" && runs.length === 0 && (
+            <Empty title="No answers recorded yet" hint="Use “Sample now” on this question, or wait for the next scheduled run." />
+          )}
+          {state === "idle" && runs.length > 0 && (
+            <>
+              <div className="text-xs text-ink-400">
+                {usable.length} answer{usable.length === 1 ? "" : "s"} counted towards this question&apos;s numbers
+                {excluded > 0 && `, ${excluded} excluded as refusals or errors rather than counted as absence`}.
+              </div>
+              <div className="max-h-[60vh] space-y-3 overflow-auto pr-1">
+                {runs.map((r) => (
+                  <div key={r.id} className={`rounded-lg border p-3 ${r.usable ? "border-black/10" : "border-amber-300 bg-amber-50"}`}>
+                    <div className="mb-1 flex flex-wrap items-center gap-2 text-xs text-ink-400">
+                      <span className="badge bg-black/[0.05] text-ink-200">{r.engine}{r.model ? ` · ${r.model}` : ""}</span>
+                      <span>{new Date(r.createdAt).toLocaleString()}</span>
+                      {r.usable ? (
+                        <>
+                          {r.mentioned && <span className="badge bg-emerald-50 text-emerald-700">named{r.position ? ` · #${r.position}` : ""}</span>}
+                          {r.cited && <span className="badge bg-brand-50 text-brand-700">linked</span>}
+                          {!r.mentioned && !r.cited && <span className="badge bg-black/[0.05] text-ink-300">absent</span>}
+                        </>
+                      ) : (
+                        <span className="badge bg-amber-100 text-amber-800">excluded — {r.error ? r.error.slice(0, 80) : "refusal or empty answer"}</span>
+                      )}
+                    </div>
+                    {r.brands.length > 0 && (
+                      <div className="mb-2 flex flex-wrap items-baseline gap-1 text-xs">
+                        <span className="text-ink-400">Order named:</span>
+                        {r.brands.map((b, i) => <span key={`${b}-${i}`} className="badge bg-black/[0.05] text-ink-200">{i + 1}. {b}</span>)}
+                      </div>
+                    )}
+                    <pre className="whitespace-pre-wrap break-words text-xs text-ink-300">{r.answer || "(empty answer)"}</pre>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </div>
+      )}
     </Modal>
   );
 }

@@ -20,11 +20,39 @@ export function SearchPage() {
   const [parsing, setParsing] = useState(false);
   const { toast, Toast } = useToast();
 
-  const load = () => apiFetch<{ searches: Search[] }>("GET", "/v1/search").then((r) => setSearches(r.searches));
+  /**
+   * Per-job progress for the searches still running.
+   *
+   * The page told people a search takes 20-90 seconds and then showed them a spinner
+   * labelled "running" for all of it. The job row has carried a `progress` percentage and a
+   * stage label the whole time, and GET /v1/search/jobs/:jobId returns them - nothing
+   * fetched either. A minute of no information reads as a minute of nothing happening.
+   */
+  const [progress, setProgress] = useState<Record<string, number>>({});
+
+  const load = async () => {
+    const r = await apiFetch<{ searches: Search[] }>("GET", "/v1/search");
+    setSearches(r.searches);
+
+    const running = r.searches.filter((s) => (s.status === "running" || s.status === "queued") && s.jobId);
+    if (running.length === 0) { setProgress({}); return; }
+    const pairs = await Promise.all(
+      running.map(async (s) => {
+        try {
+          const j = await apiFetch<{ progress: number | null }>("GET", `/v1/search/jobs/${s.jobId}`);
+          return [s.id, j.progress ?? 0] as const;
+        } catch {
+          return [s.id, -1] as const; // -1: we could not check, which is not 0%
+        }
+      }),
+    );
+    setProgress(Object.fromEntries(pairs));
+  };
+
   useEffect(() => {
     load();
     apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
-    const t = setInterval(load, 4000);
+    const t = setInterval(() => { void load(); }, 4000);
     return () => clearInterval(t);
   }, []);
 
@@ -104,7 +132,16 @@ export function SearchPage() {
               <tr key={s.id}>
                 <td className="td whitespace-nowrap text-ink-400">{fmtDate(s.createdAt)}</td>
                 <td className="td">{String(s.query.query ?? (s.query.titles as string[] | undefined)?.join(", ") ?? (s.query.companyDomains as string[] | undefined)?.join(", ") ?? "")}</td>
-                <td className="td">{s.status === "running" || s.status === "queued" ? <Spinner label={s.status} /> : <span className={`badge ${s.status === "done" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{s.status}</span>}{s.error && (s.status === "done"
+                <td className="td">{s.status === "running" || s.status === "queued" ? (
+                  <div className="space-y-1">
+                    <Spinner label={progress[s.id] > 0 ? `${s.status} · ${progress[s.id]}%` : s.status} />
+                    {progress[s.id] > 0 && (
+                      <div className="h-1.5 w-28 rounded-full bg-black/[0.05]">
+                        <div className="h-1.5 rounded-full bg-brand-600 transition-all" style={{ width: `${Math.min(100, progress[s.id])}%` }} />
+                      </div>
+                    )}
+                  </div>
+                ) : <span className={`badge ${s.status === "done" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{s.status}</span>}{s.error && (s.status === "done"
                   ? <div className="mt-1 text-xs text-amber-700">{s.error} <Link className="underline" to="/settings/billing">See plans</Link></div>
                   : <div className="text-xs text-red-600">{s.error}</div>)}</td>
                 <td className="td tabular-nums">{s.resultCount}</td>

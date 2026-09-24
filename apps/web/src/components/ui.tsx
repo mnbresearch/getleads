@@ -108,6 +108,53 @@ export function LoadError({ message, onRetry }: { message?: string; onRetry?: ()
   );
 }
 
+/**
+ * A destructive action, behind a confirmation that names what is about to go.
+ *
+ * Kept in one place because every delete in this app needs the same three things and it is
+ * easy to ship one that has only two: the name of the thing, a note of what else it takes
+ * with it, and an error the user actually sees when the request fails. A silent failure on
+ * a delete is worse than a loud one - the row is still on screen, so it reads as done.
+ */
+export function DeleteButton({
+  what,
+  consequence,
+  onDelete,
+  onError,
+  label = "Delete",
+  className = "",
+}: {
+  what: string;
+  consequence?: string;
+  onDelete: () => Promise<unknown>;
+  onError?: (message: string) => void;
+  label?: string;
+  className?: string;
+}) {
+  const [busy, setBusy] = useState(false);
+  return (
+    <button
+      type="button"
+      className={`text-red-600 disabled:opacity-50 ${className}`}
+      disabled={busy}
+      onClick={async () => {
+        const lines = [`Delete ${what}?`, consequence, "This cannot be undone."].filter(Boolean);
+        if (!confirm(lines.join("\n\n"))) return;
+        setBusy(true);
+        try {
+          await onDelete();
+        } catch (e) {
+          onError?.((e as Error).message);
+        } finally {
+          setBusy(false);
+        }
+      }}
+    >
+      {busy ? "…" : label}
+    </button>
+  );
+}
+
 export function Spinner({ label }: { label?: string }) {
   return (
     <div className="flex items-center gap-2 text-sm text-ink-400">

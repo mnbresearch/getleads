@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Empty, LoadError, Page, Spinner, useToast } from "../components/ui";
+import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 
 interface Task { id: string; type: string; title: string; body: string | null; dueAt: string; status: string; campaignId: string | null; lead: { id: string; fullName: string | null; title: string | null; email: string | null; linkedinUrl: string | null; phone: string | null; whatsapp: string | null; company: { name: string | null; domain: string } | null } | null }
 
@@ -12,6 +12,7 @@ export function TasksPage() {
   const [loading, setLoading] = useState(true);
   const { toast, Toast } = useToast();
   const [listErr, setListErr] = useState<string | null>(null);
+  const [addOpen, setAddOpen] = useState(false);
   const load = useCallback(() => {
     // .finally without .catch turned a server error into "No tasks", which reads as an
     // empty queue rather than as a page that failed to load.
@@ -25,9 +26,9 @@ export function TasksPage() {
     try { await apiFetch("POST", `/v1/tools/tasks/${t.id}/complete`, { outcome }); toast(outcome === "done" ? "Done - sequence continues" : "Skipped"); load(); } catch (e) { toast((e as Error).message, "err"); }
   };
   return (
-    <Page title="Tasks" subtitle="Human steps from your multichannel sequences: LinkedIn connects and messages, calls, WhatsApp. Complete a task and the sequence moves to the next step." actions={<select className="input w-36" value={status} onChange={(e) => setStatus(e.target.value)}><option value="pending">Pending</option><option value="done">Done</option><option value="skipped">Skipped</option><option value="all">All</option></select>}>
+    <Page title="Tasks" subtitle="Human steps from your multichannel sequences: LinkedIn connects and messages, calls, WhatsApp. Complete a task and the sequence moves to the next step." actions={<><select className="input w-36" value={status} onChange={(e) => setStatus(e.target.value)}><option value="pending">Pending</option><option value="done">Done</option><option value="skipped">Skipped</option><option value="all">All</option></select><button className="btn-primary" onClick={() => setAddOpen(true)}>Add task</button></>}>
       {Toast}
-      {loading ? <Spinner /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No tasks" hint="Add a LinkedIn, call or WhatsApp step to a campaign and tasks will appear here as contacts reach that step." /> : (
+      {loading ? <Spinner /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No tasks" hint="Tasks appear here as contacts reach a LinkedIn, call or WhatsApp step in a campaign - and you can add a one-off reminder yourself." action={<button className="btn-primary" onClick={() => setAddOpen(true)}>Add task</button>} /> : (
         <div className="space-y-3">
           {rows.map((t) => (
             <div key={t.id} className="card p-4">
@@ -45,6 +46,77 @@ export function TasksPage() {
           ))}
         </div>
       )}
+      <AddTaskModal open={addOpen} onClose={() => setAddOpen(false)} onDone={() => { setAddOpen(false); setStatus("pending"); load(); }} toast={toast} />
     </Page>
+  );
+}
+
+/**
+ * A one-off follow-up.
+ *
+ * The endpoint for this has always existed; the page was read-and-complete only, so the
+ * empty state told people tasks only ever arrive from a campaign step. "Call her back on
+ * Thursday" had nowhere to live, which is the first thing anyone wants from a task list.
+ */
+function AddTaskModal({ open, onClose, onDone, toast }: { open: boolean; onClose: () => void; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [type, setType] = useState("task");
+  const [dueAt, setDueAt] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => { if (open) { setTitle(""); setBody(""); setType("task"); setDueAt(""); } }, [open]);
+
+  const save = async () => {
+    if (!title.trim() || busy) return;
+    setBusy(true);
+    try {
+      await apiFetch("POST", "/v1/tools/tasks", {
+        title: title.trim(),
+        type,
+        body: body.trim() || undefined,
+        // datetime-local has no timezone, so it is read as local time and sent as an
+        // instant - which is what the server's .datetime() validator expects.
+        dueAt: dueAt ? new Date(dueAt).toISOString() : undefined,
+      });
+      toast("Task added");
+      onDone();
+    } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
+  };
+
+  return (
+    <Modal open={open} onClose={onClose} title="Add a task">
+      <div className="space-y-3">
+        <div>
+          <label className="label" htmlFor="task-title">What needs doing</label>
+          <input id="task-title" className="input" value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Call Priya back about the pilot" />
+        </div>
+        <div className="grid gap-3 sm:grid-cols-2">
+          <div>
+            <label className="label" htmlFor="task-type">Type</label>
+            <select id="task-type" className="input" value={type} onChange={(e) => setType(e.target.value)}>
+              <option value="task">Task</option>
+              <option value="call">Call</option>
+              <option value="linkedin_message">LinkedIn message</option>
+              <option value="linkedin_connect">LinkedIn connect</option>
+              <option value="whatsapp">WhatsApp</option>
+            </select>
+          </div>
+          <div>
+            <label className="label" htmlFor="task-due">Due</label>
+            <input id="task-due" className="input" type="datetime-local" value={dueAt} onChange={(e) => setDueAt(e.target.value)} />
+            <div className="mt-1 text-xs text-ink-400">Leave blank for now.</div>
+          </div>
+        </div>
+        <div>
+          <label className="label" htmlFor="task-body">Notes (optional)</label>
+          <textarea id="task-body" className="input h-24" value={body} onChange={(e) => setBody(e.target.value)} placeholder="Anything you want in front of you when you pick this up." />
+        </div>
+        <div className="flex justify-end gap-2">
+          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-primary" disabled={busy || !title.trim()} onClick={save}>{busy ? "…" : "Add task"}</button>
+        </div>
+      </div>
+    </Modal>
   );
 }
