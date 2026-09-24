@@ -176,6 +176,26 @@ export function classifyThrown(e: unknown): { outcome: ProviderOutcome; detail: 
  * Record an HTTP response and return whether it was a success, so a call site can stay a
  * one-liner: `if (!ok(res, "apollo")) return null;`
  */
+/**
+ * A provider could not answer, as distinct from answering with nothing.
+ *
+ * Search providers returned `[]` for both, which defeated webSearch's own guard against
+ * caching an outage: that guard counts providers which THREW, and the providers do not
+ * throw on an HTTP failure. So a 429 or a 5xx from every configured provider produced a
+ * clean empty result set, was cached, and was served to the user as "nobody matched that
+ * query" - the exact failure-as-absence bug the guard was written to prevent, walking
+ * straight past it.
+ *
+ * The outcome has already been reported to health by the time this is thrown, so webSearch
+ * does not report it a second time.
+ */
+export class ProviderUnavailableError extends Error {
+  constructor(public provider: string, public outcome: ProviderOutcome, message: string) {
+    super(message);
+    this.name = "ProviderUnavailableError";
+  }
+}
+
 export async function recordHttp(provider: string, res: Response): Promise<boolean> {
   if (res.ok) {
     reportProviderCall({ provider, outcome: "ok", status: res.status });

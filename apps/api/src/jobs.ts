@@ -1,5 +1,5 @@
 import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, visibilityPrompts, webhooks, sql as dsql, type JobHandler } from "@prospex/db";
-import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, runLeadPipeline, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
+import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
 import { pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
@@ -81,7 +81,7 @@ export const handlers: Record<string, JobHandler> = {
     const icp = icpId ? await db.query.icps.findFirst({ where: eq(icps.id, icpId) }) : null;
     try {
       const providerBudget = await remainingPremiumBudget(db, orgId);
-      const results = await runLeadPipeline(query, {
+      const { leads: results, providerFailures } = await runLeadPipelineDetailed(query, {
         ai: createAiProvider(),
         verify: verifyOpts(),
         icp: (icp?.criteria as IcpCriteria | undefined) ?? undefined,
@@ -116,19 +116,29 @@ export const handlers: Record<string, JobHandler> = {
       // found more; the plan would not let them have them. Saying so is the difference
       // between an upgrade prompt and a silent quality complaint.
       const truncated = quotaStopped !== null && results.length > ids.length;
+
+      // A search that found nothing because a configured provider refused us is not a
+      // search that found nothing. Reporting `resultCount: 0, error: null` asserts "no
+      // leads match your ICP", which is a claim about the customer's market made out of a
+      // billing or credential problem on our side.
+      const blockedByProviders = ids.length === 0 && providerFailures.length > 0;
+      const providerNote = blockedByProviders
+        ? `No leads were returned, and ${providerFailures.length === 1 ? "the data provider we tried could not answer" : `${providerFailures.length} data providers could not answer`}: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nobody matching your criteria.`
+        : null;
+
       await db
         .update(searches)
         .set({
           status: "done",
           resultCount: ids.length,
-          error: truncated ? `Stopped at your plan's limit: ${results.length - ids.length} more matching leads were found but not saved. ${quotaStopped}` : null,
+          error: truncated ? `Stopped at your plan's limit: ${results.length - ids.length} more matching leads were found but not saved. ${quotaStopped}` : providerNote,
           completedAt: new Date(),
         })
         .where(eq(searches.id, searchId));
       await emitEvent(
         orgId,
         "search.completed",
-        { searchId, results: ids.length, created, found: results.length, quotaTruncated: truncated },
+        { searchId, results: ids.length, created, found: results.length, quotaTruncated: truncated, providerFailures },
         { type: "search", id: searchId },
       );
       return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated };

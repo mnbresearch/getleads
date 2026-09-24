@@ -12,7 +12,7 @@ import { verifyEmail, type VerifyOptions } from "./email/verify.js";
 import { scoreLeadRules, type IcpCriteria } from "./icp/score.js";
 import { inferDepartment, inferSeniority } from "./util/names.js";
 import { pMap } from "./util/http.js";
-import { searchProviders, peopleProviders, type ProviderPerson } from "./providers/people.js";
+import { searchProvidersDetailed, peopleProviders, type ProviderPerson } from "./providers/people.js";
 
 export interface PipelineLead extends PersonCandidate {
   seniority?: string;
@@ -67,7 +67,20 @@ export async function parseQuery(ai: AiProvider | undefined, q: LeadSearchQuery)
   return { ...q, titles: q.titles ?? (m?.[1] ? [m[1].trim()] : []), industries: q.industries ?? (m?.[2] ? [m[2].trim()] : []), locations: q.locations ?? (m?.[3] ? [m[3].trim()] : []) };
 }
 
-export async function runLeadPipeline(query: LeadSearchQuery, opts: PipelineOptions = {}): Promise<PipelineLead[]> {
+export interface PipelineOutcome {
+  leads: PipelineLead[];
+  /**
+   * Configured data providers that could not answer, with the reason each gave.
+   *
+   * An empty result set means one of two very different things - nobody matched, or nothing
+   * we asked could reply - and a search that finishes `resultCount: 0, error: null` asserts
+   * the first. When this array is non-empty and no leads came back, it is the second.
+   */
+  providerFailures: { provider: string; message: string }[];
+}
+
+/** The pipeline, with what went wrong alongside what came back. */
+export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: PipelineOptions = {}): Promise<PipelineOutcome> {
   const progress = opts.onProgress ?? (() => {});
   const cache = opts.companyCache ?? new Map<string, CompanyProfile>();
   const limit = query.limit ?? 25;
@@ -80,9 +93,20 @@ export async function runLeadPipeline(query: LeadSearchQuery, opts: PipelineOpti
   // so never call out to them past what maxProviderLeads allows (0 = skip entirely).
   progress(8, "querying data providers");
   const providerBudget = opts.maxProviderLeads ?? Infinity;
-  const providerRows: ProviderPerson[] = providerBudget > 0 && peopleProviders().length
-    ? (await searchProviders({ titles: q.titles, locations: q.locations, industries: q.industries, keywords: q.keywords, companyDomains: q.companyDomains, companySizes: q.companySizes, limit: Math.min(limit, providerBudget) }).catch(() => [])).slice(0, providerBudget)
-    : [];
+  const providerFailures: { provider: string; message: string }[] = [];
+  let providerRows: ProviderPerson[] = [];
+  if (providerBudget > 0 && peopleProviders().length) {
+    // A rejected key must not arrive here looking like an empty database. apolloProvider
+    // classifies and throws precisely so the distinction survives; it is carried out of the
+    // pipeline rather than swallowed into [].
+    const r = await searchProvidersDetailed({ titles: q.titles, locations: q.locations, industries: q.industries, keywords: q.keywords, companyDomains: q.companyDomains, companySizes: q.companySizes, limit: Math.min(limit, providerBudget) }).catch((e) => ({
+      people: [] as ProviderPerson[],
+      failures: [{ provider: "providers", message: (e as Error).message?.slice(0, 200) ?? "threw" }],
+      answered: [] as string[],
+    }));
+    providerRows = r.people.slice(0, providerBudget);
+    providerFailures.push(...r.failures);
+  }
 
   // 1) People discovery
   progress(10, "searching people");
@@ -171,7 +195,12 @@ export async function runLeadPipeline(query: LeadSearchQuery, opts: PipelineOpti
   }
   leads.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   progress(100, "done");
-  return leads;
+  return { leads, providerFailures };
+}
+
+/** Back-compatible shape: the leads alone, for callers that do not need the detail. */
+export async function runLeadPipeline(query: LeadSearchQuery, opts: PipelineOptions = {}): Promise<PipelineLead[]> {
+  return (await runLeadPipelineDetailed(query, opts)).leads;
 }
 
 async function getCompany(domain: string, cache: Map<string, CompanyProfile>) {

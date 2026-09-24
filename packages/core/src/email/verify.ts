@@ -191,13 +191,21 @@ async function smtpProbeRaw(email: string, mxHost: string, opts: { timeoutMs?: n
   });
 }
 
+/**
+ * Does this domain accept mail for any address at all?
+ *
+ * `null` means the probe could not answer - greylisted, blocked, reset - and callers must
+ * treat that as unknown rather than as "no". An inconclusive probe is not cached, because a
+ * twelve-hour memory of one blocked minute would turn every address at a catch-all domain
+ * into a confidently verified one for the rest of the working day.
+ */
 export async function isCatchAll(domain: string, mxHost: string): Promise<boolean | null> {
   const c = catchAllCache.get(domain);
   if (c && Date.now() - c.at < TTL) return c.value;
   const rand = `zq${Math.random().toString(36).slice(2, 10)}x${Date.now().toString(36)}@${domain}`;
   const r = await smtpProbe(rand, mxHost);
   const value = r.result === "accepted" ? true : r.result === "rejected" ? false : null;
-  catchAllCache.set(domain, { at: Date.now(), value });
+  if (value !== null) catchAllCache.set(domain, { at: Date.now(), value });
   return value;
 }
 
@@ -264,10 +272,20 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
   const probe = await smtpProbe(email, mxHost);
   checks.smtp = probe.result;
   if (probe.result === "accepted") {
+    // isCatchAll is deliberately tri-state: true, false, or null when the probe itself was
+    // blocked or errored. `if (ca)` folded that null into false, so a genuine catch-all
+    // domain whose random-address probe hit a greylist came back as a VERIFIED VALID
+    // address at 0.93 - which earns the scoring credit for a checked address, suppresses
+    // re-verification, and clears the send gate. findEmail handles the same tri-state
+    // explicitly, which is what makes this a slip rather than a convention.
     const ca = await isCatchAll(domain, mxHost);
-    if (ca) {
+    if (ca === true) {
       checks.smtp = "catch_all";
       return result("catch_all", 0.6, "domain accepts all addresses", mxHost);
+    }
+    if (ca === null) {
+      checks.smtp = "catch_all";
+      return result("risky", 0.5, "SMTP accepted, but the catch-all check could not complete - this may accept every address", mxHost);
     }
     return result(checks.roleAccount ? "risky" : "valid", checks.roleAccount ? 0.7 : 0.93, "SMTP accepted", mxHost);
   }

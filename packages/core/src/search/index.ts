@@ -1,5 +1,5 @@
 import type { SearchResult } from "../types.js";
-import { providerRecentlyRejected, providerRetired, reportProviderCall, retiredReason } from "../providers/health.js";
+import { ProviderUnavailableError, providerRecentlyRejected, providerRetired, reportProviderCall, retiredReason } from "../providers/health.js";
 import { defaultProviders, type SearchProvider } from "./providers.js";
 
 export interface WebSearchOptions {
@@ -72,7 +72,12 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
       // silently returned nothing looked identical to a query nobody matched - the same
       // failure-as-absence bug this codebase keeps rediscovering. Report it like any other
       // provider call so it reaches the health table and the admin page.
-      reportProviderCall({ provider: p.name, outcome: "network", detail: msg.slice(0, 200) });
+      //
+      // A ProviderUnavailableError has already been reported with its real outcome (429,
+      // 5xx, decoy results); reporting it again here would overwrite that with "network".
+      if (!(err instanceof ProviderUnavailableError)) {
+        reportProviderCall({ provider: p.name, outcome: "network", detail: msg.slice(0, 200) });
+      }
     }
   }
 
@@ -93,8 +98,13 @@ export async function webSearch(query: string, opts: WebSearchOptions = {}): Pro
   const deduped = dedupe(best);
 
   // What gets remembered, and for how long, depends on whether this was an answer or a
-  // failure. `threw` counts providers that raised; a provider returning [] after a 4xx has
-  // already been reported to health by its own recordHttp call, and lands in the empty case.
+  // failure.
+  //
+  // This guard used to be defeated by the thing it guarded against: it counts providers
+  // that THREW, and the providers did not throw on an HTTP failure - they returned []. So a
+  // 429 or a 5xx from every configured provider produced `everyProviderFailed === false`,
+  // and the empty result was cached and re-served as "nobody matched that query". Every
+  // provider failure path now raises ProviderUnavailableError, so a failure is countable.
   const threw = attempts.filter((a) => a.includes("=threw:")).length;
   const everyProviderFailed = attempts.length > 0 && threw === attempts.length;
   const nothingWasEligible = attempts.length === 0;

@@ -209,24 +209,52 @@ export function peopleProviders(): PeopleProvider[] {
   return [apolloProvider(), hunterProvider(), pdlProvider()].filter((p) => p.available());
 }
 
-/** Query all configured providers, merged and deduped by LinkedIn URL / email / name+company. */
-export async function searchProviders(q: PeopleProviderQuery): Promise<ProviderPerson[]> {
+export interface ProviderSearchOutcome {
+  people: ProviderPerson[];
+  /** Providers that were configured and could not answer, with the reason each gave. */
+  failures: { provider: string; message: string }[];
+  /** Providers that answered, whatever they answered with. */
+  answered: string[];
+}
+
+/**
+ * Query all configured providers, merged and deduped, and say what each one did.
+ *
+ * apolloProvider deliberately classifies and then THROWS on a rejected key, with a comment
+ * saying this aggregator is the only place the distinction can still be captured - and this
+ * aggregator swallowed it into `[]`. runLeadPipeline then wrapped the call in
+ * `.catch(() => [])` on top. The net effect for a customer whose Apollo key had expired was
+ * a search that finished `status: "done", resultCount: 0, error: null`: a clean "no leads
+ * match your ICP", produced by a credential problem they were never told about.
+ */
+export async function searchProvidersDetailed(q: PeopleProviderQuery): Promise<ProviderSearchOutcome> {
   const out: ProviderPerson[] = [];
   const seen = new Set<string>();
+  const failures: { provider: string; message: string }[] = [];
+  const answered: string[] = [];
   for (const p of peopleProviders()) {
     try {
-      for (const r of await p.search(q)) {
+      const rows = await p.search(q);
+      answered.push(p.name);
+      for (const r of rows) {
         const k = r.linkedinUrl ?? r.email ?? `${r.fullName.toLowerCase()}|${(r.companyName ?? "").toLowerCase()}`;
         if (seen.has(k)) continue;
         seen.add(k);
         out.push(r);
       }
     } catch (e) {
-      if (process.env.DEBUG_SEARCH) console.warn(`[provider:${p.name}]`, (e as Error).message);
+      const message = (e as Error).message ?? String(e);
+      failures.push({ provider: p.name, message: message.slice(0, 200) });
+      if (process.env.DEBUG_SEARCH) console.warn(`[provider:${p.name}]`, message);
     }
     if (out.length >= (q.limit ?? 25)) break;
   }
-  return out.slice(0, q.limit ?? 25);
+  return { people: out.slice(0, q.limit ?? 25), failures, answered };
+}
+
+/** Back-compatible shape: the people alone, for callers that do not need the detail. */
+export async function searchProviders(q: PeopleProviderQuery): Promise<ProviderPerson[]> {
+  return (await searchProvidersDetailed(q)).people;
 }
 
 export async function enrichWithProviders(input: { email?: string; linkedinUrl?: string; firstName?: string; lastName?: string; companyDomain?: string }): Promise<ProviderPerson | null> {

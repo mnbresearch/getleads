@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import type { SearchResult } from "../types.js";
 import { fetchJson, fetchText, fetchWithTimeout } from "../util/http.js";
 import { meter } from "../util/meter.js";
-import { classifyHttp, providerRecentlyRejected, recordHttp, reportProviderCall, retireProvider } from "../providers/health.js";
+import { classifyHttp, ProviderUnavailableError, providerRecentlyRejected, recordHttp, reportProviderCall, retireProvider } from "../providers/health.js";
 // Keys arrive from dashboards and .env files, where a trailing newline or a wrapping pair of
 // quotes survives the paste. Cleaning at the edge means the value the provider sees is the
 // value the operator thinks they stored. See util/secret.ts.
@@ -58,7 +58,9 @@ export const googleCseProvider = (apiKey = secret(process.env.GOOGLE_CSE_API_KEY
       if (CSE_CLOSED.test(detail)) {
         retireProvider("google_cse", "Google closed the Custom Search JSON API to new customers (Sep 2026)");
       }
-      return [];
+      // Thrown, not returned empty: see ProviderUnavailableError. An HTTP failure that
+      // looks like an empty result set is how an outage gets cached as an answer.
+      throw new ProviderUnavailableError("google_cse", outcome, `${res.status} ${detail}`.trim());
     }
     reportProviderCall({ provider: "google_cse", outcome: "ok", status: res.status });
     const data = (await res.json().catch(() => null)) as { items?: { title: string; link: string; snippet?: string }[] } | null;
@@ -120,7 +122,7 @@ export const serperProvider = (apiKey = secret(process.env.SERPER_API_KEY)): Sea
       const body = await res.text().catch(() => "");
       const { outcome, detail } = classifyHttp(res.status, body);
       reportProviderCall({ provider: "serper", outcome, status: res.status, detail });
-      if (outcome !== "unsupported_query" || !hasOperators) return [];
+      if (outcome !== "unsupported_query" || !hasOperators) throw new ProviderUnavailableError("serper", outcome, `${res.status} ${detail}`.trim());
       // The free tier refuses site:, quotes, parentheses and OR. The account is healthy and
       // the credits are unspent, so degrade the query rather than the provider.
       noteOperatorQueriesRestricted();
@@ -128,7 +130,7 @@ export const serperProvider = (apiKey = secret(process.env.SERPER_API_KEY)): Sea
 
     if (!plain) return [];
     const res2 = await attempt(plain);
-    if (!(await recordHttp("serper", res2))) return [];
+    if (!(await recordHttp("serper", res2))) throw new ProviderUnavailableError("serper", "server", `serper returned ${res2.status} for the simplified query`);
     return parse(res2);
   },
 });
@@ -210,7 +212,10 @@ export const duckDuckGoProvider = (): SearchProvider => ({
     if (!html || !html.includes("result__a")) {
       // fallback: lite endpoint
       const lite = await fetchText(`https://lite.duckduckgo.com/lite/?${params}`, { timeoutMs: 5_000 });
-      if (!lite) return [];
+      if (!lite) {
+        reportProviderCall({ provider: "duckduckgo", outcome: "network", detail: "neither the html nor the lite endpoint returned a page" });
+        throw new ProviderUnavailableError("duckduckgo", "network", "neither the html nor the lite endpoint returned a page");
+      }
       const $l = cheerio.load(lite);
       const outL: SearchResult[] = [];
       $l("a.result-link").each((_, el) => {
@@ -284,12 +289,11 @@ export function resultsAnswerQuery(query: string, results: SearchResult[]): bool
 /** Drop a decoyed set and report it, so the chain falls through instead of passing junk on. */
 function rejectDecoys(provider: string, query: string, results: SearchResult[]): SearchResult[] {
   if (resultsAnswerQuery(query, results)) return results;
-  reportProviderCall({
-    provider,
-    outcome: "bad_response",
-    detail: `returned ${results.length} result(s) matching none of the query's distinctive terms; the scrape is being served decoy results`,
-  });
-  return [];
+  const detail = `returned ${results.length} result(s) matching none of the query's distinctive terms; the scrape is being served decoy results`;
+  reportProviderCall({ provider, outcome: "bad_response", detail });
+  // Decoy results are a provider failing, not a query with no matches. Returning [] here
+  // let a blocked scraper be cached and re-served as absence.
+  throw new ProviderUnavailableError(provider, "bad_response", detail);
 }
 
 /** Bing HTML fallback (no key). */
@@ -299,7 +303,10 @@ export const bingHtmlProvider = (): SearchProvider => ({
   async search(query, opts = {}) {
     const params = new URLSearchParams({ q: query, count: String(opts.count ?? 20), first: String((opts.offset ?? 0) + 1), setlang: "en" });
     const html = await fetchText(`https://www.bing.com/search?${params}`, { timeoutMs: 15_000 });
-    if (!html) return [];
+    if (!html) {
+      reportProviderCall({ provider: "bing_html", outcome: "network", detail: "no page returned" });
+      throw new ProviderUnavailableError("bing_html", "network", "no page returned");
+    }
     const $ = cheerio.load(html);
     const out: SearchResult[] = [];
     $("li.b_algo").each((_, el) => {
