@@ -257,13 +257,32 @@ export function LeadsPage() {
   );
 }
 
+/**
+ * Keep the display name in step with the two name boxes - but only while it still matches
+ * them.
+ *
+ * If the stored display name is exactly what the first and last boxes would produce, the
+ * user is plainly editing a name that is derived, and leaving it stale would be surprising.
+ * If it is NOT - "Priya Raman" with no last name recorded, a name with a middle initial, a
+ * suffix, a title - then it holds information the two boxes do not, and touching it would
+ * throw that away. So it is left exactly as it is, in a field the user can see and edit.
+ */
+function nameAware<T extends { firstName: string; lastName: string; fullName: string }>(current: T, key: string, value: string): T {
+  const next = { ...current, [key]: value } as T;
+  if (key !== "firstName" && key !== "lastName") return next;
+  const derivedBefore = [current.firstName.trim(), current.lastName.trim()].filter(Boolean).join(" ");
+  if (current.fullName.trim() !== derivedBefore) return next;
+  next.fullName = [next.firstName.trim(), next.lastName.trim()].filter(Boolean).join(" ");
+  return next;
+}
+
 function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; onClose: () => void; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [draft, setDraft] = useState<{ subject: string; body: string } | null>(null);
   const [brief, setBrief] = useState<{ summary: string; whyNow: string; angles: string[] } | null>(null);
   // PATCH /v1/leads/:id has always existed and nothing called it, so a typo'd email or a
   // stale job title could never be corrected from the app - only re-imported over.
-  const [editing, setEditing] = useState<null | { firstName: string; lastName: string; title: string; email: string; phone: string; linkedinUrl: string; location: string }>(null);
+  const [editing, setEditing] = useState<null | { firstName: string; lastName: string; fullName: string; title: string; email: string; phone: string; linkedinUrl: string; location: string }>(null);
   useEffect(() => { setDraft(null); setBrief(null); setEditing(null); }, [lead?.id]);
   if (!lead) return null;
   const act = async (name: string, fn: () => Promise<unknown>) => {
@@ -313,6 +332,7 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
             {([
               ["firstName", "First name", "text"],
               ["lastName", "Last name", "text"],
+              ["fullName", "Display name", "text"],
               ["title", "Title", "text"],
               ["email", "Email", "email"],
               ["phone", "Phone", "tel"],
@@ -321,7 +341,14 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
             ] as const).map(([k, label, type]) => (
               <div key={k}>
                 <label className="label" htmlFor={`edit-${k}`}>{label}</label>
-                <input id={`edit-${k}`} className="input" type={type} value={editing[k]} onChange={(e) => setEditing({ ...editing, [k]: e.target.value })} />
+                <input
+                  id={`edit-${k}`}
+                  className="input"
+                  type={type}
+                  value={editing[k]}
+                  onChange={(e) => setEditing(nameAware(editing, k, e.target.value))}
+                />
+                {k === "fullName" && <div className="mt-1 text-xs text-ink-400">What every screen and export shows. Kept in step with the two boxes above while it matches them.</div>}
               </div>
             ))}
           </div>
@@ -339,25 +366,20 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
                 // exactly what it is given - so correcting "Jon" to "John" would have
                 // appeared to do nothing at all.
                 //
-                // Only rewrite the full name when a name field was actually EDITED.
+                // The display name is a field on the form, so what gets stored is what the
+                // user can see. Two earlier attempts derived it instead, and both destroyed
+                // data: a lead imported with fullName "Priya Raman" and no separate last
+                // name - ordinary for a CSV that carried only a full name - had an empty
+                // last-name box, so any rebuild produced "Priya" and deleted the surname
+                // from the table, the modal title, search and every export. Deriving a
+                // value from two fields that may not account for it cannot be made safe;
+                // showing it can.
                 //
-                // Rebuilding it from the two boxes looks right and is not: a lead imported
-                // with fullName "Priya Raman" and no separate last name - ordinary for a
-                // CSV that carried only a full name - has an empty last-name box, so the
-                // rebuild produced "Priya" and deleted the surname from the table, the
-                // modal title, search and the export. An earlier attempt at this rebuilt
-                // from `editing` instead of `body`, which is the same string for every
-                // possible input and fixed nothing.
-                const firstChanged = editing.firstName.trim() !== (lead.firstName ?? "");
-                const lastChanged = editing.lastName.trim() !== (lead.lastName ?? "");
-                if (firstChanged || lastChanged) {
-                  const rebuilt = [editing.firstName.trim(), editing.lastName.trim()].filter(Boolean).join(" ");
-                  if (rebuilt) body.fullName = rebuilt;
-                  // A cleared box is an intentional erasure of that part of the name, and
-                  // has to be sent as such - `body` drops empty strings, so without this
-                  // the stored value would survive and disagree with the full name.
-                  if (lastChanged && !editing.lastName.trim()) body.lastName = "";
-                  if (firstChanged && !editing.firstName.trim()) body.firstName = "";
+                // A cleared box is a deliberate erasure and has to be sent as such, because
+                // `body` drops empty strings and the stored value would otherwise survive
+                // and disagree with the display name.
+                for (const k of ["firstName", "lastName", "fullName"] as const) {
+                  if (!editing[k].trim() && (lead[k] ?? "")) body[k] = "";
                 }
 
                 // Changing the address clears its verification verdict - the server does
@@ -374,7 +396,7 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
         </div>
       )}
       <div className="mt-5 flex flex-wrap gap-2 border-t border-black/5 pt-4">
-        <button className="btn-secondary" disabled={!!busy} onClick={() => setEditing({ firstName: lead.firstName ?? "", lastName: lead.lastName ?? "", title: lead.title ?? "", email: lead.email ?? "", phone: lead.phone ?? "", linkedinUrl: lead.linkedinUrl ?? "", location: lead.location ?? "" })}>Edit details</button>
+        <button className="btn-secondary" disabled={!!busy} onClick={() => setEditing({ firstName: lead.firstName ?? "", lastName: lead.lastName ?? "", fullName: lead.fullName ?? "", title: lead.title ?? "", email: lead.email ?? "", phone: lead.phone ?? "", linkedinUrl: lead.linkedinUrl ?? "", location: lead.location ?? "" })}>Edit details</button>
         <button className="btn-secondary" disabled={!!busy} onClick={() => act("enrich", () => apiFetch("POST", `/v1/leads/${lead.id}/enrich`).then(() => toast("Enrichment queued")))}>{busy === "enrich" ? "…" : "Enrich"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.email} onClick={() => act("verify", () => apiFetch("POST", `/v1/leads/${lead.id}/verify`).then(() => toast("Verified")))}>{busy === "verify" ? "…" : "Verify email"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>

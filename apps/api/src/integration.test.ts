@@ -680,6 +680,31 @@ suite("database integration", () => {
       expect(after!.currentStep).toBe(0);
     });
 
+    it("resolves only the stopped step's message, not an earlier one", async () => {
+      // The single-step scenario above cannot catch this: with one step there is only ever
+      // one message to match, so scoping by stepId is untestable there.
+      const org = await newOrg("resume-multi");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", emailAccountId: acct.id, status: "active" }).returning();
+      const [s1] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "One", bodyTemplate: "One" }).returning();
+      const [s2] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 2, channel: "email", subjectTemplate: "Two", bodyTemplate: "Two" }).returning();
+      const [lead] = await db.insert(schema.leads).values({ orgId: org.id, email: `p-${randomUUID().slice(0, 8)}@example.com`, fullName: "P", emailStatus: "valid" }).returning();
+      // Step 1's outcome was lost and a person said it arrived; step 2's is lost too.
+      const [m1] = await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: s1.id, leadId: lead.id, toEmail: lead.email!, subject: "One", bodyText: "One", status: "unknown" }).returning();
+      const [m2] = await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: s2.id, leadId: lead.id, toEmail: lead.email!, subject: "Two", bodyText: "Two", status: "unknown" }).returning();
+      const [cc] = await db.insert(schema.campaignContacts).values({ campaignId: campaign.id, leadId: lead.id, status: "failed", currentStep: 1 }).returning();
+
+      const { resumeContact } = await import("./services/campaigns.js");
+      await resumeContact(cc.id, { resend: true });
+
+      const after1 = await db.query.messages.findFirst({ where: schema.eq(schema.messages.id, m1.id) });
+      const after2 = await db.query.messages.findFirst({ where: schema.eq(schema.messages.id, m2.id) });
+      // Step 2 is the one being retried; step 1 must not be stamped "never arrived", which
+      // would contradict what the same person said about it.
+      expect(after2!.status).toBe("failed");
+      expect(after1!.status).toBe("unknown");
+    });
+
     it("refuses to resume a contact that is not stopped", async () => {
       const { cc } = await scenario("sent");
       const { resumeContact } = await import("./services/campaigns.js");

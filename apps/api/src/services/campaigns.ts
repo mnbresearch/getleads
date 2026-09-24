@@ -226,11 +226,19 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     // window where the message went out and the insert failed, and the retry then found no
     // row and sent a second WhatsApp message - the same dropped-write hole the email path
     // closes this way.
+    //
+    // Everything that can fail WITHOUT touching the provider - loading the integration,
+    // decrypting its config - happens first, so an ordinary configuration error stays an
+    // ordinary retry instead of stranding the contact for human review. Only the step that
+    // might actually deliver something sits inside the uncertain window.
+    const wa = await whatsappSender(campaign.orgId);
+    if (!wa.ok) return { skipped: wa.error };
+
     const [wm] = await db
       .insert(messages)
       .values({ orgId: campaign.orgId, campaignId: campaign.id, stepId: step.id, leadId: lead.id, channel: "whatsapp", toEmail: phone, subject: "(whatsapp)", bodyText: text, status: "sending" })
       .returning();
-    const r = await sendWhatsAppStep(campaign.orgId, phone, text);
+    const r = await wa.send(phone, text);
     await db
       .update(messages)
       .set({ status: r.ok ? "sent" : "failed", providerMessageId: r.messageId, error: r.error, sentAt: r.ok ? new Date() : null })
@@ -574,14 +582,45 @@ export async function bumpEngagement(leadId: string | null | undefined, kind: "o
 }
 
 /** WhatsApp send via the org's configured Cloud API integration. */
-export async function sendWhatsAppStep(orgId: string, to: string, text: string) {
+/**
+ * Resolve the WhatsApp sender, separately from actually sending.
+ *
+ * Split in two so a caller can get everything that might fail WITHOUT reaching the
+ * provider - loading the integration, decrypting its config - out of the way before it
+ * commits to a send. Inside a send's uncertain window, an ordinary configuration error
+ * would otherwise be indistinguishable from "we may have delivered this", and would strand
+ * the contact for human review over a rotated encryption key.
+ */
+export async function whatsappSender(
+  orgId: string,
+): Promise<{ ok: true; send: (to: string, text: string) => Promise<{ ok: boolean; messageId?: string; error?: string }> } | { ok: false; error: string }> {
   const { db } = getDb();
   const integ = await db.query.integrations.findFirst({ where: and(eq(integrations.orgId, orgId), eq(integrations.provider, "whatsapp"), eq(integrations.status, "active")) });
   if (!integ) return { ok: false, error: "WhatsApp integration not configured (Settings → Integrations → WhatsApp Cloud API)" };
-  const cfg = decryptCfg<{ phoneNumberId: string; accessToken: string; templateName?: string; templateLanguage?: string }>(integ.configEncrypted);
+  let cfg: { phoneNumberId: string; accessToken: string; templateName?: string; templateLanguage?: string } | null = null;
+  try {
+    cfg = decryptCfg<{ phoneNumberId: string; accessToken: string; templateName?: string; templateLanguage?: string }>(integ.configEncrypted);
+  } catch (e) {
+    return { ok: false, error: `WhatsApp config could not be read: ${(e as Error).message}` };
+  }
   if (!cfg?.phoneNumberId || !cfg.accessToken) return { ok: false, error: "WhatsApp config incomplete" };
-  const phone = normalizePhone(to, String((integ.settings as Record<string, unknown>).defaultCountryCode ?? "91"));
-  // Outbound-first messages must use an approved template; text is passed as the first body parameter.
-  const r = cfg.templateName ? await sendWhatsApp(cfg, phone, { template: { name: cfg.templateName, language: cfg.templateLanguage, params: [text] } }) : await sendWhatsApp(cfg, phone, { text });
-  return r;
+  const config = cfg;
+  const country = String((integ.settings as Record<string, unknown>).defaultCountryCode ?? "91");
+  return {
+    ok: true,
+    send: async (to: string, text: string) => {
+      const phone = normalizePhone(to, country);
+      // Outbound-first messages must use an approved template; text is the first body parameter.
+      return config.templateName
+        ? sendWhatsApp(config, phone, { template: { name: config.templateName, language: config.templateLanguage, params: [text] } })
+        : sendWhatsApp(config, phone, { text });
+    },
+  };
+}
+
+/** Back-compatible one-shot, for callers that do not need the split. */
+export async function sendWhatsAppStep(orgId: string, to: string, text: string) {
+  const s = await whatsappSender(orgId);
+  if (!s.ok) return { ok: false, error: s.error };
+  return s.send(to, text);
 }

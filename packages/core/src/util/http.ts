@@ -115,6 +115,23 @@ export async function readCapped(res: Response, max: number): Promise<Uint8Array
  * So redirects are followed by hand, and the guard runs against each new location. A
  * redirect to a private address ends the walk rather than being followed.
  */
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
+}
+
+function stripCredentials(headers: HeadersInit | undefined): HeadersInit | undefined {
+  if (!headers) return headers;
+  const out = new Headers(headers);
+  out.delete("authorization");
+  out.delete("cookie");
+  out.delete("proxy-authorization");
+  return out;
+}
+
 export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Response | null> {
   const max = opts.maxRedirects ?? 5;
   let current = url;
@@ -123,7 +140,11 @@ export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Re
   for (let hop = 0; hop <= max; hop++) {
     const permitted = (opts.allowPrivateHosts ?? false) || (hop === 0 && (opts.allowFirstHop ?? false));
     if (!permitted && !isPublicHost(current)) return null;
-    const res = await fetchWithTimeout(current, { ...opts, method, body, redirect: "manual" });
+    // Credentials are dropped on a cross-origin hop, as a client following redirects for
+    // us would do. This loop forwards `opts` verbatim, so without this an Authorization or
+    // Cookie header set by the caller would be handed to whatever host the redirect names.
+    const headers = hop === 0 || sameOrigin(url, current) ? opts.headers : stripCredentials(opts.headers);
+    const res = await fetchWithTimeout(current, { ...opts, headers, method, body, redirect: "manual" });
     if (res.status < 300 || res.status >= 400) return res;
     const location = res.headers.get("location");
     if (!location) return res;
@@ -135,6 +156,11 @@ export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Re
     if (res.status !== 307 && res.status !== 308) {
       method = "GET";
       body = undefined;
+    } else if (body !== undefined && typeof body !== "string") {
+      // 307/308 must replay the body, and a stream or FormData is single-use - it has
+      // already been consumed by the first hop and would throw on the second. Refusing is
+      // honest; silently sending an empty body would not be.
+      return null;
     }
     try {
       current = new URL(location, current).toString();

@@ -147,10 +147,17 @@ describe("the guard survives a redirect", () => {
       const res = await fetchPublic(`${f.base}/start`, { timeoutMs: 2000, allowPrivateHosts: true });
       expect(res).not.toBeNull();
       expect(await res!.text()).toBe("arrived");
-      // Both hops came through this loop. If fetchWithTimeout were following redirects
-      // internally the loop would be bypassed, and the assertion above would still pass -
-      // this is the one that notices.
       expect(f.hits).toEqual(["/start", "/end"]);
+
+      // The hit count above does NOT distinguish who followed the redirect - both this
+      // loop and the client produce the same two requests against a same-origin fixture,
+      // which is how an earlier version of this test came to prove nothing while its
+      // comment claimed otherwise. `maxRedirects: 0` is what separates them: the loop
+      // refuses to take the hop at all, while a client following internally returns the
+      // destination regardless of a limit it knows nothing about.
+      f.hits.length = 0;
+      expect(await fetchPublic(`${f.base}/start`, { timeoutMs: 2000, allowPrivateHosts: true, maxRedirects: 0 })).toBeNull();
+      expect(f.hits).toEqual(["/start"]);
     } finally {
       await f.close();
     }
