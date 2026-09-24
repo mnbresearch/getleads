@@ -38,13 +38,42 @@ const TITLE_WORDS = /\b(CEO|CTO|CFO|COO|CMO|Founder|Co-?Founder|Director|Head|VP
 export interface CrawlOptions {
   maxPages?: number;
   timeoutMs?: number;
+  /**
+   * Try plain http when https reaches nothing. Default true.
+   *
+   * A surprising number of small-business sites - exactly the long tail this product is
+   * built to find - still serve on http only, or have a certificate that node rejects.
+   * Every one of those used to come back as a company with no website content at all. This
+   * is a public marketing page being read, not a credential being sent, so falling back is
+   * the difference between enriching that company and silently skipping it.
+   */
+  allowInsecureFallback?: boolean;
 }
 
 export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {}): Promise<CompanyProfile> {
-  const base = `https://${domain}`;
   const profile: CompanyProfile = { domain, techStack: [], emailsFound: [], peopleFound: [], socials: {} };
   const paths = PAGES.slice(0, opts.maxPages ?? 6);
-  const pages = await pMap(paths, async (p) => ({ path: p, html: await fetchText(`${base}${p}`, { timeoutMs: opts.timeoutMs ?? 10_000 }) }), 3);
+  const timeoutMs = opts.timeoutMs ?? 10_000;
+
+  const attempt = (scheme: string) =>
+    pMap(paths, async (p) => ({ path: p, html: await fetchText(`${scheme}://${domain}${p}`, { timeoutMs }) }), 3);
+
+  // A domain handed in with an explicit scheme is honoured as written rather than
+  // double-prefixed into an unfetchable URL.
+  const explicit = /^https?:\/\//i.test(domain);
+  const scheme = explicit ? domain.split("://")[0].toLowerCase() : "https";
+  if (explicit) {
+    domain = domain.slice(domain.indexOf("://") + 3);
+    profile.domain = domain;
+  }
+
+  let pages = await attempt(scheme);
+  // https reached nothing at all: the site may be http-only or have a certificate node
+  // rejects. Retrying over http turns "this company has no web presence" back into a crawl.
+  if (!explicit && !pages.some((p) => p.html) && (opts.allowInsecureFallback ?? true)) {
+    pages = await attempt("http");
+    if (pages.some((p) => p.html)) profile.insecureFallback = true;
+  }
   const emails = new Set<string>();
   const tech = new Set<string>();
   const people = new Map<string, PersonCandidate>();
@@ -98,6 +127,11 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
   profile.techStack = [...tech];
   profile.peopleFound = [...people.values()];
   if (profile.socials.linkedin) profile.linkedinUrl = profile.socials.linkedin;
+  // Say how much of the site we actually saw, so an empty profile can be told apart from a
+  // crawl that never got off the ground. See CompanyProfile.crawlFailed.
+  profile.pagesAttempted = paths.length;
+  profile.pagesFetched = pages.filter((p) => p.html).length;
+  profile.crawlFailed = profile.pagesFetched === 0;
   return profile;
 }
 

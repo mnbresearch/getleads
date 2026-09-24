@@ -149,7 +149,10 @@ export const handlers: Record<string, JobHandler> = {
     let profile: CompanyProfile | null = null;
     if (company && (!company.enrichedAt || Date.now() - company.enrichedAt.getTime() > 30 * 86_400_000)) {
       profile = await crawlCompanyWebsite(company.domain).catch(() => null);
-      if (profile) company = await upsertCompany(lead.orgId, company.domain, { ...profile, name: profile.name ?? company.name ?? undefined });
+      // A crawl that fetched nothing is not an enrichment. Writing it would stamp
+      // `enrichedAt` and lock the company out of re-enrichment for thirty days on the
+      // strength of one bad minute.
+      if (profile && !profile.crawlFailed) company = await upsertCompany(lead.orgId, company.domain, { ...profile, name: profile.name ?? company.name ?? undefined });
     }
     const patch: Record<string, unknown> = {};
     const knownPattern = company?.emailPattern ?? undefined;
@@ -193,7 +196,7 @@ export const handlers: Record<string, JobHandler> = {
     const seeds: { domain: string; name?: string; description?: string; industry?: string }[] = [];
     for (const d of icp.seedDomains.slice(0, 5)) {
       const p = await crawlCompanyWebsite(d, { maxPages: 2 }).catch(() => null);
-      if (p) {
+      if (p && !p.crawlFailed) {
         await upsertCompany(icp.orgId, d, p);
         seeds.push({ domain: d, name: p.name, description: p.description });
       } else seeds.push({ domain: d });
@@ -278,12 +281,20 @@ export const handlers: Record<string, JobHandler> = {
     const co = await db.query.companies.findFirst({ where: eq(companies.id, String(job.payload.companyId)) });
     if (!co) return { skipped: true };
     const prof = await crawlCompanyWebsite(co.domain, { maxPages: 4 }).catch(() => null);
-    if (prof) await upsertCompany(co.orgId, co.domain, { ...prof, name: prof.name ?? co.name ?? undefined });
+    const crawled = !!prof && !prof.crawlFailed;
+    if (crawled) await upsertCompany(co.orgId, co.domain, { ...prof!, name: prof!.name ?? co.name ?? undefined });
     const { detectHiring } = await import("@prospex/core");
     const h = await detectHiring(co.domain, prof?.name ?? co.name ?? undefined).catch(() => null);
     if (h) await db.update(companies).set({ openRoles: h.openRoles, hiring: { byFunction: h.byFunction, source: h.source, careersUrl: h.careersUrl } }).where(eq(companies.id, co.id));
     const n = await refreshCompanySignals(co.orgId, co.domain, prof?.name ?? co.name).catch(() => 0);
-    return { crawled: !!prof, openRoles: h?.openRoles ?? 0, newSignals: n };
+    return {
+      crawled,
+      // Not the same as "nothing to find": say which it was, in the job result the admin
+      // page shows, rather than reporting a failed crawl as a completed one.
+      crawlError: crawled ? undefined : prof ? `no page on ${co.domain} could be fetched (${prof.pagesAttempted ?? 0} tried)` : "crawl threw",
+      openRoles: h?.openRoles ?? 0,
+      newSignals: n,
+    };
   },
 
   /** Run one signal subscription. payload: { subscriptionId } */

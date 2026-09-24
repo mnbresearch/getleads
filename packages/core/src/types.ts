@@ -45,6 +45,22 @@ export interface CompanyProfile {
   emailPattern?: string;
   mxValid?: boolean;
   catchAll?: boolean;
+  /** How many pages were requested, and how many actually came back. */
+  pagesAttempted?: number;
+  pagesFetched?: number;
+  /**
+   * True when NOT ONE page could be fetched.
+   *
+   * A crawl that fetched nothing used to return exactly the same well-formed profile as a
+   * company whose site genuinely has no team page, no emails and no detectable stack:
+   * empty arrays all round. Callers wrote that profile to the database and stamped
+   * `enrichedAt`, so a DNS hiccup or a firewall could mark a company "enriched with nothing
+   * found" and keep it that way for the full thirty-day re-enrichment window. The empty
+   * result has to be distinguishable from the failure, or the failure becomes the record.
+   */
+  crawlFailed?: boolean;
+  /** True when https reached nothing and the crawl fell back to plain http. */
+  insecureFallback?: boolean;
 }
 
 export type EmailStatus = "valid" | "risky" | "invalid" | "catch_all" | "unknown";

@@ -178,7 +178,9 @@ async function getCompany(domain: string, cache: Map<string, CompanyProfile>) {
   const hit = cache.get(domain);
   if (hit) return hit;
   const prof = await crawlCompanyWebsite(domain, { maxPages: 5 });
-  cache.set(domain, prof);
+  // Only remember a crawl that actually reached the site. Caching a failure would re-serve
+  // one unreachable moment as this company's profile for the rest of the run.
+  if (!prof.crawlFailed) cache.set(domain, prof);
   return prof;
 }
 
