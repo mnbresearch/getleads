@@ -104,7 +104,9 @@ export function SearchPage() {
               <tr key={s.id}>
                 <td className="td whitespace-nowrap text-ink-400">{fmtDate(s.createdAt)}</td>
                 <td className="td">{String(s.query.query ?? (s.query.titles as string[] | undefined)?.join(", ") ?? (s.query.companyDomains as string[] | undefined)?.join(", ") ?? "")}</td>
-                <td className="td">{s.status === "running" || s.status === "queued" ? <Spinner label={s.status} /> : <span className={`badge ${s.status === "done" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{s.status}</span>}{s.error && <div className="text-xs text-red-600">{s.error}</div>}</td>
+                <td className="td">{s.status === "running" || s.status === "queued" ? <Spinner label={s.status} /> : <span className={`badge ${s.status === "done" ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{s.status}</span>}{s.error && (s.status === "done"
+                  ? <div className="mt-1 text-xs text-amber-700">{s.error} <Link className="underline" to="/settings/billing">See plans</Link></div>
+                  : <div className="text-xs text-red-600">{s.error}</div>)}</td>
                 <td className="td tabular-nums">{s.resultCount}</td>
                 <td className="td text-right">{s.status === "done" && s.resultCount > 0 && <Link className="text-brand-600 hover:underline" to={`/leads?tag=search:${s.id.slice(0, 8)}`}>View leads →</Link>}</td>
               </tr>

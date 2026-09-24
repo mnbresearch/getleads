@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { API_URL, apiFetch, fmtDate } from "../lib/api";
-import { Page, useToast } from "../components/ui";
+import { LoadError, Page, Spinner, useToast } from "../components/ui";
 
 export function SettingsPage() {
   const tabs = [["", "Workspace"], ["team", "Team"], ["api-keys", "API keys"], ["webhooks", "Webhooks"], ["integrations", "Integrations"], ["billing", "Plan & usage"]];
@@ -24,8 +24,18 @@ function Workspace() {
   const [org, setOrg] = useState<{ name: string; settings: Record<string, string> } | null>(null);
   const [f, setF] = useState({ name: "", senderName: "", senderCompany: "", valueProp: "" });
   const { toast, Toast } = useToast();
-  useEffect(() => { apiFetch<{ org: typeof org }>("GET", "/v1/auth/me").then((r) => { setOrg(r.org); setF({ name: r.org!.name, senderName: r.org!.settings.senderName ?? "", senderCompany: r.org!.settings.senderCompany ?? r.org!.name, valueProp: r.org!.settings.valueProp ?? "" }); }); }, []);
-  if (!org) return null;
+  // `return null` on failure rendered a completely blank tab: no spinner, no message, no
+  // way to retry. Three of the six Settings tabs did this.
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const loadOrg = useCallback(() => {
+    setLoadErr(null);
+    apiFetch<{ org: typeof org }>("GET", "/v1/auth/me")
+      .then((r) => { setOrg(r.org); setF({ name: r.org!.name, senderName: r.org!.settings.senderName ?? "", senderCompany: r.org!.settings.senderCompany ?? r.org!.name, valueProp: r.org!.settings.valueProp ?? "" }); })
+      .catch((e) => setLoadErr((e as Error).message));
+  }, []);
+  useEffect(() => { loadOrg(); }, [loadOrg]);
+  if (loadErr) return <LoadError message={loadErr} onRetry={loadOrg} />;
+  if (!org) return <div className="card p-5"><Spinner label="Loading…" /></div>;
   return (
     <div className="card max-w-xl space-y-3 p-5">
       {Toast}
@@ -43,13 +53,17 @@ function ApiKeys() {
   const [keys, setKeys] = useState<{ id: string; name: string; prefix: string; lastUsedAt: string | null; revokedAt: string | null; createdAt: string }[]>([]);
   const [fresh, setFresh] = useState<string | null>(null);
   const { toast, Toast } = useToast();
+  // A second click created a second key and only ever displayed the second one. The first
+  // is shown once by the server and then unrecoverable, so a double-click silently minted a
+  // live credential nobody would ever see again.
+  const [creating, setCreating] = useState(false);
   const load = () => apiFetch<{ apiKeys: typeof keys }>("GET", "/v1/auth/api-keys").then((r) => setKeys(r.apiKeys));
   useEffect(() => { load(); }, []);
   return (
     <div className="space-y-4">
       {Toast}
       <div className="card p-5">
-        <div className="mb-2 flex items-center justify-between"><div className="font-medium">API keys</div><button className="btn-primary" onClick={async () => { const name = prompt("Key name", "Agent") ?? ""; if (!name) return; const r = await apiFetch<{ key: string }>("POST", "/v1/auth/api-keys", { name }); setFresh(r.key); load(); }}>Create key</button></div>
+        <div className="mb-2 flex items-center justify-between"><div className="font-medium">API keys</div><button className="btn-primary" disabled={creating} onClick={async () => { if (creating) return; const name = prompt("Key name", "Agent") ?? ""; if (!name) return; setCreating(true); try { const r = await apiFetch<{ key: string }>("POST", "/v1/auth/api-keys", { name }); setFresh(r.key); load(); } catch (e) { toast((e as Error).message, "err"); } finally { setCreating(false); } }}>{creating ? "Creating…" : "Create key"}</button></div>
         {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-600"><div className="mb-1 text-ink-100">Copy now - shown once:</div><code className="break-all">{fresh}</code></div>}
         <table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
           <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/auth/api-keys/${k.id}`).then(load)}>Revoke</button>}</td></tr>)}</tbody></table>
@@ -125,8 +139,15 @@ function Integrations() {
 function Billing() {
   const [u, setU] = useState<{ period: string; plan: string; usage: Record<string, { used: number; limit: number }> } | null>(null);
   const [plans, setPlans] = useState<{ plans: { id: string; name: string; priceUsd: number; limits: Record<string, number | boolean> }[]; stripeEnabled: boolean; pilotMode: boolean } | null>(null);
-  useEffect(() => { apiFetch<typeof u>("GET", "/v1/usage").then(setU); apiFetch<typeof plans>("GET", "/v1/billing/plans").then(setPlans); }, []);
-  if (!u || !plans) return null;
+  const [billErr, setBillErr] = useState<string | null>(null);
+  const loadBilling = useCallback(() => {
+    setBillErr(null);
+    apiFetch<typeof u>("GET", "/v1/usage").then(setU).catch((e) => setBillErr((e as Error).message));
+    apiFetch<typeof plans>("GET", "/v1/billing/plans").then(setPlans).catch((e) => setBillErr((e as Error).message));
+  }, []);
+  useEffect(() => { loadBilling(); }, [loadBilling]);
+  if (billErr) return <LoadError message={billErr} onRetry={loadBilling} />;
+  if (!u || !plans) return <div className="card p-5"><Spinner label="Loading…" /></div>;
   return (
     <div className="space-y-4">
       <div className="card p-5"><div className="mb-3 font-medium">Current plan: <span className="capitalize">{u.plan}</span> · {u.period}</div>
@@ -145,9 +166,14 @@ function Team() {
   const [role, setRole] = useState("member");
   const [link, setLink] = useState<string | null>(null);
   const { toast, Toast } = useToast();
-  const load = () => apiFetch<typeof d>("GET", "/v1/tools/team").then(setD);
-  useEffect(() => { load(); }, []);
-  if (!d) return null;
+  const [teamErr, setTeamErr] = useState<string | null>(null);
+  const load = useCallback(() => {
+    setTeamErr(null);
+    return apiFetch<typeof d>("GET", "/v1/tools/team").then(setD).catch((e) => setTeamErr((e as Error).message));
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  if (teamErr) return <LoadError message={teamErr} onRetry={load} />;
+  if (!d) return <div className="card p-5"><Spinner label="Loading…" /></div>;
   return (
     <div className="space-y-4">
       {Toast}

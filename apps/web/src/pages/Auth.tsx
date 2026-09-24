@@ -74,14 +74,16 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
         <h1 className="text-lg font-semibold">{mode === "login" ? "Sign in" : "Create your workspace"}</h1>
         {mode === "signup" && (
           <>
-            <div><label className="label">Your name</label><input className="input" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
-            <div><label className="label">Company / workspace</label><input className="input" value={form.orgName} onChange={(e) => setForm({ ...form, orgName: e.target.value })} /></div>
+            <div><label className="label" htmlFor="auth-name">Your name</label><input id="auth-name" className="input" autoComplete="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
+            <div><label className="label" htmlFor="auth-org">Company / workspace</label><input id="auth-org" className="input" autoComplete="organization" value={form.orgName} onChange={(e) => setForm({ ...form, orgName: e.target.value })} /></div>
           </>
         )}
-        <div><label className="label">Email</label><input className="input" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
-        <div><label className="label">Password</label><input className="input" type="password" required minLength={8} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></div>
-        {mode === "signup" && <div><label className="label">Invite code (if required)</label><input className="input" value={form.inviteCode} onChange={(e) => setForm({ ...form, inviteCode: e.target.value })} /></div>}
-        {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600">{err}</div>}
+        {/* htmlFor/id so a screen reader announces the field rather than an unlabelled box.
+            Without it this form - the entry point to the whole product - was unusable. */}
+        <div><label className="label" htmlFor="auth-email">Email</label><input id="auth-email" className="input" type="email" autoComplete="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
+        <div><label className="label" htmlFor="auth-password">Password</label><input id="auth-password" className="input" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></div>
+        {mode === "signup" && <div><label className="label" htmlFor="auth-invite">Invite code (if required)</label><input id="auth-invite" className="input" value={form.inviteCode} onChange={(e) => setForm({ ...form, inviteCode: e.target.value })} /></div>}
+        {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600" role="alert">{err}</div>}
         <button className="btn-primary w-full justify-center" disabled={busy}>{busy ? "…" : mode === "login" ? "Sign in" : "Create account"}</button>
 
         {googleEnabled && (

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { API_URL, apiFetch, auth, fmtDate } from "../lib/api";
-import { EmailStatusBadge, Empty, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
+import { EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 
 interface Company { id: string; domain: string; name: string | null; industry: string | null; size: string | null; description: string | null; techStack: string[]; location: string | null; linkedinUrl: string | null; emailPattern: string | null }
 interface Lead { id: string; fullName: string | null; firstName: string | null; lastName: string | null; title: string | null; seniority: string | null; email: string | null; emailStatus: string; emailConfidence: number; linkedinUrl: string | null; phone: string | null; location: string | null; score: number; scoreReasons: string[]; tags: string[]; source: string; createdAt: string; company: Company | null; custom: Record<string, unknown> }
@@ -17,6 +17,7 @@ export function LeadsPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [lists, setLists] = useState<{ id: string; name: string; count: number }[]>([]);
   const { toast, Toast } = useToast();
+  const [listErr, setListErr] = useState<string | null>(null);
 
   const q = useMemo(() => Object.fromEntries(params.entries()), [params]);
   const set = (k: string, v: string) => {
@@ -31,7 +32,10 @@ export function LeadsPage() {
   const load = useCallback((silent = false) => {
     if (!silent) setLoading(true);
     const qs = new URLSearchParams({ limit: String(limit), offset: String(offset), sort: q.sort ?? "created", order: q.order ?? "desc", ...Object.fromEntries(Object.entries(q).filter(([k, v]) => v && !["limit", "offset", "sort", "order"].includes(k))) });
-    apiFetch<{ leads: Lead[]; total: number }>("GET", `/v1/leads?${qs}`).then((r) => { setRows(r.leads); setTotal(r.total); }).finally(() => setLoading(false));
+    apiFetch<{ leads: Lead[]; total: number }>("GET", `/v1/leads?${qs}`)
+      .then((r) => { setRows(r.leads); setTotal(r.total); setListErr(null); })
+      .catch((e) => setListErr((e as Error).message))
+      .finally(() => setLoading(false));
   }, [q, limit, offset]);
   useEffect(() => { load(); }, [load]);
   useEffect(() => { if (!detail) return; const t = setInterval(() => load(true), 4000); return () => clearInterval(t); }, [detail?.id, load]);
@@ -54,12 +58,27 @@ export function LeadsPage() {
 
   const exportCsv = async () => {
     const qs = new URLSearchParams(Object.entries(q).filter(([k, v]) => v && !["limit", "offset"].includes(k)));
-    const res = await fetch(`${API_URL}/v1/leads/export.csv?${qs}`, { headers: { authorization: `Bearer ${auth.token}` } });
-    const blob = await res.blob();
-    const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob);
-    a.download = "leads.csv";
-    a.click();
+    try {
+      const res = await fetch(`${API_URL}/v1/leads/export.csv?${qs}`, { headers: { authorization: `Bearer ${auth.token}` } });
+      // res.ok was never checked, so an error response was wrapped in a Blob and downloaded
+      // as leads.csv. The user got a file named like a success containing {"error":...}.
+      if (!res.ok) {
+        const text = await res.text().catch(() => "");
+        let msg = `Export failed (${res.status})`;
+        try { msg = (JSON.parse(text) as { error?: string }).error ?? msg; } catch { /* not JSON */ }
+        toast(msg, "err");
+        return;
+      }
+      const blob = await res.blob();
+      const a = document.createElement("a");
+      const url = URL.createObjectURL(blob);
+      a.href = url;
+      a.download = "leads.csv";
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      toast((e as Error).message, "err");
+    }
   };
 
   return (
@@ -88,7 +107,7 @@ export function LeadsPage() {
         </div>
       )}
 
-      {loading ? <Spinner label="Loading leads…" /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
+      {loading ? <Spinner label="Loading leads…" /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[900px]">
             <thead className="border-b border-black/10 bg-cream">
@@ -99,7 +118,15 @@ export function LeadsPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((l) => (
-                <tr key={l.id} className="cursor-pointer hover:bg-black/[0.05]" onClick={() => setDetail(l)}>
+                <tr
+                  key={l.id}
+                  className="cursor-pointer hover:bg-black/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600"
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Open ${l.fullName ?? l.email ?? "lead"}`}
+                  onClick={() => setDetail(l)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(l); } }}
+                >
                   <td className="td" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={sel.has(l.id)} onChange={(e) => { const s = new Set(sel); e.target.checked ? s.add(l.id) : s.delete(l.id); setSel(s); }} /></td>
                   <td className="td"><div className="font-medium">{l.fullName ?? "-"}</div><div className="text-xs text-ink-400">{l.title ?? ""}</div></td>
                   <td className="td"><div>{l.company?.name ?? l.company?.domain ?? "-"}</div><div className="text-xs text-ink-400">{l.company?.industry ?? l.company?.domain ?? ""}</div></td>

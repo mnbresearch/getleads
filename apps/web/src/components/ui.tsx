@@ -81,6 +81,33 @@ export function Empty({ title, hint, action }: { title: string; hint?: string; a
   );
 }
 
+/**
+ * What a page shows when it could not load.
+ *
+ * Every list in this app used to render its "you have no data yet" empty state when the
+ * request failed, and several detail pages rendered a spinner that never resolved. Both
+ * tell the user something false: the first says their account is empty, the second says
+ * the page is still working. Neither offers a way out.
+ *
+ * Same distinction the backend makes everywhere else - a failure to look is not the same
+ * as having looked and found nothing - carried through to the screen.
+ */
+export function LoadError({ message, onRetry }: { message?: string; onRetry?: () => void }) {
+  return (
+    <div className="card flex flex-col items-center justify-center gap-3 p-12 text-center" role="alert">
+      <div className="text-base font-medium text-ink-50">This didn&apos;t load</div>
+      <div className="max-w-md text-sm text-ink-400">
+        {message || "Something went wrong fetching this. It is not that there is nothing here - we could not check."}
+      </div>
+      {onRetry && (
+        <button className="btn-secondary mt-1" onClick={onRetry}>
+          Try again
+        </button>
+      )}
+    </div>
+  );
+}
+
 export function Spinner({ label }: { label?: string }) {
   return (
     <div className="flex items-center gap-2 text-sm text-ink-400">
@@ -98,7 +125,15 @@ export function useToast() {
     return () => clearTimeout(t);
   }, [msg]);
   const Toast = msg ? (
-    <div className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm shadow-lg ${msg.kind === "ok" ? "bg-black text-white" : "bg-red-600 text-white"}`}>{msg.text}</div>
+    // role/aria-live so the app's primary feedback channel is not invisible to a screen
+    // reader. "assertive" for errors because a failed send or a failed save must interrupt.
+    <div
+      role={msg.kind === "err" ? "alert" : "status"}
+      aria-live={msg.kind === "err" ? "assertive" : "polite"}
+      className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm shadow-lg ${msg.kind === "ok" ? "bg-black text-white" : "bg-red-600 text-white"}`}
+    >
+      {msg.text}
+    </div>
   ) : null;
   return { toast: (text: string, kind: "ok" | "err" = "ok") => setMsg({ text, kind }), Toast };
 }

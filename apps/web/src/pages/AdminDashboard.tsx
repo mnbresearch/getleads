@@ -85,22 +85,39 @@ function OrgDetailPanel({ orgId, plans, onChanged, onClose }: { orgId: string; p
   const [busy, setBusy] = useState(false);
   const [creditForm, setCreditForm] = useState({ metric: "premiumLeads", action: "grant" as "grant" | "set", amount: 0 });
   const [confirmingStatus, setConfirmingStatus] = useState<string | null>(null);
+  /**
+   * These three operations change a customer's plan, deactivate their workspace and grant
+   * them credits. All three used to be try/finally with no catch: a failure re-enabled the
+   * button, showed nothing, and left the admin believing it had worked. A destructive
+   * action that fails silently is worse than one that refuses loudly.
+   */
+  const [err, setErr] = useState<string | null>(null);
+  const [okMsg, setOkMsg] = useState<string | null>(null);
 
-  const load = () => adminFetch<OrgDetail>("GET", `/v1/admin/orgs/${orgId}`).then((d) => { setDetail(d); setPlan(d.org.plan); });
+  const load = () => adminFetch<OrgDetail>("GET", `/v1/admin/orgs/${orgId}`).then((d) => { setDetail(d); setPlan(d.org.plan); setErr(null); }).catch((e) => setErr((e as Error).message));
   useEffect(() => { load(); }, [orgId]);
 
+  if (err && !detail) return <div className="card p-5 text-sm text-red-600" role="alert">Could not load this workspace: {err} <button className="ml-2 underline" onClick={load}>Retry</button></div>;
   if (!detail) return <div className="card p-5 text-sm text-ink-400">Loading…</div>;
 
-  const savePlan = async () => {
+  /** Run an admin mutation, and say plainly whether it worked. */
+  const run = async (what: string, fn: () => Promise<unknown>) => {
     setBusy(true);
+    setErr(null);
+    setOkMsg(null);
     try {
-      await adminFetch("PATCH", `/v1/admin/orgs/${orgId}/plan`, { plan });
+      await fn();
       await load();
       onChanged();
+      setOkMsg(`${what} saved`);
+    } catch (e) {
+      setErr(`${what} failed: ${(e as Error).message}`);
     } finally {
       setBusy(false);
     }
   };
+
+  const savePlan = () => run("Plan change", () => adminFetch("PATCH", `/v1/admin/orgs/${orgId}/plan`, { plan }));
 
   const setStatus = async (status: string) => {
     if (status !== "active" && confirmingStatus !== status) {
@@ -108,26 +125,10 @@ function OrgDetailPanel({ orgId, plans, onChanged, onClose }: { orgId: string; p
       return;
     }
     setConfirmingStatus(null);
-    setBusy(true);
-    try {
-      await adminFetch("PATCH", `/v1/admin/orgs/${orgId}/status`, { status });
-      await load();
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
+    await run(`Status change to ${status}`, () => adminFetch("PATCH", `/v1/admin/orgs/${orgId}/status`, { status }));
   };
 
-  const applyCredits = async () => {
-    setBusy(true);
-    try {
-      await adminFetch("PATCH", `/v1/admin/orgs/${orgId}/credits`, creditForm);
-      await load();
-      onChanged();
-    } finally {
-      setBusy(false);
-    }
-  };
+  const applyCredits = () => run("Credit change", () => adminFetch("PATCH", `/v1/admin/orgs/${orgId}/credits`, creditForm));
 
   return (
     <div className="card sticky top-4 space-y-5 p-5">
@@ -138,6 +139,17 @@ function OrgDetailPanel({ orgId, plans, onChanged, onClose }: { orgId: string; p
         </div>
         <button className="text-sm text-ink-400 hover:text-ink-50" onClick={onClose}>Close</button>
       </div>
+
+      {err && (
+        <div className="rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-700" role="alert">
+          {err}
+        </div>
+      )}
+      {okMsg && !err && (
+        <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 text-sm text-emerald-700" role="status">
+          {okMsg}
+        </div>
+      )}
 
       <div>
         <div className="label">Plan</div>
@@ -211,7 +223,15 @@ function OrgsTab({ plans }: { plans: Plan[] }) {
           <thead><tr className="text-left text-ink-400"><th className="th">Workspace</th><th className="th">Plan</th><th className="th">Status</th><th className="th">Leads</th><th className="th">Premium</th><th className="th">Users</th><th className="th">Joined</th></tr></thead>
           <tbody>
             {orgs?.map((o) => (
-              <tr key={o.id} className={`cursor-pointer hover:bg-black/[0.03] ${selected === o.id ? "bg-brand-50" : ""}`} onClick={() => setSelected(o.id)}>
+              <tr
+                key={o.id}
+                className={`cursor-pointer hover:bg-black/[0.03] focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600 ${selected === o.id ? "bg-brand-50" : ""}`}
+                tabIndex={0}
+                role="button"
+                aria-label={`Select workspace ${o.name}`}
+                onClick={() => setSelected(o.id)}
+                onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setSelected(o.id); } }}
+              >
                 <td className="td"><div className="font-medium text-ink-50">{o.name}</div><div className="text-xs text-ink-400">{o.ownerEmail ?? "—"}</div></td>
                 <td className="td capitalize">{o.plan}</td>
                 <td className="td"><StatusBadge status={o.status} /></td>

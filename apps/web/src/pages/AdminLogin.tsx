@@ -32,8 +32,8 @@ export function AdminLoginPage() {
       <p className="mb-6 text-center text-sm text-ink-400">Admin dashboard</p>
       <form onSubmit={submit} className="card space-y-3 p-6">
         <h1 className="text-lg font-semibold text-ink-50">Sign in</h1>
-        <div><label className="label">Admin email</label><input className="input" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
-        <div><label className="label">Password</label><input className="input" type="password" required value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></div>
+        <div><label className="label" htmlFor="admin-email">Admin email</label><input id="admin-email" className="input" autoComplete="email" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
+        <div><label className="label" htmlFor="admin-password">Password</label><input id="admin-password" className="input" autoComplete="current-password" type="password" required value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></div>
         {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600">{err}</div>}
         <button className="btn-primary w-full justify-center" disabled={busy}>{busy ? "…" : "Sign in"}</button>
       </form>

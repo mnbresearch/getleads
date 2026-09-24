@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Empty, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
+import { Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 
 interface Pixel { id: string; key: string; name: string; snippet: string; active: boolean; createdAt: string }
 interface VC { id: string; domain: string; name: string | null; firstSeenAt: string; lastSeenAt: string; visits: number; sessions: number; pages: Record<string, number>; intentScore: number; status: string; leadsFound: number; company: { name: string | null; industry: string | null; description: string | null; location: string | null; techStack: string[]; openRoles: number | null } | null }
@@ -16,9 +16,13 @@ export function VisitorsPage() {
   const [detail, setDetail] = useState<VC | null>(null);
   const [busy, setBusy] = useState(false);
   const { toast, Toast } = useToast();
+  const [listErr, setListErr] = useState<string | null>(null);
   const load = useCallback(() => {
     apiFetch<{ pixels: Pixel[] }>("GET", "/v1/visitors/pixels").then((r) => setPixels(r.pixels));
-    apiFetch<{ companies: VC[]; totals: typeof totals }>("GET", `/v1/visitors?days=${days}${status ? `&status=${status}` : ""}`).then((r) => { setRows(r.companies); setTotals(r.totals); }).finally(() => setLoading(false));
+    apiFetch<{ companies: VC[]; totals: typeof totals }>("GET", `/v1/visitors?days=${days}${status ? `&status=${status}` : ""}`)
+      .then((r) => { setRows(r.companies); setTotals(r.totals); setListErr(null); })
+      .catch((e) => setListErr((e as Error).message))
+      .finally(() => setLoading(false));
   }, [days, status]);
   useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
 
@@ -54,14 +58,21 @@ export function VisitorsPage() {
         <select className="input w-36" value={days} onChange={(e) => setDays(Number(e.target.value))}><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option></select>
         <select className="input w-40" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option><option value="new">New</option><option value="reviewed">Reviewed</option><option value="contacted">Contacted</option><option value="ignored">Ignored</option></select>
       </div>
-      {loading ? <Spinner /> : rows.length === 0 ? <Empty title="No identified companies yet" hint="Once the pixel is installed, business visitors appear here within seconds of their visit. Consumer ISPs and cloud/hosting IPs are filtered out." /> : (
+      {loading ? <Spinner /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No identified companies yet" hint="Once the pixel is installed, business visitors appear here within seconds of their visit. Consumer ISPs and cloud/hosting IPs are filtered out." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[800px]">
             <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Company</th><th className="th">Intent</th><th className="th">Top pages</th><th className="th">Visits</th><th className="th">Last seen</th><th className="th">Status</th><th className="th"></th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((v) => (
                 <tr key={v.id} className="hover:bg-black/[0.05]">
-                  <td className="td cursor-pointer" onClick={() => setDetail(v)}><div className="font-medium">{v.company?.name ?? v.name ?? v.domain}</div><div className="text-xs text-ink-400">{v.domain}{v.company?.industry ? ` · ${v.company.industry}` : ""}{v.company?.location ? ` · ${v.company.location}` : ""}</div></td>
+                  <td
+                    className="td cursor-pointer focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600"
+                    tabIndex={0}
+                    role="button"
+                    aria-label={`Open ${v.company?.name ?? v.name ?? v.domain}`}
+                    onClick={() => setDetail(v)}
+                    onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(v); } }}
+                  ><div className="font-medium">{v.company?.name ?? v.name ?? v.domain}</div><div className="text-xs text-ink-400">{v.domain}{v.company?.industry ? ` · ${v.company.industry}` : ""}{v.company?.location ? ` · ${v.company.location}` : ""}</div></td>
                   <td className="td"><ScoreBar score={v.intentScore} /></td>
                   <td className="td text-xs text-ink-300">{Object.entries(v.pages).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([p, n]) => <div key={p}>{p} <span className="text-ink-500">×{n}</span></div>)}</td>
                   <td className="td tabular-nums">{v.visits} <span className="text-xs text-ink-500">/ {v.sessions} sessions</span></td>

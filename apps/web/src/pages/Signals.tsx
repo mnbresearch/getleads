@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Empty, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
+import { Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 
 interface Signal { id: string; type: string; companyName: string | null; companyDomain: string | null; title: string; summary: string | null; url: string; source: string | null; amountUsd: number | null; round: string | null; confidence: number; occurredAt: string | null; createdAt: string; match: { status: string; leadsCreated: number } | null }
 interface Sub { id: string; name: string; types: string[]; keywords: string[]; industries: string[]; locations: string[]; targetTitles: string[]; autoCreateLeads: boolean; active: boolean; lastRunAt: string | null; stats: Record<string, number> }
@@ -25,8 +25,12 @@ export function SignalsPage() {
   const [monOpen, setMonOpen] = useState(false);
   const [results, setResults] = useState<{ m: Monitor; rows: Result[] } | null>(null);
   const { toast, Toast } = useToast();
+  const [listErr, setListErr] = useState<string | null>(null);
   const load = useCallback(() => {
-    apiFetch<{ signals: Signal[] }>("GET", `/v1/signals?days=14&limit=200${type ? `&type=${type}` : ""}${q ? `&q=${encodeURIComponent(q)}` : ""}${matched ? "&matched=true" : ""}`).then((r) => setSignals(r.signals)).finally(() => setLoading(false));
+    apiFetch<{ signals: Signal[] }>("GET", `/v1/signals?days=14&limit=200${type ? `&type=${type}` : ""}${q ? `&q=${encodeURIComponent(q)}` : ""}${matched ? "&matched=true" : ""}`)
+      .then((r) => { setSignals(r.signals); setListErr(null); })
+      .catch((e) => setListErr((e as Error).message))
+      .finally(() => setLoading(false));
     apiFetch<{ subscriptions: Sub[] }>("GET", "/v1/signals/subscriptions").then((r) => setSubs(r.subscriptions));
     apiFetch<{ monitors: Monitor[] }>("GET", "/v1/signals/monitors").then((r) => setMons(r.monitors));
   }, [type, q, matched]);
@@ -52,7 +56,7 @@ export function SignalsPage() {
           <select className="input w-40" value={type} onChange={(e) => setType(e.target.value)}><option value="">All types</option>{TYPES.map((t) => <option key={t}>{t}</option>)}</select>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={matched} onChange={(e) => setMatched(e.target.checked)} /> Only matched to my subscriptions</label>
         </div>
-        {loading ? <Spinner /> : signals.length === 0 ? <Empty title="No signals yet" hint='Click "Scan now" to pull the last 7 days of funding, acquisition and leadership news, or create a subscription to scan automatically every 6 hours.' /> : (
+        {loading ? <Spinner /> : listErr && signals.length === 0 ? <LoadError message={listErr} onRetry={load} /> : signals.length === 0 ? <Empty title="No signals yet" hint='Click "Scan now" to pull the last 7 days of funding, acquisition and leadership news, or create a subscription to scan automatically every 6 hours.' /> : (
           <div className="card divide-y divide-slate-100">
             {signals.map((s) => (
               <div key={s.id} className="flex flex-wrap items-start gap-3 p-3">

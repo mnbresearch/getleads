@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../lib/api";
-import { Empty, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
+import { Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 
 interface Rate { value: number; ci: { lower: number; upper: number }; n: number; positives: number }
 interface Prompt { id: string; text: string; topic: string | null; samplesPerRun: number; active: boolean; lastRunAt: string | null }
@@ -29,8 +29,14 @@ export function VisibilityPage() {
   const [busy, setBusy] = useState<string | null>(null);
   const { toast, Toast } = useToast();
 
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+
   const load = useCallback(() => {
-    apiFetch<Overview>("GET", "/v1/visibility/overview").then(setD).catch((e) => toast((e as Error).message, "err"));
+    setLoadErr(null);
+    // The catch used to only raise a toast - but the early return below unmounted the page
+    // before {Toast} ever rendered, so a failure showed a spinner that span forever with no
+    // message at all. The error now has somewhere to live that the user can actually see.
+    apiFetch<Overview>("GET", "/v1/visibility/overview").then(setD).catch((e) => setLoadErr((e as Error).message));
     apiFetch<{ prompts: Prompt[] }>("GET", "/v1/visibility/prompts").then((r) => setPrompts(r.prompts)).catch(() => setPrompts([]));
     apiFetch<{ engines: typeof engines }>("GET", "/v1/visibility/engines").then((r) => setEngines(r.engines ?? [])).catch(() => setEngines([]));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -45,6 +51,13 @@ export function VisibilityPage() {
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(null); }
   };
 
+  if (loadErr) {
+    return (
+      <Page title="AI visibility">
+        <LoadError message={loadErr} onRetry={load} />
+      </Page>
+    );
+  }
   if (!d) return <Page title="AI visibility"><Spinner label="Loading…" /></Page>;
 
   return (

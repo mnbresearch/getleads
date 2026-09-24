@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
-import { EmailStatusBadge, Empty, Modal, Page, Spinner, useToast } from "../components/ui";
+import { EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 
 interface Step { delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
 interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; steps?: Step[]; createdAt: string }
@@ -23,8 +23,13 @@ export function CampaignsPage() {
   const [sysAvail, setSysAvail] = useState(false);
   const { toast, Toast } = useToast();
   const navigate = useNavigate();
+  // Without this the list rendered "No campaigns yet" whenever the request failed, telling
+  // a customer with live campaigns that they had none.
+  const [listErr, setListErr] = useState<string | null>(null);
   const load = useCallback(() => {
-    apiFetch<{ campaigns: Campaign[] }>("GET", "/v1/campaigns").then((r) => setRows(r.campaigns));
+    apiFetch<{ campaigns: Campaign[] }>("GET", "/v1/campaigns")
+      .then((r) => { setRows(r.campaigns); setListErr(null); })
+      .catch((e) => setListErr((e as Error).message));
     apiFetch<{ emailAccounts: Account[]; systemProviderAvailable: boolean }>("GET", "/v1/campaigns/email-accounts").then((r) => { setAccounts(r.emailAccounts); setSysAvail(r.systemProviderAvailable); });
     apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists));
     apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
@@ -36,13 +41,21 @@ export function CampaignsPage() {
       {Toast}
       <SendingHealthPanel />
       {accounts.length === 0 && <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>}
-      {rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
+      {listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">
             <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Campaign</th><th className="th">Status</th><th className="th">Contacts</th><th className="th">Sent</th><th className="th">Opened</th><th className="th">Replied</th><th className="th">Created</th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((c) => (
-                <tr key={c.id} className="cursor-pointer hover:bg-black/[0.05]" onClick={() => navigate(`/campaigns/${c.id}`)}>
+                <tr
+                  key={c.id}
+                  className="cursor-pointer hover:bg-black/[0.05] focus-visible:outline focus-visible:outline-2 focus-visible:outline-brand-600"
+                  tabIndex={0}
+                  role="button"
+                  aria-label={`Open campaign ${c.name}`}
+                  onClick={() => navigate(`/campaigns/${c.id}`)}
+                  onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); navigate(`/campaigns/${c.id}`); } }}
+                >
                   <td className="td font-medium">{c.name}</td>
                   <td className="td"><StatusBadge s={c.status} /></td>
                   <td className="td tabular-nums">{c.contacts}</td>
@@ -217,9 +230,14 @@ export function CampaignDetail() {
   const [lists, setLists] = useState<{ id: string; name: string; count: number }[]>([]);
   const [icps, setIcps] = useState<{ id: string; name: string }[]>([]);
   const { toast, Toast } = useToast();
+  const [loadErr, setLoadErr] = useState<string | null>(null);
   const load = useCallback(() => {
     if (!id) return;
-    apiFetch<Campaign>("GET", `/v1/campaigns/${id}`).then(setC);
+    // Uncaught before, so a deleted campaign or a stale bookmark left a spinner turning
+    // forever while the 6s poll silently re-failed behind it.
+    apiFetch<Campaign>("GET", `/v1/campaigns/${id}`)
+      .then((r) => { setC(r); setLoadErr(null); })
+      .catch((e) => setLoadErr((e as Error).message));
     apiFetch<typeof stats>("GET", `/v1/campaigns/${id}/stats`).then(setStats);
     apiFetch<{ contacts: typeof contacts }>("GET", `/v1/campaigns/${id}/contacts`).then((r) => setContacts(r.contacts));
     apiFetch<{ messages: typeof messages }>("GET", `/v1/campaigns/${id}/messages`).then((r) => setMessages(r.messages));
@@ -230,6 +248,13 @@ export function CampaignDetail() {
     apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists));
     apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
   }, []);
+  if (loadErr && !c) {
+    return (
+      <Page title="Campaign" actions={<Link to="/campaigns" className="btn-secondary">← All campaigns</Link>}>
+        <LoadError message={loadErr} onRetry={load} />
+      </Page>
+    );
+  }
   if (!c) return <Page title="Campaign"><Spinner /></Page>;
   const act = (path: string) => apiFetch("POST", `/v1/campaigns/${c.id}/${path}`).then(() => { toast("Done"); load(); }).catch((e) => toast(e.message, "err"));
   return (

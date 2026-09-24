@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Empty, Page, Spinner, useToast } from "../components/ui";
+import { Empty, LoadError, Page, Spinner, useToast } from "../components/ui";
 
 interface Task { id: string; type: string; title: string; body: string | null; dueAt: string; status: string; campaignId: string | null; lead: { id: string; fullName: string | null; title: string | null; email: string | null; linkedinUrl: string | null; phone: string | null; whatsapp: string | null; company: { name: string | null; domain: string } | null } | null }
 
@@ -11,7 +11,15 @@ export function TasksPage() {
   const [status, setStatus] = useState("pending");
   const [loading, setLoading] = useState(true);
   const { toast, Toast } = useToast();
-  const load = useCallback(() => { apiFetch<{ tasks: Task[] }>("GET", `/v1/tools/tasks?status=${status}`).then((r) => setRows(r.tasks)).finally(() => setLoading(false)); }, [status]);
+  const [listErr, setListErr] = useState<string | null>(null);
+  const load = useCallback(() => {
+    // .finally without .catch turned a server error into "No tasks", which reads as an
+    // empty queue rather than as a page that failed to load.
+    apiFetch<{ tasks: Task[] }>("GET", `/v1/tools/tasks?status=${status}`)
+      .then((r) => { setRows(r.tasks); setListErr(null); })
+      .catch((e) => setListErr((e as Error).message))
+      .finally(() => setLoading(false));
+  }, [status]);
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
   const done = async (t: Task, outcome: "done" | "skipped") => {
     try { await apiFetch("POST", `/v1/tools/tasks/${t.id}/complete`, { outcome }); toast(outcome === "done" ? "Done - sequence continues" : "Skipped"); load(); } catch (e) { toast((e as Error).message, "err"); }
@@ -19,7 +27,7 @@ export function TasksPage() {
   return (
     <Page title="Tasks" subtitle="Human steps from your multichannel sequences: LinkedIn connects and messages, calls, WhatsApp. Complete a task and the sequence moves to the next step." actions={<select className="input w-36" value={status} onChange={(e) => setStatus(e.target.value)}><option value="pending">Pending</option><option value="done">Done</option><option value="skipped">Skipped</option><option value="all">All</option></select>}>
       {Toast}
-      {loading ? <Spinner /> : rows.length === 0 ? <Empty title="No tasks" hint="Add a LinkedIn, call or WhatsApp step to a campaign and tasks will appear here as contacts reach that step." /> : (
+      {loading ? <Spinner /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No tasks" hint="Add a LinkedIn, call or WhatsApp step to a campaign and tasks will appear here as contacts reach that step." /> : (
         <div className="space-y-3">
           {rows.map((t) => (
             <div key={t.id} className="card p-4">
