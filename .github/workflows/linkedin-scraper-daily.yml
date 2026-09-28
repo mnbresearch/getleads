@@ -1,0 +1,51 @@
+name: LinkedIn Scraper - Daily
+
+on:
+  schedule:
+    - cron: "0 9 * * *"  # Daily at 9 AM UTC
+  workflow_dispatch:     # Allow manual trigger
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Install dependencies
+        run: npm install --legacy-peer-deps
+      
+      - name: Build all packages
+        run: npm run build
+      
+      - name: Run LinkedIn Scraper
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_KEY: ${{ secrets.SUPABASE_KEY }}
+          DEFAULT_ORG_ID: ${{ secrets.DEFAULT_ORG_ID }}
+          SCRAPER_QUERY: "VP Sales at B2B SaaS companies"
+          SCRAPER_COUNT: "500"
+        run: |
+          npx ts-node -e "
+            import('./apps/api/dist/services/agents/linkedin-scraper.js')
+              .then(m => m.runLinkedInScraper(process.env.DEFAULT_ORG_ID || 'test-org', process.env.SCRAPER_QUERY, parseInt(process.env.SCRAPER_COUNT)))
+              .then(result => {
+                console.log('✅ Scraper completed:', result);
+                process.exit(0);
+              })
+              .catch(err => {
+                console.error('❌ Scraper failed:', err.message);
+                process.exit(1);
+              });
+          "
+      
+      - name: Report Results
+        if: always()
+        run: echo "LinkedIn scraper job completed"

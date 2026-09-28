@@ -15,6 +15,7 @@ import { campaignRoutes } from "./routes/campaigns.js";
 import { trackRoutes } from "./routes/track.js";
 import { miscRoutes } from "./routes/misc.js";
 import { agentRoutes } from "./routes/agent.js";
+import { automationRoutes } from "./routes/automation.js";
 import { pixelPublic, visitorRoutes } from "./routes/visitors.js";
 import { signalRoutes } from "./routes/signals.js";
 import { joinRoutes, toolRoutes } from "./routes/tools.js";
@@ -64,6 +65,7 @@ export function createApp() {
   app.route("/v1/campaigns", campaignRoutes);
   app.route("/v1/visibility", visibilityRoutes);
   app.route("/v1/agent", agentRoutes);
+  app.route("/v1/automation", automationRoutes);
   app.route("/v1/visitors", visitorRoutes);
   app.route("/v1/signals", signalRoutes);
   app.route("/v1/tools", toolRoutes);
