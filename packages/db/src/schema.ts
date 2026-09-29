@@ -15,6 +15,9 @@ import {
   uniqueIndex,
   index,
   primaryKey,
+  // Needed to annotate the one circular reference (icps.client_id -> clients, clients.icp_id
+  // -> icps), which TypeScript cannot otherwise infer.
+  type AnyPgColumn,
 } from "drizzle-orm/pg-core";
 
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
@@ -119,6 +122,35 @@ export const icps = pgTable("icps", {
   // Conversational ICP assistant transcript (see POST /v1/icps/:id/chat). Kept short by the
   // route (last ~20 turns) so it never becomes a meaningful storage or prompt-size concern.
   chatHistory: jsonb("chat_history").$type<{ role: "user" | "assistant"; content: string }[]>().notNull().default([]),
+  /** The client this ICP describes, when the workspace runs pipeline for several. */
+  clientId: uuid("client_id").references((): AnyPgColumn => clients.id, { onDelete: "set null" }),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  updatedAt: ts("updated_at").notNull().defaultNow(),
+});
+
+/**
+ * A client of the workspace - for an agency, one of the companies it generates pipeline for.
+ *
+ * A sub-account rather than a separate workspace, so an agency keeps one login, one sending
+ * setup and one quota, sees every client in one view, and can route a lead that does not fit
+ * one client to another that it does fit instead of discarding it. See migration 0013.
+ */
+export const clients = pgTable("clients", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  name: text("name").notNull(),
+  domain: text("domain"),
+  industry: text("industry"),
+  /** active | paused | archived */
+  status: text("status").notNull().default("active"),
+  color: text("color"),
+  icpId: uuid("icp_id").references(() => icps.id, { onDelete: "set null" }),
+  monthlyLeadTarget: integer("monthly_lead_target"),
+  notes: text("notes"),
+  /** Read-only report link. Null = sharing off. */
+  shareToken: text("share_token").unique(),
+  /** Show delivery against target in the shared report. Opt-in. */
+  reportShowTarget: boolean("report_show_target").notNull().default(false),
   createdAt: ts("created_at").notNull().defaultNow(),
   updatedAt: ts("updated_at").notNull().defaultNow(),
 });
@@ -165,6 +197,14 @@ export const leads = pgTable(
     jobCheckedAt: ts("job_checked_at"),
     /** When a check was last attempted, answered or not. Drives retry backoff. */
     jobCheckAttemptedAt: ts("job_check_attempted_at"),
+    /**
+     * The one client this lead belongs to, or null for the unassigned pool.
+     *
+     * One owner, deliberately: a person claimed by two clients of the same agency would be
+     * emailed twice from the same sending setup.
+     */
+    clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
+    clientAssignedAt: ts("client_assigned_at"),
     enrichedAt: ts("enriched_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
@@ -182,6 +222,7 @@ export const lists = pgTable("lists", {
   orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   name: text("name").notNull(),
   description: text("description"),
+  clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
   createdAt: ts("created_at").notNull().defaultNow(),
 });
 
@@ -203,6 +244,8 @@ export const searches = pgTable("searches", {
   resultCount: integer("result_count").notNull().default(0),
   jobId: uuid("job_id"),
   error: text("error"),
+  /** Leads this search creates are assigned to this client, unless another client owns them. */
+  clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
   createdAt: ts("created_at").notNull().defaultNow(),
   completedAt: ts("completed_at"),
 });
@@ -231,6 +274,7 @@ export const campaigns = pgTable("campaigns", {
   icpId: uuid("icp_id").references(() => icps.id, { onDelete: "set null" }),
   listId: uuid("list_id").references(() => lists.id, { onDelete: "set null" }),
   emailAccountId: uuid("email_account_id").references(() => emailAccounts.id, { onDelete: "set null" }),
+  clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
   settings: jsonb("settings").$type<CampaignSettings>().notNull().default({} as CampaignSettings),
   stats: jsonb("stats").$type<Record<string, number>>().notNull().default({}),
   createdAt: ts("created_at").notNull().defaultNow(),
@@ -676,6 +720,7 @@ export type Company = typeof companies.$inferSelect;
 export type Lead = typeof leads.$inferSelect;
 export type NewLead = typeof leads.$inferInsert;
 export type Icp = typeof icps.$inferSelect;
+export type Client = typeof clients.$inferSelect;
 export type List = typeof lists.$inferSelect;
 export type Campaign = typeof campaigns.$inferSelect;
 export type SequenceStep = typeof sequenceSteps.$inferSelect;

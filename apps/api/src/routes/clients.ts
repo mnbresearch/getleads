@@ -1,0 +1,161 @@
+import { Hono } from "hono";
+import { zValidator } from "@hono/zod-validator";
+import { z } from "zod";
+import { and, enqueue, eq, getDb, listLeads, lists } from "@prospex/db";
+import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
+import { notFound } from "../lib/errors.js";
+import {
+  assignLeads,
+  attentionLeadIds,
+  autoRoute,
+  clientDetail,
+  clientOverview,
+  createClient,
+  deleteClient,
+  disableSharing,
+  enableSharing,
+  publicReport,
+  requireClient,
+  routeSuggestions,
+  unassignLeads,
+  updateClient,
+} from "../services/clients.js";
+
+/**
+ * Client workspaces. See services/clients.ts for the rules this enforces.
+ *
+ * Route order matters in Hono: the fixed paths (/routing, /unassign, /pool/...) are declared
+ * before /:id so they are never captured as an id.
+ */
+export const clientRoutes = new Hono<Env>();
+clientRoutes.use("*", requireAuth);
+
+const clientInput = z.object({
+  name: z.string().trim().min(1).max(120),
+  domain: z.string().max(253).nullish(),
+  industry: z.string().max(120).nullish(),
+  status: z.enum(["active", "paused", "archived"]).optional(),
+  // A CSS hex colour, nothing else: it is rendered into a style attribute.
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/).nullish(),
+  icpId: z.string().uuid().nullish(),
+  monthlyLeadTarget: z.number().int().min(0).max(1_000_000).nullish(),
+  notes: z.string().max(5000).nullish(),
+  reportShowTarget: z.boolean().optional(),
+});
+
+const leadIdsInput = z.object({ leadIds: z.array(z.string().uuid()).min(1).max(5000) });
+const BUCKETS = ["noEmail", "unverified", "badEmail", "readyButIdle"] as const;
+
+clientRoutes.get("/", zValidator("query", z.object({ includeArchived: z.enum(["true", "false"]).optional() })), async (c) =>
+  c.json(await clientOverview(orgId(c), { includeArchived: c.req.valid("query").includeArchived === "true" })),
+);
+
+clientRoutes.post("/", zValidator("json", clientInput), async (c) => c.json(await createClient(orgId(c), c.req.valid("json")), 201));
+
+// ── Pool routing ──
+clientRoutes.get("/routing", zValidator("query", z.object({ limit: z.coerce.number().min(1).max(1000).default(200) })), async (c) =>
+  c.json(await routeSuggestions(orgId(c), { limit: c.req.valid("query").limit })),
+);
+
+clientRoutes.post("/routing/auto", rateLimit({ perMinute: 6 }), zValidator("json", z.object({ limit: z.number().int().min(1).max(1000).default(500) })), async (c) =>
+  c.json(await autoRoute(orgId(c), { limit: c.req.valid("json").limit })),
+);
+
+clientRoutes.post("/unassign", zValidator("json", leadIdsInput), async (c) => c.json(await unassignLeads(orgId(c), c.req.valid("json").leadIds)));
+
+/** The unassigned pool's own attention buckets, with the same actions a client has. */
+clientRoutes.post(
+  "/pool/act",
+  rateLimit({ perMinute: 10 }),
+  zValidator("json", z.object({ bucket: z.enum(BUCKETS), action: z.enum(["enrich", "verify"]) })),
+  async (c) => {
+    const b = c.req.valid("json");
+    return c.json(await act(orgId(c), null, b.bucket, b.action));
+  },
+);
+
+// ── One client ──
+clientRoutes.get("/:id", async (c) => c.json(await clientDetail(orgId(c), c.req.param("id"))));
+
+clientRoutes.patch("/:id", zValidator("json", clientInput.partial()), async (c) => c.json(await updateClient(orgId(c), c.req.param("id"), c.req.valid("json"))));
+
+clientRoutes.delete("/:id", async (c) => c.json(await deleteClient(orgId(c), c.req.param("id"))));
+
+clientRoutes.post("/:id/assign", zValidator("json", leadIdsInput.extend({ move: z.boolean().default(false) })), async (c) => {
+  const b = c.req.valid("json");
+  return c.json(await assignLeads(orgId(c), c.req.param("id"), b.leadIds, { move: b.move }));
+});
+
+clientRoutes.get("/:id/attention/:bucket", async (c) => {
+  const bucket = c.req.param("bucket") as (typeof BUCKETS)[number];
+  if (!BUCKETS.includes(bucket)) throw notFound("Bucket");
+  await requireClient(orgId(c), c.req.param("id"));
+  return c.json({ leadIds: await attentionLeadIds(orgId(c), c.req.param("id"), bucket) });
+});
+
+/**
+ * Act on an attention bucket in one click.
+ *
+ * Every action here is one that recovers value from a lead rather than discarding it:
+ * enrich finds the missing (or a correct replacement) address, verify checks an unchecked
+ * one, and "list" gathers ready-but-idle leads into a list a campaign can be pointed at.
+ */
+clientRoutes.post(
+  "/:id/act",
+  rateLimit({ perMinute: 10 }),
+  zValidator("json", z.object({ bucket: z.enum(BUCKETS), action: z.enum(["enrich", "verify", "list"]) })),
+  async (c) => {
+    const b = c.req.valid("json");
+    await requireClient(orgId(c), c.req.param("id"));
+    return c.json(await act(orgId(c), c.req.param("id"), b.bucket, b.action));
+  },
+);
+
+// ── Sharing ──
+clientRoutes.post("/:id/share", async (c) => c.json(await enableSharing(orgId(c), c.req.param("id"))));
+clientRoutes.delete("/:id/share", async (c) => c.json(await disableSharing(orgId(c), c.req.param("id"))));
+
+async function act(oid: string, clientId: string | null, bucket: (typeof BUCKETS)[number], action: "enrich" | "verify" | "list") {
+  const { db } = getDb();
+  const ids = await attentionLeadIds(oid, clientId, bucket);
+  if (ids.length === 0) return { action, bucket, queued: 0, note: "Nothing in that bucket right now." };
+
+  if (action === "enrich") {
+    // Charged per lookup inside the job, on the first attempt only - queueing is free.
+    const job = await enqueue(db, "leads.bulk_enrich", { leadIds: ids }, { orgId: oid });
+    return { action, bucket, queued: ids.length, jobId: job.id };
+  }
+  if (action === "verify") {
+    for (const id of ids) await enqueue(db, "lead.verify", { leadId: id }, { orgId: oid });
+    return { action, bucket, queued: ids.length };
+  }
+  // "list": a list named for the client, reused on every click, that a campaign can target.
+  if (!clientId) return { action, bucket, queued: 0, note: "Lists are per client. Assign these leads to a client first." };
+  const client = await requireClient(oid, clientId);
+  const name = `${client.name}: ready to contact`;
+  let list = await db.query.lists.findFirst({ where: and(eq(lists.orgId, oid), eq(lists.clientId, clientId), eq(lists.name, name)) });
+  if (!list) [list] = await db.insert(lists).values({ orgId: oid, clientId, name, description: "Verified leads nobody had contacted yet, gathered from the client dashboard." }).returning();
+  const inserted = await db
+    .insert(listLeads)
+    .values(ids.map((leadId) => ({ listId: list!.id, leadId })))
+    .onConflictDoNothing()
+    .returning({ leadId: listLeads.leadId });
+  return { action, bucket, listId: list.id, listName: list.name, added: inserted.length, alreadyOnList: ids.length - inserted.length };
+}
+
+/**
+ * The client-facing report. No auth: the unguessable token in the URL is the credential.
+ * Rate-limited per IP, because a public endpoint keyed on a secret is an endpoint someone
+ * will eventually try to enumerate.
+ */
+export const clientReportPublic = new Hono<Env>();
+clientReportPublic.get("/clients/report/:token", rateLimit({ perMinute: 30 }), async (c) => {
+  const r = await publicReport(c.req.param("token"));
+  // One answer for "no such token" and "sharing was turned off": telling them apart would
+  // confirm which tokens once existed.
+  if (!r) throw notFound("Report");
+  c.header("cache-control", "private, no-store");
+  c.header("x-robots-tag", "noindex");
+  return c.json(r);
+});
+

@@ -15,7 +15,7 @@ import { runMonitor } from "./services/monitors.js";
 import { runAutopilot } from "./services/autopilot.js";
 import { sendMail } from "./lib/mailer.js";
 
-const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey });
+const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
 
 /**
  * The six self-perpetuating schedulers, and how long each waits before its next run.
@@ -115,6 +115,13 @@ export const handlers: Record<string, JobHandler> = {
         const { listLeads } = await import("@prospex/db");
         for (const leadId of ids) await db.insert(listLeads).values({ listId: String(job.payload.listId), leadId }).onConflictDoNothing();
       }
+      // A search run for a client delivers to that client. People another client already
+      // owns stay with that client and are counted, never silently taken.
+      let clientClaim: { claimed: number; ownedByAnotherClient: number } | null = null;
+      if (job.payload.clientId && ids.length) {
+        const { claimSearchLeads } = await import("./services/clients.js");
+        clientClaim = await claimSearchLeads(db, orgId, String(job.payload.clientId), ids);
+      }
       // A search cut short by quota used to be written as plainly "done", so a customer who
       // hit their limit saw a completed search with fewer leads and no reason. The pipeline
       // found more; the plan would not let them have them. Saying so is the difference
@@ -145,7 +152,7 @@ export const handlers: Record<string, JobHandler> = {
         { searchId, results: ids.length, created, found: results.length, quotaTruncated: truncated, providerFailures },
         { type: "search", id: searchId },
       );
-      return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated };
+      return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated, clientClaim };
     } catch (e) {
       await db.update(searches).set({ status: "failed", error: (e as Error).message, completedAt: new Date() }).where(eq(searches.id, searchId));
       throw e;

@@ -1299,6 +1299,241 @@ suite("database integration", () => {
     });
   });
 
+  /**
+   * Client workspaces: every lead belongs to a client or waits in the pool.
+   *
+   * These pin the rules that stop leads going to waste or going to the wrong place: one
+   * owner per lead, counts that say what was NOT done, routing that acts only on evidence,
+   * and a public report that never carries contact data.
+   */
+  describe("client workspaces", () => {
+    let svc: any;
+    beforeAll(async () => {
+      svc = await import("./services/clients.js");
+    });
+
+    async function lead(orgId: string, patch: Record<string, unknown> = {}) {
+      const [row] = await db
+        .insert(schema.leads)
+        .values({ orgId, fullName: "Person", email: `cw-${randomUUID().slice(0, 8)}@example.com`, emailStatus: "valid", ...patch })
+        .returning();
+      return row;
+    }
+
+    async function companyRow(orgId: string, patch: Record<string, unknown>) {
+      const [row] = await db
+        .insert(schema.companies)
+        .values({ orgId, domain: `${randomUUID().slice(0, 8)}.example.com`, ...patch })
+        .returning();
+      return row;
+    }
+
+    async function icp(orgId: string, criteria: Record<string, unknown>) {
+      const [row] = await db.insert(schema.icps).values({ orgId, name: `icp-${randomUUID().slice(0, 6)}`, criteria }).returning();
+      return row;
+    }
+
+    it("creates a client and reports what was delivered to it", async () => {
+      const org = await newOrg("cw-overview");
+      const c = await svc.createClient(org.id, { name: "Acme", monthlyLeadTarget: 100 });
+      const a = await lead(org.id);
+      const b = await lead(org.id, { email: null, emailStatus: "unknown" });
+      await lead(org.id); // stays in the pool
+
+      const r = await svc.assignLeads(org.id, c.id, [a.id, b.id]);
+      expect(r.assigned).toBe(2);
+
+      const o = await svc.clientOverview(org.id);
+      const row = o.clients.find((x: any) => x.id === c.id);
+      expect(row.stats.leads).toBe(2);
+      expect(row.stats.deliveredThisMonth).toBe(2);
+      expect(row.stats.verified).toBe(1);
+      expect(row.target.target).toBe(100);
+      expect(row.attention.noEmail).toBe(1);
+      expect(o.pool.leads).toBe(1);
+      // The share token is a credential and must not leak through the list endpoint.
+      expect(row.shareToken).toBeUndefined();
+    });
+
+    it("never takes a lead from another client unless a move is asked for, and says so", async () => {
+      const org = await newOrg("cw-exclusive");
+      const a = await svc.createClient(org.id, { name: "A" });
+      const b = await svc.createClient(org.id, { name: "B" });
+      const l = await lead(org.id);
+
+      await svc.assignLeads(org.id, a.id, [l.id]);
+      const again = await svc.assignLeads(org.id, b.id, [l.id, randomUUID()]);
+      expect(again.assigned).toBe(0);
+      expect(again.ownedByAnotherClient).toBe(1);
+      expect(again.notFound).toBe(1);
+
+      const same = await svc.assignLeads(org.id, a.id, [l.id]);
+      expect(same.alreadyThisClient).toBe(1);
+
+      const moved = await svc.assignLeads(org.id, b.id, [l.id], { move: true });
+      expect(moved.assigned).toBe(1);
+      const after = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, l.id) });
+      expect(after.clientId).toBe(b.id);
+    });
+
+    it("keeps one workspace's leads and clients out of another's", async () => {
+      const orgA = await newOrg("cw-ten-a");
+      const orgB = await newOrg("cw-ten-b");
+      const clientA = await svc.createClient(orgA.id, { name: "Mine" });
+      const theirs = await lead(orgB.id);
+
+      const r = await svc.assignLeads(orgA.id, clientA.id, [theirs.id]);
+      expect(r.assigned).toBe(0);
+      expect(r.notFound).toBe(1);
+      await expect(svc.requireClient(orgB.id, clientA.id)).rejects.toThrow();
+      // Another workspace's ICP cannot be attached either.
+      const foreignIcp = await icp(orgB.id, { titles: ["CEO"] });
+      await expect(svc.createClient(orgA.id, { name: "X", icpId: foreignIcp.id })).rejects.toThrow(/does not exist/);
+    });
+
+    it("rejects a duplicate client name in the same workspace", async () => {
+      const org = await newOrg("cw-dupe");
+      await svc.createClient(org.id, { name: "Globex" });
+      await expect(svc.createClient(org.id, { name: "globex" })).rejects.toThrow(/already exists/);
+    });
+
+    it("returns a deleted client's leads to the pool instead of losing them", async () => {
+      const org = await newOrg("cw-delete");
+      const c = await svc.createClient(org.id, { name: "Gone" });
+      const l = await lead(org.id);
+      await svc.assignLeads(org.id, c.id, [l.id]);
+      const r = await svc.deleteClient(org.id, c.id);
+      expect(r.leadsReturnedToPool).toBe(1);
+      const after = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, l.id) });
+      expect(after).toBeTruthy();
+      expect(after.clientId).toBeNull();
+    });
+
+    it("counts ready-but-idle leads: verified, uncontacted, a week old, in no campaign", async () => {
+      const org = await newOrg("cw-idle");
+      const c = await svc.createClient(org.id, { name: "Idle Co" });
+      const old = await lead(org.id);
+      const fresh = await lead(org.id);
+      const unverified = await lead(org.id, { emailStatus: "unknown" });
+      const bad = await lead(org.id, { emailStatus: "invalid" });
+      await svc.assignLeads(org.id, c.id, [old.id, fresh.id, unverified.id, bad.id]);
+      await db.execute(schema.sql`UPDATE leads SET client_assigned_at = now() - interval '9 days' WHERE id = ${old.id}`);
+
+      const d = await svc.clientDetail(org.id, c.id);
+      expect(d.attention.readyButIdle).toBe(1);
+      expect(d.attention.unverified).toBe(1);
+      expect(d.attention.badEmail).toBe(1);
+      expect(await svc.attentionLeadIds(org.id, c.id, "readyButIdle")).toEqual([old.id]);
+
+      // Once it is in a campaign it is being used, and stops counting as waste.
+      const acct = await newAccount(org.id);
+      const [camp] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", emailAccountId: acct.id }).returning();
+      await db.insert(schema.campaignContacts).values({ campaignId: camp.id, leadId: old.id });
+      expect((await svc.clientDetail(org.id, c.id)).attention.readyButIdle).toBe(0);
+    });
+
+    describe("routing the pool", () => {
+      it("routes a clear fit, holds a contested one, and never routes on no data", async () => {
+        const org = await newOrg("cw-route");
+        const fintechIcp = await icp(org.id, { industries: ["fintech"], titles: ["head of growth", "vp growth"] });
+        const healthIcp = await icp(org.id, { industries: ["healthcare"], titles: ["head of growth", "vp growth"] });
+        const fin = await svc.createClient(org.id, { name: "FinClient", icpId: fintechIcp.id });
+        await svc.createClient(org.id, { name: "HealthClient", icpId: healthIcp.id });
+        await svc.createClient(org.id, { name: "NoIcpClient" });
+
+        const finCo = await companyRow(org.id, { name: "PayCo", industry: "Fintech" });
+        const clear = await lead(org.id, { title: "VP Growth", companyId: finCo.id });
+        // Fits neither industry, identical title match for both: a coin toss.
+        const otherCo = await companyRow(org.id, { name: "RetailCo", industry: "Retail" });
+        const tie = await lead(org.id, { title: "Head of Growth", companyId: otherCo.id });
+        // Nothing to score on at all.
+        const blank = await lead(org.id, { title: null });
+        // Right title, known-wrong industry. Scores above the bar on title alone; must not
+        // be handed to the fintech client without a person looking.
+        const retailCo = await companyRow(org.id, { name: "ShopLane", industry: "Retail" });
+        const wrongIndustry = await lead(org.id, { title: "VP Growth", companyId: retailCo.id });
+
+        const r = await svc.routeSuggestions(org.id);
+        const routable = r.routable.map((x: any) => x.leadId);
+        expect(routable).toContain(clear.id);
+        expect(r.routable.find((x: any) => x.leadId === clear.id).best.clientId).toBe(fin.id);
+        expect(routable).not.toContain(tie.id);
+        expect(routable).not.toContain(blank.id);
+        expect(routable).not.toContain(wrongIndustry.id);
+        const partial = r.held.partialFit.find((x: any) => x.leadId === wrongIndustry.id);
+        expect(partial).toBeTruthy();
+        expect(partial.mismatches).toContain("industry match");
+        // The client that can never receive anything is named, with the reason.
+        expect(r.unroutableClients.map((u: any) => u.reason)).toContain("no_icp");
+
+        const auto = await svc.autoRoute(org.id);
+        expect(auto.routed).toBe(1);
+        const after = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, clear.id) });
+        expect(after.clientId).toBe(fin.id);
+        const tieAfter = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, tie.id) });
+        expect(tieAfter.clientId).toBeNull();
+      });
+
+      it("does not route to archived or paused clients", async () => {
+        const org = await newOrg("cw-route-archived");
+        const i = await icp(org.id, { industries: ["fintech"], titles: ["vp growth"] });
+        const c = await svc.createClient(org.id, { name: "Paused", icpId: i.id, status: "paused" });
+        const co = await companyRow(org.id, { name: "P", industry: "Fintech" });
+        await lead(org.id, { title: "VP Growth", companyId: co.id });
+        const r = await svc.routeSuggestions(org.id);
+        expect(r.routable).toHaveLength(0);
+        await expect(svc.assignLeads(org.id, (await svc.updateClient(org.id, c.id, { status: "archived" })).id, [randomUUID()])).rejects.toThrow(/archived/);
+      });
+    });
+
+    it("claims a search's leads for its client without stealing another client's", async () => {
+      const org = await newOrg("cw-claim");
+      const a = await svc.createClient(org.id, { name: "A" });
+      const b = await svc.createClient(org.id, { name: "B" });
+      const mine = await lead(org.id);
+      const hers = await lead(org.id);
+      await svc.assignLeads(org.id, b.id, [hers.id]);
+      const r = await svc.claimSearchLeads(db, org.id, a.id, [mine.id, hers.id]);
+      expect(r).toEqual({ claimed: 1, ownedByAnotherClient: 1 });
+      const hersAfter = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, hers.id) });
+      expect(hersAfter.clientId).toBe(b.id);
+    });
+
+    describe("the public client report", () => {
+      it("shows the pipeline without a single email address, phone or profile URL", async () => {
+        const org = await newOrg("cw-report");
+        const c = await svc.createClient(org.id, { name: "Shared" });
+        const l = await lead(org.id, { email: "secret.person@target.example", phone: "+1 555 0100", linkedinUrl: "https://linkedin.com/in/secret" });
+        await svc.assignLeads(org.id, c.id, [l.id]);
+        const { shareToken } = await svc.enableSharing(org.id, c.id);
+
+        const r = await svc.publicReport(shareToken);
+        expect(r.client.name).toBe("Shared");
+        // Whether a client sees "behind target" is the agency's decision, off by default.
+        expect(r.target).toBeNull();
+        expect(r.leads).toHaveLength(1);
+        const blob = JSON.stringify(r);
+        expect(blob).not.toContain("secret.person");
+        expect(blob).not.toContain("555");
+        expect(blob).not.toContain("linkedin.com");
+
+        await svc.updateClient(org.id, c.id, { monthlyLeadTarget: 10, reportShowTarget: true });
+        expect((await svc.publicReport(shareToken)).target.target).toBe(10);
+      });
+
+      it("stops working the moment sharing is turned off, and never answers a guess", async () => {
+        const org = await newOrg("cw-report-off");
+        const c = await svc.createClient(org.id, { name: "Revoked" });
+        const { shareToken } = await svc.enableSharing(org.id, c.id);
+        expect(await svc.publicReport(shareToken)).not.toBeNull();
+        await svc.disableSharing(org.id, c.id);
+        expect(await svc.publicReport(shareToken)).toBeNull();
+        expect(await svc.publicReport("short")).toBeNull();
+        expect(await svc.publicReport("x".repeat(43))).toBeNull();
+      });
+    });
+  });
+
   afterAll(async () => {
     // Nothing to tear down: every test uses a fresh org, and the database is disposable.
   });

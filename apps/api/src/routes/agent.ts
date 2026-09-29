@@ -37,7 +37,7 @@ agentRoutes.post(
     await consume(db, oid, "searches", 1);
     const ai = createAiProvider();
     const providerBudget = await remainingPremiumBudget(db, oid);
-    const results = await runLeadPipeline({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey }, country: b.country, maxProviderLeads: providerBudget });
+    const results = await runLeadPipeline({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey }, country: b.country, maxProviderLeads: providerBudget });
     const out = [];
     /** Set when a quota or a fault stopped part of this run. Reported, not swallowed. */
     let emailSkipped: string | null = null;

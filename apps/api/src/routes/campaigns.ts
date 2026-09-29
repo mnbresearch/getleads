@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, asc, inArray, campaignContacts, campaigns, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql } from "@prospex/db";
+import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql } from "@prospex/db";
 import { createAiProvider, createAiProviderForPlan, generateOutreach, classifyReply, draftReplyToInbound } from "@prospex/core";
 import { env } from "../env.js";
 import { encryptJson } from "../lib/crypto.js";
@@ -71,7 +71,7 @@ const settingsInput = z.object({
   valueProp: z.string().optional(),
   tone: z.enum(["friendly", "direct", "formal", "casual"]).optional(),
 });
-const campaignInput = z.object({ name: z.string().min(1), icpId: z.string().uuid().optional(), listId: z.string().uuid().optional(), emailAccountId: z.string().uuid().optional(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
+const campaignInput = z.object({ name: z.string().min(1), icpId: z.string().uuid().optional(), listId: z.string().uuid().optional(), emailAccountId: z.string().uuid().optional(), clientId: z.string().uuid().optional(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
 
 campaignRoutes.get("/", async (c) => {
   const { db } = getDb();
@@ -91,7 +91,8 @@ campaignRoutes.post("/", zValidator("json", campaignInput), async (c) => {
   await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account");
   await assertOwned(icps, b.icpId, oid, "ICP");
   await assertOwned(lists, b.listId, oid, "List");
-  const [row] = await db.insert(campaigns).values({ orgId: oid, name: b.name, icpId: b.icpId, listId: b.listId, emailAccountId: b.emailAccountId, settings: b.settings ?? {} }).returning();
+  await assertOwned(clients, b.clientId, oid, "Client");
+  const [row] = await db.insert(campaigns).values({ orgId: oid, name: b.name, icpId: b.icpId, listId: b.listId, emailAccountId: b.emailAccountId, clientId: b.clientId ?? null, settings: b.settings ?? {} }).returning();
   if (b.steps?.length) await db.insert(sequenceSteps).values(b.steps.map((s, i) => ({ campaignId: row.id, stepNo: i + 1, ...s })));
   return c.json(await fullCampaign(oid, row.id), 201);
 });
@@ -111,9 +112,10 @@ campaignRoutes.patch("/:id", zValidator("json", campaignInput.partial()), async 
   await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account");
   await assertOwned(icps, b.icpId, oid, "ICP");
   await assertOwned(lists, b.listId, oid, "List");
+  await assertOwned(clients, b.clientId, oid, "Client");
   await db
     .update(campaigns)
-    .set({ ...(b.name ? { name: b.name } : {}), ...(b.icpId !== undefined ? { icpId: b.icpId } : {}), ...(b.listId !== undefined ? { listId: b.listId } : {}), ...(b.emailAccountId !== undefined ? { emailAccountId: b.emailAccountId } : {}), ...(b.settings ? { settings: { ...existing.settings, ...b.settings } } : {}), updatedAt: new Date() })
+    .set({ ...(b.name ? { name: b.name } : {}), ...(b.clientId !== undefined ? { clientId: b.clientId } : {}), ...(b.icpId !== undefined ? { icpId: b.icpId } : {}), ...(b.listId !== undefined ? { listId: b.listId } : {}), ...(b.emailAccountId !== undefined ? { emailAccountId: b.emailAccountId } : {}), ...(b.settings ? { settings: { ...existing.settings, ...b.settings } } : {}), updatedAt: new Date() })
     .where(eq(campaigns.id, existing.id));
   if (b.steps) {
     await db.delete(sequenceSteps).where(eq(sequenceSteps.campaignId, existing.id));

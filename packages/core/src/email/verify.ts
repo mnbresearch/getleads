@@ -213,6 +213,10 @@ export interface VerifyOptions {
   smtp?: boolean;
   hunterApiKey?: string;
   abstractApiKey?: string;
+  /** Reoon Email Verifier. Pay-as-you-go credits that never expire; tried first. */
+  reoonApiKey?: string;
+  /** MillionVerifier. Pay-as-you-go credits that never expire; tried second. */
+  millionVerifierApiKey?: string;
 }
 
 export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): Promise<EmailVerification> {
@@ -237,6 +241,59 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
     return result("invalid", 0.95, "no MX / A record");
   }
   const mxHost = mx[0].exchange;
+
+  // Dedicated verifiers first, cheapest first.
+  //
+  // Order is a cost decision. A dedicated verifier costs about a tenth of a cent per check
+  // on pay-as-you-go credits that never expire; a Hunter verification costs a Hunter credit,
+  // which is far better spent FINDING an address than checking one. Before these existed,
+  // every verification in the product drew down the same Hunter balance as email finding.
+  //
+  // Each verifier only answers when it has a real verdict. "unknown", an error body, an
+  // exhausted balance or a timeout all fall through to the next one, so running out of
+  // credits with one provider degrades to the next rather than to a wrong answer.
+  if (opts.reoonApiKey) {
+    meter("reoon");
+    const r = await fetchJson<{ status?: string; is_catch_all?: boolean; overall_score?: number }>(
+      `https://emailverifier.reoon.com/api/v1/verify?email=${encodeURIComponent(email)}&key=${encodeURIComponent(opts.reoonApiKey)}&mode=power`,
+      { timeoutMs: 30_000, provider: "reoon" },
+    );
+    const map: Record<string, EmailStatus> = {
+      safe: "valid",
+      invalid: "invalid",
+      disabled: "invalid",
+      disposable: "invalid",
+      spamtrap: "invalid",
+      catch_all: "catch_all",
+      // Deliverable in principle, but not a person, or not accepting mail right now.
+      role_account: "risky",
+      inbox_full: "risky",
+    };
+    const status = r?.status ? map[r.status] : undefined;
+    if (status) {
+      checks.smtp = status === "valid" ? "accepted" : status === "invalid" ? "rejected" : status === "catch_all" ? "catch_all" : "error";
+      const conf = typeof r?.overall_score === "number" ? Math.max(0, Math.min(1, r.overall_score / 100)) : status === "valid" ? 0.95 : status === "invalid" ? 0.95 : 0.6;
+      return result(status, conf, `reoon:${r!.status}`, mxHost);
+    }
+  }
+  if (opts.millionVerifierApiKey) {
+    meter("millionverifier");
+    const m = await fetchJson<{ result?: string; error?: string; role?: boolean; quality?: string }>(
+      `https://api.millionverifier.com/api/v3/?api=${encodeURIComponent(opts.millionVerifierApiKey)}&email=${encodeURIComponent(email)}&timeout=20`,
+      { timeoutMs: 25_000, provider: "millionverifier" },
+    );
+    // MillionVerifier answers HTTP 200 with an `error` field for a bad key or an empty
+    // balance. That is not a verdict about the address and must not be read as one.
+    if (m && !m.error && m.result) {
+      const map: Record<string, EmailStatus> = { ok: "valid", catch_all: "catch_all", invalid: "invalid", disposable: "invalid" };
+      const status = map[m.result];
+      if (status) {
+        const finalStatus: EmailStatus = status === "valid" && m.role ? "risky" : status;
+        checks.smtp = finalStatus === "valid" ? "accepted" : finalStatus === "invalid" ? "rejected" : finalStatus === "catch_all" ? "catch_all" : "error";
+        return result(finalStatus, finalStatus === "valid" ? 0.95 : finalStatus === "invalid" ? 0.95 : 0.6, `millionverifier:${m.result}`, mxHost);
+      }
+    }
+  }
 
   // Optional external verifiers (free tiers) take precedence when configured
   if (opts.hunterApiKey) {

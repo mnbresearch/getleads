@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
 import { Page, Spinner, TagInput, useToast } from "../components/ui";
 
@@ -15,6 +15,11 @@ export function SearchPage() {
   const [findEmails, setFindEmails] = useState(true);
   const [icps, setIcps] = useState<{ id: string; name: string }[]>([]);
   const [icpId, setIcpId] = useState("");
+  // A search can be run for a client: its leads are delivered straight to that client. Opened
+  // from a client's page, the client is pre-selected.
+  const [params] = useSearchParams();
+  const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
+  const [clientId, setClientId] = useState(params.get("clientId") ?? "");
   const [searches, setSearches] = useState<Search[]>([]);
   const [busy, setBusy] = useState(false);
   const [parsing, setParsing] = useState(false);
@@ -52,6 +57,7 @@ export function SearchPage() {
   useEffect(() => {
     load();
     apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
+    apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClients(r.clients)).catch(() => setClients([]));
     const t = setInterval(() => { void load(); }, 4000);
     return () => clearInterval(t);
   }, []);
@@ -74,8 +80,9 @@ export function SearchPage() {
   const run = async () => {
     setBusy(true);
     try {
-      await apiFetch("POST", "/v1/search", { query: query || undefined, titles: titles.length ? titles : undefined, industries: industries.length ? industries : undefined, locations: locations.length ? locations : undefined, companyDomains: domains.length ? domains : undefined, limit, findEmails, icpId: icpId || undefined });
-      toast("Search started - results appear in Leads as they are found");
+      await apiFetch("POST", "/v1/search", { query: query || undefined, titles: titles.length ? titles : undefined, industries: industries.length ? industries : undefined, locations: locations.length ? locations : undefined, companyDomains: domains.length ? domains : undefined, limit, findEmails, icpId: icpId || undefined, clientId: clientId || undefined });
+      const forClient = clients.find((c) => c.id === clientId);
+      toast(forClient ? `Search started for ${forClient.name} - new leads are delivered to them as they are found` : "Search started - results appear in Leads as they are found");
       load();
     } catch (e) {
       toast((e as Error).message, "err");
@@ -107,6 +114,14 @@ export function SearchPage() {
             <div><label className="label">Score against ICP</label>
               <select className="input w-56" value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">(search filters only)</option>{icps.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</select>
             </div>
+            {clients.length > 0 && (
+              <div><label className="label">Deliver to client</label>
+                <select className="input w-52" value={clientId} onChange={(e) => setClientId(e.target.value)} aria-label="Deliver leads to client">
+                  <option value="">No client (pool)</option>
+                  {clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+                </select>
+              </div>
+            )}
             <label className="mb-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={findEmails} onChange={(e) => setFindEmails(e.target.checked)} /> Find + verify emails</label>
             <button className="btn-secondary ml-auto" disabled={!query && !titles.length && !domains.length} onClick={async () => { const name = prompt("Name this saved search", query || titles.join(", ")); if (!name) return; const alert = confirm("Email me when new leads appear (daily)?"); const me = await apiFetch<{ user: { email: string } | null }>("GET", "/v1/auth/me"); await apiFetch("POST", "/v1/tools/saved-searches", { name, query: { query: query || undefined, titles: titles.length ? titles : undefined, industries: industries.length ? industries : undefined, locations: locations.length ? locations : undefined, companyDomains: domains.length ? domains : undefined, limit, findEmails, icpId: icpId || undefined }, alert, alertEmail: alert ? me.user?.email : undefined }); toast("Saved - see Autopilot page"); }}>Save search</button>
             <button className="btn-primary" onClick={run} disabled={busy || (!query && !titles.length && !domains.length)}>{busy ? "Starting…" : "Run search"}</button>

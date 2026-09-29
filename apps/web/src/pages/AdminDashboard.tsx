@@ -530,10 +530,87 @@ function PlansTab({ plans }: { plans: Plan[] }) {
   );
 }
 
+interface BalanceLine { label: string; remaining: number | null; used: number | null; limit: number | null }
+interface ProviderBalance { provider: string; name: string; role: string; configured: boolean; status: "ok" | "error" | "not_configured" | "no_endpoint"; lines: BalanceLine[]; resetsAt: string | null; billing: string; summary: string; low: boolean; checkedAt: string }
+
+/**
+ * What is left on every paid provider, read live from each provider's own free account
+ * endpoint. Nothing here spends a credit.
+ */
+function CreditsTab() {
+  const [rows, setRows] = useState<ProviderBalance[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const load = async () => {
+    setBusy(true);
+    setErr(null);
+    try {
+      const r = await adminFetch<{ balances: ProviderBalance[] }>("GET", "/v1/admin/balances");
+      setRows(r.balances);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  useEffect(() => { void load(); }, []);
+
+  const order = { error: 0, ok: 1, no_endpoint: 2, not_configured: 3 } as const;
+  const sorted = [...(rows ?? [])].sort((a, b) => Number(b.low) - Number(a.low) || order[a.status] - order[b.status] || a.name.localeCompare(b.name));
+  const tone = (b: ProviderBalance) =>
+    b.status === "error" ? "border-red-200 bg-red-50/40" : b.low ? "border-amber-200 bg-amber-50/40" : b.status === "not_configured" ? "opacity-70" : "";
+
+  return (
+    <div>
+      <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+        <p className="max-w-2xl text-sm text-ink-400">
+          Remaining credits, read from each provider's own account API. Providers with no such API say so and point to their dashboard, rather than showing a number we would have to make up.
+        </p>
+        <button className="btn-secondary" onClick={load} disabled={busy}>{busy ? "Checking…" : "Refresh"}</button>
+      </div>
+      {err && <div className="card mb-4 p-4 text-sm text-red-700">{err}</div>}
+      {!rows ? (
+        <div className="card p-5 text-sm text-ink-400">Checking every provider…</div>
+      ) : (
+        <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+          {sorted.map((b) => (
+            <div key={b.provider} className={`card p-4 ${tone(b)}`}>
+              <div className="flex items-start justify-between gap-2">
+                <div>
+                  <div className="font-semibold text-ink-50">{b.name}</div>
+                  <div className="text-xs text-ink-400">{b.role}</div>
+                </div>
+                <span className={`badge ${b.status === "ok" ? (b.low ? "bg-amber-50 text-amber-700" : "bg-emerald-50 text-emerald-700") : b.status === "error" ? "bg-red-50 text-red-700" : "bg-black/[0.05] text-ink-400"}`}>
+                  {b.status === "ok" ? (b.low ? "Low" : "OK") : b.status === "error" ? "Error" : b.status === "no_endpoint" ? "No balance API" : "Not set up"}
+                </span>
+              </div>
+              {b.lines.length > 0 && (
+                <div className="mt-3 space-y-1">
+                  {b.lines.map((l) => (
+                    <div key={l.label} className="flex items-baseline justify-between text-sm">
+                      <span className="capitalize text-ink-300">{l.label}</span>
+                      <span className="tabular-nums text-ink-50">
+                        <b>{l.remaining === null ? "-" : l.remaining.toLocaleString()}</b> left
+                        {l.limit !== null && <span className="text-ink-400"> of {l.limit.toLocaleString()}</span>}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              <div className="mt-2 text-xs text-ink-300">{b.summary}</div>
+              <div className="mt-1 text-[11px] text-ink-400">{b.billing}{b.resetsAt ? ` · resets ${b.resetsAt}` : ""}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function AdminDashboardPage() {
   const token = useAdminToken();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<"orgs" | "leads" | "tools" | "plans">("orgs");
+  const [tab, setTab] = useState<"orgs" | "leads" | "tools" | "credits" | "plans">("orgs");
   const [plans, setPlans] = useState<Plan[] | null>(null);
   const [authError, setAuthError] = useState(false);
 
@@ -558,13 +635,14 @@ export function AdminDashboardPage() {
       </header>
       <main className="mx-auto max-w-6xl p-6">
         <nav className="mb-5 flex gap-2">
-          {([["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["plans", "Pricing"]] as const).map(([id, label]) => (
+          {([["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"]] as const).map(([id, label]) => (
             <button key={id} className={`rounded-lg px-3 py-1.5 text-sm ${tab === id ? "bg-brand-600 text-white" : "text-ink-300 hover:bg-black/5"}`} onClick={() => setTab(id)}>{label}</button>
           ))}
         </nav>
         {tab === "orgs" && <OrgsTab plans={plans} />}
         {tab === "leads" && <LeadsTab plans={plans} />}
         {tab === "tools" && <ToolsTab />}
+        {tab === "credits" && <CreditsTab />}
         {tab === "plans" && <PlansTab plans={plans} />}
       </main>
     </div>

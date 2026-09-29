@@ -171,6 +171,41 @@ export async function checkPdl(raw = process.env.PDL_API_KEY): Promise<ProviderC
   return r;
 }
 
+/** Reoon: the balance endpoint, which is free and still proves the key. */
+export async function checkReoon(raw = process.env.REOON_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
+  if (!apiKey) return notConfigured("reoon", "REOON_API_KEY");
+  return run("reoon", "GET /api/v1/check-account-balance/", () =>
+    fetchWithTimeout(`https://emailverifier.reoon.com/api/v1/check-account-balance/?key=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT }),
+    shape,
+  );
+}
+
+/**
+ * MillionVerifier: the credits endpoint, free.
+ *
+ * It answers HTTP 200 with an `error` field for a bad key, so the status code alone would
+ * report a rejected key as working. The body is read before declaring success.
+ */
+export async function checkMillionVerifier(raw = process.env.MILLIONVERIFIER_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
+  if (!apiKey) return notConfigured("millionverifier", "MILLIONVERIFIER_API_KEY");
+  let bodyError: string | null = null;
+  const r = await run("millionverifier", "GET /api/v3/credits", async () => {
+    const res = await fetchWithTimeout(`https://api.millionverifier.com/api/v3/credits?api=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT });
+    const text = await res.clone().text().catch(() => "");
+    try {
+      const j = JSON.parse(text) as { error?: string };
+      if (j.error) bodyError = j.error;
+    } catch {
+      /* not JSON: run() classifies by status */
+    }
+    return res;
+  }, shape);
+  if (r.ok && bodyError) return { ...r, ok: false, outcome: "auth", detail: bodyError, summary: `Key rejected: ${bodyError}` };
+  return r;
+}
+
 /** Google Programmable Search: one result. */
 export async function checkGoogleCse(
   rawKey = process.env.GOOGLE_CSE_API_KEY,
@@ -252,6 +287,8 @@ export const PROVIDER_CHECKS: { provider: string; label: string; run: () => Prom
   { provider: "serper", label: "Serper", run: () => checkSerper() },
   { provider: "serpapi", label: "SerpAPI", run: () => checkSerpApi() },
   { provider: "resend", label: "Resend", run: () => checkResend() },
+  { provider: "reoon", label: "Reoon (verification)", run: () => checkReoon() },
+  { provider: "millionverifier", label: "MillionVerifier (verification)", run: () => checkMillionVerifier() },
 ];
 
 /**

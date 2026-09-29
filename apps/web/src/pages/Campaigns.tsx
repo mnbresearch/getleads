@@ -114,20 +114,25 @@ function StatusBadge({ s }: { s: string }) {
 }
 
 function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, existing }: { open: boolean; onClose: () => void; accounts: Account[]; lists: { id: string; name: string }[]; icps: { id: string; name: string }[]; onDone: (id: string) => void; toast: (m: string, k?: "ok" | "err") => void; existing?: Campaign }) {
-  const [f, setF] = useState({ name: "", emailAccountId: "", listId: "", icpId: "", senderName: "", senderCompany: "", senderTitle: "", valueProp: "", tone: "friendly", dailyLimit: 50, timezone: "Asia/Kolkata", start: "09:00", end: "18:00" });
+  const [clientOptions, setClientOptions] = useState<{ id: string; name: string }[]>([]);
+  useEffect(() => {
+    if (!open) return;
+    apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClientOptions(r.clients)).catch(() => setClientOptions([]));
+  }, [open]);
+  const [f, setF] = useState({ name: "", clientId: "", emailAccountId: "", listId: "", icpId: "", senderName: "", senderCompany: "", senderTitle: "", valueProp: "", tone: "friendly", dailyLimit: 50, timezone: "Asia/Kolkata", start: "09:00", end: "18:00" });
   const [steps, setSteps] = useState<Step[]>(DEFAULT_STEPS);
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (existing) {
       const s = existing.settings as Record<string, string | number | { start: string; end: string }>;
-      setF({ name: existing.name, emailAccountId: existing.emailAccountId ?? "", listId: existing.listId ?? "", icpId: existing.icpId ?? "", senderName: String(s.senderName ?? ""), senderCompany: String(s.senderCompany ?? ""), senderTitle: String(s.senderTitle ?? ""), valueProp: String(s.valueProp ?? ""), tone: String(s.tone ?? "friendly"), dailyLimit: Number(s.dailyLimit ?? 50), timezone: String(s.timezone ?? "Asia/Kolkata"), start: (s.sendWindow as { start: string })?.start ?? "09:00", end: (s.sendWindow as { end: string })?.end ?? "18:00" });
+      setF({ name: existing.name, clientId: (existing as Campaign & { clientId?: string | null }).clientId ?? "", emailAccountId: existing.emailAccountId ?? "", listId: existing.listId ?? "", icpId: existing.icpId ?? "", senderName: String(s.senderName ?? ""), senderCompany: String(s.senderCompany ?? ""), senderTitle: String(s.senderTitle ?? ""), valueProp: String(s.valueProp ?? ""), tone: String(s.tone ?? "friendly"), dailyLimit: Number(s.dailyLimit ?? 50), timezone: String(s.timezone ?? "Asia/Kolkata"), start: (s.sendWindow as { start: string })?.start ?? "09:00", end: (s.sendWindow as { end: string })?.end ?? "18:00" });
       setSteps(existing.steps?.length ? existing.steps : DEFAULT_STEPS);
     } else if (accounts[0] && !f.emailAccountId) setF((x) => ({ ...x, emailAccountId: accounts[0].id }));
   }, [existing, accounts]); // eslint-disable-line
   const save = async () => {
     setBusy(true);
     try {
-      const body = { name: f.name, emailAccountId: f.emailAccountId || undefined, listId: f.listId || undefined, icpId: f.icpId || undefined, settings: { senderName: f.senderName, senderCompany: f.senderCompany, senderTitle: f.senderTitle, valueProp: f.valueProp, tone: f.tone, dailyLimit: f.dailyLimit, timezone: f.timezone, sendWindow: { start: f.start, end: f.end, days: [1, 2, 3, 4, 5] } }, steps };
+      const body = { name: f.name, clientId: f.clientId || undefined, emailAccountId: f.emailAccountId || undefined, listId: f.listId || undefined, icpId: f.icpId || undefined, settings: { senderName: f.senderName, senderCompany: f.senderCompany, senderTitle: f.senderTitle, valueProp: f.valueProp, tone: f.tone, dailyLimit: f.dailyLimit, timezone: f.timezone, sendWindow: { start: f.start, end: f.end, days: [1, 2, 3, 4, 5] } }, steps };
       const r = existing ? await apiFetch<{ id: string }>("PATCH", `/v1/campaigns/${existing.id}`, body) : await apiFetch<{ id: string }>("POST", "/v1/campaigns", body);
       toast("Campaign saved");
       onDone(r.id);
@@ -139,6 +144,9 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2"><label className="label">Name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
           <div><label className="label">Sender account</label><select className="input" value={f.emailAccountId} onChange={(e) => setF({ ...f, emailAccountId: e.target.value })}><option value="">Select…</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.fromName} &lt;{a.fromEmail}&gt; ({a.provider})</option>)}</select></div>
+          {clientOptions.length > 0 && (
+            <div><label className="label">For client</label><select className="input" value={f.clientId} onChange={(e) => setF({ ...f, clientId: e.target.value })}><option value="">No client</option>{clientOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
+          )}
           <div><label className="label">Lead list (for enrolment)</label><select className="input" value={f.listId} onChange={(e) => setF({ ...f, listId: e.target.value })}><option value="">None</option>{lists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></div>
           <div><label className="label">Your name (for LinkedIn/WhatsApp steps)</label><input className="input" value={f.senderName} onChange={(e) => setF({ ...f, senderName: e.target.value })} /></div>
           <div><label className="label">Your company</label><input className="input" value={f.senderCompany} onChange={(e) => setF({ ...f, senderCompany: e.target.value })} /></div>

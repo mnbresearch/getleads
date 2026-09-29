@@ -44,6 +44,8 @@ const listQuery = z.object({
   // The pipeline stage. The column and the transition endpoint both existed; there was no
   // way to filter by it, so "show me everyone I have contacted" was unaskable.
   status: z.string().optional(),
+  /** A client id, or "none" for the unassigned pool. */
+  clientId: z.union([z.string().uuid(), z.literal("none")]).optional(),
   sort: z.enum(["score", "created", "updated", "name"]).default("created"),
   order: z.enum(["asc", "desc"]).default("desc"),
   limit: z.coerce.number().min(1).max(500).default(50),
@@ -62,6 +64,8 @@ async function buildWhere(oid: string, q: z.infer<typeof listQuery>) {
   if (q.hasEmail === "true") conds.push(sql`${leads.email} IS NOT NULL`);
   if (q.hasEmail === "false") conds.push(sql`${leads.email} IS NULL`);
   if (q.status) conds.push(inArray(leads.status, q.status.split(",")));
+  if (q.clientId === "none") conds.push(sql`${leads.clientId} IS NULL`);
+  else if (q.clientId) conds.push(eq(leads.clientId, q.clientId));
   if (q.listId) conds.push(sql`${leads.id} IN (SELECT lead_id FROM list_leads WHERE list_id = ${q.listId})`);
   if (q.companyDomain) conds.push(sql`${leads.companyId} IN (SELECT id FROM companies WHERE org_id = ${oid} AND domain = ${q.companyDomain})`);
   return and(...conds);
@@ -275,7 +279,7 @@ leadRoutes.post("/:id/verify", async (c) => {
   if (!l) throw notFound("Lead");
   if (!l.email) throw badRequest("Lead has no email");
   await consume(db, oid, "verifications", 1);
-  const v = await verifyEmail(l.email, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey });
+  const v = await verifyEmail(l.email, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
   const [row] = await db.update(leads).set({ emailStatus: v.status, emailConfidence: v.confidence, verifiedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, l.id)).returning();
   return c.json({ lead: row, verification: v });
 });
@@ -290,7 +294,7 @@ leadRoutes.post("/:id/find-email", async (c) => {
   const domain = co?.domain ?? (c.req.query("domain") ? extractDomain(c.req.query("domain")!) : null);
   if (!domain || !l.firstName || !l.lastName) throw badRequest("Need first name, last name and a company domain");
   await consume(db, oid, "verifications", 1);
-  const r = await findEmail({ firstName: l.firstName, lastName: l.lastName, domain, knownPattern: co?.emailPattern, knownEmails: (co?.raw as { emailsFound?: string[] })?.emailsFound }, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey });
+  const r = await findEmail({ firstName: l.firstName, lastName: l.lastName, domain, knownPattern: co?.emailPattern, knownEmails: (co?.raw as { emailsFound?: string[] })?.emailsFound }, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
   if (r.email) {
     await db.update(leads).set({ email: r.email, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, l.id));
     if (co && r.pattern && !co.emailPattern) await db.update(companies).set({ emailPattern: r.pattern }).where(eq(companies.id, co.id));

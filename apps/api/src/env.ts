@@ -42,6 +42,9 @@ export const env = {
   mailFrom: process.env.MAIL_FROM ?? "Prospex <no-reply@localhost>",
   hunterApiKey: secret(process.env.HUNTER_API_KEY),
   abstractEmailApiKey: secret(process.env.ABSTRACT_EMAIL_API_KEY),
+  /** Pay-as-you-go verifiers. Either is enough; both are tried in order when set. */
+  reoonApiKey: secret(process.env.REOON_API_KEY),
+  millionVerifierApiKey: secret(process.env.MILLIONVERIFIER_API_KEY),
   smtpProbeEnabled: bool(process.env.SMTP_PROBE_ENABLED, true),
   stripe: {
     secretKey: secret(process.env.STRIPE_SECRET_KEY),

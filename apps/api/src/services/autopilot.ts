@@ -19,7 +19,7 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
   const providerBudget = await remainingPremiumBudget(db, ap.orgId);
   const results = await runLeadPipeline({ ...(ap.query as Record<string, unknown>), limit: Math.min(200, ap.dailyLeads * 3), findEmails: true }, {
     ai: createAiProvider(),
-    verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey },
+    verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
     icp: (icp?.criteria as IcpCriteria | undefined) ?? undefined,
     maxProviderLeads: providerBudget,
     onProgress: (p, m) => log(`${p}% ${m}`),

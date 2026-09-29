@@ -118,6 +118,13 @@ export interface ScoredLead {
   coverage?: number;
   /** Criteria the ICP asks about that this lead has no data for. */
   unknownCriteria?: string[];
+  /**
+   * Criteria the ICP asks about that this lead is KNOWN to fail - the data is there and it
+   * says no. Distinct from `unknownCriteria`, and from a low score: a lead can clear a score
+   * threshold on its title alone while sitting in the wrong industry entirely, and anything
+   * deciding which of several ICPs a lead belongs to needs to see that.
+   */
+  mismatches?: string[];
 }
 
 export interface AiMessage {

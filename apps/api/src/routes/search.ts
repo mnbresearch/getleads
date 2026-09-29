@@ -25,9 +25,11 @@ const searchInput = z.object({
   icpId: z.string().uuid().optional(),
   listId: z.string().uuid().optional(),
   country: z.string().length(2).optional(),
+  /** Run this search for a client: its leads are delivered to that client. */
+  clientId: z.string().uuid().optional(),
 });
 
-const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey });
+const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
 
 /** Async lead search (recommended). Returns a search + job id to poll. */
 searchRoutes.post("/", rateLimit({ perMinute: 30 }), zValidator("json", searchInput), async (c) => {
@@ -35,9 +37,19 @@ searchRoutes.post("/", rateLimit({ perMinute: 30 }), zValidator("json", searchIn
   const body = c.req.valid("json");
   if (!body.query && !body.titles?.length && !body.companyDomains?.length) throw badRequest("Provide `query`, `titles` or `companyDomains`");
   const { db } = getDb();
+  // Checked before anything is charged: a search for a client that is not in this workspace
+  // must fail, not run unattributed.
+  let icpId = body.icpId;
+  if (body.clientId) {
+    const { requireClient } = await import("../services/clients.js");
+    const client = await requireClient(oid, body.clientId);
+    // With no ICP given, a client search is scored against that client's own ICP - which is
+    // the point of running it for them.
+    icpId = icpId ?? client.icpId ?? undefined;
+  }
   await consume(db, oid, "searches", 1);
-  const [search] = await db.insert(searches).values({ orgId: oid, query: body, status: "queued" }).returning();
-  const job = await enqueue(db, "search.run", { searchId: search.id, query: body, icpId: body.icpId, listId: body.listId }, { orgId: oid, priority: 2 });
+  const [search] = await db.insert(searches).values({ orgId: oid, query: body, status: "queued", clientId: body.clientId ?? null }).returning();
+  const job = await enqueue(db, "search.run", { searchId: search.id, query: body, icpId, listId: body.listId, clientId: body.clientId }, { orgId: oid, priority: 2 });
   await db.update(searches).set({ jobId: job.id }).where(eq(searches.id, search.id));
   if (env.jobMode === "inline") {
     // serverless: run now, bounded

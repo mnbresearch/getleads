@@ -92,7 +92,7 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
       {
         ai: createAiProvider(),
         icp: criteria,
-        verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey },
+        verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
       },
     );
 

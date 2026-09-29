@@ -73,3 +73,26 @@ describe("ICP scoring does not reward missing data", () => {
     expect(unverified.unknownCriteria).toContain("email status");
   });
 });
+
+describe("known mismatches are reported separately from unknowns", () => {
+  const icp: IcpCriteria = { industries: ["fintech"], titles: ["vp growth"] };
+
+  it("lists a criterion the data contradicts, even when the score clears a threshold", () => {
+    const r = scoreLeadRules({ title: "VP Growth", emailStatus: "valid", company: { industry: "Retail" } }, icp);
+    // Title outweighs industry, so a wrong-industry lead can still score well...
+    expect(r.score).toBeGreaterThanOrEqual(60);
+    // ...which is exactly why the contradiction has to be visible on its own.
+    expect(r.mismatches).toEqual(["industry match"]);
+  });
+
+  it("does not call missing data a mismatch", () => {
+    const r = scoreLeadRules({ title: "VP Growth" }, icp);
+    expect(r.mismatches).toEqual([]);
+    expect(r.unknownCriteria).toContain("industry match");
+  });
+
+  it("does not count email status as a fit mismatch", () => {
+    const r = scoreLeadRules({ title: "VP Growth", emailStatus: "invalid", company: { industry: "Fintech" } }, icp);
+    expect(r.mismatches).toEqual([]);
+  });
+});

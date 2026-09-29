@@ -96,6 +96,7 @@ export function scoreLeadRules(lead: LeadForScoring, icp: IcpCriteria): ScoredLe
   let known = 0;
   const reasons: string[] = [];
   const unknownCriteria: string[] = [];
+  const mismatches: string[] = [];
   const add = (weight: number, ok: CriterionVerdict, label: string) => {
     // The ICP does not ask about this. Not part of the question, so not part of the answer.
     if (ok === null) return;
@@ -110,7 +111,10 @@ export function scoreLeadRules(lead: LeadForScoring, icp: IcpCriteria): ScoredLe
     if (ok) {
       score += weight;
       reasons.push(`+ ${label}`);
-    } else reasons.push(`- ${label}`);
+    } else {
+      reasons.push(`- ${label}`);
+      mismatches.push(label);
+    }
   };
 
   const titleVerdict: CriterionVerdict = !icp.titles?.length ? null : !lead.title ? "unknown" : titleMatch(lead.title, icp.titles);
@@ -136,7 +140,7 @@ export function scoreLeadRules(lead: LeadForScoring, icp: IcpCriteria): ScoredLe
   const excluded = has(`${lead.title ?? ""} ${lead.company?.description ?? ""}`, icp.excludeKeywords);
   if (excluded === true) {
     reasons.push("- excluded keyword");
-    return { score: 0, reasons, coverage: 1, unknownCriteria: [] };
+    return { score: 0, reasons, coverage: 1, unknownCriteria: [], mismatches: [...mismatches, "excluded keyword"] };
   }
 
   // Email verification is a property of the lead, not of the ICP, so it is always asked.
@@ -155,7 +159,7 @@ export function scoreLeadRules(lead: LeadForScoring, icp: IcpCriteria): ScoredLe
   }
 
   const pct = max === 0 ? 50 : Math.round((score / max) * 100);
-  return { score: pct, reasons, coverage: max === 0 ? 0 : known / max, unknownCriteria };
+  return { score: pct, reasons, coverage: max === 0 ? 0 : known / max, unknownCriteria, mismatches };
 }
 
 export interface AiLookalikeProfile {

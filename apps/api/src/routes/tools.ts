@@ -21,7 +21,7 @@ import { tryConsume } from "../lib/quota.js";
 
 export const toolRoutes = new Hono<Env>();
 toolRoutes.use("*", requireAuth);
-const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey });
+const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
 
 const PERSONAS: Record<string, string[]> = {
   "CEO / Founder": ["CEO", "Founder", "Co-Founder", "Managing Director", "President"],

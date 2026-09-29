@@ -4,7 +4,7 @@ import { API_URL, apiFetch, auth, fmtDate } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 
 interface Company { id: string; domain: string; name: string | null; industry: string | null; size: string | null; description: string | null; techStack: string[]; location: string | null; linkedinUrl: string | null; emailPattern: string | null }
-interface Lead { id: string; status: string; fullName: string | null; firstName: string | null; lastName: string | null; title: string | null; seniority: string | null; email: string | null; emailStatus: string; emailConfidence: number; linkedinUrl: string | null; phone: string | null; location: string | null; score: number; scoreReasons: string[]; tags: string[]; source: string; createdAt: string; company: Company | null; custom: Record<string, unknown> }
+interface Lead { id: string; status: string; fullName: string | null; firstName: string | null; lastName: string | null; title: string | null; seniority: string | null; email: string | null; emailStatus: string; emailConfidence: number; linkedinUrl: string | null; phone: string | null; location: string | null; score: number; scoreReasons: string[]; tags: string[]; source: string; createdAt: string; company: Company | null; custom: Record<string, unknown>; clientId?: string | null }
 
 /**
  * The pipeline stages the server already tracks.
@@ -42,6 +42,7 @@ export function LeadsPage() {
   const [importOpen, setImportOpen] = useState(false);
   const [suppressOpen, setSuppressOpen] = useState(false);
   const [lists, setLists] = useState<{ id: string; name: string; count: number }[]>([]);
+  const [clients, setClients] = useState<{ id: string; name: string; color: string | null }[]>([]);
   // Settings tells people to "push leads from the Leads page (select -> sync)". That
   // control did not exist, on any page, so the sentence described a workflow the product
   // did not have. The connected integrations decide whether it is offered here at all.
@@ -77,6 +78,8 @@ export function LeadsPage() {
   // keep the open detail modal in sync with freshly loaded rows
   useEffect(() => { if (detail) { const fresh = rows.find((r) => r.id === detail.id); if (fresh && fresh !== detail) setDetail(fresh); } }, [rows]); // eslint-disable-line
   useEffect(() => { apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)); }, []);
+  useEffect(() => { apiFetch<{ clients: typeof clients }>("GET", "/v1/clients").then((r) => setClients(r.clients)).catch(() => setClients([])); }, []);
+  const clientById = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients]);
   useEffect(() => {
     apiFetch<{ integrations: { provider: string; status: string }[]; providers?: string[] }>("GET", "/v1/integrations")
       .then((r) => { setIntegrations(r.integrations ?? []); setSyncable(r.providers ?? []); })
@@ -96,6 +99,23 @@ export function LeadsPage() {
         const provider = action.slice(5);
         const r = await apiFetch<{ queued: number }>("POST", `/v1/integrations/${provider}/sync`, { leadIds: ids });
         toast(`Queued ${r.queued} lead${r.queued === 1 ? "" : "s"} to ${provider} - they appear there within a minute or two`);
+      }
+      if (action === "client:none") {
+        const r = await apiFetch<{ returnedToPool: number }>("POST", "/v1/clients/unassign", { leadIds: ids });
+        toast(`${r.returnedToPool} returned to the pool`);
+      } else if (action.startsWith("client:")) {
+        const clientId = action.slice(7);
+        const name = clientById.get(clientId)?.name ?? "client";
+        let r = await apiFetch<{ assigned: number; alreadyThisClient: number; ownedByAnotherClient: number; notFound: number }>("POST", `/v1/clients/${clientId}/assign`, { leadIds: ids });
+        // Leads another client owns are never taken silently. Ask, once, for the lot.
+        if (r.ownedByAnotherClient > 0 && confirm(`${r.ownedByAnotherClient} of these already belong to another client. Move them to ${name} too?`)) {
+          const moved = await apiFetch<typeof r>("POST", `/v1/clients/${clientId}/assign`, { leadIds: ids, move: true });
+          r = { ...moved, assigned: r.assigned + moved.assigned, ownedByAnotherClient: 0 };
+        }
+        const parts = [`${r.assigned} assigned to ${name}`];
+        if (r.alreadyThisClient) parts.push(`${r.alreadyThisClient} already were`);
+        if (r.ownedByAnotherClient) parts.push(`${r.ownedByAnotherClient} left with their current client`);
+        toast(parts.join(", "));
       }
       if (action.startsWith("stage:")) {
         const status = action.slice(6);
@@ -164,6 +184,9 @@ export function LeadsPage() {
         <select className="input w-40" value={q.status ?? ""} onChange={(e) => set("status", e.target.value)} aria-label="Pipeline stage"><option value="">Any stage</option>{STAGES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
         <select className="input w-40" value={q.seniority ?? ""} onChange={(e) => set("seniority", e.target.value)}><option value="">Any seniority</option>{["c_level", "vp", "director", "manager", "senior", "individual", "entry"].map((s) => <option key={s} value={s}>{s}</option>)}</select>
         <select className="input w-40" value={q.listId ?? ""} onChange={(e) => set("listId", e.target.value)}><option value="">All lists</option>{lists.map((l) => <option key={l.id} value={l.id}>{l.name} ({l.count})</option>)}</select>
+        {clients.length > 0 && (
+          <select className="input w-44" value={q.clientId ?? ""} onChange={(e) => set("clientId", e.target.value)} aria-label="Filter by client"><option value="">All clients</option><option value="none">Unassigned (pool)</option>{clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
+        )}
         {/* Lists could be created from the bulk bar and never removed, so an obsolete one
             stayed in this filter and in the Campaigns and Autopilot pickers forever. */}
         {q.listId && (
@@ -195,6 +218,9 @@ export function LeadsPage() {
           <button className="btn-secondary" onClick={() => bulk("enrich")}>Enrich</button>
           <button className="btn-secondary" onClick={() => bulk("tag")}>Tag</button>
           <select className="input w-40" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Move to pipeline stage"><option value="">Move to stage…</option>{STAGES.map((s) => <option key={s} value={`stage:${s}`}>{s}</option>)}</select>
+          {clients.length > 0 && (
+            <select className="input w-44" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Assign to client"><option value="">Assign to client…</option>{clients.map((c) => <option key={c.id} value={`client:${c.id}`}>{c.name}</option>)}<option value="client:none">Return to pool</option></select>
+          )}
           <select className="input w-44" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }}><option value="">Add to list…</option>{lists.map((l) => <option key={l.id} value={`list:${l.id}`}>{l.name}</option>)}<option value="newlist">+ New list</option></select>
           {crmTargets.length > 0 && (
             <select className="input w-40" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Push to a connected CRM">
@@ -228,7 +254,13 @@ export function LeadsPage() {
                   onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(l); } }}
                 >
                   <td className="td" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={sel.has(l.id)} onChange={(e) => { const s = new Set(sel); e.target.checked ? s.add(l.id) : s.delete(l.id); setSel(s); }} /></td>
-                  <td className="td"><div className="font-medium">{l.fullName ?? "-"}</div><div className="text-xs text-ink-400">{l.title ?? ""}</div></td>
+                  <td className="td">
+                    <div className="font-medium">{l.fullName ?? "-"}</div>
+                    <div className="text-xs text-ink-400">{l.title ?? ""}</div>
+                    {l.clientId && clientById.get(l.clientId) && (
+                      <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-ink-300"><span className="inline-block h-2 w-2 rounded-full" style={{ background: clientById.get(l.clientId)!.color ?? "#a8987f" }} />{clientById.get(l.clientId)!.name}</span>
+                    )}
+                  </td>
                   <td className="td"><div>{l.company?.name ?? l.company?.domain ?? "-"}</div><div className="text-xs text-ink-400">{l.company?.industry ?? l.company?.domain ?? ""}</div></td>
                   <td className="td">{l.email ? <div className="text-sm">{l.email}</div> : <span className="text-ink-500">-</span>}<EmailStatusBadge status={l.emailStatus} /></td>
                   <td className="td"><StageBadge status={l.status} /></td>

@@ -26,6 +26,9 @@ import { UpgradeRequestPage } from "./pages/UpgradeRequest";
 import { AdminLoginPage } from "./pages/AdminLogin";
 import { GoogleCallbackPage } from "./pages/GoogleCallback";
 import { AdminDashboardPage } from "./pages/AdminDashboard";
+import { ClientsPage } from "./pages/Clients";
+import { ClientDetailPage } from "./pages/ClientDetail";
+import { ClientReportPage } from "./pages/ClientReport";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const token = useAuthToken();
@@ -43,6 +46,8 @@ function Root() {
       <Route path="/auth/google" element={<GoogleCallbackPage />} />
       <Route path="/admin/login" element={<AdminLoginPage />} />
       <Route path="/admin" element={<AdminDashboardPage />} />
+      {/* Public: an agency's client opens this from a shared link, with no account. */}
+      <Route path="/r/:token" element={<ClientReportPage />} />
       <Route path="/" element={token ? <Protected><Shell><Dashboard /></Shell></Protected> : <LandingPage />} />
       <Route
         path="/*"
@@ -50,6 +55,8 @@ function Root() {
           <Protected>
             <Shell>
               <Routes>
+                <Route path="/clients" element={<ClientsPage />} />
+                <Route path="/clients/:id" element={<ClientDetailPage />} />
                 <Route path="/leads" element={<LeadsPage />} />
                 <Route path="/search" element={<SearchPage />} />
                 <Route path="/icps" element={<IcpPage />} />

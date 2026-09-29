@@ -68,6 +68,9 @@ suite("route surface", () => {
     { match: /^\/docs$|^\/openapi\.json$/, why: "static documents, no behaviour to assert here" },
     { match: /^\/internal\/jobs\/run$/, why: "drains the real job queue; covered by the jobs suite" },
     { match: /^\/v1\/billing\/plans$/, why: "the public price list; the pricing page reads it before anyone signs in" },
+    // Exactly this route, not /v1/public/* - a future public route should have to earn its
+    // own line here rather than inherit one. Its tests are in "client workspaces over HTTP".
+    { match: /^\/v1\/public\/clients\/report\/:token$/, why: "the client-facing report; the unguessable token in the URL is the credential" },
   ];
 
   beforeAll(async () => {
@@ -593,6 +596,50 @@ suite("route surface", () => {
       // And it must actually queue the work, not just answer politely.
       const body = await r.json();
       expect(body.jobId ?? body.queued ?? body.ok).toBeTruthy();
+    });
+  });
+
+  describe("client workspaces over HTTP", () => {
+    const H = () => ({ authorization: `Bearer ${token}`, "content-type": "application/json" });
+
+    it("requires auth for the workspace routes and not for the public report", async () => {
+      expect((await app.request("/v1/clients")).status).toBe(401);
+      // 404, not 401: the report route is reachable without a login, and an unknown token
+      // looks exactly like a revoked one.
+      expect((await app.request(`/v1/public/clients/report/${"z".repeat(43)}`)).status).toBe(404);
+    });
+
+    it("creates a client, shares it, and serves the report by token", async () => {
+      const made = await app.request("/v1/clients", { method: "POST", headers: H(), body: JSON.stringify({ name: `Route Co ${Date.now()}`, monthlyLeadTarget: 50, color: "#c15f37" }) });
+      expect(made.status).toBe(201);
+      const client = await made.json();
+
+      const list = await (await app.request("/v1/clients", { headers: H() })).json();
+      expect(list.clients.some((c: any) => c.id === client.id)).toBe(true);
+      expect(typeof list.pool.leads).toBe("number");
+
+      const shared = await (await app.request(`/v1/clients/${client.id}/share`, { method: "POST", headers: H() })).json();
+      expect(shared.shareToken.length).toBeGreaterThan(30);
+      const report = await app.request(`/v1/public/clients/report/${shared.shareToken}`);
+      expect(report.status).toBe(200);
+      expect(report.headers.get("cache-control")).toContain("no-store");
+      expect((await report.json()).client.name).toBe(client.name);
+
+      // A colour goes into a style attribute; anything but a hex value is refused.
+      const bad = await app.request(`/v1/clients/${client.id}`, { method: "PATCH", headers: H(), body: JSON.stringify({ color: "red;background:url(x)" }) });
+      expect(bad.status).toBe(400);
+    });
+
+    it("filters leads by client and by the unassigned pool", async () => {
+      const r = await app.request("/v1/leads?clientId=none", { headers: H() });
+      expect(r.status).toBe(200);
+      const bad = await app.request("/v1/leads?clientId=not-a-uuid", { headers: H() });
+      expect(bad.status).toBe(400);
+    });
+
+    it("refuses to run a search for a client that is not in the workspace", async () => {
+      const r = await app.request("/v1/search", { method: "POST", headers: H(), body: JSON.stringify({ query: "vp sales", clientId: "00000000-0000-4000-8000-000000000000" }) });
+      expect(r.status).toBe(404);
     });
   });
 

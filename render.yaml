@@ -65,6 +65,16 @@ services:
       # Optional verification boost (free tier)
       - key: HUNTER_API_KEY
         sync: false
+      # Pay-as-you-go email verification, credits never expire. Tried before Hunter so
+      # Hunter credits are spent on finding addresses, not checking them. One is enough.
+      - key: REOON_API_KEY
+        sync: false
+      - key: MILLIONVERIFIER_API_KEY
+        sync: false
+      # Metered web search with a monthly free credit; replaces Google CSE, which is closed
+      # to new customers and ends on 1 Jan 2027.
+      - key: BRAVE_SEARCH_API_KEY
+        sync: false
       # Production path: paid plans open, no pre-purchased data-provider credits needed to start
       - key: PILOT_MODE
         value: "false"

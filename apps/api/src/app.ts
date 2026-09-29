@@ -8,6 +8,7 @@ import { errorHandler } from "./lib/errors.js";
 import type { Env } from "./middleware.js";
 import { authRoutes } from "./routes/auth.js";
 import { leadRoutes } from "./routes/leads.js";
+import { clientReportPublic, clientRoutes } from "./routes/clients.js";
 import { searchRoutes } from "./routes/search.js";
 import { icpRoutes } from "./routes/icps.js";
 import { companyRoutes } from "./routes/companies.js";
@@ -59,6 +60,9 @@ export function createApp() {
 
   app.route("/v1/auth", authRoutes);
   app.route("/v1/leads", leadRoutes);
+  app.route("/v1/clients", clientRoutes);
+  // Unauthenticated: the client-facing report, where the token in the URL is the credential.
+  app.route("/v1/public", clientReportPublic);
   app.route("/v1/search", searchRoutes);
   app.route("/v1/icps", icpRoutes);
   app.route("/v1/companies", companyRoutes);

@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
 import { and, currentPeriod, desc, eq, getDb, getToolsSummary, ilike, inArray, limitsFor, or, organizations, PLANS, recordProviderHealth, sql, updateToolLimit, upgradeRequests, usage, users } from "@prospex/db";
-import { checkAllProviders } from "@prospex/core";
+import { checkAllBalances, checkAllProviders } from "@prospex/core";
 import { env } from "../env.js";
 import { issueAdminJwt } from "../lib/auth.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -199,6 +199,12 @@ adminRoutes.patch("/upgrade-requests/:id", zValidator("json", z.object({ status:
 
 // ── Tools & limits: every 3rd-party API Scout calls, its free-tier limit, and current usage,
 // so the admin knows exactly which tool to upgrade before a free tier runs out. ──
+/**
+ * What is left on every paid provider, read from each provider's own free account endpoint.
+ * Rate-limited because each call fans out to a dozen third parties.
+ */
+adminRoutes.get("/balances", rateLimit({ perMinute: 6 }), async (c) => c.json({ balances: await checkAllBalances(), checkedAt: new Date().toISOString() }));
+
 adminRoutes.get("/tools", async (c) => {
   const tools = await getToolsSummary();
   return c.json({ tools });
