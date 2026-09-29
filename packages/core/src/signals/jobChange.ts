@@ -1,5 +1,5 @@
 import type { PersonCandidate } from "../types.js";
-import { extractDomain, rootDomain } from "../util/domain.js";
+import { extractDomain, isSocialOrAggregator, rootDomain } from "../util/domain.js";
 
 /**
  * Has this person changed job since we last looked?
@@ -99,7 +99,19 @@ export function normalizeTitle(title?: string | null): string {
 function domainOf(value?: string | null): string {
   if (!value) return "";
   const host = extractDomain(value.trim().toLowerCase());
-  return host ? rootDomain(host) : "";
+  if (!host) return "";
+  const root = rootDomain(host);
+  // A LinkedIn company page is not an employer.
+  //
+  // Providers put "linkedin.com/company/acme" in a website field constantly, and parsing
+  // it properly - which is the fix above - reduces two entirely different employers to
+  // "linkedin.com" on both sides. That reads as the same company, which returns
+  // `kind: "none"` at 0.9 with "Same employer and the same title", which stamps
+  // jobCheckedAt and suppresses the next real check for a month. Before the parse fix this
+  // was accidentally safe, because the raw strings differed; the parse has to bring its own
+  // guard. Same for sites.google.com, facebook.com pages and the rest.
+  if (isSocialOrAggregator(root)) return "";
+  return root;
 }
 
 /** Do these two records describe the same employer? Domain wins when both have one. */
@@ -133,22 +145,38 @@ function sameCompany(a: JobChangeInput["previous"], b: JobChangeInput["current"]
   return na === nb;
 }
 
-/** Do two names look like the same company under a new name, rather than two companies? */
-function looksLikeRename(a?: string | null, b?: string | null): boolean {
+/** How closely related do two company names look? */
+type NameRelation = "renamed" | "same-family" | "unrelated";
+
+/**
+ * Three tiers, because two were not enough to describe what we actually know.
+ *
+ * `renamed` - one name begins with the other, whole: "Acme" -> "Acme Global". Most likely a
+ * rebrand or a restructure, and asserting a departure here would send someone to write off
+ * a live deal.
+ *
+ * `same-family` - a shared distinctive first word that is not a prefix: "Acme India" ->
+ * "Acme Global", "Tata Motors" -> "Tata Steel". This is the tier that has been wrong twice.
+ * Treating it as a rename swallowed real moves between genuinely separate companies that
+ * happen to share a founder's surname, and reported them at 0.45 as "may not be a move at
+ * all". Treating it as unrelated, which the previous fix did, swung it the other way: an
+ * internal move from "Acme India" to "Acme Global" was announced at 0.92 as "confirmed by
+ * company domain", and a rebrand takes the domain with it, so the domain confirms nothing
+ * here. It is a real change either way and it is reported as one - at the confidence the
+ * evidence actually supports, with the ambiguity named.
+ *
+ * `unrelated` - nothing in common. The domains, if we have two, mean what they say.
+ */
+function nameRelation(a?: string | null, b?: string | null): NameRelation {
   const na = normalizeCompany(a);
   const nb = normalizeCompany(b);
-  if (!na || !nb) return false;
-  // One name CONTAINS the other, whole: "Acme" -> "Acme Global".
-  //
-  // Nothing weaker than that. A previous version also called it a rename when the two
-  // names merely shared a first word of four or more characters, which is how a great many
-  // genuinely separate companies are named: "Tata Motors" and "Tata Steel", "Reliance
-  // Retail" and "Reliance Jio", "United Airlines" and "UnitedHealthcare", "American
-  // Express" and "American Airlines". Moving between two of those is a real move, and one
-  // of the more valuable ones to hear about - it was being reported at 0.45 with the words
-  // "may not be a move at all", which is the exact false negative this module exists to
-  // prevent.
-  return na.startsWith(nb + " ") || nb.startsWith(na + " ");
+  if (!na || !nb) return "unrelated";
+  if (na.startsWith(nb + " ") || nb.startsWith(na + " ")) return "renamed";
+  const [fa] = na.split(" ");
+  const [fb] = nb.split(" ");
+  // Short first words ("the", "new", "global") are far too common to carry this weight.
+  if (fa.length >= 4 && fa === fb) return "same-family";
+  return "unrelated";
 }
 
 export function detectJobChange(input: JobChangeInput): JobChangeResult {
@@ -179,28 +207,26 @@ export function detectJobChange(input: JobChangeInput): JobChangeResult {
     // "confirmed by company domain" at 0.92 for a verdict that was reached on the names
     // alone. `domainOf` is what `sameCompany` compares, so this now agrees with it.
     const byDomain = !!domainOf(previous.companyDomain) && !!domainOf(current.companyDomain);
+    const relation = nameRelation(previous.companyName, current.companyName);
     // A rebrand changes the domain too, so "the domains differ" is not by itself proof of a
-    // departure. When the NAMES still look like the same company - one a prefix of the
-    // other, or a shared distinctive first word - the likeliest explanation is a rename,
-    // and asserting 0.92 that a champion has left would send someone to write off a live
-    // deal. The first version made exactly that claim, hedging about rebrands only on the
-    // name-only path, which is the one a rebrand does not take.
-    const rename = looksLikeRename(previous.companyName, current.companyName);
-    // The rename discount still wins over a domain change, because a rebrand takes the
-    // domain with it - "Acme" on acme.com to "Acme Global" on acmeglobal.io is as likely a
-    // restructure as a departure, and asserting 0.92 would send someone to write off a live
-    // deal. What changed is which names reach this branch at all: `looksLikeRename` no
-    // longer counts a shared first word, so a real move between two same-family companies
-    // is no longer swallowed here.
-    const confidence = rename ? 0.45 : byDomain ? 0.92 : 0.7;
+    // departure. How much it proves depends on how closely the two NAMES are related, which
+    // is what nameRelation grades; the 0.92 "confirmed by company domain" claim is reserved
+    // for names with nothing in common.
+    // Name evidence outranks domain evidence in BOTH hedged tiers, because a rebrand and a
+    // restructure each take the domain with them - so for two names this closely related,
+    // differing domains are not the independent confirmation they look like.
+    const confidence = relation === "renamed" ? 0.45 : relation === "same-family" ? 0.7 : byDomain ? 0.92 : 0.7;
     return {
       kind: titleChanged ? "both" : "company_change",
       confidence,
-      reason: rename
-        ? `The company on file changed from "${previous.companyName}" to "${current.companyName}". These names look like the same company renamed or restructured, so this may not be a move at all - worth a look before acting on it.`
-        : byDomain
-          ? `Moved from ${previous.companyName ?? previous.companyDomain} to ${current.companyName ?? current.companyDomain} - confirmed by company domain.`
-          : `Company name changed from "${previous.companyName}" to "${current.companyName}". This can also be a rebrand or an acquisition, so treat it as likely rather than certain.`,
+      reason:
+        relation === "renamed"
+          ? `The company on file changed from "${previous.companyName}" to "${current.companyName}". These names look like the same company renamed or restructured, so this may not be a move at all - worth a look before acting on it.`
+          : relation === "same-family"
+            ? `The company on file changed from "${previous.companyName}" to "${current.companyName}". These are either two companies in the same group or one of them renamed, and the domain cannot tell them apart because a rebrand changes that too - so this is a real change, but whether they actually left is worth checking.`
+            : byDomain
+              ? `Moved from ${previous.companyName ?? previous.companyDomain} to ${current.companyName ?? current.companyDomain} - confirmed by company domain.`
+              : `Company name changed from "${previous.companyName}" to "${current.companyName}". This can also be a rebrand or an acquisition, so treat it as likely rather than certain.`,
       from: { company: previous.companyName, title: previous.title },
       to: { company: current.companyName, title: current.title },
       sameEmployer: false,

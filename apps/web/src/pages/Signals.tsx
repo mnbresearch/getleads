@@ -85,7 +85,14 @@ export function SignalsPage() {
                 <TypeBadge t={s.type} />
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{s.companyName ?? "Unknown company"} {s.amountUsd ? <span className="ml-1 text-emerald-600">{money(s.amountUsd)}</span> : null} {s.round && <span className="ml-1 text-xs text-ink-400">{s.round}</span>}</div>
-                  <a className="text-sm text-ink-300 hover:underline" href={s.url} target="_blank" rel="noreferrer">{s.title}</a>
+                  {/* Linkified only when there is somewhere to go. A job change has no
+                      source article - its `url` is an internal identity string - and an
+                      anchor with a non-http href renders as a link that goes nowhere. */}
+                  {/^https?:\/\//.test(s.url ?? "") ? (
+                    <a className="text-sm text-ink-300 hover:underline" href={s.url} target="_blank" rel="noreferrer">{s.title}</a>
+                  ) : (
+                    <div className="text-sm text-ink-300">{s.title}</div>
+                  )}
                   <div className="text-xs text-ink-500">{s.source} · {fmtDate(s.occurredAt ?? s.createdAt)} {s.match && <span className="ml-2 badge bg-brand-50 text-brand-700">matched{s.match.leadsCreated ? ` · ${s.match.leadsCreated} leads` : ""}</span>}</div>
                 </div>
                 {s.companyName && <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ people: unknown[] }>("POST", "/v1/tools/decision-makers", { companyName: s.companyName, companyDomain: s.companyDomain ?? undefined, limit: 4 }).then((r) => toast(`${r.people.length} decision makers saved as leads`)).catch((e) => toast(e.message, "err"))}>Find decision makers</button>}

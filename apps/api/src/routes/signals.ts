@@ -45,7 +45,7 @@ signalRoutes.get("/types", (c) => c.json({ types: SIGNAL_TYPES }));
 signalRoutes.post(
   "/job-changes/scan",
   rateLimit({ perMinute: 4 }),
-  zValidator("json", z.object({ limit: z.coerce.number().min(1).max(500).default(50), minScore: z.coerce.number().min(0).max(100).default(70), staleDays: z.coerce.number().min(1).max(365).default(30) }).optional()),
+  zValidator("json", z.object({ limit: z.coerce.number().min(1).max(500).default(50), minScore: z.coerce.number().min(0).max(100).default(70), staleDays: z.coerce.number().min(1).max(365).default(30), retryDays: z.coerce.number().min(1).max(365).default(3) }).optional()),
   async (c) => {
     const b = c.req.valid("json") ?? {};
     const r = await scanJobChanges(orgId(c), b);

@@ -22,8 +22,19 @@ export interface JobChangeScanResult {
   unconfirmed: number;
   /** Changes we had already recorded and alerted on, so did not raise again. */
   alreadyKnown: number;
+  /**
+   * Leads that were due a re-check but were attempted recently and answered nothing.
+   *
+   * Reported because otherwise the backoff turns an ongoing provider outage into a clean
+   * empty result: the day after a failed scan, every one of those leads is suppressed, and
+   * `checked: 0, changed: 0` with no note is indistinguishable from an org where nobody
+   * moved.
+   */
+  skippedRecentlyAttempted: number;
   /** Providers were configured but none could answer. */
   blocked?: string;
+  /** The caller's deadline arrived before every selected lead had been looked at. */
+  stoppedAtDeadline?: boolean;
   changes: { leadId: string; fullName: string | null; change: JobChangeResult }[];
 }
 
@@ -34,7 +45,7 @@ function worthRechecking(minScore: number) {
 
 export async function scanJobChanges(
   orgId: string,
-  opts: { limit?: number; minScore?: number; staleDays?: number; retryDays?: number } = {},
+  opts: { limit?: number; minScore?: number; staleDays?: number; retryDays?: number; deadlineAt?: number } = {},
 ): Promise<JobChangeScanResult> {
   const { db } = getDb();
   const limit = Math.min(opts.limit ?? 50, 500);
@@ -44,6 +55,15 @@ export async function scanJobChanges(
   // because that would make a failed lookup suppress checks for longer than a successful
   // one - the inversion this module is built to avoid, arriving by the back door.
   const retryDays = Math.max(1, Math.min(opts.retryDays ?? 3, staleDays));
+
+  // The same predicate the selection uses, minus the backoff - so the skip count below
+  // cannot drift away from what the scan is actually skipping.
+  const due = and(
+    eq(leads.orgId, orgId),
+    worthRechecking(minScore),
+    sql`(${leads.jobCheckedAt} IS NULL OR ${leads.jobCheckedAt} < now() - (${staleDays} || ' days')::interval)`,
+    sql`(${leads.linkedinUrl} IS NOT NULL OR ${leads.email} IS NOT NULL)`,
+  );
 
   const rows = await db
     .select({ lead: leads, company: companies })
@@ -71,10 +91,26 @@ export async function scanJobChanges(
     .orderBy(desc(leads.score))
     .limit(limit);
 
-  const out: JobChangeScanResult = { checked: 0, changed: 0, unconfirmed: 0, alreadyKnown: 0, changes: [] };
+  const [skipped] = await db
+    .select({ n: sql<number>`count(*)::int` })
+    .from(leads)
+    .where(and(due, sql`${leads.jobCheckAttemptedAt} >= now() - (${retryDays} || ' days')::interval`));
+
+  const out: JobChangeScanResult = { checked: 0, changed: 0, unconfirmed: 0, alreadyKnown: 0, skippedRecentlyAttempted: 0, changes: [] };
+  out.skippedRecentlyAttempted = Number(skipped?.n ?? 0);
   let answered = 0;
 
   for (const { lead, company } of rows) {
+    // Checked per lead, not per org.
+    //
+    // One enrichment can cost the sum of every configured provider's timeout - tens of
+    // seconds - so a caller that only checks its deadline between orgs can run minutes past
+    // it on a single org. Stopping here leaves the remaining leads unstamped, so the next
+    // run resumes rather than repeating.
+    if (opts.deadlineAt && Date.now() > opts.deadlineAt) {
+      out.stoppedAtDeadline = true;
+      break;
+    }
     const fresh = await enrichWithProviders({
       email: lead.email ?? undefined,
       linkedinUrl: lead.linkedinUrl ?? undefined,
@@ -129,15 +165,19 @@ export async function scanJobChanges(
     if (change.kind === "none") continue;
 
     // Already raised? Then it is still true, and still worth counting - but alerting on it
-    // again every cycle would train the person receiving it to ignore the alert.
-    if (await alreadyRecorded(db, orgId, lead.id, change)) {
+    // again every cycle would train the person receiving it to ignore the alert. The
+    // lead's own company row is deliberately not rewritten when a move is detected -
+    // whether the CRM record follows the person or stays with the account is the org's
+    // call - so the same move is re-detected at every scan from here on.
+    const recorded = await recordJobChange(db, orgId, lead, change, fresh.companyDomain ?? null);
+    if (!recorded) {
       out.alreadyKnown++;
       continue;
     }
 
     out.changed++;
     out.changes.push({ leadId: lead.id, fullName: lead.fullName, change });
-    await recordJobChange(db, orgId, lead, change, fresh.companyDomain ?? null);
+    await emitJobChange(orgId, lead, change);
   }
 
   // Everything we tried came back empty.
@@ -149,74 +189,88 @@ export async function scanJobChanges(
   // So it says what is true: nothing came back, and that is not the same as nobody moving.
   if (out.checked > 0 && answered === 0) {
     out.blocked = `Nothing came back for any of the ${out.checked} leads checked. That may be a provider or credential problem, or these people may simply not be in the databases we can reach - either way it is not a month in which nobody changed job. Check Settings - Integrations if you expect a provider to be answering.`;
+  } else if (out.checked === 0 && out.skippedRecentlyAttempted > 0) {
+    // The day after a failed scan.
+    //
+    // Every lead that answered nothing yesterday is inside the backoff window today, so
+    // there is nothing left to check and the scan returns zero of everything. Without this
+    // the backoff would quietly convert an unresolved outage into a clean empty result -
+    // exactly the substitution the rest of this module exists to prevent, arriving through
+    // the retry logic added to stop the outage costing money.
+    out.blocked = `Nothing was checked: all ${out.skippedRecentlyAttempted} lead${out.skippedRecentlyAttempted === 1 ? "" : "s"} due a re-check were tried within the last ${retryDays} day${retryDays === 1 ? "" : "s"} and nothing came back then, so they are being left alone rather than re-billed. This is not a month in which nobody moved. Check Settings - Integrations if you expect a provider to be answering.`;
   }
 
   return out;
 }
 
 /**
- * Have we already told this org about this exact move?
+ * A stable identity for one move, used as the signal's `url`.
  *
- * The lead's own company row is not rewritten when a move is detected - deciding whether
- * the CRM record should follow the person or stay with the account is the org's call, not
- * ours - so the same move is detected again at the next scan, and would be announced again.
- * Matching on the destination rather than on the lead alone means a SECOND move, to
- * somewhere else, still comes through.
+ * `signals` is uniquely indexed on `(type, url)`, and job-change signals had no url - so
+ * the SECOND job change ever detected, in any org, failed on a duplicate key and took the
+ * whole scan down with it. Nothing caught it because nothing had ever detected two. Giving
+ * the row a real identity fixes the crash and makes the database itself the dedup, which a
+ * SELECT-then-INSERT could never be: two scans racing both read "not recorded" and both
+ * insert.
+ *
+ * The destination is part of the key, including the DOMAIN. Providers return a company
+ * website with no company name constantly, so a move to beta.com and a later move to
+ * gamma.com otherwise look identical on every other field, and the second - a genuinely new
+ * move - would be silently swallowed by the dedup meant to stop noise.
+ *
+ * It is not an http url and the feed does not linkify it.
  */
-async function alreadyRecorded(db: Db, orgId: string, leadId: string, change: JobChangeResult): Promise<boolean> {
-  const rows = await db
-    .select({ id: signals.id })
-    .from(signals)
-    .where(
-      and(
-        eq(signals.orgId, orgId),
-        eq(signals.type, "job_change"),
-        sql`${signals.raw}->>'leadId' = ${leadId}`,
-        sql`${signals.raw}->>'kind' = ${change.kind}`,
-        sql`coalesce(${signals.raw}->'to'->>'company', '') = ${change.to?.company ?? ""}`,
-        sql`coalesce(${signals.raw}->'to'->>'title', '') = ${change.to?.title ?? ""}`,
-      ),
-    )
-    .limit(1);
-  return rows.length > 0;
+function jobChangeKey(leadId: string, change: JobChangeResult, newDomain: string | null) {
+  const dest = [newDomain ?? "", change.to?.company ?? "", change.to?.title ?? ""].join("|");
+  return `scout:job-change/${leadId}/${change.kind}/${dest}`;
 }
 
-/** Write the signal, link it to the lead, and tell anything listening. */
+/**
+ * Write the signal and link it to the lead.
+ *
+ * Returns false when this exact move was already recorded, so the caller can count it
+ * without announcing it again.
+ */
 async function recordJobChange(
   db: Db,
   orgId: string,
   lead: { id: string; fullName: string | null; title: string | null },
   change: JobChangeResult,
   newDomain: string | null,
-) {
+): Promise<boolean> {
   const title = change.sameEmployer
     ? `${lead.fullName ?? "A tracked lead"} was promoted to ${change.to?.title ?? "a new role"}`
-    : `${lead.fullName ?? "A tracked lead"} moved to ${change.to?.company ?? "a new company"}`;
+    : `${lead.fullName ?? "A tracked lead"} moved to ${change.to?.company ?? change.to?.title ?? "a new company"}`;
 
   // Written with an orgId, unlike the news-scanned signals which are global and fan out
   // through signal_matches. A job change is private to the org that tracks that lead - it
   // is derived from their own pipeline - and the feed query already reads org-scoped rows.
-  const [signal] = await db
+  //
+  // No signal_matches row either: that table links a GLOBAL signal to the subscription that
+  // matched it, and its subscription_id is part of the primary key. A job change belongs to
+  // no subscription - the org already tracks this person.
+  const inserted = await db
     .insert(signals)
     .values({
       orgId,
       type: "job_change",
       title,
       summary: change.reason,
-      url: "",
+      url: jobChangeKey(lead.id, change, newDomain),
       companyName: change.to?.company ?? null,
       companyDomain: newDomain,
       confidence: change.confidence,
       occurredAt: new Date(),
       raw: { leadId: lead.id, kind: change.kind, from: change.from, to: change.to, sameEmployer: change.sameEmployer },
     })
-    .returning();
+    .onConflictDoNothing({ target: [signals.type, signals.url] })
+    .returning({ id: signals.id });
 
-  // No signal_matches row: that table links a GLOBAL signal to the subscription that
-  // matched it, and its subscription_id is part of the primary key. A job change belongs to
-  // no subscription - the org already tracks this person.
-  void signal;
+  return inserted.length > 0;
+}
 
+/** Tell anything listening. Only for a move we have just recorded for the first time. */
+async function emitJobChange(orgId: string, lead: { id: string }, change: JobChangeResult) {
   await emitEvent(
     orgId,
     "lead.job_changed",

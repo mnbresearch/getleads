@@ -201,6 +201,13 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
       // them stop adding up exactly where the model was most confident: a lead at 95 with a
       // +20 adjustment was shown as 95, +20, score 100.
       learningAdjustment: predictionById.get(s.lead.id)?.applied ? s.score - (scoreBeforeLearning.get(s.lead.id) ?? s.score) : 0,
+      // And what the model actually said, when the clamp ate some of it. A lead already at
+      // 100 with a +20 verdict reports an applied adjustment of 0, which reads exactly like
+      // a lead the model had nothing to say about - while `reasons` and the learning note
+      // both insist it was adjusted. Both numbers, so neither has to stand in for the other.
+      learningAdjustmentRaw: predictionById.get(s.lead.id)?.applied ? predictionById.get(s.lead.id)?.adjustment : 0,
+      learningAdjustmentClamped:
+        predictionById.get(s.lead.id)?.applied && s.score - (scoreBeforeLearning.get(s.lead.id) ?? s.score) !== predictionById.get(s.lead.id)?.adjustment ? true : undefined,
     })),
     // Said out loud, because "the model is not being applied yet" and "the model found
     // nothing to say about these leads" are different answers and both look like silence.

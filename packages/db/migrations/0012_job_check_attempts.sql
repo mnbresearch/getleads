@@ -13,8 +13,9 @@
 -- confirm is still never recorded as unchanged; it is simply not retried tomorrow.
 ALTER TABLE leads ADD COLUMN IF NOT EXISTS job_check_attempted_at timestamptz;
 
--- The scheduler picks orgs by their least-recent check. Without this the correlated max()
--- in that query is a full pass over leads per org per tick.
+-- Both scan predicates filter on org_id and one of the two timestamps. The scan then sorts
+-- the survivors by score, which this index does not serve - the filter is what needs help,
+-- since without it every run reads every lead in the org.
 CREATE INDEX IF NOT EXISTS idx_leads_job_check_attempted_at ON leads(org_id, job_check_attempted_at);
 
 -- Rotation cursor for the scheduler, on the org rather than derived from its leads.

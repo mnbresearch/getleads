@@ -3,7 +3,7 @@ import { apiFetch } from "../lib/api";
 import { Empty, LoadError, Page, Spinner, useToast } from "../components/ui";
 
 interface Stage { stage: string; label: string; count: number; conversionFromPrevious: number | null; conversionFromStart: number | null; currentlyHere: number }
-interface Funnel { days: number; total: number; entered: number; lost: number; other: number; otherNote?: string; stages: Stage[]; biggestDropOff: { from: string; to: string; lostShare: number } | null; sufficient: boolean; note?: string }
+interface Funnel { days: number; totalInWindow: number; windowNote?: string; entered: number; lost: number; other: number; otherNote?: string; stages: Stage[]; biggestDropOff: { from: string; to: string; lostShare: number } | null; sufficient: boolean; note?: string }
 interface SourceRow { source: string; leads: number; withEmail: number; verified: number; contacted: number; replied: number; qualified: number; customers: number; avgScore: number | null; replyRate: number | null; qualifiedRate: number | null; sufficient: boolean }
 interface Sources { days: number; sources: SourceRow[]; note: string }
 interface CampaignRow { campaignId: string; campaign: string; sent: number; opened: number; replied: number; qualifiedLeads: number; replyRate: number | null; openRate: number | null; sufficient: boolean; bestStep: number | null; steps: { stepNo: number | null; sent: number; opened: number; replied: number; replyRate: number | null }[] }
@@ -96,10 +96,11 @@ export function AnalyticsPage() {
                   })}
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-ink-400">
-                  <span>{funnel?.entered} entered</span>
+                  <span title={funnel?.windowNote}>{funnel?.entered} entered</span>
                   {!!funnel?.lost && <span>{funnel.lost} marked lost</span>}
-                  {/* Named rather than quietly dropped, so the three buckets reconcile to
-                      the lead count on screen instead of leaving a gap with no explanation. */}
+                  {/* Named rather than quietly dropped, so the buckets reconcile to the
+                      leads created in this window instead of leaving a gap with nothing on
+                      screen to explain it. */}
                   {!!funnel?.other && (
                     <span title={funnel.otherNote} className="text-ink-500">
                       {funnel.other} outside the funnel

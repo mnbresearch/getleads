@@ -16,7 +16,7 @@
  * stays green on a machine with no database. That is a deliberate trade: a skipped
  * suite is visible in the output, whereas a failing one would train people to ignore it.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 
 const TEST_DB = process.env.TEST_DATABASE_URL;
@@ -69,6 +69,7 @@ suite("database integration", () => {
   let getUsage: any;
   let ensureRecurringJobs: any;
   let RECURRING_JOBS: any;
+  let jobHandlers: any;
   let observationsFor: any;
   let knownBrands: any;
 
@@ -82,7 +83,7 @@ suite("database integration", () => {
     ({ visibilityOverview, observationsFor, knownBrands, sampleAcrossEngines } = await import("./services/visibility.js"));
     ({ getUsage } = await import("@prospex/db"));
     ({ learnFromOutcomes } = await import("@prospex/core"));
-    ({ withReschedule, ensureRecurringJobs, RECURRING_JOBS } = await import("./jobs.js"));
+    ({ withReschedule, ensureRecurringJobs, RECURRING_JOBS, handlers: jobHandlers } = await import("./jobs.js"));
   }, 60_000);
 
   /** Each test gets its own org so they cannot contaminate one another. */
@@ -890,6 +891,141 @@ suite("database integration", () => {
       expect((await scanJobChanges(org.id, { staleDays: 2, retryDays: 90 })).checked).toBe(1);
     });
 
+    /**
+     * The backoff must not launder an outage into an empty result.
+     *
+     * Day one, nothing answers: checked 40, unconfirmed 40, blocked, 502. Day two, every
+     * one of those leads is inside the backoff window, so there is nothing left to check -
+     * and `checked: 0, changed: 0` with no note is character-for-character what an org
+     * where nobody moved gets. The outage has not resolved; the scan must still say so.
+     */
+    it("still reports an unresolved outage on the day after, when the backoff leaves nothing to check", async () => {
+      const org = await newOrg("jc-backoff-blocked");
+      await leadWith(org.id, { status: "replied", score: 90 });
+      await leadWith(org.id, { status: "replied", score: 90 });
+
+      const day1 = await scanJobChanges(org.id, {});
+      expect(day1.checked).toBe(2);
+      expect(day1.blocked).toBeTruthy();
+
+      const day2 = await scanJobChanges(org.id, {});
+      expect(day2.checked).toBe(0);
+      expect(day2.skippedRecentlyAttempted).toBe(2);
+      // The distinction the whole module exists for.
+      expect(day2.blocked).toMatch(/not a month in which nobody moved/i);
+    });
+
+    /**
+     * Detection, dedup, and the second move - the behaviours the backoff work was most
+     * likely to have broken, and the ones nothing covered.
+     */
+    describe("with a provider that answers", () => {
+      async function withEnrichment<T>(answers: Record<string, unknown>[], fn: () => Promise<T>): Promise<T> {
+        const core = await import("@prospex/core");
+        let i = 0;
+        const spy = vi.spyOn(core, "enrichWithProviders").mockImplementation(async () => (answers[Math.min(i++, answers.length - 1)] ?? null) as never);
+        try {
+          return await fn();
+        } finally {
+          spy.mockRestore();
+        }
+      }
+
+      /** Clear the backoff so the next scan in a test picks the lead up again. */
+      const makeDue = (id: string) => db.execute(schema.sql`UPDATE leads SET job_check_attempted_at = NULL, job_checked_at = NULL WHERE id = ${id}`);
+
+      it("raises a move once, then stops raising it", async () => {
+        const org = await newOrg("jc-dedup");
+        const [co] = await db.insert(schema.companies).values({ orgId: org.id, name: "Acme", domain: "acme.test" }).returning();
+        const lead = await leadWith(org.id, { status: "replied", score: 90, title: "VP Sales", companyId: co.id });
+        const answer = { companyName: "Globex", companyDomain: "globex.test", title: "VP Sales" };
+
+        const first = await withEnrichment([answer], () => scanJobChanges(org.id, {}));
+        expect(first.changed).toBe(1);
+        expect(first.alreadyKnown).toBe(0);
+
+        await makeDue(lead.id);
+        const second = await withEnrichment([answer], () => scanJobChanges(org.id, {}));
+        // Still true, still counted - but not announced a second time. The lead's own
+        // company row is deliberately not rewritten (whether the CRM record follows the
+        // person is the org's call), so the same move is detected again every scan.
+        expect(second.changed).toBe(0);
+        expect(second.alreadyKnown).toBe(1);
+
+        const rows = await db.select().from(schema.signals).where(schema.and(schema.eq(schema.signals.orgId, org.id), schema.eq(schema.signals.type, "job_change")));
+        expect(rows.length).toBe(1);
+      });
+
+      /**
+       * The hole the first dedup had. Providers return a company website with no company
+       * name constantly, so two different destinations both arrive as
+       * `to: { company: null, title: "VP Sales" }` - identical on every key the dedup
+       * matched on. The second, genuinely new move was counted as already known and never
+       * alerted: a silenced signal, produced by the code added to stop noise.
+       */
+      it("raises a second move to a different company even when neither destination has a name", async () => {
+        const org = await newOrg("jc-dedup-domain");
+        const [co] = await db.insert(schema.companies).values({ orgId: org.id, name: "Acme", domain: "acme.test" }).returning();
+        const lead = await leadWith(org.id, { status: "replied", score: 90, title: "VP Sales", companyId: co.id });
+
+        const first = await withEnrichment([{ companyName: null, companyDomain: "beta.test", title: "VP Sales" }], () => scanJobChanges(org.id, {}));
+        expect(first.changed).toBe(1);
+
+        await makeDue(lead.id);
+        const second = await withEnrichment([{ companyName: null, companyDomain: "gamma.test", title: "VP Sales" }], () => scanJobChanges(org.id, {}));
+        expect(second.changed).toBe(1);
+        expect(second.alreadyKnown).toBe(0);
+      });
+
+      it("stamps a confirmed check and stops there", async () => {
+        const org = await newOrg("jc-confirmed");
+        const [co] = await db.insert(schema.companies).values({ orgId: org.id, name: "Acme", domain: "acme.test" }).returning();
+        const lead = await leadWith(org.id, { status: "replied", score: 90, title: "VP Sales", companyId: co.id });
+
+        const r = await withEnrichment([{ companyName: "Acme", companyDomain: "https://www.acme.test/careers", title: "VP Sales" }], () => scanJobChanges(org.id, {}));
+        expect(r.changed).toBe(0);
+        expect(r.unconfirmed).toBe(0);
+        const after = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, lead.id) });
+        // A scheme and a path on the fresh side used to read as a different employer.
+        expect(after!.jobCheckedAt).not.toBeNull();
+      });
+    });
+
+    /**
+     * The rotation has to rotate.
+     *
+     * It used to order orgs by `max(job_checked_at)` over their leads, NULLS FIRST - and
+     * that column is deliberately only written on a confirmed comparison, so an org with no
+     * leads, no provider coverage or nothing comparable never got one and sat at the head
+     * of every tick forever while the orgs behind it were never reached.
+     */
+    it("advances an org that can never be scanned, instead of parking it at the head", async () => {
+      // Every other org in this database is put behind us, so the head of the rotation is
+      // deterministic. All ticks start null, and null sorts first.
+      await db.execute(schema.sql`UPDATE organizations SET job_check_tick_at = now()`);
+      const empty = await newOrg("jc-tick-empty");
+      const withLead = await newOrg("jc-tick-lead");
+      await leadWith(withLead.id, { status: "replied", score: 90 });
+      await db.execute(schema.sql`UPDATE organizations SET job_check_tick_at = NULL WHERE id IN (${empty.id}, ${withLead.id})`);
+
+      const ctx = { db, log: () => {} };
+      const tickOf = async (id: string) => (await db.select().from(schema.organizations).where(schema.eq(schema.organizations.id, id)))[0].jobCheckTickAt;
+      const run = () => jobHandlers["jobchanges.tick"]({ id: randomUUID(), type: "jobchanges.tick", payload: {}, attempts: 0 }, ctx);
+
+      await run();
+      // The org with nothing to scan is stamped anyway - that is exactly what lets the
+      // orgs behind it through on the next tick.
+      const emptyFirst = await tickOf(empty.id);
+      expect(emptyFirst).not.toBeNull();
+      expect(await tickOf(withLead.id)).not.toBeNull();
+
+      // And a newcomer, not a previously-stamped org, is at the head next time.
+      const newcomer = await newOrg("jc-tick-new");
+      await db.execute(schema.sql`UPDATE organizations SET job_check_tick_at = NULL WHERE id = ${newcomer.id}`);
+      await run();
+      expect(await tickOf(newcomer.id)).not.toBeNull();
+    });
+
     it("keeps one org's leads out of another's scan", async () => {
       const a = await newOrg("jc-a");
       const b = await newOrg("jc-b");
@@ -991,11 +1127,14 @@ suite("database integration", () => {
       expect(f.entered).toBe(50);
       expect(f.lost).toBe(10);
       expect(f.other).toBe(7);
-      // The three buckets reconcile to the population, which is the point.
-      expect(f.entered + f.lost + f.other).toBe(f.total);
-      expect(f.total).toBe(67);
+      // The three buckets reconcile to the window's population, which is the point. The
+      // window is said out loud too, because "created in the last 90 days" and "every lead
+      // you have" are very different denominators and only one of them is on screen.
+      expect(f.entered + f.lost + f.other).toBe(f.totalInWindow);
+      expect(f.totalInWindow).toBe(67);
       expect(f.otherStatuses).toEqual([{ status: "unsubscribed", count: 7 }]);
       expect(f.otherNote).toMatch(/unsubscribed: 7/);
+      expect(f.windowNote).toMatch(/last 90 days/);
     });
 
     it("withholds conversion rates when there are too few leads to mean anything", async () => {

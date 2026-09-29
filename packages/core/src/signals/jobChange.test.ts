@@ -215,28 +215,80 @@ describe("job change detection", () => {
    * treating it as evidence of a rename reported a genuine move between two of them at
    * 0.45 confidence with the words "may not be a move at all".
    */
+  /**
+   * A shared first word is how an enormous number of unrelated companies are named, and how
+   * an enormous number of sibling brands are named too. It is not a rename and it is not
+   * nothing.
+   *
+   * Both previous versions picked one and were wrong about the other: calling it a rename
+   * swallowed a genuine move as "may not be a move at all", and calling it unrelated
+   * announced an internal transfer at 0.92 as "confirmed by company domain".
+   */
   it.each([
     ["Tata Motors", "Tata Steel"],
     ["Reliance Retail", "Reliance Jio"],
-    ["United Airlines", "UnitedHealth"],
+    ["Acme India", "Acme Global"],
     ["American Express", "American Airlines"],
-  ])("reports a move between %s and %s as a move, not a probable rename", (from, to) => {
+  ])("reports a change between %s and %s, without claiming the domain confirms it", (from, to) => {
     const r = detectJobChange({
       previous: { companyName: from, companyDomain: "tatamotors.com", title: "VP Sales" },
       current: { companyName: to, companyDomain: "tatasteel.com", title: "VP Sales" },
     });
     expect(r.kind).toBe("company_change");
-    expect(r.confidence).toBeGreaterThan(0.9);
+    // Reported as a change - not swallowed as a probable rename...
+    expect(r.confidence).toBe(0.7);
     expect(r.reason).not.toMatch(/may not be a move/i);
+    // ...and not asserted as confirmed, because a rebrand moves the domain too.
+    expect(r.reason).not.toMatch(/confirmed by company domain/i);
+    expect(r.reason).toMatch(/same group|renamed/i);
   });
 
-  it("still hedges when one name contains the other whole", () => {
+  it("keeps the confirmed claim for names with nothing in common", () => {
     const r = detectJobChange({
+      previous: { companyName: "Acme", companyDomain: "acme.com", title: "VP Sales" },
+      current: { companyName: "Globex", companyDomain: "globex.io", title: "VP Sales" },
+    });
+    expect(r.confidence).toBe(0.92);
+    expect(r.reason).toMatch(/confirmed by company domain/i);
+  });
+
+  /**
+   * A LinkedIn company page is not an employer.
+   *
+   * Providers fill website fields with linkedin.com/company/<slug> constantly. Parsing the
+   * URL properly - which is what the previous fix did - reduces two entirely different
+   * employers to "linkedin.com" on both sides, which reads as the same company at 0.9 and
+   * then suppresses the next real check for a month. Before the parse fix this was
+   * accidentally safe because the raw strings differed.
+   */
+  it.each([
+    ["linkedin.com/company/acme", "https://www.linkedin.com/company/globex"],
+    ["https://sites.google.com/acme", "https://sites.google.com/globex"],
+  ])("refuses to read %s and %s as the same employer", (a, b) => {
+    const r = detectJobChange({
+      previous: { companyName: "Acme", companyDomain: a, title: "VP Sales" },
+      current: { companyName: "Globex", companyDomain: b, title: "VP Sales" },
+    });
+    expect(r.kind).toBe("company_change");
+    expect(r.reason).not.toMatch(/confirmed by company domain/i);
+  });
+
+  it("separates a probable rename from a same-group move", () => {
+    const renamed = detectJobChange({
       previous: { companyName: "Acme", title: "VP Sales" },
       current: { companyName: "Acme Global", title: "VP Sales" },
     });
-    expect(r.kind).toBe("company_change");
-    expect(r.confidence).toBeLessThan(0.5);
+    const family = detectJobChange({
+      previous: { companyName: "Acme India", title: "VP Sales" },
+      current: { companyName: "Acme Global", title: "VP Sales" },
+    });
+    // Both are changes. One name beginning with the other is likeliest a rebrand; two
+    // siblings under a shared parent is likeliest a real move within the group. The two
+    // used to be graded identically, in one direction and then the other.
+    expect(renamed.confidence).toBe(0.45);
+    expect(family.confidence).toBe(0.7);
+    expect(renamed.reason).toMatch(/may not be a move/i);
+    expect(family.reason).not.toMatch(/may not be a move/i);
   });
 
   /**

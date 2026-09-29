@@ -86,11 +86,12 @@ export async function leadFunnel(orgId: string, days: number) {
   /**
    * Everything else with a status this funnel does not model.
    *
-   * `unsubscribed` is the live example - routes/leads.ts already filters on it, so these
-   * rows exist. They are neither in `entered` nor in `lost`, and an earlier version simply
-   * did not mention them: the funnel's own totals did not add up to the org's lead count,
-   * with nothing on the page to say why. Reporting them is the same rule the rest of this
-   * module runs on - say when a denominator has been narrowed, and by how much.
+   * `leads.status` is a plain text column. The app's own writers only ever set the six
+   * stages and "lost" - so on data that came through the app this bucket is empty, and
+   * saying otherwise would be inventing a problem. It exists for the data that did not:
+   * imports, backfills and anything written directly. Those rows are in neither `entered`
+   * nor `lost`, and an earlier version dropped them without a word, which is the silent
+   * narrowing the rest of this module refuses.
    */
   const totalRows = [...counts.values()].reduce((a, n) => a + n, 0);
   const other = totalRows - entered - lost;
@@ -121,7 +122,17 @@ export async function leadFunnel(orgId: string, days: number) {
 
   return {
     days,
-    total: totalRows,
+    /**
+     * Leads CREATED IN THIS WINDOW - not the org's lead count.
+     *
+     * Named carefully because the obvious reading is wrong and the difference is large: an
+     * org whose leads are all older than `days` sees zero here while its Leads page shows
+     * hundreds. The window is the funnel's real denominator, and a cohort measured over a
+     * window is the only honest way to read conversion anyway - leads acquired last week
+     * have not had time to become customers.
+     */
+    totalInWindow: totalRows,
+    windowNote: `Counts leads created in the last ${days} days, not every lead in the workspace.`,
     entered,
     lost,
     other,

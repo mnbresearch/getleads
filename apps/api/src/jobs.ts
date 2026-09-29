@@ -354,8 +354,16 @@ export const handlers: Record<string, JobHandler> = {
       const ORGS_PER_TICK = 25;
       const LEADS_PER_ORG = 50;
       const DEADLINE_MS = 10 * 60_000;
-      /** Rough cost of one lead: an enrichment round trip plus a write. */
-      const MS_PER_LEAD = 2_000;
+      /**
+       * Budgeting cost of one lead, taken from what one can actually cost.
+       *
+       * `enrichWithProviders` walks providers serially until one answers, and the slowest
+       * configured timeout is 20s, so a lead every provider misses costs that or more. A
+       * comment previously asserted 2s, which made the budget a best-case figure and the
+       * deadline a suggestion. The hard bound is `deadlineAt`, passed into the scan and
+       * checked per lead; this number only decides how many leads are worth starting.
+       */
+      const MS_PER_LEAD = 20_000;
       const startedAt = Date.now();
 
       /**
@@ -383,6 +391,8 @@ export const handlers: Record<string, JobHandler> = {
       let changed = 0;
       let blocked = 0;
       let alreadyKnown = 0;
+      let failed = 0;
+      let backedOff = 0;
       let stoppedEarly = false;
       for (const org of orgs) {
         const remaining = DEADLINE_MS - (Date.now() - startedAt);
@@ -393,25 +403,32 @@ export const handlers: Record<string, JobHandler> = {
           stoppedEarly = true;
           break;
         }
-        const budget = Math.max(5, Math.min(LEADS_PER_ORG, Math.floor(remaining / MS_PER_LEAD)));
+        const budget = Math.min(LEADS_PER_ORG, Math.floor(remaining / MS_PER_LEAD));
 
         // Stamped before the scan, not after: an org whose scan throws must still move
         // down the rotation, or one org failing loudly blocks everyone behind it forever.
         await db.update(organizations).set({ jobCheckTickAt: new Date() }).where(eq(organizations.id, org.id));
 
-        const r = await scanJobChanges(org.id, { limit: budget }).catch((e) => {
+        const r = await scanJobChanges(org.id, { limit: budget, deadlineAt: startedAt + DEADLINE_MS }).catch((e) => {
           ctx.log(`job change scan failed for ${org.id}: ${(e as Error).message}`);
           return null;
         });
-        if (!r) continue;
+        // Counted, not just logged. A tick where all 25 orgs threw used to return exactly
+        // what a tick of 25 healthy orgs with nothing due returns, and the only trace was a
+        // log line - the same failure-looks-like-emptiness substitution this job reports on.
+        if (!r) {
+          failed++;
+          continue;
+        }
         scanned += r.checked;
         changed += r.changed;
         alreadyKnown += r.alreadyKnown;
+        backedOff += r.skippedRecentlyAttempted;
         if (r.blocked) blocked++;
       }
       // `blocked` is reported separately from `changed: 0`, because an org where no
       // provider answered has not been told that nobody moved.
-      return { orgs: orgs.length, scanned, changed, alreadyKnown, orgsWhereNothingAnswered: blocked, stoppedEarly };
+      return { orgs: orgs.length, scanned, changed, alreadyKnown, leadsLeftForNextRun: backedOff, orgsWhereScanThrew: failed, orgsWhereNothingAnswered: blocked, stoppedEarly };
     });
   },
 
