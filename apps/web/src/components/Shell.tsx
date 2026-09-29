@@ -14,6 +14,8 @@ const nav = [
   { to: "/signals", label: "Intent signals", icon: "◈" },
   { to: "/visibility", label: "AI visibility", icon: "◇" },
   { to: "/autopilot", label: "Autopilot", icon: "∞" },
+  { to: "/automation", label: "Automation", icon: "⟳" },
+  { to: "/analytics", label: "Analytics", icon: "▤" },
   { to: "/tools", label: "Tools", icon: "⚒" },
   { to: "/agent", label: "Agent console", icon: "⚡" },
   { to: "/settings", label: "Settings", icon: "⚙" },

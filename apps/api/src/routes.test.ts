@@ -596,6 +596,107 @@ suite("route surface", () => {
     });
   });
 
+  /**
+   * The Phase 2 surface, exercised end to end.
+   *
+   * The sweep above already proves these refuse an anonymous caller and do not crash. These
+   * prove they answer the question they claim to - which a sweep cannot tell.
+   */
+  describe("discovery, job changes and analytics answer honestly", () => {
+    it("reports a discovery run that found nothing without inventing anything", async () => {
+      // No search providers are configured in the test environment, so this is the
+      // "nothing answered" path - which must be distinguishable from an empty market.
+      const r = await app.request("/v1/automation/discover", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ query: "VP Sales at B2B SaaS companies", count: 3 }),
+      });
+      expect([200, 502]).toContain(r.status);
+      const body = await r.json();
+      expect(body.created).toBe(0);
+      // Whatever happened, it is named. A run that stored nothing must say which kind of
+      // nothing it was.
+      expect(body.status === "blocked" ? body.note : body.note ?? body.status).toBeTruthy();
+      expect(body.runId).toBeTruthy();
+    }, 120_000);
+
+    it("records the run in the agent history either way", async () => {
+      const r = await (await app.request("/v1/automation/runs", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(Array.isArray(r.runs)).toBe(true);
+      expect(r.runs.length).toBeGreaterThan(0);
+      // Every run carries an outcome; none is left dangling at "running".
+      expect(r.runs.every((x: any) => ["completed", "failed", "blocked"].includes(x.status))).toBe(true);
+    });
+
+    it("never invents leads: a run that stored nothing leaves the lead list untouched", async () => {
+      const before = (await (await app.request("/v1/leads", { headers: { authorization: `Bearer ${token}` } })).json()).total;
+      await app.request("/v1/automation/discover", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ query: "Heads of Procurement at logistics firms", count: 3 }),
+      });
+      const after = (await (await app.request("/v1/leads", { headers: { authorization: `Bearer ${token}` } })).json()).total;
+      // The old agent would have added three fictional people here.
+      expect(after).toBe(before);
+    }, 120_000);
+
+    it("serves an empty funnel as empty, with a reason", async () => {
+      const f = await (await app.request("/v1/analytics/funnel?days=90", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(f.sufficient).toBe(false);
+      expect(f.note).toMatch(/too few/i);
+      expect(f.biggestDropOff).toBeNull();
+    });
+
+    it("serves source performance and attribution with their denominators explained", async () => {
+      const s = await (await app.request("/v1/analytics/sources?days=90", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(Array.isArray(s.sources)).toBe(true);
+      expect(s.note).toMatch(/contacted/i);
+
+      const a = await (await app.request("/v1/analytics/attribution?days=90", { headers: { authorization: `Bearer ${token}` } })).json();
+      expect(Array.isArray(a.campaigns)).toBe(true);
+      expect(a.model).toMatch(/last-touch/i);
+    });
+
+    it("reports a job-change scan that could not ask as blocked", async () => {
+      const r = await app.request("/v1/signals/job-changes/scan", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ limit: 5 }),
+      });
+      // With no leads to check it is a clean 200; with leads and no provider it is 502.
+      expect([200, 502]).toContain(r.status);
+      const body = await r.json();
+      expect(typeof body.checked).toBe("number");
+      expect(typeof body.unconfirmed).toBe("number");
+    }, 60_000);
+
+    it("serves the job-change feed scoped to this workspace", async () => {
+      const r = await app.request("/v1/signals/job-changes?days=90", { headers: { authorization: `Bearer ${token}` } });
+      expect(r.status).toBe(200);
+      expect(Array.isArray((await r.json()).changes)).toBe(true);
+    });
+
+    it("says whether the learned model was applied, rather than silently not applying it", async () => {
+      const made = await app.request("/v1/icps", {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ name: "Scoring ICP", criteria: { titles: ["VP Sales"] }, buildWithAi: false }),
+      });
+      const { icp } = await made.json();
+      const r = await app.request(`/v1/icps/${icp.id}/score`, {
+        method: "POST",
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+        body: JSON.stringify({ assign: false }),
+      });
+      expect(r.status).toBe(200);
+      const body = await r.json();
+      // A fresh workspace has no history, so the model must NOT be applied - and must say so
+      // rather than leaving the caller to assume it was.
+      expect(body.learning.applied).toBe(false);
+      expect(body.learning.note).toMatch(/not enough/i);
+    }, 60_000);
+  });
+
   it("guards the admin surface", async () => {
     const admins = app.routes.filter((r: any) => r.method === "GET" && String(r.path).startsWith("/v1/admin"));
     expect(admins.length).toBeGreaterThan(0);

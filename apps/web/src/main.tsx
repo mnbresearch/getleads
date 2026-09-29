@@ -18,6 +18,8 @@ import { VisibilityPage } from "./pages/Visibility";
 import { TasksPage } from "./pages/Tasks";
 import { AutopilotPage } from "./pages/Autopilot";
 import { ToolsPage } from "./pages/Tools";
+import { AnalyticsPage } from "./pages/Analytics";
+import { AutomationPage } from "./pages/Automation";
 import { JoinPage } from "./pages/Join";
 import { LandingPage } from "./pages/Landing";
 import { UpgradeRequestPage } from "./pages/UpgradeRequest";
@@ -60,6 +62,8 @@ function Root() {
                 <Route path="/tasks" element={<TasksPage />} />
                 <Route path="/autopilot" element={<AutopilotPage />} />
                 <Route path="/tools" element={<ToolsPage />} />
+                <Route path="/analytics" element={<AnalyticsPage />} />
+                <Route path="/automation" element={<AutomationPage />} />
                 <Route path="/settings/*" element={<SettingsPage />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
