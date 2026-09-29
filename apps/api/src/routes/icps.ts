@@ -196,7 +196,11 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
       // ruleScore -> scoreBeforeLearning (after any AI rerank) -> + learningAdjustment.
       ruleScore: predictionById.get(s.lead.id)?.ruleScore,
       scoreBeforeLearning: scoreBeforeLearning.get(s.lead.id),
-      learningAdjustment: predictionById.get(s.lead.id)?.applied ? predictionById.get(s.lead.id)?.adjustment : 0,
+      // The adjustment AS APPLIED, after the 0..100 clamp - so the three numbers reported
+      // here always reconstruct `score`. Reporting the model's raw adjustment instead made
+      // them stop adding up exactly where the model was most confident: a lead at 95 with a
+      // +20 adjustment was shown as 95, +20, score 100.
+      learningAdjustment: predictionById.get(s.lead.id)?.applied ? s.score - (scoreBeforeLearning.get(s.lead.id) ?? s.score) : 0,
     })),
     // Said out loud, because "the model is not being applied yet" and "the model found
     // nothing to say about these leads" are different answers and both look like silence.

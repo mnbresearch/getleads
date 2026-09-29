@@ -83,6 +83,18 @@ export async function leadFunnel(orgId: string, days: number) {
   const lost = counts.get("lost") ?? 0;
   const inFunnel = [...counts.entries()].filter(([s]) => rank(s) >= 0);
   const entered = inFunnel.reduce((a, [, n]) => a + n, 0);
+  /**
+   * Everything else with a status this funnel does not model.
+   *
+   * `unsubscribed` is the live example - routes/leads.ts already filters on it, so these
+   * rows exist. They are neither in `entered` nor in `lost`, and an earlier version simply
+   * did not mention them: the funnel's own totals did not add up to the org's lead count,
+   * with nothing on the page to say why. Reporting them is the same rule the rest of this
+   * module runs on - say when a denominator has been narrowed, and by how much.
+   */
+  const totalRows = [...counts.values()].reduce((a, n) => a + n, 0);
+  const other = totalRows - entered - lost;
+  const otherStatuses = [...counts.entries()].filter(([st]) => rank(st) < 0 && st !== "lost").map(([st, n]) => ({ status: st, count: n }));
 
   const stages: FunnelStage[] = STAGES.map((s, i) => {
     // Reaching a stage is cumulative: someone who replied was, necessarily, contacted.
@@ -109,8 +121,15 @@ export async function leadFunnel(orgId: string, days: number) {
 
   return {
     days,
+    total: totalRows,
     entered,
     lost,
+    other,
+    otherNote:
+      other > 0
+        ? `${other} lead${other === 1 ? "" : "s"} have a status this funnel does not model (${otherStatuses.map((o) => `${o.status}: ${o.count}`).join(", ")}) and are in neither the rates below nor the lost count.`
+        : undefined,
+    otherStatuses,
     lostNote:
       lost > 0
         ? `${lost} lead${lost === 1 ? "" : "s"} marked lost are not in the rates below. Only the current status is stored, so where each one was lost is unknown - counting them at the start would understate the funnel and counting them at the end would overstate it.`
@@ -300,6 +319,7 @@ export async function campaignAttribution(orgId: string, days: number) {
   return {
     days,
     campaigns,
-    model: "last-touch: a reply is credited to the message it replies to. No multi-touch weighting - there is no data here that would support one.",
+    model:
+      "Replies are last-touch: a reply is credited to the message it replies to. `qualifiedLeads` is NOT - it is any-touch, counting every lead this campaign messaged that is now qualified or a customer, so a lead worked by two campaigns is counted by both and the column does not sum to your qualified total. Crediting one campaign would need a decision this data cannot make: only the lead's current status is stored, with no record of when it changed relative to each send.",
   };
 }

@@ -20,6 +20,8 @@ export interface JobChangeScanResult {
   changed: number;
   /** Leads we could not confirm either way - reported, never counted as unchanged. */
   unconfirmed: number;
+  /** Changes we had already recorded and alerted on, so did not raise again. */
+  alreadyKnown: number;
   /** Providers were configured but none could answer. */
   blocked?: string;
   changes: { leadId: string; fullName: string | null; change: JobChangeResult }[];
@@ -32,12 +34,16 @@ function worthRechecking(minScore: number) {
 
 export async function scanJobChanges(
   orgId: string,
-  opts: { limit?: number; minScore?: number; staleDays?: number } = {},
+  opts: { limit?: number; minScore?: number; staleDays?: number; retryDays?: number } = {},
 ): Promise<JobChangeScanResult> {
   const { db } = getDb();
   const limit = Math.min(opts.limit ?? 50, 500);
   const minScore = opts.minScore ?? 70;
   const staleDays = opts.staleDays ?? 30;
+  // Backoff for a lead nothing could be confirmed about. Never longer than staleDays,
+  // because that would make a failed lookup suppress checks for longer than a successful
+  // one - the inversion this module is built to avoid, arriving by the back door.
+  const retryDays = Math.max(1, Math.min(opts.retryDays ?? 3, staleDays));
 
   const rows = await db
     .select({ lead: leads, company: companies })
@@ -50,13 +56,22 @@ export async function scanJobChanges(
         // Someone checked yesterday has not moved since. This also stops a scheduled scan
         // re-spending credits on the same people every run.
         sql`(${leads.jobCheckedAt} IS NULL OR ${leads.jobCheckedAt} < now() - (${staleDays} || ' days')::interval)`,
+        // And not attempted in the last few days, whatever came of that attempt.
+        //
+        // Without this, every lead the providers cannot answer for - no coverage, no
+        // company on file to compare against - was re-selected on EVERY run: an enrichment
+        // call per lead per night for an answer that will not change, and, for any change
+        // detected without a comparable employer, a duplicate signal row and a duplicate
+        // `lead.job_changed` alert each time. Refusing to stamp `jobCheckedAt` on an
+        // unconfirmed lookup is right; retrying it nightly forever is not the same thing.
+        sql`(${leads.jobCheckAttemptedAt} IS NULL OR ${leads.jobCheckAttemptedAt} < now() - (${retryDays} || ' days')::interval)`,
         sql`(${leads.linkedinUrl} IS NOT NULL OR ${leads.email} IS NOT NULL)`,
       ),
     )
     .orderBy(desc(leads.score))
     .limit(limit);
 
-  const out: JobChangeScanResult = { checked: 0, changed: 0, unconfirmed: 0, changes: [] };
+  const out: JobChangeScanResult = { checked: 0, changed: 0, unconfirmed: 0, alreadyKnown: 0, changes: [] };
   let answered = 0;
 
   for (const { lead, company } of rows) {
@@ -69,12 +84,18 @@ export async function scanJobChanges(
     }).catch(() => null);
 
     out.checked++;
+    // The attempt is recorded whatever came of it. This is NOT "we checked and they are
+    // fine" - that is `jobCheckedAt`, below, and it is still only written on a real
+    // comparison. This is only "do not spend another provider call on this person
+    // tomorrow".
+    const attempted: Record<string, Date> = { jobCheckAttemptedAt: new Date(), updatedAt: new Date() };
 
     // No provider answered for this person. Stamping jobCheckedAt here would mean "we
     // looked and they are fine", which is exactly the lie this module exists to avoid - and
     // it would suppress the next real check for a month.
     if (!fresh) {
       out.unconfirmed++;
+      await db.update(leads).set(attempted).where(eq(leads.id, lead.id));
       continue;
     }
     answered++;
@@ -86,6 +107,7 @@ export async function scanJobChanges(
 
     if (change.kind === "unknown") {
       out.unconfirmed++;
+      await db.update(leads).set(attempted).where(eq(leads.id, lead.id));
       continue;
     }
 
@@ -98,12 +120,20 @@ export async function scanJobChanges(
     // nothing to compare against. That is the failure this whole module is built to avoid,
     // arriving through the one path that looks like success.
     if (change.comparedCompany) {
-      await db.update(leads).set({ jobCheckedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, lead.id));
+      await db.update(leads).set({ ...attempted, jobCheckedAt: new Date() }).where(eq(leads.id, lead.id));
     } else {
       out.unconfirmed++;
+      await db.update(leads).set(attempted).where(eq(leads.id, lead.id));
     }
 
     if (change.kind === "none") continue;
+
+    // Already raised? Then it is still true, and still worth counting - but alerting on it
+    // again every cycle would train the person receiving it to ignore the alert.
+    if (await alreadyRecorded(db, orgId, lead.id, change)) {
+      out.alreadyKnown++;
+      continue;
+    }
 
     out.changed++;
     out.changes.push({ leadId: lead.id, fullName: lead.fullName, change });
@@ -122,6 +152,33 @@ export async function scanJobChanges(
   }
 
   return out;
+}
+
+/**
+ * Have we already told this org about this exact move?
+ *
+ * The lead's own company row is not rewritten when a move is detected - deciding whether
+ * the CRM record should follow the person or stay with the account is the org's call, not
+ * ours - so the same move is detected again at the next scan, and would be announced again.
+ * Matching on the destination rather than on the lead alone means a SECOND move, to
+ * somewhere else, still comes through.
+ */
+async function alreadyRecorded(db: Db, orgId: string, leadId: string, change: JobChangeResult): Promise<boolean> {
+  const rows = await db
+    .select({ id: signals.id })
+    .from(signals)
+    .where(
+      and(
+        eq(signals.orgId, orgId),
+        eq(signals.type, "job_change"),
+        sql`${signals.raw}->>'leadId' = ${leadId}`,
+        sql`${signals.raw}->>'kind' = ${change.kind}`,
+        sql`coalesce(${signals.raw}->'to'->>'company', '') = ${change.to?.company ?? ""}`,
+        sql`coalesce(${signals.raw}->'to'->>'title', '') = ${change.to?.title ?? ""}`,
+      ),
+    )
+    .limit(1);
+  return rows.length > 0;
 }
 
 /** Write the signal, link it to the lead, and tell anything listening. */

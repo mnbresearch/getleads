@@ -1,5 +1,5 @@
 import type { PersonCandidate } from "../types.js";
-import { rootDomain } from "../util/domain.js";
+import { extractDomain, rootDomain } from "../util/domain.js";
 
 /**
  * Has this person changed job since we last looked?
@@ -95,10 +95,26 @@ export function normalizeTitle(title?: string | null): string {
     .trim();
 }
 
+/** A comparable root domain, from whatever shape the provider gave us. */
+function domainOf(value?: string | null): string {
+  if (!value) return "";
+  const host = extractDomain(value.trim().toLowerCase());
+  return host ? rootDomain(host) : "";
+}
+
 /** Do these two records describe the same employer? Domain wins when both have one. */
 function sameCompany(a: JobChangeInput["previous"], b: JobChangeInput["current"]): boolean | null {
-  const da = a.companyDomain ? rootDomain(a.companyDomain.toLowerCase()) : "";
-  const db = b.companyDomain ? rootDomain(b.companyDomain.toLowerCase()) : "";
+  // Parsed, not lowercased-and-split.
+  //
+  // `rootDomain` assumes it was handed a bare hostname; given "https://acme.com/careers"
+  // it returns that whole string unchanged. Providers do not cooperate - People Data Labs
+  // supplies `job_company_website`, which routinely carries a scheme and sometimes a path -
+  // so comparing raw strings reported "https://acme.com" and "acme.com" as two different
+  // employers and asserted, at 0.92 "confirmed by company domain", that someone who never
+  // moved had moved. `extractDomain` parses the URL and returns the host, or null when
+  // there is no usable host in it at all, which is correctly treated as "no domain".
+  const da = domainOf(a.companyDomain);
+  const db = domainOf(b.companyDomain);
   // A domain is the strongest identifier we have: two people at "Acme" may be at different
   // Acmes, but acme.com is acme.com.
   if (da && db) return da === db;
@@ -122,12 +138,17 @@ function looksLikeRename(a?: string | null, b?: string | null): boolean {
   const na = normalizeCompany(a);
   const nb = normalizeCompany(b);
   if (!na || !nb) return false;
-  if (na.startsWith(nb + " ") || nb.startsWith(na + " ")) return true;
-  // A shared distinctive first word: "Acme" -> "Acme Global". Short words are too common
-  // to carry that weight.
-  const [fa] = na.split(" ");
-  const [fb] = nb.split(" ");
-  return fa.length >= 4 && fa === fb;
+  // One name CONTAINS the other, whole: "Acme" -> "Acme Global".
+  //
+  // Nothing weaker than that. A previous version also called it a rename when the two
+  // names merely shared a first word of four or more characters, which is how a great many
+  // genuinely separate companies are named: "Tata Motors" and "Tata Steel", "Reliance
+  // Retail" and "Reliance Jio", "United Airlines" and "UnitedHealthcare", "American
+  // Express" and "American Airlines". Moving between two of those is a real move, and one
+  // of the more valuable ones to hear about - it was being reported at 0.45 with the words
+  // "may not be a move at all", which is the exact false negative this module exists to
+  // prevent.
+  return na.startsWith(nb + " ") || nb.startsWith(na + " ");
 }
 
 export function detectJobChange(input: JobChangeInput): JobChangeResult {
@@ -153,7 +174,11 @@ export function detectJobChange(input: JobChangeInput): JobChangeResult {
   const titleChanged = haveBothTitles && prevTitle !== currTitle;
 
   if (companyChanged) {
-    const byDomain = !!previous.companyDomain && !!current.companyDomain;
+    // Parseable domains on both sides - not merely non-empty fields. Providers put "n/a",
+    // "-" and free text in a website column, and a truthiness check let those claim
+    // "confirmed by company domain" at 0.92 for a verdict that was reached on the names
+    // alone. `domainOf` is what `sameCompany` compares, so this now agrees with it.
+    const byDomain = !!domainOf(previous.companyDomain) && !!domainOf(current.companyDomain);
     // A rebrand changes the domain too, so "the domains differ" is not by itself proof of a
     // departure. When the NAMES still look like the same company - one a prefix of the
     // other, or a shared distinctive first word - the likeliest explanation is a rename,
@@ -161,6 +186,12 @@ export function detectJobChange(input: JobChangeInput): JobChangeResult {
     // deal. The first version made exactly that claim, hedging about rebrands only on the
     // name-only path, which is the one a rebrand does not take.
     const rename = looksLikeRename(previous.companyName, current.companyName);
+    // The rename discount still wins over a domain change, because a rebrand takes the
+    // domain with it - "Acme" on acme.com to "Acme Global" on acmeglobal.io is as likely a
+    // restructure as a departure, and asserting 0.92 would send someone to write off a live
+    // deal. What changed is which names reach this branch at all: `looksLikeRename` no
+    // longer counts a shared first word, so a real move between two same-family companies
+    // is no longer swallowed here.
     const confidence = rename ? 0.45 : byDomain ? 0.92 : 0.7;
     return {
       kind: titleChanged ? "both" : "company_change",

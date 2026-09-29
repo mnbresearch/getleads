@@ -207,4 +207,64 @@ describe("job change detection", () => {
     // Same verdict, very different basis - and the caller must not stamp this as checked.
     expect(oneMissing.comparedCompany).toBe(false);
   });
+
+  /**
+   * The false negative that matters most, because the move it hides is the valuable one.
+   *
+   * A shared first word is how an enormous number of unrelated companies are named, and
+   * treating it as evidence of a rename reported a genuine move between two of them at
+   * 0.45 confidence with the words "may not be a move at all".
+   */
+  it.each([
+    ["Tata Motors", "Tata Steel"],
+    ["Reliance Retail", "Reliance Jio"],
+    ["United Airlines", "UnitedHealth"],
+    ["American Express", "American Airlines"],
+  ])("reports a move between %s and %s as a move, not a probable rename", (from, to) => {
+    const r = detectJobChange({
+      previous: { companyName: from, companyDomain: "tatamotors.com", title: "VP Sales" },
+      current: { companyName: to, companyDomain: "tatasteel.com", title: "VP Sales" },
+    });
+    expect(r.kind).toBe("company_change");
+    expect(r.confidence).toBeGreaterThan(0.9);
+    expect(r.reason).not.toMatch(/may not be a move/i);
+  });
+
+  it("still hedges when one name contains the other whole", () => {
+    const r = detectJobChange({
+      previous: { companyName: "Acme", title: "VP Sales" },
+      current: { companyName: "Acme Global", title: "VP Sales" },
+    });
+    expect(r.kind).toBe("company_change");
+    expect(r.confidence).toBeLessThan(0.5);
+  });
+
+  /**
+   * Providers hand us whatever they have. People Data Labs' `job_company_website` carries a
+   * scheme routinely and a path sometimes, and string-comparing that against a bare host
+   * invented a domain-confirmed departure for someone who had not moved.
+   */
+  it.each([
+    ["https://acme.com", "acme.com"],
+    ["https://www.acme.com/careers", "acme.com"],
+    ["  HTTP://Acme.com  ", "www.acme.com"],
+  ])("treats %s and %s as the same employer", (a, b) => {
+    const r = detectJobChange({
+      previous: { companyName: "Acme Inc", companyDomain: a, title: "VP Sales" },
+      current: { companyName: "Acme", companyDomain: b, title: "VP Sales" },
+    });
+    expect(r.kind).toBe("none");
+    expect(r.sameEmployer).toBe(true);
+    expect(r.comparedCompany).toBe(true);
+  });
+
+  it("falls back to names when a domain field holds nothing parseable", () => {
+    const r = detectJobChange({
+      previous: { companyName: "Acme", companyDomain: "n/a", title: "VP Sales" },
+      current: { companyName: "Globex", companyDomain: "globex.io", title: "VP Sales" },
+    });
+    // Name-only evidence: reported, but not at domain-confirmed confidence.
+    expect(r.kind).toBe("company_change");
+    expect(r.confidence).toBeCloseTo(0.7);
+  });
 });

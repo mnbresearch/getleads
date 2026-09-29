@@ -354,36 +354,64 @@ export const handlers: Record<string, JobHandler> = {
       const ORGS_PER_TICK = 25;
       const LEADS_PER_ORG = 50;
       const DEADLINE_MS = 10 * 60_000;
+      /** Rough cost of one lead: an enrichment round trip plus a write. */
+      const MS_PER_LEAD = 2_000;
       const startedAt = Date.now();
 
+      /**
+       * Ordered by the org's own rotation cursor, not by a derived one.
+       *
+       * This used to order by `(SELECT max(job_checked_at) FROM leads ...) NULLS FIRST`,
+       * which starved permanently: `job_checked_at` is deliberately only written when an
+       * employer could be compared on both sides, so an org with no leads, no provider
+       * coverage or nothing comparable never gets one, its max stays NULL, and it sits at
+       * the head of NULLS FIRST every tick while the orgs behind it are never reached at
+       * all. It was also a correlated aggregate over `leads` per org per tick with no
+       * index behind it.
+       *
+       * The cursor is stamped below for every org we ATTEMPT, so the rotation advances
+       * whatever the outcome.
+       */
       const orgs = await db
         .select({ id: organizations.id })
         .from(organizations)
         .where(eq(organizations.status, "active"))
-        .orderBy(dsql`(SELECT max(job_checked_at) FROM leads WHERE leads.org_id = organizations.id) NULLS FIRST`)
+        .orderBy(dsql`${organizations.jobCheckTickAt} ASC NULLS FIRST`)
         .limit(ORGS_PER_TICK);
 
       let scanned = 0;
       let changed = 0;
       let blocked = 0;
+      let alreadyKnown = 0;
       let stoppedEarly = false;
       for (const org of orgs) {
-        if (Date.now() - startedAt > DEADLINE_MS) {
+        const remaining = DEADLINE_MS - (Date.now() - startedAt);
+        // Enough budget left to be worth starting? The deadline was previously only
+        // checked BETWEEN orgs, so a tick with nine minutes gone would still start a
+        // fifty-lead scan and run minutes past its own limit.
+        if (remaining < 10 * MS_PER_LEAD) {
           stoppedEarly = true;
           break;
         }
-        const r = await scanJobChanges(org.id, { limit: LEADS_PER_ORG }).catch((e) => {
+        const budget = Math.max(5, Math.min(LEADS_PER_ORG, Math.floor(remaining / MS_PER_LEAD)));
+
+        // Stamped before the scan, not after: an org whose scan throws must still move
+        // down the rotation, or one org failing loudly blocks everyone behind it forever.
+        await db.update(organizations).set({ jobCheckTickAt: new Date() }).where(eq(organizations.id, org.id));
+
+        const r = await scanJobChanges(org.id, { limit: budget }).catch((e) => {
           ctx.log(`job change scan failed for ${org.id}: ${(e as Error).message}`);
           return null;
         });
         if (!r) continue;
         scanned += r.checked;
         changed += r.changed;
+        alreadyKnown += r.alreadyKnown;
         if (r.blocked) blocked++;
       }
       // `blocked` is reported separately from `changed: 0`, because an org where no
       // provider answered has not been told that nobody moved.
-      return { orgs: orgs.length, scanned, changed, orgsWhereNothingAnswered: blocked, stoppedEarly };
+      return { orgs: orgs.length, scanned, changed, alreadyKnown, orgsWhereNothingAnswered: blocked, stoppedEarly };
     });
   },
 

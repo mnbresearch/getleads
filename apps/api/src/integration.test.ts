@@ -856,6 +856,40 @@ suite("database integration", () => {
       expect(after!.jobCheckedAt).toBeNull();
     });
 
+    /**
+     * Refusing to stamp `jobCheckedAt` on a lookup nothing answered is right. Retrying that
+     * same lead every night forever is not the same thing - it is a provider call per lead
+     * per run for an answer that is not going to change. The attempt is stamped separately,
+     * and gates a short backoff that never outlasts the success window.
+     */
+    it("backs off a lead nothing could be confirmed about, without recording it as checked", async () => {
+      const org = await newOrg("jc-backoff");
+      const lead = await leadWith(org.id, { status: "replied", score: 90 });
+
+      expect((await scanJobChanges(org.id, {})).checked).toBe(1);
+      const after = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, lead.id) });
+      // Attempted, emphatically not checked.
+      expect(after!.jobCheckAttemptedAt).not.toBeNull();
+      expect(after!.jobCheckedAt).toBeNull();
+
+      // Not picked up again tomorrow...
+      expect((await scanJobChanges(org.id, {})).checked).toBe(0);
+      // ...but picked up again well before the 30-day success window would have allowed.
+      await db.execute(schema.sql`UPDATE leads SET job_check_attempted_at = now() - interval '5 days' WHERE id = ${lead.id}`);
+      expect((await scanJobChanges(org.id, { retryDays: 3 })).checked).toBe(1);
+    });
+
+    it("never lets the retry backoff outlast the confirmed-check window", async () => {
+      const org = await newOrg("jc-backoff-clamp");
+      const lead = await leadWith(org.id, { status: "replied", score: 90 });
+      await scanJobChanges(org.id, { staleDays: 2, retryDays: 90 });
+      await db.execute(schema.sql`UPDATE leads SET job_check_attempted_at = now() - interval '3 days' WHERE id = ${lead.id}`);
+      // retryDays was clamped to staleDays, so three days is stale enough to look again. An
+      // unclamped 90 would mean a failed lookup suppressed checks for longer than a
+      // successful one, which inverts the entire point of the two timestamps.
+      expect((await scanJobChanges(org.id, { staleDays: 2, retryDays: 90 })).checked).toBe(1);
+    });
+
     it("keeps one org's leads out of another's scan", async () => {
       const a = await newOrg("jc-a");
       const b = await newOrg("jc-b");
@@ -935,6 +969,33 @@ suite("database integration", () => {
       expect(f.stages[0].count).toBe(80);
       expect(f.stages[0].conversionFromStart).toBe(1);
       expect(f.lostNote).toMatch(/not in the rates/i);
+    });
+
+    /**
+     * A status the funnel does not model must be accounted for out loud.
+     *
+     * `unsubscribed` is a live example - routes/leads.ts already filters on it - and it is
+     * in neither the stages nor the lost count. Leaving it unmentioned meant the funnel's
+     * own totals did not add up to the org's lead count with nothing on the page to say
+     * why, which is the same silent narrowing this module refuses everywhere else.
+     */
+    it("accounts for statuses the funnel does not model instead of dropping them", async () => {
+      const org = await newOrg("funnel-other");
+      await seedLeads(org.id, [
+        { status: "new", n: 50 },
+        { status: "lost", n: 10 },
+        { status: "unsubscribed", n: 7 },
+      ]);
+
+      const f = await leadFunnel(org.id, 90);
+      expect(f.entered).toBe(50);
+      expect(f.lost).toBe(10);
+      expect(f.other).toBe(7);
+      // The three buckets reconcile to the population, which is the point.
+      expect(f.entered + f.lost + f.other).toBe(f.total);
+      expect(f.total).toBe(67);
+      expect(f.otherStatuses).toEqual([{ status: "unsubscribed", count: 7 }]);
+      expect(f.otherNote).toMatch(/unsubscribed: 7/);
     });
 
     it("withholds conversion rates when there are too few leads to mean anything", async () => {
@@ -1038,21 +1099,38 @@ suite("database integration", () => {
       expect(c.qualifiedLeads).toBe(2);
     });
 
-    it("does not count one qualified lead twice for receiving two steps", async () => {
+    it("counts each qualified lead once per campaign, however many steps reached it", async () => {
+      /**
+       * Three qualified leads, reached unevenly: one by step 1 only, one by step 2 only,
+       * one by both.
+       *
+       * The uneven part is the whole test. An earlier version seeded a single lead that
+       * received both steps and asserted 1, which passes against the broken implementation
+       * too: per-step counts of 1 and 1 recombined with `max` give 1. Here the per-step
+       * cohorts are 2 and 2, so `max` reports 2 and summing reports 4, and only counting
+       * distinct leads per campaign gives 3.
+       */
       const org = await newOrg("attribution-onelead");
       const acct = await newAccount(org.id);
       const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "Both", emailAccountId: acct.id }).returning();
       const [s1] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "a", bodyTemplate: "a" }).returning();
       const [s2] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 2, channel: "email", subjectTemplate: "b", bodyTemplate: "b" }).returning();
-      await seedLeads(org.id, [{ status: "customer", n: 1 }]);
-      const [only] = await db.select().from(schema.leads).where(schema.eq(schema.leads.orgId, org.id));
+      await seedLeads(org.id, [{ status: "customer", n: 3 }]);
+      const rows = await db.select().from(schema.leads).where(schema.eq(schema.leads.orgId, org.id));
+      expect(rows.length).toBe(3);
 
-      for (const st of [s1, s2]) {
-        await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: st.id, leadId: only.id, toEmail: only.email!, subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date() });
-      }
+      const reach = async (lead: (typeof rows)[number], step: typeof s1) => {
+        await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: step.id, leadId: lead.id, toEmail: lead.email!, subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date() });
+      };
+      await reach(rows[0], s1);
+      await reach(rows[1], s2);
+      await reach(rows[2], s1);
+      await reach(rows[2], s2);
 
       const c = (await campaignAttribution(org.id, 90)).campaigns.find((x: any) => x.campaign === "Both");
-      expect(c.qualifiedLeads).toBe(1);
+      expect(c.qualifiedLeads).toBe(3);
+      // And the per-step cohorts really are uneven, so the assertion above discriminates.
+      expect(c.steps.map((x: any) => x.sent).sort()).toEqual([2, 2]);
     });
 
     it("credits a reply to its campaign and step, and withholds a best step on thin data", async () => {

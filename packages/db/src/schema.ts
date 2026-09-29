@@ -30,6 +30,8 @@ export const organizations = pgTable("organizations", {
   stripeCustomerId: text("stripe_customer_id"),
   stripeSubscriptionId: text("stripe_subscription_id"),
   settings: jsonb("settings").$type<Record<string, unknown>>().notNull().default({}),
+  /** Rotation cursor for the daily job-change scan. Stamped per attempt, not per success. */
+  jobCheckTickAt: ts("job_check_tick_at"),
   createdAt: ts("created_at").notNull().defaultNow(),
 });
 
@@ -161,6 +163,8 @@ export const leads = pgTable(
      * suppress the next real check for a month on the strength of a timeout.
      */
     jobCheckedAt: ts("job_checked_at"),
+    /** When a check was last attempted, answered or not. Drives retry backoff. */
+    jobCheckAttemptedAt: ts("job_check_attempted_at"),
     enrichedAt: ts("enriched_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
