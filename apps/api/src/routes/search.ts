@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, consume, consumeLead, desc, drainJobs, enqueue, eq, getDb, getJob, jobs, remainingPremiumBudget, searches } from "@prospex/db";
+import { and, consume, consumeLead, desc, drainJobs, enqueue, eq, getDb, getJob, icps, jobs, lists, remainingPremiumBudget, searches } from "@prospex/db";
+import { assertOwned } from "../lib/ownership.js";
 import { crawlCompanyWebsite, extractDomain, findCompanies, findEmail, findPeople, resolveCompanyDomain, runLeadPipeline, createAiProvider, verifyEmail, parseQuery, pMap } from "@prospex/core";
 import { env } from "../env.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -39,10 +40,16 @@ searchRoutes.post("/", rateLimit({ perMinute: 30 }), zValidator("json", searchIn
   const { db } = getDb();
   // Checked before anything is charged: a search for a client that is not in this workspace
   // must fail, not run unattributed.
+  // Every id in the body names a row this org must own. The ICP and list were not checked
+  // before, and the job reads the ICP and writes into list_leads by id alone - so a caller
+  // who knew another workspace's list id could write their leads into it.
+  await assertOwned(icps, body.icpId, oid, "ICP");
+  await assertOwned(lists, body.listId, oid, "List");
   let icpId = body.icpId;
   if (body.clientId) {
     const { requireClient } = await import("../services/clients.js");
     const client = await requireClient(oid, body.clientId);
+    if (client.status === "archived") throw badRequest("That client is archived. Reactivate it before running searches for it.");
     // With no ICP given, a client search is scored against that client's own ICP - which is
     // the point of running it for them.
     icpId = icpId ?? client.icpId ?? undefined;

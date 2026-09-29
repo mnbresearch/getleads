@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
 import { Page, Spinner, TagInput, useToast } from "../components/ui";
 
-interface Search { id: string; status: string; resultCount: number; query: Record<string, unknown>; createdAt: string; error: string | null; jobId: string | null }
+interface Search { id: string; status: string; resultCount: number; query: Record<string, unknown>; createdAt: string; error: string | null; jobId: string | null; clientId?: string | null; clientClaim?: { claimed: number; ownedByAnotherClient: number; skipped?: string; error?: string } | null }
 
 export function SearchPage() {
   const [query, setQuery] = useState("");
@@ -165,7 +165,21 @@ export function SearchPage() {
                   : /plan's limit/i.test(s.error)
                     ? <div className="mt-1 text-xs text-amber-700">{s.error} <Link className="underline" to="/settings/billing">See plans</Link></div>
                     : <div className="mt-1 text-xs text-amber-700">{s.error}</div>)}</td>
-                <td className="td tabular-nums">{s.resultCount}</td>
+                <td className="td tabular-nums">
+                  {s.resultCount}
+                  {s.clientClaim && (
+                    // What the client claim did, said on the search itself: otherwise "12
+                    // results" for a client search hides that 3 of them stayed with the
+                    // client that already had them.
+                    <div className="text-[11px] font-normal text-ink-400">
+                      {s.clientClaim.skipped
+                        ? s.clientClaim.skipped === "client_archived" ? "client archived - not delivered" : "client deleted - not delivered"
+                        : s.clientClaim.error
+                          ? "delivery to client failed"
+                          : `${s.clientClaim.claimed} delivered to ${clients.find((c) => c.id === s.clientId)?.name ?? "client"}${s.clientClaim.ownedByAnotherClient ? ` · ${s.clientClaim.ownedByAnotherClient} already another client's` : ""}`}
+                    </div>
+                  )}
+                </td>
                 <td className="td text-right">{s.status === "done" && s.resultCount > 0 && <Link className="text-brand-600 hover:underline" to={`/leads?tag=search:${s.id.slice(0, 8)}`}>View leads →</Link>}</td>
               </tr>
             ))}

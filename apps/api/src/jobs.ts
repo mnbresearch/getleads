@@ -117,10 +117,19 @@ export const handlers: Record<string, JobHandler> = {
       }
       // A search run for a client delivers to that client. People another client already
       // owns stay with that client and are counted, never silently taken.
-      let clientClaim: { claimed: number; ownedByAnotherClient: number } | null = null;
+      //
+      // Its own try: the search itself has succeeded and its leads are saved (and charged)
+      // by this point. Letting a claim failure throw marked a finished search failed, and
+      // the retry re-ran the whole pipeline and charged for the same leads again.
+      let clientClaim: { claimed: number; ownedByAnotherClient: number; skipped?: string; error?: string } | null = null;
       if (job.payload.clientId && ids.length) {
-        const { claimSearchLeads } = await import("./services/clients.js");
-        clientClaim = await claimSearchLeads(db, orgId, String(job.payload.clientId), ids);
+        try {
+          const { claimSearchLeads } = await import("./services/clients.js");
+          clientClaim = await claimSearchLeads(db, orgId, String(job.payload.clientId), ids);
+        } catch (e) {
+          clientClaim = { claimed: 0, ownedByAnotherClient: 0, error: (e as Error).message.slice(0, 200) };
+          ctx.log(`client claim failed: ${clientClaim.error}`);
+        }
       }
       // A search cut short by quota used to be written as plainly "done", so a customer who
       // hit their limit saw a completed search with fewer leads and no reason. The pipeline
@@ -143,6 +152,7 @@ export const handlers: Record<string, JobHandler> = {
           status: "done",
           resultCount: ids.length,
           error: truncated ? `Stopped at your plan's limit: ${results.length - ids.length} more matching leads were found but not saved. ${quotaStopped}` : providerNote,
+          clientClaim: clientClaim ?? undefined,
           completedAt: new Date(),
         })
         .where(eq(searches.id, searchId));
@@ -187,6 +197,26 @@ export const handlers: Record<string, JobHandler> = {
       if (firstAttempt) await consume(db, lead.orgId, "verifications", 1);
       const v = await verifyEmail(lead.email, verifyOpts());
       Object.assign(patch, { emailStatus: v.status, emailConfidence: v.confidence, verifiedAt: new Date() });
+    } else if (job.payload.replaceInvalid && lead.email && lead.emailStatus === "invalid" && company && lead.firstName && lead.lastName) {
+      // Asked for explicitly ("find a working address"): the person may be right and only
+      // the address wrong. Look for a replacement; keep the bad one on record rather than
+      // throwing it away, so it is never tried again and never silently resurrected.
+      if (firstAttempt) await consume(db, lead.orgId, "verifications", 1);
+      const r = await findEmail({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, verifyOpts());
+      const usable = r.email && r.email.toLowerCase() !== lead.email.toLowerCase() && (r.status === "valid" || r.status === "catch_all" || r.status === "risky");
+      const taken = usable ? await db.query.leads.findFirst({ where: and(eq(leads.orgId, lead.orgId), eq(leads.email, r.email!.toLowerCase())) }) : null;
+      const custom = { ...(lead.custom ?? {}) } as Record<string, unknown>;
+      const priorBad = Array.isArray(custom.invalidEmails) ? (custom.invalidEmails as string[]) : [];
+      if (usable && !taken) {
+        custom.invalidEmails = [...new Set([...priorBad, lead.email])];
+        Object.assign(patch, { email: r.email!.toLowerCase(), emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: new Date(), custom });
+      } else {
+        // Recorded, so the next look at this lead can tell "tried, nothing better" from
+        // "never tried" - and the dashboard is not asked to repeat the same lookup.
+        custom.replacementSearchedAt = new Date().toISOString();
+        custom.replacementResult = taken ? "found an address another lead already has" : r.email ? `only found ${r.status} candidates` : "no candidate found";
+        Object.assign(patch, { custom });
+      }
     }
     const icp = lead.icpId ? await db.query.icps.findFirst({ where: eq(icps.id, lead.icpId) }) : null;
     if (icp) {

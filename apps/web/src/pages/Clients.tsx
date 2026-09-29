@@ -208,6 +208,7 @@ function RoutingModal({ open, onClose, onChanged, toast }: { open: boolean; onCl
     apiFetch<Routing>("GET", "/v1/clients/routing?limit=300").then(setR).catch((e) => setErr((e as Error).message));
   }, []);
   useEffect(() => { if (open) load(); }, [open, load]);
+  const remainingClear = r ? r.routable.filter((x) => !done.has(x.leadId)).length : 0;
 
   const assign = async (leadId: string, clientId: string) => {
     try {
@@ -223,7 +224,9 @@ function RoutingModal({ open, onClose, onChanged, toast }: { open: boolean; onCl
   const auto = async () => {
     setBusy(true);
     try {
-      const res = await apiFetch<{ routed: number; byClient: { name: string; assigned: number }[]; leftForReview: number }>("POST", "/v1/clients/routing/auto", { limit: 500 });
+      // Only the clear fits this screen showed, and not the ones already assigned by hand.
+      const shown = (r?.routable ?? []).map((x) => x.leadId).filter((id) => !done.has(id));
+      const res = await apiFetch<{ routed: number; byClient: { name: string; assigned: number }[]; leftForReview: number }>("POST", "/v1/clients/routing/auto", { leadIds: shown });
       toast(res.routed ? `Routed ${res.routed} leads: ${res.byClient.filter((b) => b.assigned).map((b) => `${b.name} ${b.assigned}`).join(", ")}` : "Nothing clear enough to route automatically");
       onChanged();
       load();
@@ -254,11 +257,11 @@ function RoutingModal({ open, onClose, onChanged, toast }: { open: boolean; onCl
 
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="text-sm">
-              <b className="text-ink-50">{r.routable.length - [...done].filter((d) => r.routable.some((x) => x.leadId === d)).length}</b> clear fits ·{" "}
+              <b className="text-ink-50">{remainingClear}</b> clear fits ·{" "}
               <b className="text-ink-50">{r.held.contested.length + r.held.partialFit.length}</b> need your call · {r.held.noFit} fit nobody · {r.held.tooLittleData} too little data
               {r.truncated && <span className="text-ink-400"> (the newest {r.examined} of {r.poolSize.toLocaleString()} examined)</span>}
             </div>
-            <button className="btn-primary" disabled={busy || r.routable.length === 0} onClick={auto}>{busy ? "Routing…" : `Route all ${r.routable.length} clear fits`}</button>
+            <button className="btn-primary" disabled={busy || remainingClear === 0} onClick={auto}>{busy ? "Routing…" : `Route these ${remainingClear} clear fits`}</button>
           </div>
 
           {r.routable.length > 0 && (

@@ -637,6 +637,29 @@ suite("route surface", () => {
       expect(bad.status).toBe(400);
     });
 
+    it("lets a campaign be untagged from its client", async () => {
+      const client = await (await app.request("/v1/clients", { method: "POST", headers: H(), body: JSON.stringify({ name: `Untag ${Date.now()}` }) })).json();
+      const made = await app.request("/v1/campaigns", { method: "POST", headers: H(), body: JSON.stringify({ name: "Tagged", clientId: client.id }) });
+      expect(made.status).toBe(201);
+      const camp = await made.json();
+      const patched = await app.request(`/v1/campaigns/${camp.id}`, { method: "PATCH", headers: H(), body: JSON.stringify({ clientId: null }) });
+      expect(patched.status).toBe(200);
+      expect((await patched.json()).clientId ?? null).toBeNull();
+    });
+
+    it("refuses a search that names another workspace's ICP or list", async () => {
+      const r1 = await app.request("/v1/search", { method: "POST", headers: H(), body: JSON.stringify({ query: "vp sales", icpId: "00000000-0000-4000-8000-000000000001" }) });
+      expect(r1.status).toBe(404);
+      const r2 = await app.request("/v1/search", { method: "POST", headers: H(), body: JSON.stringify({ query: "vp sales", listId: "00000000-0000-4000-8000-000000000002" }) });
+      expect(r2.status).toBe(404);
+    });
+
+    it("filters leads by the same attention definition the dashboard counts", async () => {
+      const r = await app.request("/v1/leads?attention=readyButIdle&clientId=none", { headers: H() });
+      expect(r.status).toBe(200);
+      expect((await app.request("/v1/leads?attention=nonsense", { headers: H() })).status).toBe(400);
+    });
+
     it("refuses to run a search for a client that is not in the workspace", async () => {
       const r = await app.request("/v1/search", { method: "POST", headers: H(), body: JSON.stringify({ query: "vp sales", clientId: "00000000-0000-4000-8000-000000000000" }) });
       expect(r.status).toBe(404);

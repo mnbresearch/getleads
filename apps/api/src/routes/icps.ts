@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, companies, consume, desc, inArray, enqueue, eq, getDb, icps, leads, organizations, sql } from "@prospex/db";
+import { and, clients, companies, consume, desc, inArray, enqueue, eq, getDb, icps, leads, organizations, sql } from "@prospex/db";
+import { assertOwned } from "../lib/ownership.js";
 import { createAiProvider, createAiProviderForPlan, scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriteria, type IcpChatMessage } from "@prospex/core";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
@@ -22,7 +23,7 @@ const criteria = z.object({
   excludeKeywords: z.array(z.string()).optional(),
   techStack: z.array(z.string()).optional(),
 });
-const icpInput = z.object({ name: z.string().min(1), description: z.string().optional(), criteria: criteria.optional(), seedDomains: z.array(z.string()).max(10).optional(), product: z.string().optional(), buildWithAi: z.boolean().default(true) });
+const icpInput = z.object({ name: z.string().min(1), description: z.string().optional(), criteria: criteria.optional(), seedDomains: z.array(z.string()).max(10).optional(), product: z.string().optional(), buildWithAi: z.boolean().default(true), clientId: z.string().uuid().optional() });
 
 icpRoutes.get("/", async (c) => {
   const { db } = getDb();
@@ -38,7 +39,8 @@ icpRoutes.post("/", zValidator("json", icpInput), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
-  const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [] }).returning();
+  await assertOwned(clients, b.clientId, oid, "Client");
+  const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [], clientId: b.clientId ?? null }).returning();
   let jobId: string | null = null;
   if (b.buildWithAi && (b.description || b.seedDomains?.length)) jobId = (await enqueue(db, "icp.build", { icpId: row.id, product: b.product }, { orgId: oid })).id;
   return c.json({ icp: row, jobId }, 201);

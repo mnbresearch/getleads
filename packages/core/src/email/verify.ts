@@ -3,6 +3,7 @@ import net from "node:net";
 import type { EmailStatus, EmailVerification } from "../types.js";
 import { fetchJson } from "../util/http.js";
 import { meter } from "../util/meter.js";
+import { reportProviderCall } from "../providers/health.js";
 
 const FREE_PROVIDERS = new Set([
   "gmail.com", "yahoo.com", "yahoo.co.in", "hotmail.com", "outlook.com", "live.com", "icloud.com", "aol.com", "protonmail.com", "proton.me", "rediffmail.com", "zoho.com", "mail.com", "gmx.com", "yandex.com",
@@ -254,9 +255,12 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
   // credits with one provider degrades to the next rather than to a wrong answer.
   if (opts.reoonApiKey) {
     meter("reoon");
-    const r = await fetchJson<{ status?: string; is_catch_all?: boolean; overall_score?: number }>(
+    // Health is reported here, from the BODY, rather than by fetchJson from the status code:
+    // these providers answer a bad key or an empty balance with HTTP 200 and an error in
+    // the JSON, which a status-code check would record as a healthy call.
+    const r = await fetchJson<{ status?: string; reason?: string; overall_score?: number }>(
       `https://emailverifier.reoon.com/api/v1/verify?email=${encodeURIComponent(email)}&key=${encodeURIComponent(opts.reoonApiKey)}&mode=power`,
-      { timeoutMs: 30_000, provider: "reoon" },
+      { timeoutMs: 30_000 },
     );
     const map: Record<string, EmailStatus> = {
       safe: "valid",
@@ -270,9 +274,16 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
       inbox_full: "risky",
     };
     const status = r?.status ? map[r.status] : undefined;
+    if (!r) reportProviderCall({ provider: "reoon", outcome: "network", detail: "no usable response" });
+    else if (r.status === "error") reportProviderCall({ provider: "reoon", outcome: /credit|balance|limit/i.test(r.reason ?? "") ? "rate_limit" : "auth", detail: (r.reason ?? "error").slice(0, 160) });
+    else reportProviderCall({ provider: "reoon", outcome: "ok" });
     if (status) {
       checks.smtp = status === "valid" ? "accepted" : status === "invalid" ? "rejected" : status === "catch_all" ? "catch_all" : "error";
-      const conf = typeof r?.overall_score === "number" ? Math.max(0, Math.min(1, r.overall_score / 100)) : status === "valid" ? 0.95 : status === "invalid" ? 0.95 : 0.6;
+      // overall_score is a DELIVERABILITY score: high means likely to deliver. It is a fair
+      // confidence for a "valid" verdict and exactly backwards for an "invalid" one, where it
+      // used to produce a near-zero confidence in a verdict Reoon was sure of.
+      const score = typeof r?.overall_score === "number" ? Math.max(0, Math.min(1, r.overall_score / 100)) : null;
+      const conf = status === "valid" ? score ?? 0.95 : status === "invalid" ? 0.95 : 0.6;
       return result(status, conf, `reoon:${r!.status}`, mxHost);
     }
   }
@@ -280,8 +291,11 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
     meter("millionverifier");
     const m = await fetchJson<{ result?: string; error?: string; role?: boolean; quality?: string }>(
       `https://api.millionverifier.com/api/v3/?api=${encodeURIComponent(opts.millionVerifierApiKey)}&email=${encodeURIComponent(email)}&timeout=20`,
-      { timeoutMs: 25_000, provider: "millionverifier" },
+      { timeoutMs: 25_000 },
     );
+    if (!m) reportProviderCall({ provider: "millionverifier", outcome: "network", detail: "no usable response" });
+    else if (m.error) reportProviderCall({ provider: "millionverifier", outcome: /credit/i.test(m.error) ? "rate_limit" : "auth", detail: m.error.slice(0, 160) });
+    else reportProviderCall({ provider: "millionverifier", outcome: "ok" });
     // MillionVerifier answers HTTP 200 with an `error` field for a bad key or an empty
     // balance. That is not a verdict about the address and must not be read as one.
     if (m && !m.error && m.result) {

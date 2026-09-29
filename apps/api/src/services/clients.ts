@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { and, clients, eq, getDb, icps, inArray, leads, organizations, sql, type Client } from "@prospex/db";
+import { and, campaignContacts, clientLeadDeliveries, clients, eq, getDb, icps, inArray, leads, organizations, sql, type Client } from "@prospex/db";
 import { scoreLeadRules, type IcpCriteria, type LeadForScoring } from "@prospex/core";
 import { badRequest, notFound } from "../lib/errors.js";
 
@@ -60,11 +60,39 @@ export interface ClientAttention {
   readyButIdle: number;
 }
 
+export type AttentionBucket = keyof ClientAttention;
+export const ATTENTION_BUCKETS: AttentionBucket[] = ["noEmail", "unverified", "badEmail", "readyButIdle"];
+
+/**
+ * The one definition of each bucket, over the `leads` table.
+ *
+ * Used for the counts on the dashboard, for the ids an action acts on, and for the Leads
+ * page filter behind each "View" link - so the number on the card, the leads acted on and
+ * the list you land on are always the same set. They were three hand-copied definitions
+ * before, and the "View" links had already drifted from the counts beside them.
+ */
+export function attentionWhere(bucket: AttentionBucket): ReturnType<typeof sql> {
+  switch (bucket) {
+    case "noEmail":
+      return sql`(${leads.email} IS NULL AND ${leads.status} <> 'lost')`;
+    case "unverified":
+      return sql`(${leads.email} IS NOT NULL AND ${leads.emailStatus} = 'unknown' AND ${leads.status} <> 'lost')`;
+    case "badEmail":
+      return sql`(${leads.emailStatus} = 'invalid' AND ${leads.status} <> 'lost')`;
+    case "readyButIdle":
+      return sql`(${leads.status} = 'new' AND ${leads.emailStatus} IN ('valid','catch_all') AND coalesce(${leads.clientAssignedAt}, ${leads.createdAt}) < now() - interval '7 days' AND NOT EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.lead_id = ${leads.id}))`;
+  }
+}
+
 const STATS_SQL = (orgId: string, clientFilter: ReturnType<typeof sql>) => sql`
   SELECT
     l.client_id                                                                       AS client_id,
     count(*)::int                                                                     AS leads,
-    count(*) FILTER (WHERE l.client_assigned_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::int AS delivered_this_month,
+    count(*) FILTER (WHERE EXISTS (
+      SELECT 1 FROM client_lead_deliveries d
+      WHERE d.client_id = l.client_id AND d.lead_id = l.id
+        AND d.delivered_at >= date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+    ))::int                                                                           AS delivered_this_month,
     count(*) FILTER (WHERE l.created_at >= now() - interval '7 days')::int            AS new_7d,
     count(*) FILTER (WHERE l.email IS NOT NULL)::int                                  AS with_email,
     count(*) FILTER (WHERE l.email_status = 'valid')::int                             AS verified,
@@ -244,8 +272,7 @@ export async function createClient(orgId: string, input: ClientInput) {
         reportShowTarget: input.reportShowTarget ?? false,
       })
       .returning();
-    // An ICP chosen for a client is, from now on, that client's ICP.
-    if (row.icpId) await db.update(icps).set({ clientId: row.id }).where(and(eq(icps.id, row.icpId), eq(icps.orgId, orgId)));
+    if (row.icpId) await linkIcp(db, orgId, row.id, null, row.icpId);
     return publicClient(row);
   } catch (e) {
     if (isDuplicateName(e)) throw badRequest(`A client called "${input.name.trim()}" already exists.`);
@@ -253,9 +280,25 @@ export async function createClient(orgId: string, input: ClientInput) {
   }
 }
 
+/**
+ * Point an ICP back at the client that uses it.
+ *
+ * Only claims an ICP nobody else has claimed: several clients may share one ICP, and the
+ * last one saved used to overwrite the link for all of them. When a client switches ICP,
+ * the old one is released - but only if it still points here.
+ */
+async function linkIcp(db: Db, orgId: string, clientId: string, oldIcpId: string | null, newIcpId: string | null) {
+  if (oldIcpId && oldIcpId !== newIcpId) {
+    await db.update(icps).set({ clientId: null }).where(and(eq(icps.id, oldIcpId), eq(icps.orgId, orgId), eq(icps.clientId, clientId)));
+  }
+  if (newIcpId) {
+    await db.update(icps).set({ clientId }).where(and(eq(icps.id, newIcpId), eq(icps.orgId, orgId), sql`${icps.clientId} IS NULL`));
+  }
+}
+
 export async function updateClient(orgId: string, id: string, input: Partial<ClientInput>) {
   const { db } = getDb();
-  await requireClient(orgId, id);
+  const before = await requireClient(orgId, id);
   if (input.icpId !== undefined) await assertIcpInOrg(db, orgId, input.icpId);
   const patch: Partial<typeof clients.$inferInsert> = { updatedAt: new Date() };
   if (input.name !== undefined) patch.name = input.name.trim();
@@ -269,7 +312,7 @@ export async function updateClient(orgId: string, id: string, input: Partial<Cli
   if (input.reportShowTarget !== undefined) patch.reportShowTarget = input.reportShowTarget;
   try {
     const [row] = await db.update(clients).set(patch).where(and(eq(clients.id, id), eq(clients.orgId, orgId))).returning();
-    if (input.icpId) await db.update(icps).set({ clientId: id }).where(and(eq(icps.id, input.icpId), eq(icps.orgId, orgId)));
+    if (input.icpId !== undefined) await linkIcp(db, orgId, id, before.icpId, input.icpId);
     return publicClient(row);
   } catch (e) {
     if (isDuplicateName(e)) throw badRequest(`A client called "${input.name?.trim()}" already exists.`);
@@ -295,6 +338,42 @@ export async function deleteClient(orgId: string, id: string) {
 
 // ── Assignment ───────────────────────────────────────────────────────────────────────
 
+/** Record first deliveries. Re-assigning a lead a client already had never counts twice. */
+async function recordDeliveries(db: Db, clientId: string, leadIds: string[]) {
+  if (leadIds.length === 0) return;
+  await db
+    .insert(clientLeadDeliveries)
+    .values(leadIds.map((leadId) => ({ clientId, leadId })))
+    .onConflictDoNothing();
+}
+
+/**
+ * Stop a moved lead's sequences in its previous client's campaigns.
+ *
+ * Otherwise a move hands the person to client B while client A's sequence keeps emailing
+ * them from the same sending setup - the double contact that one-owner-per-lead exists to
+ * prevent, arriving through the move itself. Returning a lead to the pool does not do this:
+ * nobody else is about to contact them.
+ */
+async function stopPreviousClientSequences(db: Db, orgId: string, moves: { leadId: string; fromClientId: string }[]) {
+  let stopped = 0;
+  for (const m of moves) {
+    const rows = await db
+      .update(campaignContacts)
+      .set({ status: "reassigned", nextSendAt: null, updatedAt: new Date() })
+      .where(
+        and(
+          eq(campaignContacts.leadId, m.leadId),
+          sql`${campaignContacts.status} IN ('queued','active')`,
+          sql`${campaignContacts.campaignId} IN (SELECT id FROM campaigns WHERE org_id = ${orgId} AND client_id = ${m.fromClientId})`,
+        ),
+      )
+      .returning({ id: campaignContacts.id });
+    stopped += rows.length;
+  }
+  return stopped;
+}
+
 export interface AssignResult {
   requested: number;
   assigned: number;
@@ -304,6 +383,8 @@ export interface AssignResult {
   ownedByAnotherClient: number;
   /** Not in this workspace, or deleted. */
   notFound: number;
+  /** On a move: sequences stopped in the previous client's campaigns. */
+  stoppedSequences?: number;
 }
 
 export async function assignLeads(orgId: string, clientId: string, leadIds: string[], opts: { move?: boolean } = {}): Promise<AssignResult> {
@@ -343,19 +424,30 @@ export async function assignLeads(orgId: string, clientId: string, leadIds: stri
     if (r.clientId === clientId) alreadyThisClient++;
     else ownedByAnotherClient++;
   }
-  return { requested: ids.length, assigned: updated.length, alreadyThisClient, ownedByAnotherClient, notFound: ids.length - before.length };
+  await recordDeliveries(db, clientId, [...updatedSet]);
+  const moves = before.filter((r) => updatedSet.has(r.id) && r.clientId && r.clientId !== clientId).map((r) => ({ leadId: r.id, fromClientId: r.clientId! }));
+  const stoppedSequences = moves.length ? await stopPreviousClientSequences(db, orgId, moves) : 0;
+  return {
+    requested: ids.length,
+    assigned: updated.length,
+    alreadyThisClient,
+    ownedByAnotherClient,
+    notFound: ids.length - before.length,
+    ...(opts.move ? { stoppedSequences } : {}),
+  };
 }
 
 export async function unassignLeads(orgId: string, leadIds: string[]) {
   const { db } = getDb();
   const ids = [...new Set(leadIds)];
-  if (ids.length === 0) return { returnedToPool: 0 };
+  if (ids.length === 0) return { requested: 0, returnedToPool: 0, alreadyInPool: 0, notFound: 0 };
+  const found = await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, orgId), inArray(leads.id, ids)));
   const rows = await db
     .update(leads)
     .set({ clientId: null, clientAssignedAt: null, updatedAt: new Date() })
     .where(and(eq(leads.orgId, orgId), inArray(leads.id, ids), sql`${leads.clientId} IS NOT NULL`))
     .returning({ id: leads.id });
-  return { returnedToPool: rows.length };
+  return { requested: ids.length, returnedToPool: rows.length, alreadyInPool: found.length - rows.length, notFound: ids.length - found.length };
 }
 
 /**
@@ -364,19 +456,53 @@ export async function unassignLeads(orgId: string, leadIds: string[]) {
  * Deliberately the non-moving path: a person another client already owns is left with that
  * client and counted, so the search report can say "12 of these were already X's".
  */
-export async function claimSearchLeads(db: Db, orgId: string, clientId: string, leadIds: string[]) {
+export async function claimSearchLeads(db: Db, orgId: string, clientId: string, leadIds: string[]): Promise<{ claimed: number; ownedByAnotherClient: number; skipped?: string }> {
   if (leadIds.length === 0) return { claimed: 0, ownedByAnotherClient: 0 };
+  // Checked at claim time, not only when the search was submitted: a search runs later, and
+  // a client deleted or archived in between must not be written to (a deleted one fails on
+  // the foreign key; an archived one would receive leads nobody looks at).
+  const client = await db.query.clients.findFirst({ where: and(eq(clients.id, clientId), eq(clients.orgId, orgId)) });
+  if (!client) return { claimed: 0, ownedByAnotherClient: 0, skipped: "client_deleted" };
+  if (client.status === "archived") return { claimed: 0, ownedByAnotherClient: 0, skipped: "client_archived" };
   const ids = [...new Set(leadIds)];
   const updated = await db
     .update(leads)
     .set({ clientId, clientAssignedAt: new Date() })
     .where(and(eq(leads.orgId, orgId), inArray(leads.id, ids), sql`${leads.clientId} IS NULL`))
     .returning({ id: leads.id });
+  await recordDeliveries(db, clientId, updated.map((u) => u.id));
   const [{ other }] = await db
     .select({ other: sql<number>`count(*)::int` })
     .from(leads)
     .where(and(eq(leads.orgId, orgId), inArray(leads.id, ids), sql`${leads.clientId} IS NOT NULL`, sql`${leads.clientId} <> ${clientId}`));
   return { claimed: updated.length, ownedByAnotherClient: n(other) };
+}
+
+/**
+ * Make a client-tagged campaign respect ownership.
+ *
+ * Of the leads asked to be enrolled: those owned by the campaign's client go in; unowned
+ * ones are claimed for that client first (they are about to be contacted on its behalf);
+ * those owned by a different client are left out and counted.
+ */
+export async function partitionForClientCampaign(db: Db, orgId: string, clientId: string, leadIds: string[]) {
+  if (leadIds.length === 0) return { allowed: [] as string[], claimed: 0, ownedByAnotherClient: 0 };
+  const rows = await db.select({ id: leads.id, clientId: leads.clientId }).from(leads).where(and(eq(leads.orgId, orgId), inArray(leads.id, leadIds)));
+  const unowned = rows.filter((r) => !r.clientId).map((r) => r.id);
+  let claimed: string[] = [];
+  if (unowned.length) {
+    claimed = (
+      await db
+        .update(leads)
+        .set({ clientId, clientAssignedAt: new Date(), updatedAt: new Date() })
+        .where(and(eq(leads.orgId, orgId), inArray(leads.id, unowned), sql`${leads.clientId} IS NULL`))
+        .returning({ id: leads.id })
+    ).map((r) => r.id);
+    await recordDeliveries(db, clientId, claimed);
+  }
+  const claimedSet = new Set(claimed);
+  const allowed = rows.filter((r) => r.clientId === clientId || claimedSet.has(r.id)).map((r) => r.id);
+  return { allowed, claimed: claimed.length, ownedByAnotherClient: rows.length - allowed.length };
 }
 
 // ── Routing the pool ─────────────────────────────────────────────────────────────────
@@ -409,7 +535,7 @@ export interface RouteSuggestion {
   hold: null | "no_fit" | "contested" | "too_little_data" | "partial_fit";
 }
 
-export async function routeSuggestions(orgId: string, opts: { limit?: number } = {}) {
+export async function routeSuggestions(orgId: string, opts: { limit?: number; leadIds?: string[] } = {}) {
   const { db } = getDb();
   const limit = Math.min(Math.max(opts.limit ?? 200, 1), 1000);
 
@@ -419,7 +545,13 @@ export async function routeSuggestions(orgId: string, opts: { limit?: number } =
     .leftJoin(icps, eq(clients.icpId, icps.id))
     .where(and(eq(clients.orgId, orgId), eq(clients.status, "active")));
 
-  const routable = active.filter((r) => r.icp && Object.values((r.icp.criteria ?? {}) as IcpCriteria).some((v) => Array.isArray(v) && v.length > 0));
+  // Positive criteria only. An ICP made of nothing but exclusions leaves the scorer with a
+  // single criterion - whether the email is verified - so every verified lead scored 100
+  // against it with full coverage, and that client won the entire pool on no evidence of
+  // fit at all.
+  const hasPositiveCriteria = (c: IcpCriteria) =>
+    Object.entries(c ?? {}).some(([k, v]) => k !== "excludeKeywords" && Array.isArray(v) && v.length > 0);
+  const routable = active.filter((r) => r.icp && hasPositiveCriteria(r.icp.criteria as IcpCriteria));
   // Named, so the page can say why a client never receives anything rather than leaving
   // the operator to wonder.
   const unroutable = active.filter((r) => !routable.includes(r)).map((r) => ({ clientId: r.client.id, name: r.client.name, reason: r.icp ? "icp_has_no_criteria" : "no_icp" }));
@@ -432,6 +564,7 @@ export async function routeSuggestions(orgId: string, opts: { limit?: number } =
       FROM leads l
       LEFT JOIN companies co ON co.id = l.company_id
       WHERE l.org_id = ${orgId} AND l.client_id IS NULL AND l.status <> 'lost'
+        ${opts.leadIds ? sql`AND l.id IN (SELECT unnest(${`{${opts.leadIds.filter((i) => /^[0-9a-f-]{36}$/i.test(i)).join(",")}}`}::uuid[]))` : sql``}
       ORDER BY l.created_at DESC
       LIMIT ${limit}`),
   );
@@ -506,8 +639,15 @@ export async function routeSuggestions(orgId: string, opts: { limit?: number } =
   };
 }
 
-/** Assign every clearly-routable pooled lead to its best client. Contested ones are left. */
-export async function autoRoute(orgId: string, opts: { limit?: number } = {}) {
+/**
+ * Assign every clearly-routable pooled lead to its best client. Contested and partial fits
+ * are left for a person.
+ *
+ * With `leadIds`, only those leads are considered - the ones a person was actually shown.
+ * Routing "all clear fits" used to recompute over a larger window than the review screen
+ * displayed, so leads nobody had seen were assigned under a button that said otherwise.
+ */
+export async function autoRoute(orgId: string, opts: { limit?: number; leadIds?: string[] } = {}) {
   const s = await routeSuggestions(orgId, opts);
   const byClient = new Map<string, { name: string; ids: string[] }>();
   for (const r of s.routable) {
@@ -593,19 +733,13 @@ export async function clientDetail(orgId: string, id: string) {
 }
 
 /** Lead ids in one attention bucket, so the page can act on exactly what it counted. */
-export async function attentionLeadIds(orgId: string, clientId: string | null, bucket: keyof ClientAttention, limit = 1000): Promise<string[]> {
+export async function attentionLeadIds(orgId: string, clientId: string | null, bucket: AttentionBucket, limit = 1000): Promise<{ ids: string[]; total: number }> {
   const { db } = getDb();
-  const owner = clientId ? sql`l.client_id = ${clientId}` : sql`l.client_id IS NULL`;
-  const where = {
-    noEmail: sql`l.email IS NULL AND l.status <> 'lost'`,
-    unverified: sql`l.email IS NOT NULL AND l.email_status = 'unknown' AND l.status <> 'lost'`,
-    badEmail: sql`l.email_status = 'invalid' AND l.status <> 'lost'`,
-    readyButIdle: sql`l.status = 'new' AND l.email_status IN ('valid','catch_all') AND coalesce(l.client_assigned_at, l.created_at) < now() - interval '7 days' AND NOT EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.lead_id = l.id)`,
-  }[bucket];
-  const rows = rowsOf<{ id: string }>(
-    await db.execute(sql`SELECT l.id FROM leads l WHERE l.org_id = ${orgId} AND ${owner} AND ${where} ORDER BY l.score DESC LIMIT ${limit}`),
-  );
-  return rows.map((r) => String(r.id));
+  const owner = clientId ? eq(leads.clientId, clientId) : sql`${leads.clientId} IS NULL`;
+  const where = and(eq(leads.orgId, orgId), owner, attentionWhere(bucket));
+  const rows = await db.select({ id: leads.id }).from(leads).where(where).orderBy(sql`${leads.score} DESC`).limit(limit);
+  const [{ total }] = await db.select({ total: sql<number>`count(*)::int` }).from(leads).where(where);
+  return { ids: rows.map((r) => r.id), total: n(total) };
 }
 
 // ── Sharing ──────────────────────────────────────────────────────────────────────────
@@ -680,8 +814,8 @@ export async function publicReport(token: string) {
       deliveredAt: r.client_assigned_at ? new Date(String(r.client_assigned_at)).toISOString() : null,
     })),
     shownLeads: list.length,
-    // The list is capped; the totals are not. Said so, rather than letting a client count
-    // rows and conclude they were short-changed.
-    listTruncated: stats.leads > list.length,
+    // The list is capped and leaves out leads marked lost; compared against the same
+    // population, or a client with one active and one lost lead is told the list is cut.
+    listTruncated: stats.leads - n(funnel.find((f) => f.status === "lost")?.n) > list.length,
   };
 }

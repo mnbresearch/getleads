@@ -155,6 +155,17 @@ export const clients = pgTable("clients", {
   updatedAt: ts("updated_at").notNull().defaultNow(),
 });
 
+/** First delivery of a lead to a client. Never rewritten; see migration 0013. */
+export const clientLeadDeliveries = pgTable(
+  "client_lead_deliveries",
+  {
+    clientId: uuid("client_id").notNull().references(() => clients.id, { onDelete: "cascade" }),
+    leadId: uuid("lead_id").notNull().references((): AnyPgColumn => leads.id, { onDelete: "cascade" }),
+    deliveredAt: ts("delivered_at").notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.clientId, t.leadId] }) }),
+);
+
 export const leads = pgTable(
   "leads",
   {
@@ -246,6 +257,8 @@ export const searches = pgTable("searches", {
   error: text("error"),
   /** Leads this search creates are assigned to this client, unless another client owns them. */
   clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
+  /** What the client claim did: delivered, and left with another client. */
+  clientClaim: jsonb("client_claim").$type<Record<string, unknown>>(),
   createdAt: ts("created_at").notNull().defaultNow(),
   completedAt: ts("completed_at"),
 });

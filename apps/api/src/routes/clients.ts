@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { and, enqueue, eq, getDb, listLeads, lists } from "@prospex/db";
+import { and, enqueue, eq, getDb, getUsage, listLeads, lists } from "@prospex/db";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { notFound } from "../lib/errors.js";
 import {
@@ -57,8 +57,14 @@ clientRoutes.get("/routing", zValidator("query", z.object({ limit: z.coerce.numb
   c.json(await routeSuggestions(orgId(c), { limit: c.req.valid("query").limit })),
 );
 
-clientRoutes.post("/routing/auto", rateLimit({ perMinute: 6 }), zValidator("json", z.object({ limit: z.number().int().min(1).max(1000).default(500) })), async (c) =>
-  c.json(await autoRoute(orgId(c), { limit: c.req.valid("json").limit })),
+clientRoutes.post(
+  "/routing/auto",
+  rateLimit({ perMinute: 6 }),
+  zValidator("json", z.object({ limit: z.number().int().min(1).max(1000).default(500), leadIds: z.array(z.string().uuid()).max(1000).optional() })),
+  async (c) => {
+    const b = c.req.valid("json");
+    return c.json(await autoRoute(orgId(c), { limit: b.leadIds ? Math.max(b.leadIds.length, 1) : b.limit, leadIds: b.leadIds }));
+  },
 );
 
 clientRoutes.post("/unassign", zValidator("json", leadIdsInput), async (c) => c.json(await unassignLeads(orgId(c), c.req.valid("json").leadIds)));
@@ -90,7 +96,8 @@ clientRoutes.get("/:id/attention/:bucket", async (c) => {
   const bucket = c.req.param("bucket") as (typeof BUCKETS)[number];
   if (!BUCKETS.includes(bucket)) throw notFound("Bucket");
   await requireClient(orgId(c), c.req.param("id"));
-  return c.json({ leadIds: await attentionLeadIds(orgId(c), c.req.param("id"), bucket) });
+  const r = await attentionLeadIds(orgId(c), c.req.param("id"), bucket);
+  return c.json({ leadIds: r.ids, total: r.total });
 });
 
 /**
@@ -117,17 +124,42 @@ clientRoutes.delete("/:id/share", async (c) => c.json(await disableSharing(orgId
 
 async function act(oid: string, clientId: string | null, bucket: (typeof BUCKETS)[number], action: "enrich" | "verify" | "list") {
   const { db } = getDb();
-  const ids = await attentionLeadIds(oid, clientId, bucket);
-  if (ids.length === 0) return { action, bucket, queued: 0, note: "Nothing in that bucket right now." };
+  const { ids: all, total } = await attentionLeadIds(oid, clientId, bucket);
+  if (all.length === 0) return { action, bucket, queued: 0, note: "Nothing in that bucket right now." };
+
+  // Enrich and verify each spend a verification from the plan inside the job. Queueing more
+  // than the plan has left used to enqueue work that then failed job by job on the quota,
+  // while the page reported the whole batch as queued.
+  let ids = all;
+  let skippedForQuota = 0;
+  if (action === "enrich" || action === "verify") {
+    const u = (await getUsage(db, oid)).usage.verifications;
+    if (u.limit > 0) {
+      const left = Math.max(0, u.limit - u.used);
+      if (left < ids.length) {
+        skippedForQuota = ids.length - left;
+        ids = ids.slice(0, left);
+      }
+    }
+    if (ids.length === 0) {
+      return { action, bucket, queued: 0, skippedForQuota, note: "Your plan has no verifications left this month, so nothing was queued." };
+    }
+  }
+  // Said when a bucket is bigger than one action takes, so "queued 1,000" is not read as
+  // "the bucket is now empty".
+  const remainingInBucket = Math.max(0, total - all.length);
 
   if (action === "enrich") {
-    // Charged per lookup inside the job, on the first attempt only - queueing is free.
-    const job = await enqueue(db, "leads.bulk_enrich", { leadIds: ids }, { orgId: oid });
-    return { action, bucket, queued: ids.length, jobId: job.id };
+    // A known-bad address is a different job from a missing one: enrichment normally leaves
+    // a lead that already has an email alone, so "find a working address" queued work that
+    // could never change anything. `replaceInvalid` tells the job to look for a replacement.
+    const replaceInvalid = bucket === "badEmail";
+    for (const id of ids) await enqueue(db, "lead.enrich", { leadId: id, ...(replaceInvalid ? { replaceInvalid: true } : {}) }, { orgId: oid });
+    return { action, bucket, queued: ids.length, skippedForQuota, remainingInBucket };
   }
   if (action === "verify") {
     for (const id of ids) await enqueue(db, "lead.verify", { leadId: id }, { orgId: oid });
-    return { action, bucket, queued: ids.length };
+    return { action, bucket, queued: ids.length, skippedForQuota, remainingInBucket };
   }
   // "list": a list named for the client, reused on every click, that a campaign can target.
   if (!clientId) return { action, bucket, queued: 0, note: "Lists are per client. Assign these leads to a client first." };
@@ -140,7 +172,7 @@ async function act(oid: string, clientId: string | null, bucket: (typeof BUCKETS
     .values(ids.map((leadId) => ({ listId: list!.id, leadId })))
     .onConflictDoNothing()
     .returning({ leadId: listLeads.leadId });
-  return { action, bucket, listId: list.id, listName: list.name, added: inserted.length, alreadyOnList: ids.length - inserted.length };
+  return { action, bucket, listId: list.id, listName: list.name, added: inserted.length, alreadyOnList: ids.length - inserted.length, remainingInBucket };
 }
 
 /**

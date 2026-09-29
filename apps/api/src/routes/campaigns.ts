@@ -71,7 +71,7 @@ const settingsInput = z.object({
   valueProp: z.string().optional(),
   tone: z.enum(["friendly", "direct", "formal", "casual"]).optional(),
 });
-const campaignInput = z.object({ name: z.string().min(1), icpId: z.string().uuid().optional(), listId: z.string().uuid().optional(), emailAccountId: z.string().uuid().optional(), clientId: z.string().uuid().optional(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
+const campaignInput = z.object({ name: z.string().min(1), icpId: z.string().uuid().optional(), listId: z.string().uuid().optional(), emailAccountId: z.string().uuid().optional(), clientId: z.string().uuid().nullable().optional(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
 
 campaignRoutes.get("/", async (c) => {
   const { db } = getDb();
@@ -143,8 +143,20 @@ campaignRoutes.post("/:id/enroll", zValidator("json", z.object({ leadIds: z.arra
   ids = [...new Set(ids)];
   // only leads with a usable email
   const valid = await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, ids), sql`${leads.email} IS NOT NULL`, sql`${leads.emailStatus} <> 'invalid'`));
-  const n = await enrollLeads(cp, valid.map((v) => v.id));
-  return c.json({ enrolled: n, skippedNoEmail: ids.length - valid.length });
+  let toEnroll = valid.map((v) => v.id);
+  // A campaign run for a client only contacts that client's leads. Unowned ones are claimed
+  // for it (they are about to be contacted on its behalf); another client's are left out
+  // and counted. Without this, one-owner-per-lead held everywhere except at the point where
+  // emails are actually sent.
+  let clientNote: { claimedForClient: number; skippedOtherClient: number } | undefined;
+  if (cp.clientId) {
+    const { partitionForClientCampaign } = await import("../services/clients.js");
+    const p = await partitionForClientCampaign(db, oid, cp.clientId, toEnroll);
+    toEnroll = p.allowed;
+    clientNote = { claimedForClient: p.claimed, skippedOtherClient: p.ownedByAnotherClient };
+  }
+  const n = await enrollLeads(cp, toEnroll);
+  return c.json({ enrolled: n, skippedNoEmail: ids.length - valid.length, ...(clientNote ?? {}) });
 });
 
 /**

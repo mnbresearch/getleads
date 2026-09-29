@@ -132,7 +132,8 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
   const save = async () => {
     setBusy(true);
     try {
-      const body = { name: f.name, clientId: f.clientId || undefined, emailAccountId: f.emailAccountId || undefined, listId: f.listId || undefined, icpId: f.icpId || undefined, settings: { senderName: f.senderName, senderCompany: f.senderCompany, senderTitle: f.senderTitle, valueProp: f.valueProp, tone: f.tone, dailyLimit: f.dailyLimit, timezone: f.timezone, sendWindow: { start: f.start, end: f.end, days: [1, 2, 3, 4, 5] } }, steps };
+      // null on edit, so choosing "No client" actually untags; omitted on create.
+      const body = { name: f.name, clientId: f.clientId || (existing ? null : undefined), emailAccountId: f.emailAccountId || undefined, listId: f.listId || undefined, icpId: f.icpId || undefined, settings: { senderName: f.senderName, senderCompany: f.senderCompany, senderTitle: f.senderTitle, valueProp: f.valueProp, tone: f.tone, dailyLimit: f.dailyLimit, timezone: f.timezone, sendWindow: { start: f.start, end: f.end, days: [1, 2, 3, 4, 5] } }, steps };
       const r = existing ? await apiFetch<{ id: string }>("PATCH", `/v1/campaigns/${existing.id}`, body) : await apiFetch<{ id: string }>("POST", "/v1/campaigns", body);
       toast("Campaign saved");
       onDone(r.id);
@@ -449,8 +450,13 @@ function EnrollModal({ open, onClose, campaign, lists, onDone, toast }: { open: 
   const go = async () => {
     setBusy(true);
     try {
-      const r = await apiFetch<{ enrolled: number; skippedNoEmail: number }>("POST", `/v1/campaigns/${campaign.id}/enroll`, mode === "list" ? { fromList: true } : { minScore });
-      toast(`Enrolled ${r.enrolled} leads${r.skippedNoEmail ? ` (${r.skippedNoEmail} skipped: no valid email)` : ""}`);
+      const r = await apiFetch<{ enrolled: number; skippedNoEmail: number; claimedForClient?: number; skippedOtherClient?: number }>("POST", `/v1/campaigns/${campaign.id}/enroll`, mode === "list" ? { fromList: true } : { minScore });
+      const extra = [
+        r.skippedNoEmail ? `${r.skippedNoEmail} skipped: no valid email` : "",
+        r.skippedOtherClient ? `${r.skippedOtherClient} skipped: they belong to another client` : "",
+        r.claimedForClient ? `${r.claimedForClient} unassigned leads were assigned to this campaign's client` : "",
+      ].filter(Boolean);
+      toast(`Enrolled ${r.enrolled} leads${extra.length ? ` (${extra.join("; ")})` : ""}`);
       onDone();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };

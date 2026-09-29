@@ -1423,7 +1423,7 @@ suite("database integration", () => {
       expect(d.attention.readyButIdle).toBe(1);
       expect(d.attention.unverified).toBe(1);
       expect(d.attention.badEmail).toBe(1);
-      expect(await svc.attentionLeadIds(org.id, c.id, "readyButIdle")).toEqual([old.id]);
+      expect((await svc.attentionLeadIds(org.id, c.id, "readyButIdle")).ids).toEqual([old.id]);
 
       // Once it is in a campaign it is being used, and stops counting as waste.
       const acct = await newAccount(org.id);
@@ -1497,6 +1497,147 @@ suite("database integration", () => {
       expect(r).toEqual({ claimed: 1, ownedByAnotherClient: 1 });
       const hersAfter = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, hers.id) });
       expect(hersAfter.clientId).toBe(b.id);
+    });
+
+    describe("fixes from review", () => {
+      it("never routes on an ICP made only of exclusions", async () => {
+        const org = await newOrg("cw-exclude-only");
+        const excl = await icp(org.id, { excludeKeywords: ["student"] });
+        await svc.createClient(org.id, { name: "ExcludeOnly", icpId: excl.id });
+        const barista = await lead(org.id, { title: "Barista" });
+        const r = await svc.routeSuggestions(org.id);
+        expect(r.routable.map((x: any) => x.leadId)).not.toContain(barista.id);
+        expect(r.unroutableClients.map((u: any) => u.name)).toContain("ExcludeOnly");
+      });
+
+      it("does not write a search's leads to a client deleted or archived since it was submitted", async () => {
+        const org = await newOrg("cw-claim-gone");
+        const gone = await svc.createClient(org.id, { name: "Gone" });
+        const shelved = await svc.createClient(org.id, { name: "Shelved" });
+        const l = await lead(org.id);
+        await svc.deleteClient(org.id, gone.id);
+        await svc.updateClient(org.id, shelved.id, { status: "archived" });
+        expect(await svc.claimSearchLeads(db, org.id, gone.id, [l.id])).toMatchObject({ claimed: 0, skipped: "client_deleted" });
+        expect(await svc.claimSearchLeads(db, org.id, shelved.id, [l.id])).toMatchObject({ claimed: 0, skipped: "client_archived" });
+        expect((await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, l.id) })).clientId).toBeNull();
+      });
+
+      it("routes only the leads a person was shown", async () => {
+        const org = await newOrg("cw-route-shown");
+        const i = await icp(org.id, { industries: ["fintech"], titles: ["vp growth"] });
+        const c = await svc.createClient(org.id, { name: "Fin", icpId: i.id });
+        const co = await companyRow(org.id, { name: "P", industry: "Fintech" });
+        const shown = await lead(org.id, { title: "VP Growth", companyId: co.id });
+        const notShown = await lead(org.id, { title: "VP Growth", companyId: co.id });
+        const r = await svc.autoRoute(org.id, { leadIds: [shown.id] });
+        expect(r.routed).toBe(1);
+        expect((await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, shown.id) })).clientId).toBe(c.id);
+        expect((await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, notShown.id) })).clientId).toBeNull();
+      });
+
+      it("counts a delivery once, however many times the lead comes back through the pool", async () => {
+        const org = await newOrg("cw-redeliver");
+        const c = await svc.createClient(org.id, { name: "Once" });
+        const l = await lead(org.id);
+        await svc.assignLeads(org.id, c.id, [l.id]);
+        // First delivered two months ago.
+        await db.execute(schema.sql`UPDATE client_lead_deliveries SET delivered_at = now() - interval '60 days' WHERE lead_id = ${l.id}`);
+        await svc.unassignLeads(org.id, [l.id]);
+        await svc.assignLeads(org.id, c.id, [l.id]);
+        const row = (await svc.clientOverview(org.id)).clients.find((x: any) => x.id === c.id);
+        expect(row.stats.leads).toBe(1);
+        expect(row.stats.deliveredThisMonth).toBe(0);
+
+        // A genuinely new client for that person is a new delivery - once.
+        const other = await svc.createClient(org.id, { name: "Other" });
+        await svc.assignLeads(org.id, other.id, [l.id], { move: true });
+        const o = (await svc.clientOverview(org.id)).clients.find((x: any) => x.id === other.id);
+        expect(o.stats.deliveredThisMonth).toBe(1);
+      });
+
+      it("stops the previous client's sequence when a lead is moved, and not when it is pooled", async () => {
+        const org = await newOrg("cw-move-stop");
+        const a = await svc.createClient(org.id, { name: "A" });
+        const b = await svc.createClient(org.id, { name: "B" });
+        const l = await lead(org.id);
+        await svc.assignLeads(org.id, a.id, [l.id]);
+        const acct = await newAccount(org.id);
+        const [camp] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "A seq", emailAccountId: acct.id, clientId: a.id }).returning();
+        await db.insert(schema.campaignContacts).values({ campaignId: camp.id, leadId: l.id, status: "active" });
+
+        await svc.unassignLeads(org.id, [l.id]);
+        let cc = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.leadId, l.id) });
+        expect(cc.status).toBe("active");
+
+        await svc.assignLeads(org.id, a.id, [l.id]);
+        const r = await svc.assignLeads(org.id, b.id, [l.id], { move: true });
+        expect(r.stoppedSequences).toBe(1);
+        cc = await db.query.campaignContacts.findFirst({ where: schema.eq(schema.campaignContacts.leadId, l.id) });
+        expect(cc.status).toBe("reassigned");
+        expect(cc.nextSendAt).toBeNull();
+      });
+
+      it("accounts for every id when returning leads to the pool", async () => {
+        const org = await newOrg("cw-unassign-counts");
+        const c = await svc.createClient(org.id, { name: "C" });
+        const owned = await lead(org.id);
+        const pooled = await lead(org.id);
+        await svc.assignLeads(org.id, c.id, [owned.id]);
+        const r = await svc.unassignLeads(org.id, [owned.id, pooled.id, randomUUID(), owned.id]);
+        expect(r).toEqual({ requested: 3, returnedToPool: 1, alreadyInPool: 1, notFound: 1 });
+      });
+
+      it("keeps a client campaign to that client's leads, claiming unowned ones", async () => {
+        const org = await newOrg("cw-enrol");
+        const a = await svc.createClient(org.id, { name: "A" });
+        const b = await svc.createClient(org.id, { name: "B" });
+        const mine = await lead(org.id);
+        const theirs = await lead(org.id);
+        const nobodys = await lead(org.id);
+        await svc.assignLeads(org.id, a.id, [mine.id]);
+        await svc.assignLeads(org.id, b.id, [theirs.id]);
+        const p = await svc.partitionForClientCampaign(db, org.id, a.id, [mine.id, theirs.id, nobodys.id]);
+        expect(p.allowed.sort()).toEqual([mine.id, nobodys.id].sort());
+        expect(p.claimed).toBe(1);
+        expect(p.ownedByAnotherClient).toBe(1);
+        expect((await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, nobodys.id) })).clientId).toBe(a.id);
+      });
+
+      it("does not let one client's ICP link overwrite another's, and releases it on switch", async () => {
+        const org = await newOrg("cw-icp-link");
+        const shared = await icp(org.id, { titles: ["cto"] });
+        const a = await svc.createClient(org.id, { name: "A", icpId: shared.id });
+        await svc.createClient(org.id, { name: "B", icpId: shared.id });
+        expect((await db.query.icps.findFirst({ where: schema.eq(schema.icps.id, shared.id) })).clientId).toBe(a.id);
+
+        const own = await icp(org.id, { titles: ["cfo"] });
+        await svc.updateClient(org.id, a.id, { icpId: own.id });
+        expect((await db.query.icps.findFirst({ where: schema.eq(schema.icps.id, shared.id) })).clientId).toBeNull();
+        expect((await db.query.icps.findFirst({ where: schema.eq(schema.icps.id, own.id) })).clientId).toBe(a.id);
+      });
+
+      it("reports the true size of an attention bucket, not just what one action takes", async () => {
+        const org = await newOrg("cw-bucket-total");
+        const c = await svc.createClient(org.id, { name: "C" });
+        const ids = [];
+        for (let i = 0; i < 3; i++) ids.push((await lead(org.id, { emailStatus: "unknown" })).id);
+        await svc.assignLeads(org.id, c.id, ids);
+        const r = await svc.attentionLeadIds(org.id, c.id, "unverified", 2);
+        expect(r.ids).toHaveLength(2);
+        expect(r.total).toBe(3);
+      });
+
+      it("tells a client the list is complete when the only leads left out are lost ones", async () => {
+        const org = await newOrg("cw-report-lost");
+        const c = await svc.createClient(org.id, { name: "C" });
+        const live = await lead(org.id);
+        const lostOne = await lead(org.id, { status: "lost" });
+        await svc.assignLeads(org.id, c.id, [live.id, lostOne.id]);
+        const { shareToken } = await svc.enableSharing(org.id, c.id);
+        const r = await svc.publicReport(shareToken);
+        expect(r.shownLeads).toBe(1);
+        expect(r.listTruncated).toBe(false);
+      });
     });
 
     describe("the public client report", () => {

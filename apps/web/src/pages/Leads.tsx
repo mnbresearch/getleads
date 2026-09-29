@@ -101,20 +101,25 @@ export function LeadsPage() {
         toast(`Queued ${r.queued} lead${r.queued === 1 ? "" : "s"} to ${provider} - they appear there within a minute or two`);
       }
       if (action === "client:none") {
-        const r = await apiFetch<{ returnedToPool: number }>("POST", "/v1/clients/unassign", { leadIds: ids });
-        toast(`${r.returnedToPool} returned to the pool`);
+        const r = await apiFetch<{ returnedToPool: number; alreadyInPool: number }>("POST", "/v1/clients/unassign", { leadIds: ids });
+        toast(`${r.returnedToPool} returned to the pool${r.alreadyInPool ? `, ${r.alreadyInPool} were already there` : ""}`);
       } else if (action.startsWith("client:")) {
         const clientId = action.slice(7);
         const name = clientById.get(clientId)?.name ?? "client";
         let r = await apiFetch<{ assigned: number; alreadyThisClient: number; ownedByAnotherClient: number; notFound: number }>("POST", `/v1/clients/${clientId}/assign`, { leadIds: ids });
         // Leads another client owns are never taken silently. Ask, once, for the lot.
-        if (r.ownedByAnotherClient > 0 && confirm(`${r.ownedByAnotherClient} of these already belong to another client. Move them to ${name} too?`)) {
-          const moved = await apiFetch<typeof r>("POST", `/v1/clients/${clientId}/assign`, { leadIds: ids, move: true });
-          r = { ...moved, assigned: r.assigned + moved.assigned, ownedByAnotherClient: 0 };
+        let stopped = 0;
+        if (r.ownedByAnotherClient > 0 && confirm(`${r.ownedByAnotherClient} of these already belong to another client. Move them to ${name} too? Any sequence the other client is running for them will stop.`)) {
+          const moved = await apiFetch<typeof r & { stoppedSequences?: number }>("POST", `/v1/clients/${clientId}/assign`, { leadIds: ids, move: true });
+          // The second call sees the first call's leads as "already this client's", so its
+          // own counts cannot be added naively: only its `assigned` is new.
+          r = { ...r, assigned: r.assigned + moved.assigned, ownedByAnotherClient: r.ownedByAnotherClient - moved.assigned };
+          stopped = moved.stoppedSequences ?? 0;
         }
         const parts = [`${r.assigned} assigned to ${name}`];
         if (r.alreadyThisClient) parts.push(`${r.alreadyThisClient} already were`);
         if (r.ownedByAnotherClient) parts.push(`${r.ownedByAnotherClient} left with their current client`);
+        if (stopped) parts.push(`${stopped} sequence${stopped === 1 ? "" : "s"} stopped for the previous client`);
         toast(parts.join(", "));
       }
       if (action.startsWith("stage:")) {

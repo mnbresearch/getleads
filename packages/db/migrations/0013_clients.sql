@@ -52,3 +52,21 @@ ALTER TABLE campaigns ADD COLUMN IF NOT EXISTS client_id uuid REFERENCES clients
 ALTER TABLE icps      ADD COLUMN IF NOT EXISTS client_id uuid REFERENCES clients(id) ON DELETE SET NULL;
 ALTER TABLE lists     ADD COLUMN IF NOT EXISTS client_id uuid REFERENCES clients(id) ON DELETE SET NULL;
 ALTER TABLE searches  ADD COLUMN IF NOT EXISTS client_id uuid REFERENCES clients(id) ON DELETE SET NULL;
+
+-- Every time a lead is delivered to a client, once per (client, lead), ever.
+--
+-- "Delivered this month" was read off client_assigned_at, which is re-stamped whenever a
+-- lead is assigned. So a lead delivered in July, returned to the pool and reassigned in
+-- September counted as a September delivery - target progress could be inflated just by
+-- tidying up. The first delivery is recorded here and never rewritten.
+CREATE TABLE IF NOT EXISTS client_lead_deliveries (
+  client_id    uuid NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+  lead_id      uuid NOT NULL REFERENCES leads(id) ON DELETE CASCADE,
+  delivered_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (client_id, lead_id)
+);
+CREATE INDEX IF NOT EXISTS idx_client_lead_deliveries_client_time ON client_lead_deliveries(client_id, delivered_at);
+
+-- What a client search did with its leads: how many it delivered, how many were left with
+-- the client that already owned them. Stored on the search so the Search page can say so.
+ALTER TABLE searches ADD COLUMN IF NOT EXISTS client_claim jsonb;

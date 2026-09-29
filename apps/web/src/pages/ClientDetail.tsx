@@ -44,10 +44,12 @@ export function ClientDetailPage() {
     const copy = BUCKET_COPY[bucket];
     setActing(bucket);
     try {
-      const r = await apiFetch<{ queued?: number; added?: number; alreadyOnList?: number; listName?: string; note?: string }>("POST", `/v1/clients/${id}/act`, { bucket, action: copy.action });
-      if (r.note) toast(r.note);
-      else if (copy.action === "list") toast(`${r.added} added to "${r.listName}"${r.alreadyOnList ? `, ${r.alreadyOnList} were already on it` : ""}. Point a campaign at that list.`);
-      else toast(`${r.queued} queued - results land over the next few minutes`);
+      const r = await apiFetch<{ queued?: number; added?: number; alreadyOnList?: number; listName?: string; note?: string; skippedForQuota?: number; remainingInBucket?: number }>("POST", `/v1/clients/${id}/act`, { bucket, action: copy.action });
+      const more = r.remainingInBucket ? ` ${r.remainingInBucket} more remain - run it again after these finish.` : "";
+      const quota = r.skippedForQuota ? ` ${r.skippedForQuota} not queued: your plan has no verifications left this month.` : "";
+      if (r.note) toast(r.note + quota, r.skippedForQuota ? "err" : "ok");
+      else if (copy.action === "list") toast(`${r.added} added to "${r.listName}"${r.alreadyOnList ? `, ${r.alreadyOnList} were already on it` : ""}. Point a campaign at that list.${more}`);
+      else toast(`${r.queued} queued - results land over the next few minutes.${quota}${more}`);
       setTimeout(load, 1500);
     } catch (e) {
       toast((e as Error).message, "err");

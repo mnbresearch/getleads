@@ -46,6 +46,8 @@ const listQuery = z.object({
   status: z.string().optional(),
   /** A client id, or "none" for the unassigned pool. */
   clientId: z.union([z.string().uuid(), z.literal("none")]).optional(),
+  /** One of the client dashboard's needs-attention buckets, with the dashboard's definition. */
+  attention: z.enum(["noEmail", "unverified", "badEmail", "readyButIdle"]).optional(),
   sort: z.enum(["score", "created", "updated", "name"]).default("created"),
   order: z.enum(["asc", "desc"]).default("desc"),
   limit: z.coerce.number().min(1).max(500).default(50),
@@ -66,6 +68,10 @@ async function buildWhere(oid: string, q: z.infer<typeof listQuery>) {
   if (q.status) conds.push(inArray(leads.status, q.status.split(",")));
   if (q.clientId === "none") conds.push(sql`${leads.clientId} IS NULL`);
   else if (q.clientId) conds.push(eq(leads.clientId, q.clientId));
+  if (q.attention) {
+    const { attentionWhere } = await import("../services/clients.js");
+    conds.push(attentionWhere(q.attention));
+  }
   if (q.listId) conds.push(sql`${leads.id} IN (SELECT lead_id FROM list_leads WHERE list_id = ${q.listId})`);
   if (q.companyDomain) conds.push(sql`${leads.companyId} IN (SELECT id FROM companies WHERE org_id = ${oid} AND domain = ${q.companyDomain})`);
   return and(...conds);
@@ -312,8 +318,11 @@ leadRoutes.get("/lists/all", async (c) => {
     .orderBy(desc(lists.createdAt));
   return c.json({ lists: rows.map((r) => ({ ...r.list, count: r.count })) });
 });
-leadRoutes.post("/lists", zValidator("json", z.object({ name: z.string().min(1), description: z.string().optional() })), async (c) => {
+leadRoutes.post("/lists", zValidator("json", z.object({ name: z.string().min(1), description: z.string().optional(), clientId: z.string().uuid().optional() })), async (c) => {
   const { db } = getDb();
+  const { assertOwned } = await import("../lib/ownership.js");
+  const { clients } = await import("@prospex/db");
+  await assertOwned(clients, c.req.valid("json").clientId, orgId(c), "Client");
   const [row] = await db.insert(lists).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
   return c.json(row, 201);
 });
