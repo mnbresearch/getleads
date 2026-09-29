@@ -1,5 +1,5 @@
 import { getDb, sql } from "@prospex/db";
-import { learnFromOutcomes, type IcpLearning, type OutcomeSample } from "@prospex/core";
+import { learnFromOutcomes, type IcpLearning, type OutcomeSample, predictLeadScore, type Prediction } from "@prospex/core";
 
 /**
  * Build the outcome samples that ICP learning reasons over: one row per lead that has
@@ -47,4 +47,47 @@ export async function icpLearningSamples(db: ReturnType<typeof getDb>["db"], org
 /** What the org's send history says its ICP actually is. */
 export async function icpLearningFor(db: ReturnType<typeof getDb>["db"], orgIdValue: string): Promise<IcpLearning> {
   return learnFromOutcomes(await icpLearningSamples(db, orgIdValue));
+}
+
+/**
+ * Score a set of leads with the learning applied, not just the rules.
+ *
+ * The learning is computed once for the whole batch rather than per lead: it is a property
+ * of the org's send history, not of any one lead, and recomputing it per row would turn a
+ * scoring pass into hundreds of identical aggregate queries.
+ *
+ * Returns the rule score unchanged for every lead when there is not yet enough history -
+ * which is the common case for a new workspace, and the right answer for it.
+ */
+export async function scoreLeadsWithLearning(
+  db: ReturnType<typeof getDb>["db"],
+  orgIdValue: string,
+  rows: {
+    id: string;
+    seniority?: string | null;
+    department?: string | null;
+    country?: string | null;
+    emailStatus?: string | null;
+    company?: { industry?: string | null; size?: string | null } | null;
+    ruleScore: number;
+  }[],
+): Promise<{ learning: IcpLearning; scored: { id: string; prediction: Prediction }[] }> {
+  const learning = await icpLearningFor(db, orgIdValue);
+  const scored = rows.map((r) => ({
+    id: r.id,
+    prediction: predictLeadScore(learning, {
+      // The same attribute names the learning was built from. A mismatch here would mean
+      // nothing ever matches and the feature would silently do nothing at all.
+      attributes: {
+        seniority: r.seniority,
+        department: r.department,
+        industry: r.company?.industry,
+        companySize: r.company?.size,
+        country: r.country,
+        emailStatus: r.emailStatus,
+      },
+      ruleScore: r.ruleScore,
+    }),
+  }));
+  return { learning, scored };
 }

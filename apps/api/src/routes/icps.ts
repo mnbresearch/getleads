@@ -5,6 +5,7 @@ import { and, companies, consume, desc, inArray, enqueue, eq, getDb, icps, leads
 import { createAiProvider, createAiProviderForPlan, scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriteria, type IcpChatMessage } from "@prospex/core";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
+import { scoreLeadsWithLearning } from "../services/insights.js";
 
 export const icpRoutes = new Hono<Env>();
 icpRoutes.use("*", requireAuth);
@@ -108,7 +109,7 @@ icpRoutes.post("/:id/chat", zValidator("json", z.object({ message: z.string().mi
 });
 
 /** Score all (or given) leads against this ICP. Rule-based; optional AI re-rank of top N. */
-icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.string().uuid()).optional(), assign: z.boolean().default(false), aiRerankTop: z.number().int().min(0).max(50).default(0) })), async (c) => {
+icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.string().uuid()).optional(), assign: z.boolean().default(false), aiRerankTop: z.number().int().min(0).max(50).default(0), useLearning: z.boolean().default(true) })), async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const icp = await db.query.icps.findFirst({ where: and(eq(icps.id, c.req.param("id")), eq(icps.orgId, oid)) });
@@ -121,6 +122,39 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
     .where(b.leadIds ? and(eq(leads.orgId, oid), inArray(leads.id, b.leadIds)) : eq(leads.orgId, oid))
     .limit(5000);
   const scored = rows.map(({ lead, company }) => ({ lead, company, ...scoreLeadRules({ title: lead.title, location: lead.location, country: lead.country, emailStatus: lead.emailStatus, company }, icp.criteria as IcpCriteria) }));
+  /**
+   * Apply what the send history taught us, on top of the declared rules.
+   *
+   * icp/learn.ts has always worked out which segments actually reply; nothing applied it,
+   * so a lead from a segment with three times the baseline reply rate ranked exactly like
+   * one from a segment that never replies. The adjustment is bounded and gated on the
+   * learning's own sufficiency check, so a new workspace with no history sees the rule
+   * score unchanged - see packages/core/src/icp/predict.ts.
+   */
+  const learningApplied = b.useLearning
+    ? await scoreLeadsWithLearning(
+        db,
+        oid,
+        scored.map((s) => ({
+          id: s.lead.id,
+          seniority: s.lead.seniority,
+          department: s.lead.department,
+          country: s.lead.country,
+          emailStatus: s.lead.emailStatus,
+          company: s.company ? { industry: s.company.industry, size: s.company.size } : null,
+          ruleScore: s.score,
+        })),
+      )
+    : null;
+
+  const predictionById = new Map((learningApplied?.scored ?? []).map((p) => [p.id, p.prediction]));
+  for (const s of scored) {
+    const p = predictionById.get(s.lead.id);
+    if (!p?.applied) continue;
+    s.score = p.score;
+    s.reasons = [...s.reasons, `~ ${p.reason}`];
+  }
+
   scored.sort((a, b2) => b2.score - a.score);
   const ai = createAiProvider();
   if (b.aiRerankTop > 0 && hasAi(ai)) {
@@ -137,5 +171,28 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
   if (b.assign) {
     for (const s of scored) await db.update(leads).set({ score: s.score, scoreReasons: s.reasons, icpId: icp.id, updatedAt: new Date() }).where(eq(leads.id, s.lead.id));
   }
-  return c.json({ scored: scored.map((s) => ({ leadId: s.lead.id, fullName: s.lead.fullName, title: s.lead.title, company: s.company?.name, score: s.score, reasons: s.reasons })) });
+  return c.json({
+    scored: scored.map((s) => ({
+      leadId: s.lead.id,
+      fullName: s.lead.fullName,
+      title: s.lead.title,
+      company: s.company?.name,
+      score: s.score,
+      reasons: s.reasons,
+      ruleScore: predictionById.get(s.lead.id)?.ruleScore,
+      learningAdjustment: predictionById.get(s.lead.id)?.adjustment,
+    })),
+    // Said out loud, because "the model is not being applied yet" and "the model found
+    // nothing to say about these leads" are different answers and both look like silence.
+    learning: learningApplied
+      ? {
+          applied: learningApplied.learning.sufficient,
+          sampleSize: learningApplied.learning.sampleSize,
+          positives: learningApplied.learning.positives,
+          note: learningApplied.learning.sufficient
+            ? `Adjusted using ${learningApplied.learning.sampleSize} contacted leads from your own history.`
+            : `Rule scores only: ${learningApplied.learning.sampleSize} contacted leads and ${learningApplied.learning.positives} positive replies so far, which is not enough to learn from yet.`,
+        }
+      : undefined,
+  });
 });
