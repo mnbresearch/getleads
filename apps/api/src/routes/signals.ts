@@ -4,14 +4,19 @@ import { z } from "zod";
 import { and, campaigns, desc, enqueue, eq, getDb, icps, inArray, monitorResults, monitors, or, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
 import { notFound } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
-import { orgId, requireAuth, type Env } from "../middleware.js";
+import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
+import { scanJobChanges } from "../services/jobChanges.js";
 import { runSubscription } from "../services/signals.js";
 import { runMonitor } from "../services/monitors.js";
 
 export const signalRoutes = new Hono<Env>();
 signalRoutes.use("*", requireAuth);
 
-const SIGNAL_TYPES = ["funding", "acquisition", "hiring", "leadership", "expansion", "launch", "partnership", "news"] as const;
+// `job_change` is a lead-level signal rather than a company-level one: it fires when a
+// person we already track moves employer or is promoted. A champion who moves is the
+// strongest buying trigger there is - they arrive somewhere new with budget, a mandate and
+// a tool they already like - and the same event tells you a live deal just lost its sponsor.
+const SIGNAL_TYPES = ["funding", "acquisition", "hiring", "leadership", "expansion", "launch", "partnership", "job_change", "news"] as const;
 
 /** Signal feed: global signals + matches for this org. */
 signalRoutes.get("/", zValidator("query", z.object({ type: z.string().optional(), q: z.string().optional(), matched: z.enum(["true", "false"]).optional(), days: z.coerce.number().default(14), limit: z.coerce.number().max(500).default(100) })), async (c) => {
@@ -30,8 +35,46 @@ signalRoutes.get("/", zValidator("query", z.object({ type: z.string().optional()
 
 signalRoutes.get("/types", (c) => c.json({ types: SIGNAL_TYPES }));
 
+/**
+ * Re-check tracked leads for a job change.
+ *
+ * Rate-limited because it spends a provider enrichment call per lead. Only leads the org
+ * has actually engaged, or that score well against the ICP, are re-checked - and only if
+ * they have not been confirmed recently.
+ */
+signalRoutes.post(
+  "/job-changes/scan",
+  rateLimit({ perMinute: 4 }),
+  zValidator("json", z.object({ limit: z.coerce.number().min(1).max(500).default(50), minScore: z.coerce.number().min(0).max(100).default(70), staleDays: z.coerce.number().min(1).max(365).default(30) }).optional()),
+  async (c) => {
+    const b = c.req.valid("json") ?? {};
+    const r = await scanJobChanges(orgId(c), b);
+    // 502 when nothing answered: "nobody moved" and "we could not ask" are different
+    // answers and only one of them is about the customer's market.
+    return c.json(r, r.blocked ? 502 : 200);
+  },
+);
+
+/** The job-change feed: who moved, from where to where, and what it means. */
+signalRoutes.get("/job-changes", zValidator("query", z.object({ days: z.coerce.number().min(1).max(365).default(90), limit: z.coerce.number().min(1).max(200).default(50) })), async (c) => {
+  const q = c.req.valid("query");
+  const { db } = getDb();
+  const rows = await db
+    .select()
+    .from(signals)
+    .where(and(eq(signals.orgId, orgId(c)), eq(signals.type, "job_change"), sql`${signals.createdAt} > now() - (${q.days} || ' days')::interval`))
+    .orderBy(desc(signals.createdAt))
+    .limit(q.limit);
+  return c.json({ changes: rows });
+});
+
 /** Trigger a global scan now (no subscription needed) - useful for demos and agents. */
-signalRoutes.post("/scan", zValidator("json", z.object({ types: z.array(z.enum(SIGNAL_TYPES)).default(["funding", "acquisition"]), keywords: z.array(z.string()).default([]), industries: z.array(z.string()).default([]), locations: z.array(z.string()).default([]), days: z.number().int().min(1).max(30).default(7) })), async (c) => {
+// The scan searches news, and job_change is not discoverable that way - it is derived by
+// re-checking leads we already track. It stays out of this endpoint's enum while remaining
+// a valid filter and subscription type elsewhere.
+const SCANNABLE_TYPES = ["funding", "acquisition", "hiring", "leadership", "expansion", "launch", "partnership", "news"] as const;
+
+signalRoutes.post("/scan", zValidator("json", z.object({ types: z.array(z.enum(SCANNABLE_TYPES)).default(["funding", "acquisition"]), keywords: z.array(z.string()).default([]), industries: z.array(z.string()).default([]), locations: z.array(z.string()).default([]), days: z.number().int().min(1).max(30).default(7) })), async (c) => {
   const b = c.req.valid("json");
   const { scanSignals } = await import("@prospex/core");
   const { storeSignals } = await import("../services/signals.js");

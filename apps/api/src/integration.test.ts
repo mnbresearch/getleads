@@ -397,10 +397,19 @@ suite("database integration", () => {
 
     it("covers every scheduler the seeder knows about", () => {
       // A scheduler present in one list and missing from the other stops running with no
-      // error, so the two are derived from the same constant and this pins that.
+      // error, so the two are derived from the same constant and this pins that. The list
+      // is written out deliberately: adding a scheduler should require saying so here.
       expect(Object.keys(RECURRING_JOBS).sort()).toEqual(
-        ["autopilots.tick", "campaign.tick", "monitors.tick", "signals.scan", "system.cleanup", "visibility.tick"].sort(),
+        ["autopilots.tick", "campaign.tick", "jobchanges.tick", "monitors.tick", "signals.scan", "system.cleanup", "visibility.tick"].sort(),
       );
+    });
+
+    it("has a handler for every scheduler it will enqueue", async () => {
+      // The other half of the same failure: a scheduler in RECURRING_JOBS with no handler
+      // is enqueued forever and fails every time, and nothing says so out loud.
+      const { handlers } = await import("./jobs.js");
+      const missing = Object.keys(RECURRING_JOBS).filter((t) => !(t in handlers));
+      expect(missing).toEqual([]);
     });
   });
 
@@ -764,6 +773,83 @@ suite("database integration", () => {
       // pass if sendStep bailed out for an unrelated reason like a missing account.
       expect(r.skipped).toBeUndefined();
       expect(r.sent).toBe(true);
+    });
+  });
+
+  /**
+   * Job change detection, against the real query.
+   *
+   * The scan's selection logic is where it can quietly stop working: too narrow and it
+   * checks nobody, too broad and it spends a provider call on every lead in the database
+   * every night. These pin the selection, not the provider call.
+   */
+  describe("job change scanning picks the right leads", () => {
+    let scanJobChanges: any;
+
+    beforeAll(async () => {
+      ({ scanJobChanges } = await import("./services/jobChanges.js"));
+    });
+
+    async function leadWith(orgId: string, patch: Record<string, unknown>) {
+      const [row] = await db
+        .insert(schema.leads)
+        .values({ orgId, fullName: "P", email: `jc-${randomUUID().slice(0, 8)}@example.com`, linkedinUrl: `https://www.linkedin.com/in/x-${randomUUID().slice(0, 8)}`, ...patch })
+        .returning();
+      return row;
+    }
+
+    it("checks engaged leads and high scorers, and leaves the rest alone", async () => {
+      const org = await newOrg("jc-select");
+      await leadWith(org.id, { status: "replied", score: 10 }); // engaged, low score -> in
+      await leadWith(org.id, { status: "new", score: 95 }); // cold but strong fit -> in
+      await leadWith(org.id, { status: "new", score: 10 }); // neither -> out
+
+      const r = await scanJobChanges(org.id, { limit: 50, minScore: 70 });
+      expect(r.checked).toBe(2);
+    });
+
+    it("does not re-check someone confirmed recently", async () => {
+      const org = await newOrg("jc-stale");
+      const lead = await leadWith(org.id, { status: "replied", score: 90 });
+      await db.update(schema.leads).set({ jobCheckedAt: new Date() }).where(schema.eq(schema.leads.id, lead.id));
+
+      expect((await scanJobChanges(org.id, { staleDays: 30 })).checked).toBe(0);
+      // ...but does once the check has gone stale.
+      await db.execute(schema.sql`UPDATE leads SET job_checked_at = now() - interval '60 days' WHERE id = ${lead.id}`);
+      expect((await scanJobChanges(org.id, { staleDays: 30 })).checked).toBe(1);
+    });
+
+    it("skips a lead with nothing to look them up by", async () => {
+      const org = await newOrg("jc-noid");
+      await db.insert(schema.leads).values({ orgId: org.id, fullName: "No Handle", status: "replied", score: 90 });
+      expect((await scanJobChanges(org.id, {})).checked).toBe(0);
+    });
+
+    /**
+     * The distinction the whole feature rests on. With no provider configured, every lookup
+     * comes back empty - and that must be reported as "we could not ask", never as a month
+     * in which nobody moved, and it must not stamp jobCheckedAt and suppress the next real
+     * check for a month.
+     */
+    it("reports an unanswerable scan as blocked, not as nobody having moved", async () => {
+      const org = await newOrg("jc-blocked");
+      const lead = await leadWith(org.id, { status: "replied", score: 90 });
+
+      const r = await scanJobChanges(org.id, {});
+      expect(r.checked).toBe(1);
+      expect(r.changed).toBe(0);
+      expect(r.unconfirmed).toBe(1);
+      expect(r.blocked).toMatch(/provider|credential/i);
+
+      const after = await db.query.leads.findFirst({ where: schema.eq(schema.leads.id, lead.id) });
+      expect(after!.jobCheckedAt).toBeNull();
+    });
+
+    it("keeps one org's leads out of another's scan", async () => {
+      const a = await newOrg("jc-a");
+      const b = await newOrg("jc-b");
+      await leadWith(a.id, { status: "replied", score: 90 });
+      expect((await scanJobChanges(b.id, {})).checked).toBe(0);
     });
   });
 

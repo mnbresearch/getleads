@@ -1,4 +1,4 @@
-import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, visibilityPrompts, webhooks, sql as dsql, type JobHandler } from "@prospex/db";
+import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, ne, organizations, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type JobHandler, visibilityPrompts, webhooks } from "@prospex/db";
 import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, isPublicHost, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
@@ -8,6 +8,7 @@ import { sendStep, tickCampaign } from "./services/campaigns.js";
 import { syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
 import { tryConsume } from "./lib/quota.js";
+import { scanJobChanges } from "./services/jobChanges.js";
 import { identifyVisit } from "./services/visitors.js";
 import { refreshCompanySignals, runSubscription } from "./services/signals.js";
 import { runMonitor } from "./services/monitors.js";
@@ -28,6 +29,9 @@ export const RECURRING_JOBS: Record<string, number> = {
   "monitors.tick": 30 * 60_000,
   "visibility.tick": 3600_000,
   "autopilots.tick": 3600_000,
+  // Daily. A job change is a slow event and each check costs a provider call, so scanning
+  // more often would spend credits to learn the same thing.
+  "jobchanges.tick": 24 * 3600_000,
   "system.cleanup": 6 * 3600_000,
 };
 
@@ -323,6 +327,35 @@ export const handlers: Record<string, JobHandler> = {
     const sub = await ctx.db.query.signalSubscriptions.findFirst({ where: eq(signalSubscriptions.id, String(job.payload.subscriptionId)) });
     if (!sub || !sub.active) return { skipped: true };
     return runSubscription(sub, ctx.log);
+  },
+
+  /**
+   * Scheduler: re-check engaged and high-scoring leads for a job change, daily.
+   *
+   * Runs per org rather than globally so one org's provider outage or quota does not stop
+   * the others, and so the per-org limit means what it says.
+   */
+  "jobchanges.tick": async (job, ctx) => {
+    const { db } = ctx;
+    return withReschedule(db, job, "jobchanges.tick", async () => {
+      const orgs = await db.select({ id: organizations.id }).from(organizations).where(ne(organizations.status, "deactivated"));
+      let scanned = 0;
+      let changed = 0;
+      let blocked = 0;
+      for (const org of orgs) {
+        const r = await scanJobChanges(org.id, { limit: 50 }).catch((e) => {
+          ctx.log(`job change scan failed for ${org.id}: ${(e as Error).message}`);
+          return null;
+        });
+        if (!r) continue;
+        scanned += r.checked;
+        changed += r.changed;
+        if (r.blocked) blocked++;
+      }
+      // `blocked` is reported separately from `changed: 0`, because an org where no
+      // provider answered has not been told that nobody moved.
+      return { orgs: orgs.length, scanned, changed, orgsWhereNothingAnswered: blocked };
+    });
   },
 
   /** Scheduler: run all active subscriptions every 6h. */

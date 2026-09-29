@@ -26,6 +26,7 @@ export * from "./util/names.js";
 export { pMap, sleep, fetchJson, fetchText } from "./util/http.js";
 export * from "./signals/news.js";
 export * from "./signals/hiring.js";
+export * from "./signals/jobChange.js";
 export * from "./visitors/identify.js";
 export * from "./providers/people.js";
 export * from "./linkedin/resolve.js";

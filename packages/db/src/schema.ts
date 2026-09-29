@@ -153,6 +153,14 @@ export const leads = pgTable(
     ownerUserId: uuid("owner_user_id"),
     status: text("status").notNull().default("new"),
     verifiedAt: ts("verified_at"),
+    /**
+     * When a job-change check last got a real answer for this person.
+     *
+     * Stamped only when a provider actually responded. A lookup that failed leaves this
+     * alone on purpose: writing it would mean "we looked and they are fine", and would
+     * suppress the next real check for a month on the strength of a timeout.
+     */
+    jobCheckedAt: ts("job_checked_at"),
     enrichedAt: ts("enriched_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),

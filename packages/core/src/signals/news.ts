@@ -6,6 +6,12 @@ import * as cheerio from "cheerio";
 import { fetchText } from "../util/http.js";
 import { extractDomain, isSocialOrAggregator } from "../util/domain.js";
 
+/**
+ * `job_change` is deliberately absent: everything in this union is something the news
+ * scanner searches for, and a job change is not discovered by searching news - it is
+ * derived by re-checking a lead we already track. It is a valid `signals.type` value and
+ * appears in the feed; it just has no query. See services/jobChanges.ts.
+ */
 export type SignalType = "funding" | "acquisition" | "hiring" | "leadership" | "expansion" | "launch" | "partnership" | "news";
 
 export interface NewsItem {

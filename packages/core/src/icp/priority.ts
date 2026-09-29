@@ -25,7 +25,7 @@ export interface PriorityResult {
 }
 
 /** Signal types worth treating as a buying trigger, roughly in descending strength. */
-const HOT_SIGNAL_TYPES = new Set(["funding", "acquisition", "leadership", "hiring", "expansion", "launch", "partnership"]);
+const HOT_SIGNAL_TYPES = new Set(["funding", "acquisition", "leadership", "hiring", "expansion", "launch", "partnership", "job_change"]);
 
 const daysAgo = (d: Date | string | null | undefined): number | null => {
   if (!d) return null;
