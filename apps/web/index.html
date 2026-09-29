@@ -9,9 +9,75 @@
     <meta property="og:description" content="Find the right people, then find out what ChatGPT, Gemini and the rest tell them about you. AEO and GEO measurement that reports a confidence interval instead of a number it cannot defend." />
     <meta property="og:type" content="website" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="canonical" href="https://scout.mnbresearch.com/" />
     <title>Scout — Lead intelligence and AI visibility (AEO / GEO)</title>
+
+    <!--
+      Link previews.
+      The page had og:title and og:description but no image, so every share of it - in
+      Slack, WhatsApp, LinkedIn, a forwarded email - rendered as a bare grey link. For a
+      product whose whole pitch is being findable and legible to machines, being illegible
+      to the unfurler was the wrong first impression.
+    -->
+    <meta property="og:url" content="https://scout.mnbresearch.com/" />
+    <meta property="og:site_name" content="Scout" />
+    <meta property="og:image" content="https://scout.mnbresearch.com/og.jpg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:alt" content="Scout — find buyers who actually exist, and know what AI says about you." />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Scout — Outbound and AI visibility in one system" />
+    <meta name="twitter:description" content="Find the right people, then find out what ChatGPT, Gemini and the rest tell them about you. Measurement that reports a confidence interval instead of a number it cannot defend." />
+    <meta name="twitter:image" content="https://scout.mnbresearch.com/og.jpg" />
+
+    <!--
+      Structured data, which is how an engine knows what this page IS rather than guessing
+      from prose. A product that sells AI visibility and ships none of its own is a poor
+      advertisement for itself; this is the cheapest possible instance of taking its own
+      advice.
+    -->
+    <script type="application/ld+json">
+      {
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "Organization",
+            "@id": "https://scout.mnbresearch.com/#org",
+            "name": "MNB Research",
+            "url": "https://mnbresearch.com",
+            "email": "contact@mnbresearch.com"
+          },
+          {
+            "@type": "SoftwareApplication",
+            "name": "Scout",
+            "applicationCategory": "BusinessApplication",
+            "applicationSubCategory": "Sales Intelligence",
+            "operatingSystem": "Web",
+            "url": "https://scout.mnbresearch.com/",
+            "image": "https://scout.mnbresearch.com/og.jpg",
+            "publisher": { "@id": "https://scout.mnbresearch.com/#org" },
+            "description": "B2B lead intelligence that verifies buyers before it contacts them, and measures what AI engines answer about you when those buyers go looking. Reports per engine with sample sizes and confidence intervals.",
+            "featureList": [
+              "Live B2B lead discovery and verification",
+              "ICP scoring that learns from reply outcomes",
+              "Email deliverability protection with automatic sending cutoff",
+              "AI visibility measurement across engines (AEO / GEO)",
+              "Website visitor identification",
+              "Intent signals from funding, hiring and leadership changes",
+              "MCP server and REST API for AI agents"
+            ],
+            "offers": {
+              "@type": "Offer",
+              "price": "0",
+              "priceCurrency": "USD",
+              "description": "Free plan with web-sourced leads, no credit card required."
+            }
+          }
+        ]
+      }
+    </script>
   </head>
-  <body class="bg-base text-ink-100">
+  <body class="bg-cream text-ink-100">
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

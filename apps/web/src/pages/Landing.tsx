@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { HeroDemo } from "../components/HeroDemo";
 import { DemoVideo } from "../components/DemoVideo";
+import { FAQS } from "../content/faq";
 import { apiFetch } from "../lib/api";
 
 /**
@@ -171,10 +172,24 @@ function planFeatures(p: Plan): string[] {
 
 function PricingSection() {
   const [plans, setPlans] = useState<Plan[] | null>(null);
+  /**
+   * Whether the plans could not be FETCHED, as opposed to there being none.
+   *
+   * The catch used to collapse both into an empty array, which rendered an empty grid: no
+   * cards, no message, no way to buy, and nothing on the page admitting anything had gone
+   * wrong. A visitor arriving while the API is cold would simply conclude the product has
+   * no pricing. It is also the exact substitution the rest of this product refuses to make
+   * everywhere else - a failed call is not an empty answer - showing up on the one page
+   * where a stranger forms their first impression.
+   */
+  const [unreachable, setUnreachable] = useState(false);
   useEffect(() => {
     apiFetch<{ plans: Plan[] }>("GET", "/v1/billing/plans")
       .then((r) => setPlans(r.plans.filter((p) => p.id !== "pilot").sort((a, b) => PLAN_ORDER.indexOf(a.id) - PLAN_ORDER.indexOf(b.id))))
-      .catch(() => setPlans([]));
+      .catch(() => {
+        setUnreachable(true);
+        setPlans([]);
+      });
   }, []);
 
   return (
@@ -187,6 +202,20 @@ function PricingSection() {
 
       {plans === null ? (
         <div className="mt-10 text-center text-sm text-ink-400">Loading plans…</div>
+      ) : plans.length === 0 ? (
+        /* Says what happened and still gives the visitor a way forward. */
+        <div className="card mx-auto mt-10 max-w-lg p-8 text-center">
+          <div className="font-semibold text-ink-50">{unreachable ? "Pricing could not be loaded just now" : "Plans are being updated"}</div>
+          <p className="mt-2 text-sm text-ink-400">
+            {unreachable
+              ? "That is on our side, not yours - the page could not reach the API. Refreshing usually fixes it, and either way you can still start free or email us for current pricing."
+              : "The plan list is briefly empty while it is updated. Start free in the meantime, or email us and we will send current pricing."}
+          </p>
+          <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
+            <Link to="/signup" className="btn-primary">Start free</Link>
+            <a href="mailto:contact@mnbresearch.com?subject=Scout%20pricing" className="btn-secondary">Email us for pricing</a>
+          </div>
+        </div>
       ) : (
         <div className="mt-12 grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-5">
           {plans.map((p) => {
@@ -202,7 +231,11 @@ function PricingSection() {
                 <p className="mt-1 text-xs text-ink-400">{PLAN_BLURB[p.id]}</p>
                 <div className="mt-4">
                   {custom ? (
-                    <span className="text-3xl font-bold text-ink-50">${p.priceUsd.toLocaleString()}</span>
+                    <>
+                      <span className="text-sm text-ink-400">from </span>
+                      <span className="text-3xl font-bold text-ink-50">${p.priceUsd.toLocaleString()}</span>
+                      <span className="text-sm text-ink-400">/mo</span>
+                    </>
                   ) : p.priceUsd === 0 ? (
                     <span className="text-3xl font-bold text-ink-50">Free</span>
                   ) : (
@@ -249,6 +282,7 @@ export function LandingPage() {
             <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
             <a href="#how-aeo" className="hover:text-ink-50">AEO / GEO</a>
             <a href="#compare" className="hover:text-ink-50">Compare</a>
+            <a href="#faq" className="hover:text-ink-50">FAQ</a>
             <a href="#pricing" className="hover:text-ink-50">Pricing</a>
           </nav>
           <div className="flex items-center gap-3">
@@ -498,6 +532,32 @@ export function LandingPage() {
           </p>
         </section>
 
+        <section id="faq" className="scroll-mt-24 pb-24">
+          <div className="mx-auto max-w-2xl text-center">
+            <span className="badge border border-black/10 bg-black/5 text-ink-300">Straight answers</span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">The questions people actually ask</h2>
+            <p className="mt-3 text-ink-300">
+              Including the one where the honest answer is no.
+            </p>
+          </div>
+          {/*
+            Rendered as <details> rather than a JavaScript accordion: it is open-able
+            without JS, keyboard-operable for free, and findable by the browser's own
+            in-page search even while collapsed.
+          */}
+          <div className="mx-auto mt-12 max-w-3xl divide-y divide-black/[0.06] overflow-hidden rounded-xl border border-black/10 bg-surface">
+            {FAQS.map((f) => (
+              <details key={f.q} className="group px-6 py-4 open:bg-black/[0.015]">
+                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 text-left font-medium text-ink-50 marker:hidden">
+                  {f.q}
+                  <span className="shrink-0 text-ink-400 transition group-open:rotate-45" aria-hidden>+</span>
+                </summary>
+                <p className="mt-3 text-sm leading-relaxed text-ink-300">{f.a}</p>
+              </details>
+            ))}
+          </div>
+        </section>
+
         <section id="how-it-works" className="scroll-mt-24 pb-24">
           <div className="mx-auto max-w-2xl text-center">
             <span className="badge border border-black/10 bg-black/5 text-ink-300">How it works</span>
@@ -561,6 +621,7 @@ export function LandingPage() {
               <li><a href="#compare" className="hover:text-ink-50">Compare</a></li>
               <li><a href="#how-it-works" className="hover:text-ink-50">How it works</a></li>
               <li><a href="#features" className="hover:text-ink-50">Features</a></li>
+              <li><a href="#faq" className="hover:text-ink-50">FAQ</a></li>
               <li><a href="#pricing" className="hover:text-ink-50">Pricing</a></li>
             </ul>
           </div>

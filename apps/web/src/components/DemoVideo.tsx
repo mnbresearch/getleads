@@ -59,7 +59,8 @@ export function DemoVideo() {
               <img
                 src={`https://i.ytimg.com/vi/${DEMO_VIDEO_ID}/maxresdefault.jpg`}
                 alt=""
-                loading="lazy"
+                loading="eager"
+                decoding="async"
                 className="absolute inset-0 h-full w-full object-cover"
                 /* maxres does not exist for every upload; hqdefault always does. */
                 onError={(e) => {
