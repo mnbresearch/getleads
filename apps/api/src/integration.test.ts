@@ -853,6 +853,160 @@ suite("database integration", () => {
     });
   });
 
+  /**
+   * Funnel, source performance and attribution, against real rows.
+   *
+   * These are pure SQL over joins, which is exactly where a metric goes wrong silently: a
+   * denominator that quietly includes rows the step could never apply to, a join that
+   * double-counts, a rate computed from three data points and printed as a finding.
+   */
+  describe("analytics answer the three questions honestly", () => {
+    let leadFunnel: any;
+    let sourcePerformance: any;
+    let campaignAttribution: any;
+
+    beforeAll(async () => {
+      ({ leadFunnel, sourcePerformance, campaignAttribution } = await import("./services/analytics.js"));
+    });
+
+    async function seedLeads(orgId: string, spec: { status: string; source?: string; score?: number; n: number }[]) {
+      for (const s of spec) {
+        for (let i = 0; i < s.n; i++) {
+          await db.insert(schema.leads).values({
+            orgId,
+            fullName: `L${i}`,
+            email: `${s.status}-${i}-${randomUUID().slice(0, 6)}@example.com`,
+            status: s.status,
+            source: s.source ?? "search",
+            score: s.score ?? 50,
+          });
+        }
+      }
+    }
+
+    it("counts reaching a stage cumulatively, because a reply implies a contact", async () => {
+      const org = await newOrg("funnel");
+      await seedLeads(org.id, [
+        { status: "new", n: 40 },
+        { status: "contacted", n: 30 },
+        { status: "replied", n: 10 },
+        { status: "customer", n: 5 },
+      ]);
+
+      const f = await leadFunnel(org.id, 90);
+      expect(f.entered).toBe(85);
+      const byStage = Object.fromEntries(f.stages.map((s: any) => [s.stage, s.count]));
+      // Everyone reached "new"; the 5 customers also reached replied, contacted and new.
+      expect(byStage.new).toBe(85);
+      expect(byStage.contacted).toBe(45);
+      expect(byStage.replied).toBe(15);
+      expect(byStage.customer).toBe(5);
+      expect(f.sufficient).toBe(true);
+    });
+
+    it("withholds conversion rates when there are too few leads to mean anything", async () => {
+      const org = await newOrg("funnel-thin");
+      await seedLeads(org.id, [{ status: "contacted", n: 3 }]);
+      const f = await leadFunnel(org.id, 90);
+      expect(f.sufficient).toBe(false);
+      expect(f.biggestDropOff).toBeNull();
+      expect(f.note).toMatch(/too few/i);
+    });
+
+    it("keeps one org's funnel out of another's", async () => {
+      const a = await newOrg("funnel-a");
+      const b = await newOrg("funnel-b");
+      await seedLeads(a.id, [{ status: "replied", n: 25 }]);
+      expect((await leadFunnel(b.id, 90)).entered).toBe(0);
+    });
+
+    /**
+     * The denominator decision that matters most. A source that produced 500 leads of which
+     * 10 were emailed has a 20% reply rate and a contact problem - not a 0.4% reply rate.
+     * Those two readings call for opposite actions.
+     */
+    it("computes reply rate per lead contacted, not per lead acquired", async () => {
+      const org = await newOrg("sources");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", emailAccountId: acct.id }).returning();
+
+      await seedLeads(org.id, [{ status: "new", source: "linkedin", n: 50 }]);
+      const leadRows = await db.select().from(schema.leads).where(schema.eq(schema.leads.orgId, org.id));
+
+      // Only 10 of the 50 were ever emailed; 2 of those replied.
+      for (let i = 0; i < 10; i++) {
+        await db.insert(schema.messages).values({
+          orgId: org.id,
+          campaignId: campaign.id,
+          leadId: leadRows[i].id,
+          toEmail: leadRows[i].email!,
+          subject: "s",
+          bodyText: "b",
+          direction: "outbound",
+          status: "sent",
+          sentAt: new Date(),
+          repliedAt: i < 2 ? new Date() : null,
+        });
+      }
+
+      const r = await sourcePerformance(org.id, 90);
+      const row = r.sources.find((s: any) => s.source === "linkedin");
+      expect(row.leads).toBe(50);
+      expect(row.contacted).toBe(10);
+      expect(row.replied).toBe(2);
+      expect(row.replyRate).toBeCloseTo(0.2, 4); // not 2/50
+      expect(row.sufficient).toBe(false); // 10 contacted is too few to call it a rate
+    });
+
+    it("does not double-count a lead that received several messages", async () => {
+      const org = await newOrg("sources-dupe");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "C", emailAccountId: acct.id }).returning();
+      await seedLeads(org.id, [{ status: "new", source: "search", n: 1 }]);
+      const [lead] = await db.select().from(schema.leads).where(schema.eq(schema.leads.orgId, org.id));
+
+      for (let i = 0; i < 4; i++) {
+        await db.insert(schema.messages).values({
+          orgId: org.id, campaignId: campaign.id, leadId: lead.id, toEmail: lead.email!,
+          subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date(),
+          repliedAt: i === 3 ? new Date() : null,
+        });
+      }
+
+      const row = (await sourcePerformance(org.id, 90)).sources.find((s: any) => s.source === "search");
+      // One lead, four touches. The join must not make that four leads.
+      expect(row.leads).toBe(1);
+      expect(row.contacted).toBe(1);
+      expect(row.replied).toBe(1);
+    });
+
+    it("credits a reply to its campaign and step, and withholds a best step on thin data", async () => {
+      const org = await newOrg("attribution");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "Outbound Q4", emailAccountId: acct.id }).returning();
+      const [s1] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "a", bodyTemplate: "a" }).returning();
+      await seedLeads(org.id, [{ status: "replied", n: 3 }]);
+      const leadRows = await db.select().from(schema.leads).where(schema.eq(schema.leads.orgId, org.id));
+
+      for (const l of leadRows) {
+        await db.insert(schema.messages).values({
+          orgId: org.id, campaignId: campaign.id, stepId: s1.id, leadId: l.id, toEmail: l.email!,
+          subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date(), repliedAt: new Date(),
+        });
+      }
+
+      const a = await campaignAttribution(org.id, 90);
+      const c = a.campaigns.find((x: any) => x.campaign === "Outbound Q4");
+      expect(c.sent).toBe(3);
+      expect(c.replied).toBe(3);
+      expect(c.steps[0].stepNo).toBe(1);
+      // Three sends is not evidence that step 1 is the best step.
+      expect(c.sufficient).toBe(false);
+      expect(c.bestStep).toBeNull();
+      expect(a.model).toMatch(/last-touch/i);
+    });
+  });
+
   afterAll(async () => {
     // Nothing to tear down: every test uses a fresh org, and the database is disposable.
   });

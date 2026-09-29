@@ -6,6 +6,7 @@ import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, integra
 import { sendingHealthForAccount } from "../services/campaigns.js";
 import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
+import { campaignAttribution, leadFunnel, sourcePerformance } from "../services/analytics.js";
 import { encryptJson, randomToken } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { orgId, requireAuth, requireUser, type Env } from "../middleware.js";
@@ -59,6 +60,27 @@ miscRoutes.get("/analytics/overview", requireAuth, async (c) => {
     .limit(10);
   return c.json({ leads: l, messages: m, companies: co.n, campaigns: cp, daily: (daily as unknown as { rows?: unknown[] }).rows ?? daily, emailStatus: Object.fromEntries(byStatus.map((r) => [r.status, r.n])), topCompanies, usage: await getUsage(db, oid) });
 });
+
+/**
+ * Where leads stall.
+ *
+ * Stage-to-stage conversion, plus the single biggest drop-off, which is the only
+ * actionable thing in a funnel. Below 20 leads in the window the rates are withheld rather
+ * than printed, because at that size one lead moves a rate by five points.
+ */
+miscRoutes.get("/analytics/funnel", requireAuth, zValidator("query", z.object({ days: z.coerce.number().min(1).max(365).default(90) })), async (c) =>
+  c.json(await leadFunnel(orgId(c), c.req.valid("query").days)),
+);
+
+/** Which sources produce leads that go somewhere - and which just produce volume. */
+miscRoutes.get("/analytics/sources", requireAuth, zValidator("query", z.object({ days: z.coerce.number().min(1).max(365).default(90) })), async (c) =>
+  c.json(await sourcePerformance(orgId(c), c.req.valid("query").days)),
+);
+
+/** Which campaign, and which step within it, produced the reply. */
+miscRoutes.get("/analytics/attribution", requireAuth, zValidator("query", z.object({ days: z.coerce.number().min(1).max(365).default(90) })), async (c) =>
+  c.json(await campaignAttribution(orgId(c), c.req.valid("query").days)),
+);
 
 /**
  * What your send history says your ICP actually is, as opposed to what you declared.
