@@ -338,12 +338,41 @@ export const handlers: Record<string, JobHandler> = {
   "jobchanges.tick": async (job, ctx) => {
     const { db } = ctx;
     return withReschedule(db, job, "jobchanges.tick", async () => {
-      const orgs = await db.select({ id: organizations.id }).from(organizations).where(ne(organizations.status, "deactivated"));
+      /**
+       * Bounded, and only for orgs that can actually log in.
+       *
+       * `ne(status, "deactivated")` let `revoked` orgs through - both are blocked at auth,
+       * so that spent enrichment credits on workspaces nobody can reach. And there was no
+       * cap of any kind: every org, sequentially, up to 50 serial provider round trips
+       * each. At a few thousand orgs that is tens of thousands of serial HTTP calls in one
+       * invocation, which exceeds any job timeout and is then retried from the beginning,
+       * forever, getting no further.
+       *
+       * So: active orgs only, a budget per tick, and the least-recently-scanned orgs first
+       * so the rotation covers everyone over a few days instead of starving the tail.
+       */
+      const ORGS_PER_TICK = 25;
+      const LEADS_PER_ORG = 50;
+      const DEADLINE_MS = 10 * 60_000;
+      const startedAt = Date.now();
+
+      const orgs = await db
+        .select({ id: organizations.id })
+        .from(organizations)
+        .where(eq(organizations.status, "active"))
+        .orderBy(dsql`(SELECT max(job_checked_at) FROM leads WHERE leads.org_id = organizations.id) NULLS FIRST`)
+        .limit(ORGS_PER_TICK);
+
       let scanned = 0;
       let changed = 0;
       let blocked = 0;
+      let stoppedEarly = false;
       for (const org of orgs) {
-        const r = await scanJobChanges(org.id, { limit: 50 }).catch((e) => {
+        if (Date.now() - startedAt > DEADLINE_MS) {
+          stoppedEarly = true;
+          break;
+        }
+        const r = await scanJobChanges(org.id, { limit: LEADS_PER_ORG }).catch((e) => {
           ctx.log(`job change scan failed for ${org.id}: ${(e as Error).message}`);
           return null;
         });
@@ -354,7 +383,7 @@ export const handlers: Record<string, JobHandler> = {
       }
       // `blocked` is reported separately from `changed: 0`, because an org where no
       // provider answered has not been told that nobody moved.
-      return { orgs: orgs.length, scanned, changed, orgsWhereNothingAnswered: blocked };
+      return { orgs: orgs.length, scanned, changed, orgsWhereNothingAnswered: blocked, stoppedEarly };
     });
   },
 

@@ -56,7 +56,6 @@ describe("job change detection", () => {
     for (const [a, b] of [
       ["Acme Technologies Private Limited", "Acme Technologies"],
       ["Acme Technologies Pvt. Ltd.", "Acme Technologies Private Limited"],
-      ["Razorpay Software Pvt Ltd", "Razorpay"],
       ["Tata Consultancy Services Limited", "Tata Consultancy Services"],
     ]) {
       const r = detectJobChange({ previous: { companyName: a, title: "VP Sales" }, current: { companyName: b, title: "VP Sales" } });
@@ -107,8 +106,105 @@ describe("job change detection", () => {
     expect(r.kind).toBe("both");
   });
 
-  it("normalises the way the comparisons rely on", () => {
-    expect(normalizeCompany("Acme Technologies Private Limited")).toBe("acme");
+  it("normalises legal suffixes away but keeps the discriminating words", () => {
+    // "Technologies" stays. Stripping descriptive words collapsed distinct employers.
+    expect(normalizeCompany("Acme Technologies Private Limited")).toBe("acme technologies");
+    expect(normalizeCompany("Acme Pvt. Ltd.")).toBe("acme");
     expect(normalizeTitle("Vice President of Sales")).toBe("vp sales");
+  });
+
+  /**
+   * The false negatives a too-eager normaliser produces. Losing a real move is the
+   * expensive error here - a duplicate alert is merely annoying - and a first version
+   * stripped Solutions, Systems, Labs and Group, collapsing distinct employers to one
+   * string and reporting the move as "no change" at 0.9 confidence.
+   */
+  it("does not collapse two different companies that share a word", () => {
+    for (const [a, b] of [
+      ["Acme Solutions", "Acme Systems"],
+      ["Zoho Corporation", "Zoho Labs"],
+      ["Infosys Technologies", "Infosys BPM"],
+    ]) {
+      const r = detectJobChange({ previous: { companyName: a, title: "VP Sales" }, current: { companyName: b, title: "VP Sales" } });
+      expect({ a, b, kind: r.kind }).toEqual({ a, b, kind: "company_change" });
+    }
+  });
+
+  /**
+   * "Razorpay Software Pvt Ltd" and "Razorpay" may be one employer written two ways, or a
+   * parent and a subsidiary. From names alone that is genuinely undecidable, and both
+   * confident answers are wrong: calling it "no change" silently loses a real move, and
+   * calling it a confirmed departure sends someone to write off a live deal. So it surfaces
+   * as a change the user can glance at, carrying its own uncertainty.
+   */
+  it("surfaces an undecidable name relationship as a low-confidence change", () => {
+    const r = detectJobChange({
+      previous: { companyName: "Razorpay Software Pvt Ltd", title: "VP Sales" },
+      current: { companyName: "Razorpay", title: "VP Sales" },
+    });
+    expect(r.kind).toBe("company_change");
+    expect(r.confidence).toBeLessThan(0.6);
+    expect(r.reason).toMatch(/may not be a move/i);
+  });
+
+  it("does not treat a name that merely starts with another as the same employer", () => {
+    const r = detectJobChange({
+      previous: { companyName: "Meta", title: "PM" },
+      current: { companyName: "Metabase", title: "PM" },
+    });
+    expect(r.kind).toBe("company_change");
+  });
+
+  it("keeps an employer whose name is entirely generic comparable", () => {
+    // "Systems Limited" normalised to "" under the old rules, making it permanently
+    // uncomparable - so a move away from it could never be detected.
+    expect(normalizeCompany("Systems Limited")).not.toBe("");
+    const r = detectJobChange({
+      previous: { companyName: "Systems Limited", title: "CTO" },
+      current: { companyName: "Razorpay", title: "CTO" },
+    });
+    expect(r.kind).toBe("company_change");
+  });
+
+  /**
+   * A rebrand changes the domain too, so differing domains are not proof of a departure.
+   * Claiming 0.92 that a champion left would send someone to write off a live deal.
+   */
+  it("treats a likely rename as uncertain, even when the domain changed", () => {
+    const r = detectJobChange({
+      previous: { companyName: "Acme", companyDomain: "acme.com", title: "VP Sales" },
+      current: { companyName: "Acme Global", companyDomain: "acmeglobal.io", title: "VP Sales" },
+    });
+    expect(r.kind).toBe("company_change");
+    expect(r.confidence).toBeLessThan(0.6);
+    expect(r.reason).toMatch(/renamed|restructured|may not be a move/i);
+  });
+
+  it("still calls an unrelated move confirmed when the domains differ", () => {
+    const r = detectJobChange({
+      previous: { companyName: "Acme", companyDomain: "acme.com", title: "VP Sales" },
+      current: { companyName: "Globex", companyDomain: "globex.io", title: "VP Sales" },
+    });
+    expect(r.confidence).toBeGreaterThan(0.9);
+  });
+
+  /**
+   * The distinction a caller needs to decide whether it may record "checked, no change".
+   */
+  it("says whether the employer could actually be compared", () => {
+    const bothKnown = detectJobChange({
+      previous: { companyName: "Acme", companyDomain: "acme.com", title: "VP Sales" },
+      current: { companyName: "Acme", companyDomain: "acme.com", title: "VP Sales" },
+    });
+    expect(bothKnown.kind).toBe("none");
+    expect(bothKnown.comparedCompany).toBe(true);
+
+    const oneMissing = detectJobChange({
+      previous: { title: "VP Sales" },
+      current: { companyName: "Acme", title: "VP Sales" },
+    });
+    expect(oneMissing.kind).toBe("none");
+    // Same verdict, very different basis - and the caller must not stamp this as checked.
+    expect(oneMissing.comparedCompany).toBe(false);
   });
 });

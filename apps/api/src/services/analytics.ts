@@ -67,15 +67,27 @@ export async function leadFunnel(orgId: string, days: number) {
   const counts = new Map<string, number>();
   for (const r of rows) counts.set(r.status, Number(r.n));
 
-  // "lost" leaves the funnel from wherever it was; it is reported beside the funnel rather
-  // than inside it, because a lost lead did reach the stages it reached.
+  /**
+   * "lost" is excluded from the funnel entirely - numerator and denominator both.
+   *
+   * Only the CURRENT status is stored, so a lost lead's furthest stage is unknown: it may
+   * have been lost at "contacted" or after "qualified". A first version kept lost leads in
+   * the denominator and, because `rank("lost")` is -1, in none of the stage counts - which
+   * showed 20% of leads failing to reach the first stage of the funnel, a thing that cannot
+   * happen, since every lead reaches "new". Putting them in at rank 0 would be the opposite
+   * lie: claiming they got nowhere.
+   *
+   * So they are counted beside the funnel with a note, and the rates below describe the
+   * population they actually describe.
+   */
   const lost = counts.get("lost") ?? 0;
-  const entered = [...counts.entries()].filter(([s]) => s !== "lost").reduce((a, [, n]) => a + n, 0) + lost;
+  const inFunnel = [...counts.entries()].filter(([s]) => rank(s) >= 0);
+  const entered = inFunnel.reduce((a, [, n]) => a + n, 0);
 
   const stages: FunnelStage[] = STAGES.map((s, i) => {
     // Reaching a stage is cumulative: someone who replied was, necessarily, contacted.
-    const reached = [...counts.entries()].filter(([st]) => rank(st) >= i).reduce((a, [, n]) => a + n, 0);
-    const prevReached = i === 0 ? entered : [...counts.entries()].filter(([st]) => rank(st) >= i - 1).reduce((a, [, n]) => a + n, 0);
+    const reached = inFunnel.filter(([st]) => rank(st) >= i).reduce((a, [, n]) => a + n, 0);
+    const prevReached = i === 0 ? entered : inFunnel.filter(([st]) => rank(st) >= i - 1).reduce((a, [, n]) => a + n, 0);
     return {
       stage: s.stage,
       label: s.label,
@@ -99,6 +111,10 @@ export async function leadFunnel(orgId: string, days: number) {
     days,
     entered,
     lost,
+    lostNote:
+      lost > 0
+        ? `${lost} lead${lost === 1 ? "" : "s"} marked lost are not in the rates below. Only the current status is stored, so where each one was lost is unknown - counting them at the start would understate the funnel and counting them at the end would overstate it.`
+        : undefined,
     stages,
     biggestDropOff: entered >= 20 ? worst : null,
     // Below this, stage-to-stage rates swing wildly on single leads and reporting one as a
@@ -206,24 +222,42 @@ export async function sourcePerformance(orgId: string, days: number) {
 export async function campaignAttribution(orgId: string, days: number) {
   const { db } = getDb();
 
+  // Qualified leads are counted once per CAMPAIGN in their own CTE, not per step row.
+  //
+  // Per-step counts cannot be recombined afterwards: summing double-counts a lead that
+  // received several steps, and taking the max undercounts whenever two qualified leads
+  // were reached by different steps - which reports a campaign's qualified leads as the
+  // size of its single busiest step cohort. (And `count(DISTINCT ...) OVER ()` is not
+  // something Postgres supports, so a window will not do it either.)
   const rows = await db.execute(sql`
+    WITH scoped AS (
+      SELECT m.*, c.id AS c_id, c.name AS c_name
+      FROM messages m
+      JOIN campaigns c ON c.id = m.campaign_id
+      WHERE m.org_id = ${orgId}
+        AND m.direction = 'outbound'
+        AND m.created_at > now() - (${days} || ' days')::interval
+    ),
+    qualified AS (
+      SELECT s.c_id, count(DISTINCT s.lead_id)::int AS n
+      FROM scoped s
+      JOIN leads l ON l.id = s.lead_id
+      WHERE l.status IN ('qualified','customer')
+      GROUP BY s.c_id
+    )
     SELECT
-      c.id                                                                    AS campaign_id,
-      c.name                                                                  AS campaign,
-      ss.step_no                                                              AS step_no,
-      count(*) FILTER (WHERE m.sent_at IS NOT NULL)::int                      AS sent,
-      count(*) FILTER (WHERE m.opened_at IS NOT NULL)::int                    AS opened,
-      count(*) FILTER (WHERE m.replied_at IS NOT NULL)::int                   AS replied,
-      count(DISTINCT l.id) FILTER (WHERE l.status IN ('qualified','customer'))::int AS qualified_leads
-    FROM messages m
-    JOIN campaigns c        ON c.id = m.campaign_id
-    LEFT JOIN sequence_steps ss ON ss.id = m.step_id
-    LEFT JOIN leads l       ON l.id = m.lead_id
-    WHERE m.org_id = ${orgId}
-      AND m.direction = 'outbound'
-      AND m.created_at > now() - (${days} || ' days')::interval
-    GROUP BY c.id, c.name, ss.step_no
-    ORDER BY c.name, ss.step_no`);
+      s.c_id                                                    AS campaign_id,
+      s.c_name                                                  AS campaign,
+      ss.step_no                                                AS step_no,
+      count(*) FILTER (WHERE s.sent_at IS NOT NULL)::int        AS sent,
+      count(*) FILTER (WHERE s.opened_at IS NOT NULL)::int      AS opened,
+      count(*) FILTER (WHERE s.replied_at IS NOT NULL)::int     AS replied,
+      coalesce(max(q.n), 0)::int                                AS qualified_leads
+    FROM scoped s
+    LEFT JOIN sequence_steps ss ON ss.id = s.step_id
+    LEFT JOIN qualified q       ON q.c_id = s.c_id
+    GROUP BY s.c_id, s.c_name, ss.step_no
+    ORDER BY s.c_name, ss.step_no`);
 
   const byCampaign = new Map<string, { campaignId: string; campaign: string; sent: number; opened: number; replied: number; qualifiedLeads: number; steps: { stepNo: number | null; sent: number; opened: number; replied: number; replyRate: number | null }[] }>();
 

@@ -14,7 +14,7 @@
  * Running them:
  *   TEST_DATABASE_URL=postgres://user@localhost:5432/scout_test npm run test -w apps/api
  */
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { randomUUID } from "node:crypto";
 
 const TEST_DB = process.env.TEST_DATABASE_URL;
@@ -614,10 +614,20 @@ suite("route surface", () => {
       expect([200, 502]).toContain(r.status);
       const body = await r.json();
       expect(body.created).toBe(0);
-      // Whatever happened, it is named. A run that stored nothing must say which kind of
-      // nothing it was.
-      expect(body.status === "blocked" ? body.note : body.note ?? body.status).toBeTruthy();
       expect(body.runId).toBeTruthy();
+
+      // A run that stored nothing must say WHICH kind of nothing, in words. An earlier
+      // version of this assertion was `body.note ?? body.status`, which is unconditionally
+      // truthy because status is always a non-empty string - it could not fail.
+      expect(typeof body.note).toBe("string");
+      expect(body.note.length).toBeGreaterThan(20);
+      if (body.status === "blocked") {
+        expect(body.note).toMatch(/not the same as nobody matching/i);
+        expect(r.status).toBe(502);
+      } else {
+        expect(body.note).toMatch(/nobody matched/i);
+        expect(r.status).toBe(200);
+      }
     }, 120_000);
 
     it("records the run in the agent history either way", async () => {
@@ -628,16 +638,59 @@ suite("route surface", () => {
       expect(r.runs.every((x: any) => ["completed", "failed", "blocked"].includes(x.status))).toBe(true);
     });
 
-    it("never invents leads: a run that stored nothing leaves the lead list untouched", async () => {
-      const before = (await (await app.request("/v1/leads", { headers: { authorization: `Bearer ${token}` } })).json()).total;
-      await app.request("/v1/automation/discover", {
-        method: "POST",
-        headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
-        body: JSON.stringify({ query: "Heads of Procurement at logistics firms", count: 3 }),
-      });
-      const after = (await (await app.request("/v1/leads", { headers: { authorization: `Bearer ${token}` } })).json()).total;
-      // The old agent would have added three fictional people here.
-      expect(after).toBe(before);
+    /**
+     * The storage path, exercised with a stubbed pipeline.
+     *
+     * An earlier version of this test just ran discovery with no providers configured and
+     * asserted the lead count was unchanged - but with no providers the pipeline returns
+     * nothing, the store loop never runs, and the assertion was over an empty loop. It
+     * would have passed against a storeDiscoveredLead that double-charged quota, wrote
+     * garbage provenance, or ignored the unique index.
+     */
+    it("stores real leads once, with provenance, and never invents any", async () => {
+      const dbPkg = await import("@prospex/db");
+      const db = dbPkg.getDb().db;
+      const { runDiscoveryAgent } = await import("./services/agents/discovery.js");
+      const core = await import("@prospex/core");
+
+      const email = `disc-${randomUUID().slice(0, 8)}@example.com`;
+      const fixture = [
+        { firstName: "Priya", lastName: "Sharma", fullName: "Priya Sharma", title: "VP Sales", email, emailStatus: "valid", companyName: "Acme", companyDomain: "acme.test", source: "stub", confidence: 0.9 },
+      ];
+      const spy = vi.spyOn(core, "runLeadPipelineDetailed").mockResolvedValue({ leads: fixture as never, providerFailures: [] });
+
+      try {
+        const first = await runDiscoveryAgent(orgId, "VP Sales", { limit: 5 });
+        expect(first.found).toBe(1);
+        expect(first.created).toBe(1);
+        expect(first.duplicates).toBe(0);
+
+        // The lead is in the REAL table, so everything downstream can see it.
+        const stored = await db.select().from(dbPkg.leads).where(dbPkg.eq(dbPkg.leads.email, email));
+        expect(stored).toHaveLength(1);
+
+        // Provenance points at it, with the query that found it - not a second copy.
+        const prov = await db.select().from(dbPkg.scrapedLeads).where(dbPkg.eq(dbPkg.scrapedLeads.leadId, stored[0].id));
+        expect(prov).toHaveLength(1);
+        expect(prov[0].agentRunId).toBe(first.runId);
+        expect((prov[0].enrichedData as { query?: string }).query).toBe("VP Sales");
+        // Nothing invented: no random intent score, no guessed industry.
+        expect(JSON.stringify(prov[0].enrichedData)).not.toMatch(/intentScore/i);
+
+        // Running again finds the same person: counted as a duplicate, stored once.
+        const second = await runDiscoveryAgent(orgId, "VP Sales", { limit: 5 });
+        expect(second.created).toBe(0);
+        expect(second.duplicates).toBe(1);
+        expect(await db.select().from(dbPkg.leads).where(dbPkg.eq(dbPkg.leads.email, email))).toHaveLength(1);
+
+        // Preview stores nothing at all.
+        const preview = await runDiscoveryAgent(orgId, "VP Sales", { limit: 5, preview: true });
+        expect(preview.created).toBe(0);
+        expect(preview.note).toMatch(/preview/i);
+        expect(await db.select().from(dbPkg.scrapedLeads).where(dbPkg.eq(dbPkg.scrapedLeads.leadId, stored[0].id))).toHaveLength(2);
+      } finally {
+        spy.mockRestore();
+      }
     }, 120_000);
 
     it("serves an empty funnel as empty, with a reason", async () => {

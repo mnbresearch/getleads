@@ -37,7 +37,8 @@ export interface Prediction {
   ruleScore: number;
   /** True when learned evidence actually moved the score. */
   applied: boolean;
-  /** Points added or removed, before clamping. */
+  /** Points added or removed - the final, clamped and rounded figure, so that
+   * `ruleScore + adjustment` always equals `score` when no other stage has run. */
   adjustment: number;
   /** The segments that moved it, strongest first. */
   evidence: { attribute: string; value: string; lift: number; n: number; direction: AttributeInsight["direction"] }[];
@@ -49,13 +50,26 @@ export interface Prediction {
 const MAX_ADJUSTMENT = 20;
 
 /**
+ * Minimum segment size before a correlation may move a real lead's rank.
+ *
+ * Higher than the threshold for DISPLAYING an insight, and that difference is the whole
+ * point: a dashboard may say "fintech looks promising so far" from 8 leads, because a
+ * person reads that with their own judgement attached. Reordering someone's working list
+ * by it is a decision made on their behalf, and deserves more evidence.
+ */
+const MIN_N_TO_ACT = 15;
+
+/**
  * Does this insight clear the bar for being used on a real lead?
  *
- * Displaying an insight and acting on one are different thresholds. The dashboard can show
- * "fintech replies more often, tentatively"; ranking a lead on it needs the interval to
- * actually exclude the baseline, or we are ranking on noise.
+ * The interval check is deliberately re-asserted even though `learnFromOutcomes` already
+ * enforces it - an earlier version of this comment claimed it was a second, independent
+ * threshold, which was simply untrue: it re-tested exactly the condition learn.ts had
+ * already applied, so it could never reject anything. The real second threshold is the
+ * sample size, which is genuinely stricter here than for display.
  */
 function usable(i: AttributeInsight): boolean {
+  if (i.n < MIN_N_TO_ACT) return false;
   return i.direction === "outperforms" ? i.ci.lower > i.baseline : i.ci.upper < i.baseline;
 }
 
@@ -86,11 +100,28 @@ export function predictLeadScore(learning: IcpLearning, input: PredictionInput):
   // second and third matching segment add less than the first: they are usually correlated
   // (fintech VPs at 51-200 companies are one population described three ways), and adding
   // them at full weight would triple-count a single piece of evidence.
-  const ordered = [...matched].sort((a, b) => Math.abs(b.lift - 1) - Math.abs(a.lift - 1));
+  /**
+   * Strength from the LOG of the lift, not from `lift - 1`.
+   *
+   * Lift is a ratio, so it is asymmetric around 1: outperformance runs to infinity while
+   * underperformance is squeezed into [0, 1). A linear `lift - 1` therefore hit the +1 cap
+   * at 2x but could only reach -1 at a lift of exactly zero - so a segment replying at
+   * twice the baseline earned +20 while its exact inverse, replying at half, earned only
+   * -10. Every score drifted upward, and a segment replying at a fifth of baseline - a
+   * brutal signal - was penalised less than a merely-good segment was rewarded.
+   *
+   * log(lift) is symmetric: 2x and 0.5x are equal and opposite. Scaled so that a 3x segment
+   * saturates the cap, which is about where a lift stops being worth more evidence.
+   */
+  const strengthOf = (lift: number) => {
+    if (!(lift > 0)) return -1; // a segment that never replies is the strongest negative
+    return Math.max(-1, Math.min(1, Math.log(lift) / Math.log(3)));
+  };
+
+  const ordered = [...matched].sort((a, b) => Math.abs(strengthOf(b.lift)) - Math.abs(strengthOf(a.lift)));
   let adjustment = 0;
   ordered.forEach((i, idx) => {
-    const strength = Math.max(-1, Math.min(1, i.lift - 1));
-    adjustment += strength * MAX_ADJUSTMENT * Math.pow(0.5, idx);
+    adjustment += strengthOf(i.lift) * MAX_ADJUSTMENT * Math.pow(0.5, idx);
   });
   adjustment = Math.max(-MAX_ADJUSTMENT, Math.min(MAX_ADJUSTMENT, Math.round(adjustment)));
 

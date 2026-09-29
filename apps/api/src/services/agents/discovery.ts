@@ -117,22 +117,35 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
 
     for (const lead of found) {
       const stored = await storeDiscoveredLead(db, orgIdValue, lead, { icpId: icp?.id ?? null, criteria, runId: run.id, query });
+      // Counted BEFORE the quota check. A lead that tripped the limit was still written -
+      // charging happens after the row exists, so that a rediscovery costs nothing - and an
+      // earlier version broke out without counting it. The run then reported one fewer
+      // lead than it had stored, and told the customer a lead had been discarded that was
+      // in fact sitting in their list.
+      if (stored.created) created++;
+      else duplicates++;
       if (stored.quotaStopped) {
         quotaStopped = stored.quotaStopped;
         break;
       }
-      if (stored.created) created++;
-      else duplicates++;
     }
 
+    const notSaved = found.length - created - duplicates;
     const note = quotaStopped
-      ? `Stopped at your plan's limit: ${found.length - created - duplicates} more were found but not saved. ${quotaStopped}`
+      ? notSaved > 0
+        ? `Stopped at your plan's limit: ${notSaved} more were found but not saved. ${quotaStopped}`
+        : `Stopped at your plan's limit after saving ${created}. ${quotaStopped}`
       : found.length === 0
         ? "Every configured source answered, and nobody matched this query."
         : undefined;
 
     await finish({ status: "completed" }, created, note);
-    await emitEvent(orgIdValue, "agent.discovery_completed", { runId: run.id, query, found: found.length, created, duplicates, quotaStopped }, { type: "agent_run", id: run.id });
+    // Best-effort, and deliberately outside the try below. emitEvent writes rows and can
+    // enqueue webhook jobs, so it can throw - and it used to do so INSIDE the try, where
+    // the catch rewrote a run that had genuinely completed to `failed, rows_created: 0`
+    // while its leads sat committed in the database. A notification failing is not the run
+    // failing, and must not be able to say that it was.
+    await emitEvent(orgIdValue, "agent.discovery_completed", { runId: run.id, query, found: found.length, created, duplicates, quotaStopped }, { type: "agent_run", id: run.id }).catch(() => {});
 
     return { runId: run.id, status: "completed", query, found: found.length, created, duplicates, providerFailures, quotaStopped, note };
   } catch (e) {
@@ -200,7 +213,9 @@ async function storeDiscoveredLead(
     .values({
       orgId: orgIdValue,
       leadId: row.id,
-      name: row.fullName ?? [lead.firstName, lead.lastName].filter(Boolean).join(" ") ?? "unknown",
+      // `name` is NOT NULL, and join() never returns nullish - so the fallback has to be on
+      // the joined string being empty, not on it being null.
+      name: row.fullName || [lead.firstName, lead.lastName].filter(Boolean).join(" ") || "unknown",
       title: lead.title ?? null,
       company: lead.company?.name ?? lead.companyName ?? null,
       email: lead.email ?? null,

@@ -89,8 +89,19 @@ export async function scanJobChanges(
       continue;
     }
 
-    // A confirmed look, whatever it found. Only now is it honest to say we checked.
-    await db.update(leads).set({ jobCheckedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, lead.id));
+    // Stamped only when the EMPLOYER could actually be compared on both sides.
+    //
+    // `kind: "none"` also comes back when the titles match and the company could not be
+    // compared - honest as far as it goes, but a lead with no company on file whose title
+    // is unchanged would have been recorded as "checked, no change", suppressing the next
+    // real check for a month while the provider was quietly reporting a new employer we had
+    // nothing to compare against. That is the failure this whole module is built to avoid,
+    // arriving through the one path that looks like success.
+    if (change.comparedCompany) {
+      await db.update(leads).set({ jobCheckedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, lead.id));
+    } else {
+      out.unconfirmed++;
+    }
 
     if (change.kind === "none") continue;
 
@@ -99,9 +110,15 @@ export async function scanJobChanges(
     await recordJobChange(db, orgId, lead, change, fresh.companyDomain ?? null);
   }
 
-  // Everything we tried refused us. That is not "nobody moved".
+  // Everything we tried came back empty.
+  //
+  // Deliberately hedged. `enrichWithProviders` returns null for "no provider configured",
+  // "the provider threw" AND "the provider answered and had no match on this person", and
+  // it does not say which. Asserting a credential problem would be a diagnosis this data
+  // cannot support - fifty people genuinely not in any database looks identical from here.
+  // So it says what is true: nothing came back, and that is not the same as nobody moving.
   if (out.checked > 0 && answered === 0) {
-    out.blocked = `No data provider answered for any of the ${out.checked} leads checked. This is a provider or credential problem, not a month in which nobody changed job.`;
+    out.blocked = `Nothing came back for any of the ${out.checked} leads checked. That may be a provider or credential problem, or these people may simply not be in the databases we can reach - either way it is not a month in which nobody changed job. Check Settings - Integrations if you expect a provider to be answering.`;
   }
 
   return out;

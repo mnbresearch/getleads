@@ -37,6 +37,15 @@ export interface JobChangeResult {
   to?: { company?: string | null; title?: string | null };
   /** True when a move looks like a promotion at the same employer rather than a new one. */
   sameEmployer?: boolean;
+  /**
+   * Whether the EMPLOYER could be compared on both sides.
+   *
+   * `kind: "none"` is returned when the titles match even if the company could not be
+   * compared, which is honest as far as it goes - nothing changed in what we could see.
+   * But a caller that records "checked, no change" on the strength of that will suppress
+   * the next real check, so it needs to know which kind of "none" this was.
+   */
+  comparedCompany: boolean;
 }
 
 /** Normalise a company name enough to compare two spellings of the same employer. */
@@ -46,10 +55,18 @@ export function normalizeCompany(name?: string | null): string {
     .toLowerCase()
     .replace(/&/g, " and ")
     .replace(/[.,'"]/g, "")
-    // Legal suffixes and the noise around them. "Acme Technologies Private Limited",
-    // "Acme Technologies Pvt. Ltd." and "Acme Technologies" are one employer, and treating
-    // them as three would report a job change every time a provider spelled it differently.
-    .replace(/\b(private|pvt|public|limited|ltd|llc|llp|inc|incorporated|corp|corporation|co|company|gmbh|bv|nv|sa|ag|plc|pte|holdings|group|technologies|technology|labs|software|solutions|services|systems|international|global)\b/g, " ")
+    // LEGAL suffixes only. "Acme Technologies Private Limited", "Acme Technologies Pvt.
+    // Ltd." and "Acme Technologies" are one employer, and treating them as three would
+    // report a move every time a provider spelled it differently.
+    //
+    // Descriptive words stay. A first version also stripped Technologies, Solutions,
+    // Systems, Labs, Software, Services, Group, Holdings, International and Global - which
+    // collapsed "Acme Solutions" and "Acme Systems" to the same string, so a champion
+    // moving between them was reported as no change at 0.9 confidence. It also reduced
+    // employers whose names are entirely generic ("Systems Limited") to the empty string,
+    // making them permanently uncomparable. Losing a real move is the expensive error here;
+    // a duplicate alert is merely annoying.
+    .replace(/\b(private|pvt|public|limited|ltd|llc|llp|inc|incorporated|corp|corporation|co|company|gmbh|bv|nv|sa|ag|plc|pte)\b/g, " ")
     .replace(/[^a-z0-9 ]/g, " ")
     .replace(/\s+/g, " ")
     .trim();
@@ -89,10 +106,28 @@ function sameCompany(a: JobChangeInput["previous"], b: JobChangeInput["current"]
   const na = normalizeCompany(a.companyName);
   const nb = normalizeCompany(b.companyName);
   if (!na || !nb) return null; // one side has nothing to compare
-  if (na === nb) return true;
-  // A rename or an acquisition often leaves one name a prefix of the other.
-  if (na.startsWith(nb) || nb.startsWith(na)) return true;
-  return false;
+  // Exact match only, once legal suffixes are gone.
+  //
+  // An earlier version also treated one name being a prefix of the other as the same
+  // employer, to absorb renames. That swallowed real moves whole: "Zoho" to "Zoho Labs" is
+  // a parent-to-subsidiary move and reported nothing at all. Renames are handled where they
+  // belong instead - in the CONFIDENCE of the reported change, via looksLikeRename - so a
+  // probable rename surfaces as a low-confidence change worth a glance, rather than as
+  // silence.
+  return na === nb;
+}
+
+/** Do two names look like the same company under a new name, rather than two companies? */
+function looksLikeRename(a?: string | null, b?: string | null): boolean {
+  const na = normalizeCompany(a);
+  const nb = normalizeCompany(b);
+  if (!na || !nb) return false;
+  if (na.startsWith(nb + " ") || nb.startsWith(na + " ")) return true;
+  // A shared distinctive first word: "Acme" -> "Acme Global". Short words are too common
+  // to carry that weight.
+  const [fa] = na.split(" ");
+  const [fb] = nb.split(" ");
+  return fa.length >= 4 && fa === fb;
 }
 
 export function detectJobChange(input: JobChangeInput): JobChangeResult {
@@ -109,6 +144,7 @@ export function detectJobChange(input: JobChangeInput): JobChangeResult {
     return {
       kind: "unknown",
       confidence: 0,
+      comparedCompany: false,
       reason: "Not enough on one side to compare - this was not checked, rather than unchanged.",
     };
   }
@@ -117,18 +153,27 @@ export function detectJobChange(input: JobChangeInput): JobChangeResult {
   const titleChanged = haveBothTitles && prevTitle !== currTitle;
 
   if (companyChanged) {
-    // A domain match on both sides is near-certain; two names that simply differ could
-    // still be a rebrand, an acquisition, or a provider writing the parent company.
     const byDomain = !!previous.companyDomain && !!current.companyDomain;
+    // A rebrand changes the domain too, so "the domains differ" is not by itself proof of a
+    // departure. When the NAMES still look like the same company - one a prefix of the
+    // other, or a shared distinctive first word - the likeliest explanation is a rename,
+    // and asserting 0.92 that a champion has left would send someone to write off a live
+    // deal. The first version made exactly that claim, hedging about rebrands only on the
+    // name-only path, which is the one a rebrand does not take.
+    const rename = looksLikeRename(previous.companyName, current.companyName);
+    const confidence = rename ? 0.45 : byDomain ? 0.92 : 0.7;
     return {
       kind: titleChanged ? "both" : "company_change",
-      confidence: byDomain ? 0.92 : 0.7,
-      reason: byDomain
-        ? `Moved from ${previous.companyName ?? previous.companyDomain} to ${current.companyName ?? current.companyDomain} - confirmed by company domain.`
-        : `Company name changed from "${previous.companyName}" to "${current.companyName}". This can also be a rebrand or an acquisition, so treat it as likely rather than certain.`,
+      confidence,
+      reason: rename
+        ? `The company on file changed from "${previous.companyName}" to "${current.companyName}". These names look like the same company renamed or restructured, so this may not be a move at all - worth a look before acting on it.`
+        : byDomain
+          ? `Moved from ${previous.companyName ?? previous.companyDomain} to ${current.companyName ?? current.companyDomain} - confirmed by company domain.`
+          : `Company name changed from "${previous.companyName}" to "${current.companyName}". This can also be a rebrand or an acquisition, so treat it as likely rather than certain.`,
       from: { company: previous.companyName, title: previous.title },
       to: { company: current.companyName, title: current.title },
       sameEmployer: false,
+      comparedCompany: true,
     };
   }
 
@@ -145,14 +190,16 @@ export function detectJobChange(input: JobChangeInput): JobChangeResult {
       from: { company: previous.companyName, title: previous.title },
       to: { company: current.companyName, title: current.title },
       sameEmployer: companyVerdict === true,
+      comparedCompany: companyVerdict !== null,
     };
   }
 
   return {
     kind: "none",
     confidence: companyVerdict === true ? 0.9 : 0.5,
-    reason: companyVerdict === true ? "Same employer and the same title." : "Nothing changed in what could be compared.",
+    reason: companyVerdict === true ? "Same employer and the same title." : "Nothing changed in what could be compared - but the employer could not be checked on both sides.",
     sameEmployer: companyVerdict === true,
+    comparedCompany: companyVerdict !== null,
   };
 }
 

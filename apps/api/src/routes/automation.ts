@@ -53,7 +53,11 @@ automationRoutes.post("/linkedin-scrape", rateLimit({ perMinute: 6 }), zValidato
   return c.json(
     {
       ...r,
-      note: "This endpoint no longer scrapes LinkedIn, and never did - it ran a model that invented profiles. It now runs Scout's real discovery pipeline. Use POST /v1/automation/discover.",
+      // A separate key. Overwriting `note` erased the run's own explanation - and on the
+      // blocked path that note is the ONLY place the provider outage is described, so a 502
+      // came back saying nothing but "this endpoint was renamed".
+      deprecation:
+        "This endpoint no longer scrapes LinkedIn, and never did - it ran a model that invented profiles. It now runs Scout's real discovery pipeline. Use POST /v1/automation/discover.",
     },
     r.status === "blocked" ? 502 : r.status === "failed" ? 500 : 200,
   );

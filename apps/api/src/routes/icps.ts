@@ -148,12 +148,6 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
     : null;
 
   const predictionById = new Map((learningApplied?.scored ?? []).map((p) => [p.id, p.prediction]));
-  for (const s of scored) {
-    const p = predictionById.get(s.lead.id);
-    if (!p?.applied) continue;
-    s.score = p.score;
-    s.reasons = [...s.reasons, `~ ${p.reason}`];
-  }
 
   scored.sort((a, b2) => b2.score - a.score);
   const ai = createAiProvider();
@@ -168,6 +162,25 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
     }
     scored.sort((a, b2) => b2.score - a.score);
   }
+
+  /**
+   * The learned adjustment is applied LAST, after any AI rerank.
+   *
+   * Applied before it, the rerank's `0.5 * score + 0.5 * aiScore` silently halved the
+   * learned signal for the top N leads and left it at full weight for everyone else - so
+   * the head of the list was scored by a different formula from its tail, and the reported
+   * `ruleScore + learningAdjustment` no longer equalled the score shown. Last means the
+   * chain is rule -> (optional AI) -> learning, every component is reported, and they add up.
+   */
+  const scoreBeforeLearning = new Map(scored.map((s) => [s.lead.id, s.score]));
+  for (const s of scored) {
+    const p = predictionById.get(s.lead.id);
+    if (!p?.applied) continue;
+    s.score = Math.max(0, Math.min(100, s.score + p.adjustment));
+    s.reasons = [...s.reasons, `~ ${p.reason}`];
+  }
+  scored.sort((a, b2) => b2.score - a.score);
+
   if (b.assign) {
     for (const s of scored) await db.update(leads).set({ score: s.score, scoreReasons: s.reasons, icpId: icp.id, updatedAt: new Date() }).where(eq(leads.id, s.lead.id));
   }
@@ -179,8 +192,11 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
       company: s.company?.name,
       score: s.score,
       reasons: s.reasons,
+      // Every stage named separately, so the final number can be reconstructed:
+      // ruleScore -> scoreBeforeLearning (after any AI rerank) -> + learningAdjustment.
       ruleScore: predictionById.get(s.lead.id)?.ruleScore,
-      learningAdjustment: predictionById.get(s.lead.id)?.adjustment,
+      scoreBeforeLearning: scoreBeforeLearning.get(s.lead.id),
+      learningAdjustment: predictionById.get(s.lead.id)?.applied ? predictionById.get(s.lead.id)?.adjustment : 0,
     })),
     // Said out loud, because "the model is not being applied yet" and "the model found
     // nothing to say about these leads" are different answers and both look like silence.

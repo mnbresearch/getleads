@@ -825,6 +825,17 @@ suite("database integration", () => {
       expect((await scanJobChanges(org.id, {})).checked).toBe(0);
     });
 
+    it("does not record a check it could not actually make", async () => {
+      // A lead with no company on file whose title is unchanged: the comparison returns
+      // "none" because nothing visible changed, but the EMPLOYER was never compared. An
+      // earlier version stamped jobCheckedAt here, which suppressed the next real check for
+      // a month while a provider was quietly reporting a new employer.
+      const { detectJobChange } = await import("@prospex/core");
+      const r = detectJobChange({ previous: { title: "VP Sales" }, current: { companyName: "Somewhere New", title: "VP Sales" } });
+      expect(r.kind).toBe("none");
+      expect(r.comparedCompany).toBe(false);
+    });
+
     /**
      * The distinction the whole feature rests on. With no provider configured, every lookup
      * comes back empty - and that must be reported as "we could not ask", never as a month
@@ -904,6 +915,28 @@ suite("database integration", () => {
       expect(f.sufficient).toBe(true);
     });
 
+    /**
+     * The case the first version got wrong. `rank("lost")` is -1, so lost leads were in the
+     * denominator and in none of the stage counts - showing 20% of leads failing to reach
+     * the FIRST stage, which cannot happen, because every lead reaches it.
+     */
+    it("does not show leads failing to reach the first stage of the funnel", async () => {
+      const org = await newOrg("funnel-lost");
+      await seedLeads(org.id, [
+        { status: "new", n: 80 },
+        { status: "lost", n: 20 },
+      ]);
+
+      const f = await leadFunnel(org.id, 90);
+      // Lost leads sit beside the funnel, not inside it: only the current status is stored,
+      // so where each one was lost is unknowable, and guessing either end is a lie.
+      expect(f.lost).toBe(20);
+      expect(f.entered).toBe(80);
+      expect(f.stages[0].count).toBe(80);
+      expect(f.stages[0].conversionFromStart).toBe(1);
+      expect(f.lostNote).toMatch(/not in the rates/i);
+    });
+
     it("withholds conversion rates when there are too few leads to mean anything", async () => {
       const org = await newOrg("funnel-thin");
       await seedLeads(org.id, [{ status: "contacted", n: 3 }]);
@@ -978,6 +1011,48 @@ suite("database integration", () => {
       expect(row.leads).toBe(1);
       expect(row.contacted).toBe(1);
       expect(row.replied).toBe(1);
+    });
+
+    /**
+     * Two qualified leads reached by DIFFERENT steps. A per-step count cannot be recombined
+     * afterwards - summing double-counts anyone who got several steps, and taking the max
+     * reports the campaign's qualified leads as the size of its busiest step cohort, which
+     * is what the first version did.
+     */
+    it("counts a campaign's qualified leads once, across all its steps", async () => {
+      const org = await newOrg("attribution-qualified");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "Split", emailAccountId: acct.id }).returning();
+      const [s1] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "a", bodyTemplate: "a" }).returning();
+      const [s2] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 2, channel: "email", subjectTemplate: "b", bodyTemplate: "b" }).returning();
+      await seedLeads(org.id, [{ status: "qualified", n: 2 }]);
+      const [a, b] = await db.select().from(schema.leads).where(schema.eq(schema.leads.orgId, org.id));
+
+      // Lead A only ever received step 1; lead B only ever received step 2.
+      await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: s1.id, leadId: a.id, toEmail: a.email!, subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date() });
+      await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: s2.id, leadId: b.id, toEmail: b.email!, subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date() });
+
+      const c = (await campaignAttribution(org.id, 90)).campaigns.find((x: any) => x.campaign === "Split");
+      // Max across step rows would say 1. Summing would also say 2 here but double-counts
+      // the moment one lead receives both steps, which the next assertion covers.
+      expect(c.qualifiedLeads).toBe(2);
+    });
+
+    it("does not count one qualified lead twice for receiving two steps", async () => {
+      const org = await newOrg("attribution-onelead");
+      const acct = await newAccount(org.id);
+      const [campaign] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "Both", emailAccountId: acct.id }).returning();
+      const [s1] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 1, channel: "email", subjectTemplate: "a", bodyTemplate: "a" }).returning();
+      const [s2] = await db.insert(schema.sequenceSteps).values({ campaignId: campaign.id, stepNo: 2, channel: "email", subjectTemplate: "b", bodyTemplate: "b" }).returning();
+      await seedLeads(org.id, [{ status: "customer", n: 1 }]);
+      const [only] = await db.select().from(schema.leads).where(schema.eq(schema.leads.orgId, org.id));
+
+      for (const st of [s1, s2]) {
+        await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, stepId: st.id, leadId: only.id, toEmail: only.email!, subject: "s", bodyText: "b", direction: "outbound", status: "sent", sentAt: new Date() });
+      }
+
+      const c = (await campaignAttribution(org.id, 90)).campaigns.find((x: any) => x.campaign === "Both");
+      expect(c.qualifiedLeads).toBe(1);
     });
 
     it("credits a reply to its campaign and step, and withholds a best step on thin data", async () => {
