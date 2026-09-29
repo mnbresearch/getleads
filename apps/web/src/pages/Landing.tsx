@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { HeroDemo } from "../components/HeroDemo";
+import { DemoVideo } from "../components/DemoVideo";
 import { apiFetch } from "../lib/api";
 
 /**
@@ -181,7 +182,7 @@ function PricingSection() {
       <div className="mx-auto max-w-2xl text-center">
         <span className="badge border border-black/10 bg-black/5 text-ink-300">Pricing</span>
         <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Simple pricing, real leads</h2>
-        <p className="mt-3 text-ink-300">Every plan sources what it can for free first — you only pay for verified, provider-backed leads. Cancel anytime.</p>
+        <p className="mt-3 text-ink-300">Every plan sources what it can for free first — you only pay for verified, provider-backed leads. Paid plans are set up with you, so your provider budget matches the volume you actually send.</p>
       </div>
 
       {plans === null ? (
@@ -242,6 +243,7 @@ export function LandingPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <Logo size={28} textClassName="text-lg" />
           <nav className="hidden items-center gap-6 text-sm text-ink-300 sm:flex">
+            <a href="#demo" className="hover:text-ink-50">Watch</a>
             <a href="#problems" className="hover:text-ink-50">Why Scout</a>
             <a href="#ai" className="hover:text-ink-50">The AI layer</a>
             <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
@@ -274,6 +276,8 @@ export function LandingPage() {
           <p className="mt-4 text-xs text-ink-400">No credit card required · Free web-sourced leads on day one</p>
           <HeroDemo />
         </section>
+
+        <DemoVideo />
 
         <section id="problems" className="scroll-mt-24 py-24">
           <div className="mx-auto max-w-2xl text-center">
@@ -549,6 +553,7 @@ export function LandingPage() {
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Product</div>
             <ul className="mt-3 space-y-2 text-ink-300">
+              <li><a href="#demo" className="hover:text-ink-50">Watch the demo</a></li>
               <li><a href="#problems" className="hover:text-ink-50">Why Scout</a></li>
               <li><a href="#ai" className="hover:text-ink-50">The AI layer</a></li>
               <li><a href="#visibility" className="hover:text-ink-50">AI visibility</a></li>

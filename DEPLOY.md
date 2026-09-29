@@ -130,7 +130,7 @@ Then open a support ticket: "please unblock outbound port 25 for app prospex-api
 Verify: `curl https://<api>/health` → `{"ok":true,"db":"up"}`; open `https://<api>/docs`.
 
 ### B4. Dashboard (Vercel)
-Import the repo → Root directory `apps/web` → Framework Vite → Env `VITE_API_URL=https://<api>`. `apps/web/vercel.json` handles SPA routing. Then set `APP_URL` on the API to the Vercel URL (CORS + links in emails).
+Import the repo → Root directory `apps/web` → Framework Vite → Env `VITE_API_URL=https://<api>`. Optionally `VITE_DEMO_VIDEO_ID=<youtube id>` to show the explainer under the hero; unset, that section is not rendered. `apps/web/vercel.json` handles SPA routing. Then set `APP_URL` on the API to the Vercel URL (CORS + links in emails).
 
 ### B5. Domains (optional)
 CNAME `prospex.<yourdomain>` → Vercel; `api.prospex.<yourdomain>` → Render. Update `APP_URL`, `API_URL`, `VITE_API_URL`. The visitor pixel and tracking links use `API_URL`, so set it before customers install pixels.
