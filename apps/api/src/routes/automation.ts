@@ -1,80 +1,72 @@
 import { Hono } from "hono";
 import { zValidator } from "@hono/zod-validator";
 import { z } from "zod";
-import { getDb, scrapedLeads, eq } from "@prospex/db";
-import { runLinkedInScraper, getScrapedLeads } from "../services/agents/linkedin-scraper.js";
-import { requireAuth, orgId, type Env } from "../middleware.js";
+import { discoveredLeads, recentAgentRuns, runDiscoveryAgent } from "../services/agents/discovery.js";
+import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 
+/**
+ * Scheduled and on-demand lead discovery.
+ *
+ * The routes keep their original paths so anything already pointed at them keeps working,
+ * but what they run has changed completely: the agent behind them used to invent profiles
+ * and now runs the product's real discovery pipeline. See services/agents/discovery.ts.
+ */
 export const automationRoutes = new Hono<Env>();
 automationRoutes.use("*", requireAuth);
 
-const scrapeInput = z.object({
-  query: z.string().default("VP Sales at B2B SaaS companies"),
-  count: z.coerce.number().min(1).max(1000).default(100),
+const runInput = z.object({
+  query: z.string().min(3).max(500).default("VP Sales at B2B SaaS companies"),
+  // Capped at 200, not 1000. The old ceiling was meaningless because nothing was being
+  // fetched; a real run makes provider calls and costs quota per lead.
+  count: z.coerce.number().min(1).max(200).default(25),
+  icpId: z.string().uuid().optional(),
+  /** Report what would be stored without storing it. */
+  preview: z.boolean().default(false),
 });
 
 const leadsQuery = z.object({
   company: z.string().optional(),
+  runId: z.string().uuid().optional(),
   limit: z.coerce.number().min(1).max(500).default(50),
   offset: z.coerce.number().min(0).default(0),
 });
 
-// POST /automation/linkedin-scrape
-// Start a LinkedIn scraping job
-automationRoutes.post(
-  "/linkedin-scrape",
-  zValidator("json", scrapeInput),
-  async (c) => {
-    try {
-      const org_id = orgId(c);
-      const { query, count } = c.req.valid("json");
+/**
+ * Run a discovery pass now.
+ *
+ * Synchronous and rate-limited because it makes real provider calls: a caller that fires
+ * this in a loop is spending the org's lead quota and its providers' credits.
+ */
+automationRoutes.post("/discover", rateLimit({ perMinute: 6 }), zValidator("json", runInput), async (c) => {
+  const b = c.req.valid("json");
+  const r = await runDiscoveryAgent(orgId(c), b.query, { limit: b.count, icpId: b.icpId, preview: b.preview });
 
-      const result = await runLinkedInScraper(org_id, query, count);
+  // 502 when every source refused us. A run that found nothing because nothing answered is
+  // not a successful run that found nothing, and a caller polling this needs to know which.
+  return c.json(r, r.status === "blocked" ? 502 : r.status === "failed" ? 500 : 200);
+});
 
-      return c.json({
-        ...result,
-        success: true,
-      });
-    } catch (error) {
-      console.error("LinkedIn scraper error:", error);
-      return c.json(
-        {
-          error: error instanceof Error ? error.message : "Unknown error",
-        },
-        500
-      );
-    }
-  }
-);
+/** Kept for the existing scheduled workflow, which posts to this path. */
+automationRoutes.post("/linkedin-scrape", rateLimit({ perMinute: 6 }), zValidator("json", runInput), async (c) => {
+  const b = c.req.valid("json");
+  const r = await runDiscoveryAgent(orgId(c), b.query, { limit: b.count, icpId: b.icpId, preview: b.preview });
+  return c.json(
+    {
+      ...r,
+      note: "This endpoint no longer scrapes LinkedIn, and never did - it ran a model that invented profiles. It now runs Scout's real discovery pipeline. Use POST /v1/automation/discover.",
+    },
+    r.status === "blocked" ? 502 : r.status === "failed" ? 500 : 200,
+  );
+});
 
-// GET /automation/leads
-// Query scraped leads
-automationRoutes.get(
-  "/leads",
-  zValidator("query", leadsQuery),
-  async (c) => {
-    try {
-      const org_id = orgId(c);
-      const { company, limit, offset } = c.req.valid("query");
+/** Leads this agent surfaced, read through to their current state. */
+automationRoutes.get("/leads", zValidator("query", leadsQuery), async (c) => {
+  const q = c.req.valid("query");
+  const rows = await discoveredLeads(orgId(c), q);
+  return c.json({ data: rows, count: rows.length });
+});
 
-      const leads = await getScrapedLeads(org_id, {
-        company,
-        limit,
-        offset,
-      });
-
-      return c.json({
-        data: leads,
-        count: leads.length,
-      });
-    } catch (error) {
-      console.error("Get leads error:", error);
-      return c.json(
-        {
-          error: error instanceof Error ? error.message : "Unknown error",
-        },
-        500
-      );
-    }
-  }
+/** Run history, with what each run actually produced. */
+automationRoutes.get("/runs", zValidator("query", z.object({ limit: z.coerce.number().min(1).max(100).default(25) })), async (c) =>
+  c.json({ runs: await recentAgentRuns(orgId(c), c.req.valid("query").limit) }),
 );

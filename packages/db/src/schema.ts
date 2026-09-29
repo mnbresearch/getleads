@@ -8,6 +8,10 @@ import {
   jsonb,
   uuid,
   real,
+  // `date` for calendar-day columns (deadlines, effective dates). It was used by tables
+  // added later without being imported, which broke `tsc -p packages/db` - and with it the
+  // Render build command, which runs that build.
+  date,
   uniqueIndex,
   index,
   primaryKey,
@@ -773,9 +777,25 @@ export type ToolUsage = typeof toolUsage.$inferSelect;
 // =====================
 
 // Scraped LinkedIn profiles
+/**
+ * Where a discovered lead came from.
+ *
+ * Originally a second, parallel copy of the lead - which is how a table of invented people
+ * came to sit alongside the real one, indistinguishable to everything downstream. It is now
+ * the PROVENANCE record: one row per (lead, run) saying which agent run surfaced this
+ * person, what it was looking for, and what was observed about them at the time.
+ *
+ * That makes per-source performance answerable (which query and which provider actually
+ * produce leads that reply), and it means a lead of doubtful origin can always be traced
+ * back. The lead itself lives in `leads`, once, where the rest of the product can see it.
+ */
 export const scrapedLeads = pgTable("scraped_leads", {
   id: uuid("id").primaryKey().defaultRandom(),
   orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  /** The real lead this is provenance for. Null only on rows predating the change. */
+  leadId: uuid("lead_id").references(() => leads.id, { onDelete: "cascade" }),
+  /** The run that surfaced it, so a bad run's output can be found and judged together. */
+  agentRunId: uuid("agent_run_id"),
   name: text("name").notNull(),
   title: text("title"),
   company: text("company"),
@@ -790,6 +810,10 @@ export const scrapedLeads = pgTable("scraped_leads", {
 }, (table) => ({
   orgIdIdx: index("idx_scraped_leads_org_id").on(table.orgId),
   emailIdx: index("idx_scraped_leads_email").on(table.email),
+  leadIdx: index("idx_scraped_leads_lead_id").on(table.leadId),
+  runIdx: index("idx_scraped_leads_agent_run_id").on(table.agentRunId),
+  // One provenance row per lead per run: a run re-finding the same person records it once.
+  uniqPerRun: uniqueIndex("scraped_leads_lead_run_uniq").on(table.leadId, table.agentRunId),
   companyIdx: index("idx_scraped_leads_company").on(table.company),
   createdAtIdx: index("idx_scraped_leads_created_at").on(table.createdAt),
 }));

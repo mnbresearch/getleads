@@ -1,0 +1,91 @@
+# Daily lead discovery.
+#
+# Replaces linkedin-scraper-daily.yml, which could not have worked: it passed SUPABASE_URL
+# and SUPABASE_KEY while the app reads DATABASE_URL, invoked `npx ts-node` which is not a
+# dependency, and defaulted the org to the string 'test-org', which is not a UUID and would
+# have failed the foreign key. It also asked for 500 leads a day from an agent that invented
+# every one of them.
+#
+# This calls the deployed API instead of reconstructing a database connection in CI. The API
+# already holds the credentials, the migrations and the quota ledger, so there is nothing to
+# keep in sync and no database secret in GitHub.
+#
+# Required secrets:
+#   SCOUT_API_URL   e.g. https://api.mnbresearch.com
+#   SCOUT_API_KEY   an API key from Settings (px_live_...)
+# Optional variables:
+#   SCOUT_QUERY     who to look for; defaults below
+#   SCOUT_COUNT     leads per run, 1-200
+#   SCOUT_ICP_ID    an ICP uuid to score against
+name: Discovery - Daily
+
+on:
+  schedule:
+    - cron: "0 9 * * *" # 09:00 UTC
+  workflow_dispatch:
+    inputs:
+      query:
+        description: "Who to look for"
+        required: false
+      count:
+        description: "How many leads (1-200)"
+        required: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run a discovery pass
+        env:
+          API_URL: ${{ secrets.SCOUT_API_URL }}
+          API_KEY: ${{ secrets.SCOUT_API_KEY }}
+          QUERY: ${{ github.event.inputs.query || vars.SCOUT_QUERY || 'VP Sales at B2B SaaS companies in India' }}
+          COUNT: ${{ github.event.inputs.count || vars.SCOUT_COUNT || '25' }}
+          ICP_ID: ${{ vars.SCOUT_ICP_ID }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${API_URL:-}" ] || [ -z "${API_KEY:-}" ]; then
+            echo "::error::SCOUT_API_URL and SCOUT_API_KEY must be set as repository secrets."
+            exit 1
+          fi
+
+          body=$(jq -n \
+            --arg q "$QUERY" \
+            --argjson c "${COUNT}" \
+            --arg icp "${ICP_ID:-}" \
+            '{query: $q, count: $c} + (if $icp == "" then {} else {icpId: $icp} end)')
+
+          echo "Query: $QUERY (up to $COUNT leads)"
+
+          # -w writes the status on its own line after the body so both can be inspected; a
+          # non-2xx is a real failure and must fail the job rather than pass quietly.
+          out=$(curl -sS -w '\n%{http_code}' -X POST "$API_URL/v1/automation/discover" \
+            -H "x-api-key: $API_KEY" \
+            -H 'content-type: application/json' \
+            --max-time 600 \
+            -d "$body")
+
+          status=$(printf '%s' "$out" | tail -n1)
+          payload=$(printf '%s' "$out" | sed '$d')
+          echo "$payload" | jq . || echo "$payload"
+
+          if [ "$status" = "502" ]; then
+            echo "::error::Every configured data source refused the request. This is a provider or credential problem, not an empty market."
+            exit 1
+          fi
+          if [ "$status" != "200" ]; then
+            echo "::error::Discovery failed with HTTP $status"
+            exit 1
+          fi
+
+          created=$(printf '%s' "$payload" | jq -r '.created // 0')
+          found=$(printf '%s' "$payload" | jq -r '.found // 0')
+          dupes=$(printf '%s' "$payload" | jq -r '.duplicates // 0')
+          echo "::notice::Found $found, stored $created new, $dupes already known."
+
+          # Nothing found and nothing refused us is a legitimate outcome - the query matched
+          # nobody. Say so rather than dressing it up as success or failure.
+          if [ "$found" = "0" ]; then
+            echo "::warning::No leads matched this query. Every source answered; nobody fit."
+          fi
