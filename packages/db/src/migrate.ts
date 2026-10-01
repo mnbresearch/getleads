@@ -13,6 +13,10 @@ export async function runMigrations(url = process.env.DATABASE_URL) {
   if (!url) throw new Error("DATABASE_URL is not set");
   const sql = postgres(url, { max: 1, ssl: url.includes("localhost") ? false : "prefer" });
   try {
+    // Two processes starting at once (API + a worker, or a redeploy overlap) must not both
+    // apply the same migration. A session-level advisory lock serialises them; it is released
+    // when the connection closes in the finally below.
+    await sql`SELECT pg_advisory_lock(727274001)`;
     await sql`CREATE TABLE IF NOT EXISTS _migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
     const applied = new Set((await sql`SELECT name FROM _migrations`).map((r) => r.name as string));
     const files = (await readdir(migrationsDir)).filter((f) => f.endsWith(".sql")).sort();

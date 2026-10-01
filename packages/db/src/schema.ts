@@ -198,6 +198,8 @@ export const leads = pgTable(
     ownerUserId: uuid("owner_user_id"),
     status: text("status").notNull().default("new"),
     verifiedAt: ts("verified_at"),
+    /** Which verifier answered for the current email, e.g. "reoon:safe". */
+    emailVerifiedBy: text("email_verified_by"),
     /**
      * When a job-change check last got a real answer for this person.
      *
@@ -319,6 +321,9 @@ export const campaignContacts = pgTable(
     variant: integer("variant").notNull().default(0),
     nextSendAt: ts("next_send_at"),
     lastMessageId: uuid("last_message_id"),
+    /** Consecutive failed send attempts; the contact is marked failed past a limit. */
+    sendFailures: integer("send_failures").notNull().default(0),
+    lastError: text("last_error"),
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
@@ -487,6 +492,8 @@ export const invites = pgTable("invites", {
   token: text("token").notNull().unique(),
   invitedBy: uuid("invited_by"),
   acceptedAt: ts("accepted_at"),
+  expiresAt: ts("expires_at"),
+  revokedAt: ts("revoked_at"),
   createdAt: ts("created_at").notNull().defaultNow(),
 });
 
@@ -1032,3 +1039,13 @@ export type Competitor = typeof competitors.$inferSelect;
 export type CompetitorTracking = typeof competitorTracking.$inferSelect;
 export type MarketAnalysis = typeof marketAnalysis.$inferSelect;
 export type AgentRun = typeof agentRuns.$inferSelect;
+
+/** Password reset tokens. Only the sha256 of the token is stored. */
+export const passwordResetTokens = pgTable("password_reset_tokens", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  tokenHash: text("token_hash").notNull().unique(),
+  expiresAt: ts("expires_at").notNull(),
+  usedAt: ts("used_at"),
+  createdAt: ts("created_at").notNull().defaultNow(),
+});
