@@ -67,6 +67,18 @@ export async function claimJob(db: Db, workerId: string, types?: string[]): Prom
   return job ? normalizeJob(job) : null;
 }
 
+/**
+ * Raw-SQL rows carry timestamps as strings (db.execute bypasses drizzle's column mapping).
+ * Handing such a string back through a drizzle timestamp column throws inside the driver
+ * ("value.toISOString is not a function"), so every timestamp is a real Date from here on.
+ */
+function toDate(v: unknown): Date | null {
+  if (v == null) return null;
+  if (v instanceof Date) return v;
+  const d = new Date(v as string | number);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
 function normalizeJob(j: Record<string, unknown>): Job {
   // db.execute returns snake_case columns; map to camelCase for consumers
   return {
@@ -78,14 +90,14 @@ function normalizeJob(j: Record<string, unknown>): Job {
     priority: j.priority,
     attempts: j.attempts,
     maxAttempts: j.max_attempts ?? j.maxAttempts,
-    runAt: j.run_at ?? j.runAt,
-    lockedAt: j.locked_at ?? j.lockedAt ?? null,
+    runAt: toDate(j.run_at ?? j.runAt) ?? new Date(),
+    lockedAt: toDate(j.locked_at ?? j.lockedAt),
     lockedBy: j.locked_by ?? j.lockedBy ?? null,
     progress: j.progress ?? 0,
     result: j.result ?? null,
     error: j.error ?? null,
-    createdAt: j.created_at ?? j.createdAt,
-    updatedAt: j.updated_at ?? j.updatedAt,
+    createdAt: toDate(j.created_at ?? j.createdAt) ?? new Date(),
+    updatedAt: toDate(j.updated_at ?? j.updatedAt) ?? new Date(),
   } as Job;
 }
 
@@ -110,12 +122,14 @@ export async function failJob(db: Db, job: Job, err: unknown) {
   const message = err instanceof Error ? `${err.message}` : String(err);
   const retry = job.attempts < job.maxAttempts;
   const backoffMs = Math.min(60_000 * 2 ** (job.attempts - 1), 30 * 60_000);
+  // A final failure leaves run_at alone. Writing job.runAt back used to crash the whole
+  // process when the row came from claimJob's raw SQL (a string, not a Date).
   const rows = await db
     .update(jobs)
     .set({
       status: retry ? "queued" : "failed",
       error: message.slice(0, 4000),
-      runAt: retry ? new Date(Date.now() + backoffMs) : job.runAt,
+      ...(retry ? { runAt: new Date(Date.now() + backoffMs) } : {}),
       lockedAt: null,
       lockedBy: null,
       updatedAt: new Date(),
@@ -179,15 +193,20 @@ export function startWorker(db: Db, handlers: Record<string, JobHandler>, opts: 
       });
       if (!job) break;
       active++;
-      void runJob(db, job, handlers, log).finally(() => {
-        active--;
-      });
+      // runJob already contains its own failures; this catch is the last line so that a
+      // DB fault while recording an outcome is logged, never an unhandled rejection that
+      // takes the whole process (and the API embedded with it) down.
+      void runJob(db, job, handlers, log)
+        .catch((e) => log(`job ${job.id} bookkeeping error: ${e instanceof Error ? e.message : String(e)}`))
+        .finally(() => {
+          active--;
+        });
     }
   };
 
-  const interval = setInterval(tick, pollMs);
+  const interval = setInterval(() => void tick().catch((e) => log(`tick error: ${e instanceof Error ? e.message : String(e)}`)), pollMs);
   const reaper = setInterval(() => reapStaleJobs(db).catch(() => {}), 60_000);
-  void tick();
+  void tick().catch((e) => log(`tick error: ${e instanceof Error ? e.message : String(e)}`));
   log(`started ${workerId} concurrency=${concurrency} types=${(opts.types ?? Object.keys(handlers)).join(",")}`);
 
   return async () => {
@@ -201,7 +220,9 @@ export function startWorker(db: Db, handlers: Record<string, JobHandler>, opts: 
 export async function runJob(db: Db, job: Job, handlers: Record<string, JobHandler>, log = console.log) {
   const handler = handlers[job.type];
   if (!handler) {
-    await failJob(db, { ...job, attempts: job.maxAttempts }, new Error(`no handler for ${job.type}`));
+    await failJob(db, { ...job, attempts: job.maxAttempts }, new Error(`no handler for ${job.type}`)).catch((e) =>
+      log(`[${job.type}:${job.id.slice(0, 8)}] could not record failure: ${e instanceof Error ? e.message : String(e)}`),
+    );
     return;
   }
   // Refresh the lock while the job runs. Without a heartbeat, any job longer than the
@@ -226,16 +247,54 @@ export async function runJob(db: Db, job: Job, handlers: Record<string, JobHandl
   const heartbeat = setInterval(() => void beat().catch(() => {}), HEARTBEAT_MS);
   if (typeof heartbeat.unref === "function") heartbeat.unref();
   const started = Date.now();
+  let result: Record<string, unknown> | void = undefined;
+  let failure: unknown = null;
+  let threw = false;
   try {
-    const result = await handler(job, ctx);
-    const owned = await completeJob(db, job.id, result ?? undefined, job.lockedBy);
-    ctx.log(owned ? `done in ${Date.now() - started}ms` : `finished in ${Date.now() - started}ms, but the job had been reaped and reclaimed; result not recorded`);
+    result = await handler(job, ctx);
   } catch (err) {
-    ctx.log(`failed: ${err instanceof Error ? err.message : String(err)}`);
-    await failJob(db, job, err);
+    threw = true;
+    failure = err;
+  }
+  // Recording the outcome is its own step: a throw from completeJob/failJob (a dropped
+  // connection, a bad value) must be logged, never escape - an escaped rejection here is
+  // an unhandled rejection that kills the process. The job stays "running" and the reaper
+  // returns it to the queue.
+  try {
+    if (!threw) {
+      const owned = await completeJob(db, job.id, result ?? undefined, job.lockedBy);
+      ctx.log(owned ? `done in ${Date.now() - started}ms` : `finished in ${Date.now() - started}ms, but the job had been reaped and reclaimed; result not recorded`);
+    } else {
+      ctx.log(`failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+      await failJob(db, job, failure);
+    }
+  } catch (e) {
+    ctx.log(`could not record outcome: ${e instanceof Error ? e.message : String(e)}`);
   } finally {
     clearInterval(heartbeat);
   }
+}
+
+/**
+ * Claim and run one specific queued job, now. For inline mode, where a request that just
+ * enqueued its own job should not first wait behind every scheduler and backlog job due.
+ * Returns false when the job was not claimable (already taken, not queued, not due).
+ */
+export async function runJobById(db: Db, handlers: Record<string, JobHandler>, jobId: string, workerId = `inline:${process.pid}`) {
+  const rows = await db.execute<Job>(dsql`
+    UPDATE jobs SET status = 'running', locked_at = now(), locked_by = ${workerId},
+      attempts = attempts + 1, updated_at = now()
+    WHERE id = (
+      SELECT id FROM jobs WHERE id = ${jobId} AND status = 'queued' AND run_at <= now()
+      FOR UPDATE SKIP LOCKED
+    )
+    RETURNING *
+  `);
+  const r = (rows as unknown as { rows?: Job[] }).rows ?? (rows as unknown as Job[]);
+  const job = Array.isArray(r) ? r[0] : undefined;
+  if (!job) return false;
+  await runJob(db, normalizeJob(job as unknown as Record<string, unknown>), handlers);
+  return true;
 }
 
 /** Inline mode (serverless): run all runnable jobs right now, bounded by time. */
@@ -244,9 +303,16 @@ export async function drainJobs(db: Db, handlers: Record<string, JobHandler>, ma
   const started = Date.now();
   let processed = 0;
   while (Date.now() - started < maxMs) {
-    const job = await claimJob(db, workerId, Object.keys(handlers));
+    let job: Job | null;
+    try {
+      job = await claimJob(db, workerId, Object.keys(handlers));
+    } catch (e) {
+      console.warn(`[queue] drain claim error: ${e instanceof Error ? e.message : String(e)}`);
+      break;
+    }
     if (!job) break;
-    await runJob(db, job, handlers);
+    // One bad job must not end the drain (or the request driving it).
+    await runJob(db, job, handlers).catch((e) => console.warn(`[queue] job ${job!.id} bookkeeping error: ${e instanceof Error ? e.message : String(e)}`));
     processed++;
   }
   return processed;

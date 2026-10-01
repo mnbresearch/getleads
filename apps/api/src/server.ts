@@ -4,6 +4,12 @@ import { env } from "./env.js";
 import { createApp } from "./app.js";
 import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.js";
 
+// One bad job or a stray promise must never take the process down: Node's default for an
+// unhandled rejection is to exit, which turned a single failing webhook into a restart loop.
+process.on("unhandledRejection", (reason) => {
+  console.error("[api] unhandled rejection (kept running):", reason);
+});
+
 async function main() {
   if (process.env.AUTO_MIGRATE !== "false") await runMigrations();
   const app = createApp();

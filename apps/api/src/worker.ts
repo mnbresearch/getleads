@@ -3,6 +3,12 @@ import "./env.js";
 import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
 
+// One bad job or a stray promise must never take the process down: Node's default for an
+// unhandled rejection is to exit, which turned a single failing webhook into a restart loop.
+process.on("unhandledRejection", (reason) => {
+  console.error("[worker] unhandled rejection (kept running):", reason);
+});
+
 async function main() {
   wireToolMeter();
   if (process.env.AUTO_MIGRATE !== "false") await runMigrations();

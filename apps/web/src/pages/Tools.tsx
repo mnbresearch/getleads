@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { apiFetch } from "../lib/api";
 import { EmailStatusBadge, Page, useToast } from "../components/ui";
+import { CompanyIntelView, DomainHealthView } from "../components/ToolResults";
 
 type Row = Record<string, unknown>;
 
@@ -97,11 +98,11 @@ export function ToolsPage() {
   return (
     <Page title="Tools" subtitle="One-off enrichment and verification tools. Everything here is also available in the API and MCP server.">
       {Toast}
-      <div className="grid gap-4 lg:grid-cols-3">
-        <div className="card p-4 lg:col-span-1">
+      <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="card min-w-0 p-4 lg:col-span-1">
           <div className="space-y-1">{(Object.keys(meta) as (typeof tool)[]).map((k) => <button key={k} className={`block w-full rounded-lg px-3 py-2 text-left text-sm ${tool === k ? "bg-brand-50 font-medium text-brand-600" : "hover:bg-black/[0.05]"}`} onClick={() => { setTool(k); setOut(null); }}>{meta[k].label}</button>)}</div>
         </div>
-        <div className="card space-y-3 p-4 lg:col-span-2">
+        <div className="card min-w-0 space-y-3 p-4 lg:col-span-2">
           <div className="font-medium">{meta[tool].label}</div>
           <textarea className="input h-28 font-mono text-xs" placeholder={meta[tool].ph} value={input} onChange={(e) => setInput(e.target.value)} />
           {meta[tool].extra && <input className="input" placeholder={meta[tool].extra} value={extra} onChange={(e) => setExtra(e.target.value)} />}
@@ -115,9 +116,10 @@ export function ToolsPage() {
             <div className="overflow-x-auto">
               <table className="w-full text-sm"><thead><tr>{columnsOf(out).map((k) => <th key={k} className="th">{k}</th>)}</tr></thead>
                 <tbody className="divide-y divide-slate-100">{out.map((r, i) => <tr key={i}>{columnsOf(out).map((k) => <td key={k} className="td text-xs">{k === "emailStatus" || k === "status" ? <EmailStatusBadge status={String(r[k] ?? "")} /> : typeof r[k] === "object" ? JSON.stringify(r[k]) : String(r[k] ?? "")}</td>)}</tr>)}</tbody></table>
-              {out.length === 0 && <div className="py-4 text-sm text-ink-400">No results (keyless search engines are rate-limited from cloud IPs; add a Brave/Google key or Apollo/Hunter for consistent results).</div>}
+              {/* Any reason the server gave is in the notices above; no guessed cause here. */}
+              {out.length === 0 && <div className="py-4 text-sm text-ink-400">No results found for this request.</div>}
             </div>
-          ) : <pre className="max-h-96 overflow-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{JSON.stringify(out, null, 2)}</pre>)}
+          ) : tool === "intel" ? <CompanyIntelView data={out} /> : tool === "health" ? <DomainHealthView data={out} /> : <pre className="max-h-96 max-w-full overflow-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{JSON.stringify(out, null, 2)}</pre>)}
         </div>
       </div>
     </Page>

@@ -28,7 +28,17 @@ export interface FindEmailOptions extends VerifyOptions {
    * a credit, so this is the cost ceiling per lead.
    */
   maxVerifierChecks?: number;
+  /**
+   * Which verifiers this call may spend on. "any" (default) uses whatever is configured.
+   * "payg-only" restricts checks to the pay-as-you-go verifiers (Reoon, MillionVerifier):
+   * bulk discovery runs this for every lead, and a Hunter-only setup would otherwise burn
+   * its small monthly verification allowance on pattern guesses.
+   */
+  verifierPolicy?: "any" | "payg-only";
 }
+
+/** Defaults for bulk callers (the pipeline): one check per lead, pay-as-you-go verifiers only. */
+export const BULK_FIND_DEFAULTS: Pick<FindEmailOptions, "maxVerifierChecks" | "verifierPolicy"> = { maxVerifierChecks: 1, verifierPolicy: "payg-only" };
 
 /**
  * Find a person's work email:
@@ -46,6 +56,9 @@ export async function findEmail(input: FindEmailInput, opts: FindEmailOptions = 
   // check its own answer would double the cost of every lead for no new information.
   const paygOpts: VerifyOptions = { reoonApiKey: opts.reoonApiKey, millionVerifierApiKey: opts.millionVerifierApiKey, smtp: false };
   const hasPayg = !!(opts.reoonApiKey || opts.millionVerifierApiKey);
+  // What the verification steps below may spend on. Under "payg-only" Hunter and Abstract
+  // never verify (Hunter may still FIND, above - that is its own step).
+  const checkOpts: VerifyOptions = opts.verifierPolicy === "payg-only" ? { ...opts, hunterApiKey: undefined, abstractApiKey: undefined } : opts;
 
   if (opts.hunterApiKey) {
     meter("hunter");
@@ -87,7 +100,7 @@ export async function findEmail(input: FindEmailInput, opts: FindEmailOptions = 
         const e = m.toLowerCase();
         if (isExcluded(e)) continue;
         if (looksLikePerson(e, firstName, lastName)) {
-          const v = await verifyEmail(e, opts);
+          const v = await verifyEmail(e, checkOpts);
           candidates.push({ email: e, status: v.status, confidence: Math.max(v.confidence, 0.75) });
           if (v.status !== "invalid") return { email: e, status: v.status, confidence: Math.max(v.confidence, 0.8), pattern: patternOf(e, firstName, lastName), candidates, verifiedBy: verifiedByOf(v), source: "web" };
           excluded.add(e);
@@ -128,7 +141,7 @@ export async function findEmail(input: FindEmailInput, opts: FindEmailOptions = 
    */
   const viaVerifier = async (): Promise<EmailFindResult> => {
     const max = Math.max(0, opts.maxVerifierChecks ?? 3);
-    const vopts: VerifyOptions = { ...opts, smtp: false };
+    const vopts: VerifyOptions = { ...checkOpts, smtp: false };
     const rejected = new Set<string>();
     let fallback: { email: string; status: EmailStatus; confidence: number; verifiedBy?: string } | null = null;
     for (const e of list.slice(0, max)) {
@@ -151,7 +164,7 @@ export async function findEmail(input: FindEmailInput, opts: FindEmailOptions = 
   };
 
   const smtpEnabled = opts.smtp ?? process.env.SMTP_PROBE_ENABLED !== "false";
-  if (!smtpEnabled) return hasVerifierConfigured(opts) ? viaVerifier() : guess();
+  if (!smtpEnabled) return hasVerifierConfigured(checkOpts) ? viaVerifier() : guess();
 
   const catchAll = await isCatchAll(domain, mxHost);
   if (catchAll === true) {
@@ -161,7 +174,7 @@ export async function findEmail(input: FindEmailInput, opts: FindEmailOptions = 
   }
   if (catchAll === null) {
     // SMTP blocked (port 25 unavailable) -> a verifier if there is one, else a pattern guess
-    return hasVerifierConfigured(opts) ? viaVerifier() : guess();
+    return hasVerifierConfigured(checkOpts) ? viaVerifier() : guess();
   }
 
   for (const e of list.slice(0, 8)) {

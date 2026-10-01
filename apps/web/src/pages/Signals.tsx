@@ -102,7 +102,7 @@ export function SignalsPage() {
   return (
     <Page title="Intent signals" subtitle="Companies that just raised money, got acquired, hired a new leader or are hiring fast are 3-5x more likely to buy. Subscribe and Scout turns signals into decision-maker leads automatically." actions={<><button className="btn-secondary" onClick={scan} disabled={scanning}>{scanning ? "Scanning news…" : "Scan now"}</button><button className="btn-secondary" onClick={() => setMonOpen(true)}>New monitor</button><button className="btn-primary" onClick={() => setSubOpen(true)}>New subscription</button></>}>
       {Toast}
-      <div className="mb-3 flex gap-2 border-b border-black/10">{(["feed", "subscriptions", "monitors"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}{t === "subscriptions" ? ` (${subs.length})` : t === "monitors" ? ` (${mons.length})` : ""}</button>)}</div>
+      <div className="-mx-4 mb-3 flex gap-2 overflow-x-auto whitespace-nowrap border-b border-black/10 px-4 sm:mx-0 sm:px-0">{(["feed", "subscriptions", "monitors"] as const).map((t) => <button key={t} className={`shrink-0 px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}{t === "subscriptions" ? ` (${subs.length})` : t === "monitors" ? ` (${mons.length})` : ""}</button>)}</div>
 
       {tab === "feed" && <>
         <div className="mb-3 flex flex-wrap gap-2">

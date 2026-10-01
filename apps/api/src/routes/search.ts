@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, consume, consumeLead, desc, drainJobs, enqueue, eq, getDb, getJob, icps, jobs, listLeads, lists, QuotaExceededError, remainingPremiumBudget, searches } from "@prospex/db";
+import { and, consume, consumeLead, desc, runJobById, enqueue, eq, getDb, getJob, icps, jobs, listLeads, lists, QuotaExceededError, remainingPremiumBudget, searches } from "@prospex/db";
 import { assertOwned } from "../lib/ownership.js";
 import { crawlCompanyWebsite, extractDomain, findCompanies, findEmail, findPeople, resolveCompanyDomain, runLeadPipeline, verifyEmail, parseQuery, pMap } from "@prospex/core";
 import { aiFor, NO_AI } from "../lib/ai.js";
@@ -61,8 +61,9 @@ searchRoutes.post("/", rateLimit({ perMinute: 30 }), zValidator("json", searchIn
   const job = await enqueue(db, "search.run", { searchId: search.id, query: body, icpId, listId: body.listId, clientId: body.clientId }, { orgId: oid, priority: 2 });
   await db.update(searches).set({ jobId: job.id }).where(eq(searches.id, search.id));
   if (env.jobMode === "inline") {
-    // serverless: run now, bounded
-    await drainJobs(db, handlers, 25_000);
+    // serverless: run this search's own job now. Draining the whole queue made the user's
+    // search wait behind every scheduler and backlog job that happened to be due.
+    await runJobById(db, handlers, job.id);
     const s = await db.query.searches.findFirst({ where: eq(searches.id, search.id) });
     return c.json({ search: s, jobId: job.id }, 200);
   }

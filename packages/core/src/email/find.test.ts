@@ -153,3 +153,27 @@ describe("verify chain falls through on 'unknown'", () => {
     expect((await verifyEmail("jane@acme.example", { smtp: false, reoonApiKey: "r" })).verifiedBy).toBe("reoon:safe");
   });
 });
+
+describe("bulk verification policy", () => {
+  it("BULK_FIND_DEFAULTS checks one candidate and never spends a Hunter verification", async () => {
+    const { BULK_FIND_DEFAULTS } = await import("./find.js");
+    expect(BULK_FIND_DEFAULTS).toEqual({ maxVerifierChecks: 1, verifierPolicy: "payg-only" });
+    // Hunter-only setup: the finder returns nothing, so the pattern path runs.
+    const calls = stubFetch((u) => (u.includes("hunter.io/v2/email-finder") ? { body: { data: {} } } : u.includes("hunter.io") ? { body: { data: { status: "valid", result: "deliverable", score: 99 } } } : undefined));
+    const r = await findEmail(person, { smtp: false, hunterApiKey: "h", ...BULK_FIND_DEFAULTS });
+    expect(calls.filter((c) => c.includes("hunter.io/v2/email-verifier"))).toHaveLength(0);
+    expect(r.status).toBe("risky");
+  });
+
+  it("payg-only still uses Reoon, at most maxVerifierChecks times", async () => {
+    const calls = stubFetch((u) => (u.includes("reoon.com") ? { body: { status: "invalid" } } : undefined));
+    await findEmail(person, { smtp: false, reoonApiKey: "r", hunterApiKey: undefined, maxVerifierChecks: 1, verifierPolicy: "payg-only" });
+    expect(calls.filter((c) => c.includes("reoon.com"))).toHaveLength(1);
+  });
+
+  it("an explicit single-lead call (default policy) may still verify with Hunter", async () => {
+    const calls = stubFetch((u) => (u.includes("hunter.io/v2/email-finder") ? { body: { data: {} } } : u.includes("hunter.io/v2/email-verifier") ? { body: { data: { status: "valid", result: "deliverable", score: 99 } } } : undefined));
+    await findEmail(person, { smtp: false, hunterApiKey: "h" });
+    expect(calls.filter((c) => c.includes("hunter.io/v2/email-verifier")).length).toBeGreaterThan(0);
+  });
+});

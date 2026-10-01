@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, fmtNum } from "../lib/api";
+import { metricLabel } from "../lib/metrics";
 import { LoadError, Page, Spinner, Stat } from "../components/ui";
 
 interface Overview {
@@ -55,18 +56,18 @@ export function Dashboard() {
       )}
       {hot && hot.length > 0 && (
         <div className="card mt-6 p-4">
-          <div className="mb-3 flex items-center justify-between">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div>
               <div className="font-medium">Contact today</div>
               <div className="text-xs text-ink-400">Ranked by fit, engagement, and live company signals - not just recency.</div>
             </div>
             <Link to="/leads?sort=score&order=desc" className="text-sm text-brand-600 hover:underline">View all leads →</Link>
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {hot.map((h) => (
-              <div key={h.lead.id} className="rounded-lg border border-black/10 p-3 text-sm">
-                <div className="flex items-center justify-between">
-                  <div className="font-medium">{h.lead.fullName ?? "Unknown"}</div>
+              <div key={h.lead.id} className="min-w-0 rounded-lg border border-black/10 p-3 text-sm [overflow-wrap:anywhere]">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="min-w-0 font-medium">{h.lead.fullName ?? "Unknown"}</div>
                   <span className={`badge ${h.priority.score >= 70 ? "bg-emerald-50 text-emerald-700" : h.priority.score >= 40 ? "bg-amber-50 text-amber-700" : "bg-black/[0.05] text-ink-400"}`}>{h.priority.score}</span>
                 </div>
                 <div className="text-xs text-ink-400">{h.lead.title ?? ""}{h.lead.company ? ` · ${h.lead.company.name ?? h.lead.company.domain}` : ""}</div>
@@ -77,12 +78,16 @@ export function Dashboard() {
         </div>
       )}
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-3">
-        <div className="card p-4 lg:col-span-2">
-          <div className="mb-3 flex items-center justify-between">
+      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-3">
+        <div className="card min-w-0 p-4 lg:col-span-2">
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
             <div className="font-medium">Last 30 days</div>
             <div className="flex gap-3 text-xs text-ink-400"><span><i className="mr-1 inline-block h-2 w-2 rounded-sm bg-brand-500" />leads</span><span><i className="mr-1 inline-block h-2 w-2 rounded-sm bg-emerald-500" />sent</span><span><i className="mr-1 inline-block h-2 w-2 rounded-sm bg-amber-500" />replied</span></div>
           </div>
+          {/* An all-zero month drew an empty box that looked like a chart that failed to render. */}
+          {d.daily.every((x) => !x.leads && !x.sent && !x.replied) ? (
+            <div className="flex h-40 items-center justify-center rounded-lg border border-dashed border-black/10 text-sm text-ink-400">No activity in the last 30 days yet</div>
+          ) : (
           <div className="flex h-40 items-end gap-[3px]">
             {d.daily.map((x) => (
               <div key={x.day} className="group relative flex flex-1 items-end gap-px" title={`${x.day}: ${x.leads} leads, ${x.sent} sent, ${x.replied} replied`}>
@@ -92,13 +97,14 @@ export function Dashboard() {
               </div>
             ))}
           </div>
+          )}
         </div>
-        <div className="card p-4">
+        <div className="card min-w-0 p-4">
           <div className="mb-3 font-medium">Monthly usage</div>
           <div className="space-y-3">
             {Object.entries(d.usage.usage).map(([k, v]) => (
               <div key={k}>
-                <div className="flex justify-between text-xs"><span className="capitalize text-ink-300">{k.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums text-ink-400">{fmtNum(v.used)} / {limitLabel(k, v.limit)}</span></div>
+                <div className="flex justify-between text-xs"><span className="text-ink-300">{metricLabel(k)}</span><span className="tabular-nums text-ink-400">{fmtNum(v.used)} / {limitLabel(k, v.limit)}</span></div>
                 <div className="mt-1 h-1.5 rounded-full bg-black/[0.05]"><div className={`h-1.5 rounded-full ${v.limit && v.used / v.limit > 0.9 ? "bg-red-500" : "bg-brand-500"}`} style={{ width: `${v.limit ? Math.min(100, (v.used / v.limit) * 100) : 0}%` }} /></div>
               </div>
             ))}
@@ -106,8 +112,8 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <div className="card p-4">
+      <div className="mt-6 grid grid-cols-1 gap-4 lg:grid-cols-2">
+        <div className="card min-w-0 p-4">
           <div className="mb-3 font-medium">Email quality</div>
           <div className="flex flex-wrap gap-2">
             {Object.entries(d.emailStatus).map(([s, n]) => (
@@ -116,11 +122,11 @@ export function Dashboard() {
             {Object.keys(d.emailStatus).length === 0 && <div className="text-sm text-ink-400">No leads yet.</div>}
           </div>
         </div>
-        <div className="card p-4">
+        <div className="card min-w-0 p-4">
           <div className="mb-3 font-medium">Top companies</div>
           <ul className="divide-y divide-slate-100 text-sm">
             {d.topCompanies.map((c) => (
-              <li key={c.domain} className="flex justify-between py-1.5"><span className="truncate">{c.name ?? c.domain} <span className="text-ink-500">{c.domain}</span></span><span className="tabular-nums text-ink-400">{c.n}</span></li>
+              <li key={c.domain} className="flex justify-between gap-2 py-1.5"><span className="min-w-0 truncate" title={c.name ?? c.domain}>{c.name ?? c.domain} <span className="text-ink-500">{c.domain}</span></span><span className="tabular-nums text-ink-400">{c.n}</span></li>
             ))}
             {d.topCompanies.length === 0 && <li className="py-1.5 text-ink-400">No companies yet.</li>}
           </ul>

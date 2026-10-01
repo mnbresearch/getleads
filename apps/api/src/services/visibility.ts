@@ -11,6 +11,7 @@ import {
   intentCoverage,
   parseGeneratedPrompts,
   starterPack,
+  pluralRole,
   templateBrief,
   validatePrompts,
   type AiProvider,
@@ -19,6 +20,18 @@ import {
   type TemplateContext,
   type VisibilityObservation,
 } from "@prospex/core";
+import { ApiError } from "../lib/errors.js";
+
+/**
+ * No AI engine is configured on this server at all. A 503 with its own code rather than a
+ * generic 500: it is a setup problem the operator can fix, and the scheduled job skips on it
+ * instead of failing every run.
+ */
+export class AiNotConfiguredError extends ApiError {
+  constructor() {
+    super(503, "No AI engine is configured on this server, so visibility can't be sampled. Add GROQ_API_KEY or GEMINI_API_KEY.", "ai_not_configured");
+  }
+}
 
 /**
  * AI visibility execution and reporting.
@@ -74,7 +87,7 @@ export async function runVisibilityPrompt(
 ) {
   const cfg = await visibilityConfig(db, orgIdValue);
   const provider = opts.provider ?? availableAiProvidersForPlan(opts.plan ?? "free")[0];
-  if (!provider) throw new Error("No AI provider configured");
+  if (!provider) throw new AiNotConfiguredError();
 
   let answer = "";
   let error: string | null = null;
@@ -152,7 +165,8 @@ export async function sampleAcrossEngines(
   const all = availableAiProvidersForPlan(opts.plan ?? "free");
   const wanted = (prompt.engines ?? []).filter(Boolean);
   const providers = wanted.length ? all.filter((p) => wanted.includes(p.name)) : all;
-  if (providers.length === 0) throw new Error("No AI provider configured");
+  if (all.length === 0) throw new AiNotConfiguredError();
+  if (providers.length === 0) throw new ApiError(503, `None of this prompt's engines (${wanted.join(", ")}) is available on this server or plan.`, "ai_not_configured");
 
   const samples = opts.samples ?? prompt.samplesPerRun ?? 3;
 
@@ -364,13 +378,19 @@ export async function suggestPrompts(
   // The ICP is the org's own description of its buyer. Prefer it over anything inferred.
   const icp = await db.query.icps.findFirst({ where: eq(icps.orgId, orgIdValue), orderBy: desc(icps.updatedAt) });
   const criteria = (icp?.criteria ?? {}) as IcpCriteria;
-  const audience = [criteria.titles?.[0], criteria.industries?.[0] ? `${criteria.industries[0]} companies` : null]
+  // "founders at fintech companies", not "Founder at fintech companies".
+  const audience = [criteria.titles?.[0] ? pluralRole(criteria.titles[0]) : null, criteria.industries?.[0] ? `${criteria.industries[0]} companies` : null]
     .filter(Boolean)
     .join(" at ") || null;
 
+  // The category is what the org SELLS. The ICP's name describes the buyer and the org's
+  // name is the brand (which validatePrompts then rejects), so neither is a fallback; with
+  // nothing better, "B2B software" reads as a real question. starterPack turns a bare
+  // qualifier ("B2B", "lead generation") into a product phrase.
+  const orgCategory = typeof org?.settings?.category === "string" ? (org.settings.category as string) : undefined;
   const ctx: TemplateContext = {
     brand: cfg.brand.name,
-    category: opts.category?.trim() || criteria.keywords?.[0] || icp?.name || org?.name || "software",
+    category: opts.category?.trim() || criteria.keywords?.[0] || orgCategory?.trim() || "B2B software",
     competitors: cfg.competitors.map((c) => c.name),
     audience,
     problem: icp?.description ?? null,

@@ -123,7 +123,7 @@ export function VisibilityPage() {
           <div className="mb-2 text-xs text-ink-400">
             Engines are trained and retrieved differently and often disagree, so act on these rows. The headline above blends them and describes no single engine.
           </div>
-          <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {d.byEngine.map((e) => (
               <div key={e.engine} className="rounded-lg border border-black/10 p-3 text-sm">
                 <div className="flex items-center justify-between gap-2">
@@ -156,12 +156,13 @@ export function VisibilityPage() {
         <div className="card mt-4 p-4">
           <div className="font-medium">Who owns these answers</div>
           <div className="mb-2 text-xs text-ink-400">"Wins without you" counts answers where they appear and you do not. That is the gap worth closing.</div>
+          <div className="overflow-x-auto">
           <table className="w-full text-sm">
             <thead className="border-b border-black/10"><tr><th className="th">Brand</th><th className="th">Appears in</th><th className="th">Avg position</th><th className="th">Wins without you</th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {d.competitors.map((c) => (
                 <tr key={c.name}>
-                  <td className="td font-medium">{c.name}</td>
+                  <td className="td max-w-[14rem] font-medium [overflow-wrap:anywhere]">{c.name}</td>
                   <td className="td tabular-nums">{pct(c.appearanceRate)}</td>
                   <td className="td tabular-nums">{c.avgPosition ?? "—"}</td>
                   <td className="td tabular-nums">{c.beatsYou}</td>
@@ -169,6 +170,7 @@ export function VisibilityPage() {
               ))}
             </tbody>
           </table>
+          </div>
         </div>
       )}
 
@@ -176,9 +178,9 @@ export function VisibilityPage() {
         <div className="card mt-4 p-4">
           <div className="font-medium">Winnable gaps</div>
           <div className="mb-2 text-xs text-ink-400">Questions where a rival proves the answer slot exists and it is not yours. Ranked above questions nobody wins.</div>
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
             {d.gaps.map((g) => (
-              <div key={g.promptId} className="rounded-lg border border-black/10 p-3 text-sm">
+              <div key={g.promptId} className="min-w-0 rounded-lg border border-black/10 p-3 text-sm [overflow-wrap:anywhere]">
                 <div className="font-medium">{g.prompt}</div>
                 <div className="mt-1 text-xs text-ink-400">You: {pct(g.mentionRate)} · {g.topRival ? `${g.topRival}: ${pct(g.rivalRate)}` : "no clear rival"} · {g.runs} answers</div>
               </div>
@@ -214,14 +216,14 @@ export function VisibilityPage() {
           <ul className="divide-y divide-slate-100 text-sm">
             {prompts.map((p) => (
               <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
-                <div className="min-w-0">
-                  <div className="truncate font-medium">
+                <div className="min-w-0 max-w-full">
+                  <div className="truncate font-medium" title={p.text}>
                     {p.text}
                     {p.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}
                   </div>
                   <div className="text-xs text-ink-400">{p.samplesPerRun} samples/day{p.topic ? ` · ${p.topic}` : ""}{p.lastRunAt ? ` · last ${new Date(p.lastRunAt).toLocaleDateString()}` : " · never run"}</div>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-wrap items-center gap-2">
                   {/* "Suggest more" installs up to ten of these in one click, so every one of
                       them needs a way back out. Pausing keeps the history a resumed question
                       is measured against; deleting does not. */}

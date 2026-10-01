@@ -2,8 +2,8 @@ import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq,
 import { buildIcpWithAi, crawlCompanyWebsite, createAiProviderForPlan, findEmail, isPublicHost, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
-import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
-import { knownBrands, sampleAcrossEngines } from "./services/visibility.js";
+import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead, verifierOf } from "./services/leads.js";
+import { AiNotConfiguredError, knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { sendStep, tickCampaign } from "./services/campaigns.js";
 import { syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
@@ -33,20 +33,9 @@ async function aiFor(db: Db, orgId: string | null | undefined) {
 /** Only orgs that are allowed to run: a suspended workspace's schedules must not fire. */
 const orgIsActive = (col: unknown) => dsql`${col} IN (SELECT id FROM organizations WHERE status = 'active')`;
 
-/**
- * Which verifier gave this verdict, for leads.email_verified_by. Null when no external
- * verifier or SMTP probe actually answered (a syntax rule or "probe disabled" is not a
- * verification, and must not be stamped as one).
- */
-export function verifierOf(v: { reason?: string | null; verifiedBy?: string | null }): string | null {
-  const by = v.verifiedBy ?? "";
-  if (/^(reoon|millionverifier|hunter|abstract):/i.test(by) || by === "smtp") return by.slice(0, 80);
-  if (by) return null; // a local check ("syntax", "dns", "mx-only") is not a verification
-  const r = v.reason ?? "";
-  if (/^(reoon|millionverifier|hunter|abstract):/i.test(r)) return r.slice(0, 80);
-  if (/^SMTP (accepted|rejected)/.test(r)) return "smtp";
-  return null;
-}
+// verifierOf lives in services/leads.ts now (the verify route uses it too); re-exported
+// here for existing importers.
+export { verifierOf };
 
 /**
  * Charge one unit for this job exactly once, across all its attempts.
@@ -691,7 +680,15 @@ export const handlers: Record<string, JobHandler> = {
     // The plan decides which engines are sampled. Without it the scheduled path defaulted
     // to the free-tier set for paying orgs - and the manual path, which passed it, did not
     // agree with the scheduled one.
-    const r = await sampleAcrossEngines(db, prompt.orgId, prompt, { others, plan: await planOf(db, prompt.orgId) });
+    let r: Awaited<ReturnType<typeof sampleAcrossEngines>>;
+    try {
+      r = await sampleAcrossEngines(db, prompt.orgId, prompt, { others, plan: await planOf(db, prompt.orgId) });
+    } catch (e) {
+      // No engine configured is a setup state, not a failure: retrying cannot fix it, and a
+      // failed job every hour per prompt buried real errors. Skip with the reason.
+      if (e instanceof AiNotConfiguredError) return { skipped: true, note: e.message };
+      throw e;
+    }
     return { engines: r.engines, samplesPerEngine: r.samplesPerEngine, total: r.total, usable: r.usable };
   },
 

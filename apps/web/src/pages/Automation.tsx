@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiFetch, fmtDate } from "../lib/api";
+import { ProspexError, apiFetch, fmtDate } from "../lib/api";
 import { Empty, LoadError, Page, Spinner, useToast } from "../components/ui";
 
 interface AgentRun { id: string; agentType: string; status: string; rowsCreated: number | null; error: string | null; startedAt: string; completedAt: string | null }
@@ -35,6 +35,7 @@ export function AutomationPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("VP Sales at B2B SaaS companies in India");
+  const [runErr, setRunErr] = useState<{ message: string; quota: boolean } | null>(null);
   const { toast, Toast } = useToast();
 
   const load = useCallback(() => {
@@ -51,6 +52,7 @@ export function AutomationPage() {
 
   const discover = async (preview: boolean) => {
     setBusy(preview ? "preview" : "run");
+    setRunErr(null);
     try {
       const r = await apiFetch<{ found: number; created: number; duplicates: number; note?: string }>("POST", "/v1/automation/discover", { query, count: 25, preview });
       // One toast: a second call replaced the first before anyone could read the counts.
@@ -61,7 +63,13 @@ export function AutomationPage() {
       // The 502 case carries the real explanation: every provider refused us. Showing the
       // raw message matters here, because "no leads" and "nothing answered" look identical
       // in a lead list and only one of them is about the market.
-      toast((e as Error).message, "err");
+      //
+      // Kept on screen as well as toasted: a toast is gone in a few seconds, and an
+      // exhausted search quota (402 quota_exceeded) needs a way to the plan page.
+      const err = e as ProspexError;
+      const quota = err?.status === 402 || err?.code === "quota_exceeded";
+      setRunErr({ message: err.message, quota });
+      toast(err.message, "err");
     } finally {
       setBusy(null);
     }
@@ -79,6 +87,13 @@ export function AutomationPage() {
               <button className="btn-secondary" disabled={!!busy || query.trim().length < 3} onClick={() => discover(true)}>{busy === "preview" ? "…" : "Preview"}</button>
               <button className="btn-primary" disabled={!!busy || query.trim().length < 3} onClick={() => discover(false)}>{busy === "run" ? "Searching…" : "Run"}</button>
             </div>
+            {runErr && (
+              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 [overflow-wrap:anywhere]" role="alert">
+                {runErr.quota ? <div className="font-medium">Search quota used up</div> : null}
+                <div>{runErr.message}</div>
+                {runErr.quota && <Link className="mt-1 inline-block font-medium underline" to="/settings/billing">See plan &amp; usage</Link>}
+              </div>
+            )}
             <p className="mt-2 text-xs text-ink-400">
               Preview reports what would be stored without storing it or spending lead quota. To run discovery on a schedule, set up <Link className="text-brand-600 hover:underline" to="/autopilot">Autopilot</Link>, which runs daily.
             </p>

@@ -31,10 +31,17 @@ const runInput = z.object({
  * standard shape (its text moves to `error.message`, and is kept as `errorText` too).
  */
 function withErrorShape<T extends { status: string; error?: string; note?: string }>(r: T) {
-  if (r.status !== "failed" && r.status !== "blocked") return r;
+  if (r.status !== "failed" && r.status !== "blocked" && r.status !== "quota") return r;
+  if (r.status === "quota") {
+    const message = (r as { quotaStopped?: string }).quotaStopped ?? r.note ?? "Your monthly searches limit is reached.";
+    return { ...r, error: { code: "quota_exceeded", message }, errorText: r.error };
+  }
   const message = r.error ?? r.note ?? (r.status === "blocked" ? "No data source could answer this run." : "The discovery run failed.");
   return { ...r, error: { code: r.status === "blocked" ? "providers_unavailable" : "discovery_failed", message }, errorText: r.error };
 }
+
+/** quota -> 402, every source refused -> 502, failed -> 500. */
+const discoveryStatus = (s: string) => (s === "quota" ? 402 : s === "blocked" ? 502 : s === "failed" ? 500 : 200);
 
 const leadsQuery = z.object({
   company: z.string().optional(),
@@ -55,7 +62,7 @@ automationRoutes.post("/discover", rateLimit({ perMinute: 6 }), zValidator("json
 
   // 502 when every source refused us. A run that found nothing because nothing answered is
   // not a successful run that found nothing, and a caller polling this needs to know which.
-  return c.json(withErrorShape(r), r.status === "blocked" ? 502 : r.status === "failed" ? 500 : 200);
+  return c.json(withErrorShape(r), discoveryStatus(r.status));
 });
 
 /** Kept for the existing scheduled workflow, which posts to this path. */
@@ -71,7 +78,7 @@ automationRoutes.post("/linkedin-scrape", rateLimit({ perMinute: 6 }), zValidato
       deprecation:
         "This endpoint no longer scrapes LinkedIn, and never did - it ran a model that invented profiles. It now runs Scout's real discovery pipeline. Use POST /v1/automation/discover.",
     },
-    r.status === "blocked" ? 502 : r.status === "failed" ? 500 : 200,
+    discoveryStatus(r.status),
   );
 });
 

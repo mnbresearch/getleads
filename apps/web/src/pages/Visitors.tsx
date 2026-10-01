@@ -146,7 +146,7 @@ export function VisitorsPage() {
                 onError={(m) => toast(m, "err")}
               />
             </div>
-            <pre className="overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{p.snippet}</pre>
+            <pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{p.snippet}</pre>
             <button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied")).catch(() => toast("Could not copy - select the snippet and copy it manually", "err"))}>Copy</button>
           </div>
         ))}

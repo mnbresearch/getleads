@@ -85,6 +85,16 @@ export function localDate(tz: string, now = new Date()): string {
   return new Intl.DateTimeFormat("en-CA", { timeZone: zone, year: "numeric", month: "2-digit", day: "2-digit" }).format(now);
 }
 
+/**
+ * The date a sending account's daily counter is keyed on: UTC, one reference for every
+ * campaign. The counter lives on the account, which campaigns in different time zones
+ * share; keying it by each campaign's local date made them reset each other's count (two
+ * campaigns at cap 2 reserved 6 slots). Campaign time zones still govern the send window.
+ */
+export function accountDay(now = new Date()): string {
+  return now.toISOString().slice(0, 10);
+}
+
 /** The next local midnight (plus a minute), when a spent daily cap opens again. */
 export function nextLocalDay(tz: string, now = new Date()): Date {
   const zone = isValidTimezone(tz) ? tz : "UTC";
@@ -277,7 +287,7 @@ export async function tickCampaign(campaignId: string) {
   // reservation in sendStep. It still has to count sends already enqueued but not yet
   // made - by this campaign and by every other campaign sharing the sender - or each tick
   // re-spent the same remaining budget and the queue overshot the cap many times over.
-  const today = localDate(s.timezone);
+  const today = accountDay();
   const sentToday = account && account.sentTodayDate === today ? account.sentToday : 0;
   const caps = [s.dailyLimit, account?.dailyLimit ?? s.dailyLimit];
   // Warm-up ramp and any degraded-deliverability throttle both bind here.
@@ -619,14 +629,23 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   if (!quota.ok) throw new Error(`could not record email usage: ${quota.message}`);
   const refundQuota = () => consume(db, campaign.orgId, "emails", -1, { allowOverage: true }).catch(() => {});
 
-  // Then the daily cap, reserved atomically. No slot: back in the queue for the next local
-  // day, uncharged.
-  const health = await sendingHealthForAccount(db, campaign.orgId, account);
-  const cap = Math.min(s.dailyLimit, account.dailyLimit, health.recommendedDailyCap);
-  const today = localDate(s.timezone);
-  if (!(await reserveDailySlot(account.id, today, cap))) {
+  // Then the daily cap, reserved atomically. No slot: back in the queue for when the
+  // account's (UTC) day turns over, uncharged.
+  // Both steps run inside the refund guard: a DB fault here used to keep the charge, and
+  // the job's retry charged again.
+  const today = accountDay();
+  let reserved: boolean;
+  try {
+    const health = await sendingHealthForAccount(db, campaign.orgId, account);
+    const cap = Math.min(s.dailyLimit, account.dailyLimit, health.recommendedDailyCap);
+    reserved = await reserveDailySlot(account.id, today, cap);
+  } catch (e) {
     await refundQuota();
-    await requeueContact(cc.id, nextLocalDay(s.timezone));
+    throw e;
+  }
+  if (!reserved) {
+    await refundQuota();
+    await requeueContact(cc.id, nextLocalDay("UTC"));
     return { skipped: "daily limit reached" };
   }
 

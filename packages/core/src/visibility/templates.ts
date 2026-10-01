@@ -119,34 +119,69 @@ export function validatePrompts(candidates: PromptTemplate[], ctx: { brand: stri
  * comparison questions are where brands discover they are absent; a pack made only of
  * flattering questions would be the same mistake as reporting one sample as a measurement.
  */
+/** Words that already make a category a thing you can buy ("CRM", "lead generation platform"). */
+const PRODUCT_NOUN = /\b(software|tools?|platforms?|apps?|applications?|services?|solutions?|systems?|crm|erp|suites?|agenc(y|ies)|providers?|vendors?|products?|api|saas)$/i;
+/** Nouns read as mass/plural, which take no article ("choosing B2B software", not "a B2B software"). */
+const NO_ARTICLE = /\b(software|tools|platforms|apps|services|solutions|systems|suites|agencies|providers|vendors|products)$/i;
+
+/**
+ * A category as a purchasable noun phrase. A bare qualifier ("B2B", "lead generation") made
+ * questions like "What is the best B2B for founders?"; it becomes "B2B software".
+ */
+export function categoryPhrase(category: string | null | undefined): { base: string; product: string; withArticle: string } {
+  const base = (category ?? "").trim().replace(/\s+/g, " ") || "B2B software";
+  const product = PRODUCT_NOUN.test(base) ? base : `${base} software`;
+  const withArticle = NO_ARTICLE.test(product) ? product : `${/^[aeiou]/i.test(product) && !/^(uni|use|eu)/i.test(product) ? "an" : "a"} ${product}`;
+  return { base, product, withArticle };
+}
+
+/** "Founder" -> "founders", "Head of Sales" -> "heads of Sales", "CEO" -> "CEOs". */
+export function pluralRole(role: string): string {
+  const r = role.trim();
+  if (!r) return r;
+  const plural = (w: string) => (/s$/i.test(w) ? w : /[^aeiou]y$/i.test(w) ? `${w.slice(0, -1)}ies` : `${w}s`);
+  const lowerIfTitleCase = (w: string) => (/^[A-Z][a-z]+$/.test(w) ? w.toLowerCase() : w);
+  const words = r.split(/\s+/);
+  const ofIdx = words.findIndex((w) => /^of$/i.test(w));
+  if (ofIdx > 0) {
+    words[ofIdx - 1] = plural(lowerIfTitleCase(words[ofIdx - 1]));
+    return words.join(" ");
+  }
+  words[words.length - 1] = plural(words[words.length - 1]);
+  if (words.length === 1) words[0] = lowerIfTitleCase(words[0]);
+  return words.join(" ");
+}
+
 export function starterPack(ctx: TemplateContext): PromptTemplate[] {
-  const cat = (ctx.category || "software").trim();
+  const { base, product, withArticle } = categoryPhrase(ctx.category);
+  const cat = base;
   const audience = (ctx.audience || "").trim();
   const forWhom = audience ? ` for ${audience}` : "";
   const rivals = (ctx.competitors ?? []).map((c) => c.trim()).filter(Boolean);
   const problem = (ctx.problem || "").trim();
+  const isProduct = product === base;
 
   const out: PromptTemplate[] = [
     {
-      text: `What is the best ${cat}${forWhom}?`,
+      text: `What is the best ${product}${forWhom}?`,
       topic: "category",
       intent: "category",
       rationale: "The question a buyer asks first. If you are absent here, nothing downstream matters.",
     },
     {
-      text: `Which ${cat} tools should I shortlist${forWhom} in 2026?`,
+      text: isProduct ? `Which ${product} options should I shortlist${forWhom} in 2026?` : `Which ${cat} tools should I shortlist${forWhom} in 2026?`,
       topic: "category",
       intent: "category",
       rationale: "Shortlist questions decide who gets evaluated at all.",
     },
     {
-      text: `What should I look for when choosing a ${cat}?`,
+      text: `What should I look for when choosing ${withArticle}?`,
       topic: "evaluation",
       intent: "evaluation",
       rationale: "Reveals which criteria the engines treat as important, which is what to lead with in outreach.",
     },
     {
-      text: `What are the pros and cons of the leading ${cat} platforms?`,
+      text: isProduct ? `What are the pros and cons of the leading ${product} options?` : `What are the pros and cons of the leading ${cat} platforms?`,
       topic: "evaluation",
       intent: "evaluation",
       rationale: "Surfaces how you are characterised, not just whether you are named.",

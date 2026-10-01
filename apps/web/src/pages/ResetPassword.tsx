@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { apiFetch, auth } from "../lib/api";
+import { ProspexError, apiFetch, auth } from "../lib/api";
 import { Logo } from "../components/Logo";
 
 /**
@@ -10,6 +10,26 @@ import { Logo } from "../components/Logo";
  * straight away exactly the way the login form does it, rather than being sent back to type
  * the password they just chose.
  */
+const BAD_LINK = "This reset link is invalid or has expired. Request a new one.";
+
+/**
+ * Whether a failed reset was the link's fault rather than the password's.
+ *
+ * A malformed token comes back as a validator error ("token: String must contain at least
+ * 10 character(s)"), which is accurate and useless to someone who clicked a link. Anything
+ * about the token gets the one sentence that tells them what to do.
+ */
+function isTokenProblem(e: unknown): boolean {
+  if (!(e instanceof ProspexError) || e.status !== 400) return false;
+  if (["invalid_reset_token", "invalid_token", "expired_token", "token_expired", "token_used"].includes(e.code)) return true;
+  if (/token/i.test(e.code)) return true;
+  const body = e.details as { error?: { issues?: { path?: unknown }[] } } | null | undefined;
+  const issues = body?.error?.issues;
+  if (Array.isArray(issues) && issues.some((i) => (Array.isArray(i?.path) ? i.path[0] : i?.path) === "token")) return true;
+  // Older validator shape and message-only fallbacks.
+  return /^token\b/i.test(e.message);
+}
+
 export function ResetPasswordPage() {
   const [params] = useSearchParams();
   const token = params.get("token");
@@ -18,6 +38,7 @@ export function ResetPasswordPage() {
   const [confirmPw, setConfirmPw] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const [linkBad, setLinkBad] = useState(false);
 
   const mismatch = confirmPw.length > 0 && pw !== confirmPw;
   const submit = async (e: React.FormEvent) => {
@@ -32,20 +53,21 @@ export function ResetPasswordPage() {
       auth.set(r.token);
       navigate("/", { replace: true });
     } catch (e2) {
-      setErr((e2 as Error).message);
+      if (isTokenProblem(e2)) setLinkBad(true);
+      else setErr((e2 as Error).message);
       setBusy(false);
     }
   };
 
   return (
-    <div className="mx-auto mt-16 max-w-md p-6">
+    <div className="mx-auto mt-16 max-w-md p-4 sm:p-6">
       <div className="mb-6 flex items-center justify-center">
         <Logo size={34} textClassName="text-2xl" />
       </div>
-      {!token ? (
-        <div className="card space-y-3 p-6">
-          <h1 className="text-lg font-semibold">This reset link is incomplete</h1>
-          <p className="text-sm text-ink-300">The link is missing its reset code. Open it again from the email, or request a new one.</p>
+      {!token || linkBad ? (
+        <div className="card space-y-3 p-6" role={linkBad ? "alert" : undefined}>
+          <h1 className="text-lg font-semibold">Reset link not valid</h1>
+          <p className="text-sm text-ink-300">{BAD_LINK}</p>
           <Link className="btn-primary w-full justify-center" to="/forgot-password">Request a new link</Link>
         </div>
       ) : (

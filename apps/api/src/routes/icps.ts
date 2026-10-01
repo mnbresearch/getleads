@@ -27,7 +27,7 @@ const criteria = z.object({
 });
 // description, seedDomains and clientId are nullable because GET returns null for them, and
 // the edit form sends back what it read.
-const icpInput = z.object({ name: z.string().min(1), description: z.string().nullish(), criteria: criteria.optional(), seedDomains: z.array(z.string()).max(10).nullish(), product: z.string().optional(), buildWithAi: z.boolean().default(true), clientId: z.string().uuid().nullish() });
+const icpInput = z.object({ name: z.string().min(1).max(200), description: z.string().max(5000).nullish(), criteria: criteria.optional(), seedDomains: z.array(z.string()).max(10).nullish(), product: z.string().max(5000).optional(), buildWithAi: z.boolean().default(true), clientId: z.string().uuid().nullish() });
 
 icpRoutes.get("/", async (c) => {
   const { db } = getDb();

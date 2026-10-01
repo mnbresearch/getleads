@@ -12,7 +12,9 @@ export interface DomainHealth {
    * has. A user acting on that would change live DNS on the strength of a network blip.
    */
   resolved: boolean;
-  mx: { ok: boolean; hosts: string[] };
+  /** `ok` means the domain can receive mail. `nullMx`: it publishes "MX 0 ." (RFC 7505), an
+   * explicit statement that it accepts no mail - not a working MX. */
+  mx: { ok: boolean; hosts: string[]; nullMx?: boolean };
   spf: { ok: boolean; record?: string; issues: string[] };
   dkim: { ok: boolean; selectorsFound: string[] };
   dmarc: { ok: boolean; record?: string; policy?: string; issues: string[] };
@@ -43,8 +45,13 @@ export async function checkDomainHealth(domain: string): Promise<DomainHealth> {
   const rec: string[] = [];
   let mxHosts: string[] = [];
   let mxAnswered = false;
+  let nullMx = false;
   try {
-    mxHosts = (await dns.resolveMx(domain)).sort((a, b) => a.priority - b.priority).map((m) => m.exchange);
+    const raw = (await dns.resolveMx(domain)).sort((a, b) => a.priority - b.priority).map((m) => m.exchange);
+    // A null MX comes back as an exchange of "" (or "."). Counting it as a host reported
+    // "mail setup OK" for domains like example.com that refuse all mail.
+    mxHosts = raw.filter((h) => h && h !== ".");
+    nullMx = raw.length > 0 && mxHosts.length === 0;
     mxAnswered = true;
   } catch (e) {
     mxAnswered = DNS_SAYS_NO.has((e as NodeJS.ErrnoException)?.code ?? "");
@@ -87,7 +94,7 @@ export async function checkDomainHealth(domain: string): Promise<DomainHealth> {
     return {
       domain,
       resolved,
-      mx: { ok: mxHosts.length > 0, hosts: mxHosts },
+      mx: { ok: mxHosts.length > 0, hosts: mxHosts, nullMx },
       // Same meaning as the resolved branch below: "present AND without problems". It read
       // `!!spfRec` here, so the same field meant two different things depending on whether
       // DNS had answered - and the branch where it meant less is the one nobody reads
@@ -101,12 +108,14 @@ export async function checkDomainHealth(domain: string): Promise<DomainHealth> {
   }
 
   let score = 0;
-  if (mxHosts.length) score += 25; else rec.push("Add MX records - the domain cannot receive replies");
+  if (mxHosts.length) score += 25;
+  else if (nullMx) rec.push("This domain publishes a null MX (RFC 7505): it refuses all mail, so it cannot receive replies. Replace it with real MX records before sending from it.");
+  else rec.push("Add MX records - the domain cannot receive replies");
   if (spfRec && spfIssues.length === 0) score += 25; else if (spfRec) score += 15;
   if (selectorsFound.length) score += 25; else rec.push("Set up DKIM signing in your email provider (Google Workspace, Zoho, Resend, Brevo)");
   if (dmarcRec && policy !== "none") score += 25; else if (dmarcRec) score += 15;
   if (!spfRec) rec.push("Publish an SPF record, e.g. v=spf1 include:_spf.google.com ~all");
   if (!dmarcRec) rec.push("Publish _dmarc TXT: v=DMARC1; p=quarantine; rua=mailto:dmarc@" + domain);
   if (score >= 90) rec.push("Domain is well configured. Warm up gradually: 10/day -> 50/day over 3 weeks for a new mailbox.");
-  return { domain, resolved, mx: { ok: mxHosts.length > 0, hosts: mxHosts }, spf: { ok: !!spfRec && spfIssues.length === 0, record: spfRec, issues: spfIssues }, dkim: { ok: selectorsFound.length > 0, selectorsFound }, dmarc: { ok: !!dmarcRec && policy !== "none", record: dmarcRec, policy, issues: dmarcIssues }, score, recommendations: rec };
+  return { domain, resolved, mx: { ok: mxHosts.length > 0, hosts: mxHosts, nullMx }, spf: { ok: !!spfRec && spfIssues.length === 0, record: spfRec, issues: spfIssues }, dkim: { ok: selectorsFound.length > 0, selectorsFound }, dmarc: { ok: !!dmarcRec && policy !== "none", record: dmarcRec, policy, issues: dmarcIssues }, score, recommendations: rec };
 }

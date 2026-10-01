@@ -33,7 +33,7 @@ export async function runMonitor(m: Monitor, log: (s: string) => void = () => {}
         // whole engager list every tick, so charging before the upsert billed the org for
         // the same forty people every six hours, forever, while `onConflictDoNothing` kept
         // the result table unchanged. A repeat costs nothing because it produces nothing.
-        const { lead, created } = await upsertLead(m.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, source: "linkedin:post", tags: ["engager", `monitor:${m.id.slice(0, 8)}`] });
+        const { lead, created } = await upsertLead(m.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, source: "linkedin:post", tags: ["engager", `monitor:${m.id.slice(0, 8)}`] }, { fillOnly: true });
         leadId = lead.id;
         if (created) {
           const charge = await tryConsume(db, m.orgId, "leads", 1);

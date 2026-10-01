@@ -80,3 +80,28 @@ describe("sender domain health separates 'no record' from 'could not ask'", () =
     expect(r.spf.ok).toBe(false);
   });
 });
+
+describe("a null MX is not a mail setup", () => {
+  it("treats MX 0 . (RFC 7505) as unable to receive mail", async () => {
+    resolveMx.mockResolvedValue([{ exchange: "", priority: 0 }]);
+    resolveTxt.mockImplementation(async (d: string) => {
+      if (d === "example.com") return [["v=spf1 -all"]];
+      if (d === "_dmarc.example.com") return [["v=DMARC1; p=reject; rua=mailto:x@example.com"]];
+      throw err("ENODATA");
+    });
+    const r = await checkDomainHealth("example.com");
+    expect(r.resolved).toBe(true);
+    expect(r.mx.ok).toBe(false);
+    expect(r.mx.nullMx).toBe(true);
+    expect(r.mx.hosts).toEqual([]);
+    expect(r.recommendations.join(" ")).toMatch(/null MX/);
+  });
+
+  it("no MX at all is also not able to receive mail", async () => {
+    resolveMx.mockRejectedValue(err("ENODATA"));
+    resolveTxt.mockRejectedValue(err("ENODATA"));
+    const r = await checkDomainHealth("nomx.example");
+    expect(r.mx.ok).toBe(false);
+    expect(r.recommendations.join(" ")).toMatch(/Add MX records/);
+  });
+});

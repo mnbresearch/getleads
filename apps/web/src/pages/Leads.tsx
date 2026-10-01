@@ -315,18 +315,20 @@ export function LeadsPage() {
                   onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setDetail(l); } }}
                 >
                   <td className="td" onClick={(e) => e.stopPropagation()}><input type="checkbox" checked={sel.has(l.id)} onChange={(e) => { const s = new Set(sel); e.target.checked ? s.add(l.id) : s.delete(l.id); setSel(s); }} /></td>
-                  <td className="td">
-                    <div className="font-medium">{l.fullName ?? "-"}</div>
-                    <div className="text-xs text-ink-400">{l.title ?? ""}</div>
+                  {/* Capped and truncated, full value on hover: one 600-character name widened
+                      the whole table instead of staying in its column. */}
+                  <td className="td max-w-[16rem]">
+                    <div className="truncate font-medium" title={l.fullName ?? undefined}>{l.fullName ?? "-"}</div>
+                    <div className="truncate text-xs text-ink-400" title={l.title ?? undefined}>{l.title ?? ""}</div>
                     {l.clientId && clientById.get(l.clientId) && (
-                      <span className="mt-1 inline-flex items-center gap-1 text-[11px] text-ink-300"><span className="inline-block h-2 w-2 rounded-full" style={{ background: clientById.get(l.clientId)!.color ?? "#a8987f" }} />{clientById.get(l.clientId)!.name}</span>
+                      <span className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-ink-300"><span className="inline-block h-2 w-2 shrink-0 rounded-full" style={{ background: clientById.get(l.clientId)!.color ?? "#a8987f" }} /><span className="truncate">{clientById.get(l.clientId)!.name}</span></span>
                     )}
                   </td>
-                  <td className="td"><div>{l.company?.name ?? l.company?.domain ?? "-"}</div><div className="text-xs text-ink-400">{l.company?.industry ?? l.company?.domain ?? ""}</div></td>
-                  <td className="td">{l.email ? <div className="text-sm">{l.email}</div> : <span className="text-ink-500">-</span>}<EmailStatusBadge status={l.emailStatus} /></td>
+                  <td className="td max-w-[14rem]"><div className="truncate" title={l.company?.name ?? l.company?.domain ?? undefined}>{l.company?.name ?? l.company?.domain ?? "-"}</div><div className="truncate text-xs text-ink-400">{l.company?.industry ?? l.company?.domain ?? ""}</div></td>
+                  <td className="td max-w-[16rem]">{l.email ? <div className="truncate text-sm" title={l.email}>{l.email}</div> : <span className="text-ink-500">-</span>}<EmailStatusBadge status={l.emailStatus} /></td>
                   <td className="td"><StageBadge status={l.status} /></td>
                   <td className="td"><ScoreBar score={l.score} /></td>
-                  <td className="td text-ink-300">{l.location ?? l.company?.location ?? "-"}</td>
+                  <td className="td max-w-[12rem] text-ink-300"><div className="truncate">{l.location ?? l.company?.location ?? "-"}</div></td>
                   <td className="td whitespace-nowrap text-xs text-ink-400">{fmtDate(l.createdAt)}</td>
                 </tr>
               ))}
@@ -371,7 +373,7 @@ function nameAware<T extends { firstName: string; lastName: string; fullName: st
 
 function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; onClose: () => void; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const [busy, setBusy] = useState<string | null>(null);
-  const [draft, setDraft] = useState<{ subject: string; body: string } | null>(null);
+  const [draft, setDraft] = useState<{ subject: string; body: string; ai?: boolean; note?: string } | null>(null);
   const [brief, setBrief] = useState<{ summary: string; whyNow: string; angles: string[] } | null>(null);
   // PATCH /v1/leads/:id has always existed and nothing called it, so a typo'd email or a
   // stale job title could never be corrected from the app - only re-imported over.
@@ -384,8 +386,8 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
   };
   return (
     <Modal open={!!lead} onClose={onClose} title={lead.fullName ?? "Lead"} wide>
-      <div className="grid gap-5 sm:grid-cols-2">
-        <div className="space-y-2 text-sm">
+      <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 [overflow-wrap:anywhere]">
+        <div className="min-w-0 space-y-2 text-sm">
           <div className="text-ink-400">{lead.title}</div>
           <div className="flex items-center gap-2">
             <span className="text-ink-400">Stage:</span>
@@ -407,7 +409,7 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
           <div className="flex flex-wrap gap-1">{lead.tags.map((t) => <span key={t} className="badge bg-black/[0.05] text-ink-300">{t}</span>)}</div>
           <div className="pt-2"><ScoreBar score={lead.score} /><ul className="mt-1 text-xs text-ink-400">{lead.scoreReasons.map((r, i) => <li key={i}>{r}</li>)}</ul></div>
         </div>
-        <div className="space-y-2 text-sm">
+        <div className="min-w-0 space-y-2 text-sm">
           <div className="font-medium">{lead.company?.name ?? lead.company?.domain ?? "No company"}</div>
           {lead.company && <>
             <div><a className="text-brand-600 hover:underline" href={`https://${lead.company.domain}`} target="_blank" rel="noreferrer">{lead.company.domain} ↗</a> {lead.company.linkedinUrl && <a className="ml-2 text-brand-600 hover:underline" href={lead.company.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}</div>
@@ -491,12 +493,19 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
       <div className="mt-5 flex flex-wrap gap-2 border-t border-black/5 pt-4">
         <button className="btn-secondary" disabled={!!busy} onClick={() => setEditing({ firstName: lead.firstName ?? "", lastName: lead.lastName ?? "", fullName: lead.fullName ?? "", title: lead.title ?? "", email: lead.email ?? "", phone: lead.phone ?? "", linkedinUrl: lead.linkedinUrl ?? "", location: lead.location ?? "" })}>Edit details</button>
         <button className="btn-secondary" disabled={!!busy} onClick={() => act("enrich", () => apiFetch("POST", `/v1/leads/${lead.id}/enrich`).then(() => toast("Enrichment queued")))}>{busy === "enrich" ? "…" : "Enrich"}</button>
-        <button className="btn-secondary" disabled={!!busy || !lead.email} onClick={() => act("verify", () => apiFetch("POST", `/v1/leads/${lead.id}/verify`).then(() => toast("Verified")))}>{busy === "verify" ? "…" : "Verify email"}</button>
+        <button className="btn-secondary" disabled={!!busy || !lead.email} onClick={() => act("verify", () => apiFetch<{ verification?: { status?: string } }>("POST", `/v1/leads/${lead.id}/verify`).then((r) => {
+          // Say what the check found: a bare "Verified" read as a pass even when the
+          // address came back invalid.
+          const st = r.verification?.status ?? "unknown";
+          if (st === "valid") toast("Verified: valid");
+          else if (st === "invalid") toast("Address is invalid", "err");
+          else toast(`Couldn't confirm (${st.replace("_", " ")})`);
+        }))}>{busy === "verify" ? "…" : "Verify email"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>
-        <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
+        <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string; ai?: boolean; note?: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
         {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast("No AI provider configured", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
         <DeleteButton
-          className="btn-danger ml-auto !text-white"
+          className="btn-danger ml-auto"
           what={lead.fullName ?? lead.email ?? "this lead"}
           consequence="Their activity history and list memberships go with them."
           onDelete={async () => { await apiFetch("DELETE", `/v1/leads/${lead.id}`); toast("Lead deleted"); onClose(); onChanged(); }}
@@ -511,10 +520,12 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
           {brief.angles.length > 0 && <ul className="mt-2 list-inside list-disc text-ink-200">{brief.angles.map((a, i) => <li key={i}>{a}</li>)}</ul>}
         </div>
       )}
-      {draft && <div className="mt-4 rounded-lg bg-cream p-3 text-sm"><div className="font-medium">{draft.subject}</div><pre className="mt-2 whitespace-pre-wrap font-sans text-ink-200">{draft.body}</pre><button className="btn-secondary mt-2" onClick={() => navigator.clipboard.writeText(`Subject: ${draft.subject}\n\n${draft.body}`).then(() => toast("Copied"))}>Copy</button></div>}
+      {draft && <div className="mt-4 rounded-lg bg-cream p-3 text-sm">{draft.ai === false && <div className="mb-2"><span className="badge bg-amber-50 text-amber-700 ring-1 ring-amber-200">Template - not AI-written</span>{draft.note && <p className="mt-1 text-xs text-ink-400">{draft.note}</p>}</div>}{draft.ai !== false && draft.note && <p className="mb-2 text-xs text-ink-400">{draft.note}</p>}<div className="font-medium break-words">{draft.subject}</div><pre className="mt-2 whitespace-pre-wrap font-sans text-ink-200">{draft.body}</pre><button className="btn-secondary mt-2" onClick={() => navigator.clipboard.writeText(`Subject: ${draft.subject}\n\n${draft.body}`).then(() => toast("Copied"))}>Copy</button></div>}
     </Modal>
   );
 }
+
+const ADD_LEAD_LABELS = { fullName: "Full name", title: "Title", email: "Email", linkedinUrl: "LinkedIn URL", companyName: "Company name", companyDomain: "Company website", location: "Location" } as const;
 
 function AddLeadModal({ open, onClose, onDone, toast }: { open: boolean; onClose: () => void; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const blank = { fullName: "", title: "", email: "", linkedinUrl: "", companyName: "", companyDomain: "", location: "" };
@@ -534,7 +545,7 @@ function AddLeadModal({ open, onClose, onDone, toast }: { open: boolean; onClose
     <Modal open={open} onClose={onClose} title="Add lead">
       <div className="grid gap-3 sm:grid-cols-2">
         {(["fullName", "title", "email", "linkedinUrl", "companyName", "companyDomain", "location"] as const).map((k) => (
-          <div key={k} className={k === "fullName" ? "sm:col-span-2" : ""}><label className="label">{k.replace(/([A-Z])/g, " $1")}</label><input className="input" value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></div>
+          <div key={k} className={k === "fullName" ? "sm:col-span-2" : ""}><label className="label">{ADD_LEAD_LABELS[k]}</label><input className="input" value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></div>
         ))}
       </div>
       <button className="btn-primary mt-4 w-full justify-center" disabled={busy || !f.fullName} onClick={submit}>{busy ? "Saving…" : "Save lead"}</button>

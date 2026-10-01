@@ -61,6 +61,8 @@ export function parseCsv(text: string): Record<string, string>[] {
  */
 export function csvCell(v: unknown): string {
   let s = String(v ?? "");
-  if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+  // Phone numbers and plain numbers ("+14155550100", "-5", "+1 (415) 555-0100") cannot be
+  // formulas; prefixing them corrupted every exported phone number.
+  if (/^[=+\-@\t\r]/.test(s) && !/^[+-]?[\d\s().-]+$/.test(s)) s = `'${s}`;
   return `"${s.replace(/"/g, '""')}"`;
 }

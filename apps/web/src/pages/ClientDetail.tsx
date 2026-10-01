@@ -18,6 +18,12 @@ interface Detail {
 
 const STAGES = ["new", "contacted", "engaged", "replied", "qualified", "customer", "lost"];
 
+const STATUS_TOAST: Record<string, string> = {
+  active: "Client set to Active",
+  paused: "Client paused",
+  archived: "Client archived - report link disabled",
+};
+
 export function ClientDetailPage() {
   const { id = "" } = useParams();
   const [d, setD] = useState<Detail | null>(null);
@@ -69,6 +75,8 @@ export function ClientDetailPage() {
   const setStatus = async (status: string) => {
     try {
       await apiFetch("PATCH", `/v1/clients/${id}`, { status });
+      // Every status change confirms itself; it used to depend on which path the change took.
+      toast(STATUS_TOAST[status] ?? "Status updated");
       load();
     } catch (e) {
       toast((e as Error).message, "err");
@@ -225,10 +233,16 @@ export function ClientDetailPage() {
             type="checkbox"
             checked={c.reportShowTarget}
             onChange={async (e) => {
+              // Optimistic: the box ticks on click rather than a round-trip later, and goes
+              // back (with the reason) if the server refuses.
+              const next = e.target.checked;
+              const flip = (v: boolean) => setD((prev) => (prev && prev.client.id === id ? { ...prev, client: { ...prev.client, reportShowTarget: v } } : prev));
+              flip(next);
               try {
-                await apiFetch("PATCH", `/v1/clients/${id}`, { reportShowTarget: e.target.checked });
-                load();
+                await apiFetch("PATCH", `/v1/clients/${id}`, { reportShowTarget: next });
+                toast(next ? "Delivery shown in the report" : "Delivery hidden from the report");
               } catch (x) {
+                flip(!next);
                 toast((x as Error).message, "err");
               }
             }}

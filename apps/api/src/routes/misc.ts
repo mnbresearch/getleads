@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import Stripe from "stripe";
+import { isPublicHost } from "@prospex/core";
 import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, inArray, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
 import { sendingHealthForAccount } from "../services/campaigns.js";
 import { icpLearningFor } from "../services/insights.js";
@@ -13,6 +14,17 @@ import { orgId, requireAuth, requireRole, requireUser, type Env } from "../middl
 import { INTEGRATION_PROVIDERS } from "../services/integrations.js";
 /** Channel/data providers configured via the same integrations table (config-only, no lead sync). */
 const CHANNEL_PROVIDERS = ["whatsapp", "apollo", "hunter", "pdl", "ipinfo"];
+/** Credential fields each provider cannot work without (what its sync/send reads). */
+const REQUIRED_CREDENTIALS: Record<string, string[]> = {
+  hubspot: ["accessToken"],
+  pipedrive: ["apiToken"],
+  zoho: ["accessToken"],
+  cortex: ["url"],
+  webhook: ["url"],
+  sheets: ["url"],
+  whatsapp: ["phoneNumberId", "accessToken"],
+};
+const CREDENTIAL_LABELS: Record<string, string> = { accessToken: "access token", apiToken: "API token", url: "URL", phoneNumberId: "phone number ID" };
 
 export const miscRoutes = new Hono<Env>();
 
@@ -125,9 +137,20 @@ miscRoutes.get("/webhooks", requireAuth, async (c) => {
 });
 /** The full signing secret is in this response - shown once at creation, as with API keys. */
 miscRoutes.post("/webhooks", requireAuth, requireRole("owner", "admin"), zValidator("json", z.object({ url: z.string().url(), events: z.array(z.string()).default(["*"]) })), async (c) => {
+  const url = c.req.valid("json").url;
+  // Deliveries to a non-public address are always skipped (SSRF guard in webhook.deliver),
+  // so accepting one created a webhook that silently never fired. Refused up front; in local
+  // development it is allowed, with a warning saying deliveries will be skipped.
+  let warning: string | undefined;
+  if (!/^https?:\/\//i.test(url)) throw badRequest("Webhook URL must start with http:// or https://");
+  if (!isPublicHost(url, { allowUserinfo: true })) {
+    const msg = `${url} is not a public address (localhost, private network or internal host), so Scout cannot deliver to it.`;
+    if (env.nodeEnv !== "development") throw badRequest(`${msg} Use a URL reachable from the internet.`);
+    warning = `${msg} Saved because this server runs in development mode, but deliveries to it will be skipped.`;
+  }
   const { db } = getDb();
-  const [row] = await db.insert(webhooks).values({ orgId: orgId(c), url: c.req.valid("json").url, events: c.req.valid("json").events, secret: randomToken(24) }).returning();
-  return c.json(row, 201);
+  const [row] = await db.insert(webhooks).values({ orgId: orgId(c), url, events: c.req.valid("json").events, secret: randomToken(24) }).returning();
+  return c.json(warning ? { ...row, warning } : row, 201);
 });
 miscRoutes.delete("/webhooks/:id", requireAuth, requireRole("owner", "admin"), async (c) => {
   const { db } = getDb();
@@ -162,6 +185,15 @@ miscRoutes.put("/integrations/:provider", requireAuth, requireRole("owner", "adm
   const provider = c.req.param("provider");
   if (!INTEGRATION_PROVIDERS.includes(provider) && !CHANNEL_PROVIDERS.includes(provider)) throw badRequest(`Unknown provider. Supported: ${[...INTEGRATION_PROVIDERS, ...CHANNEL_PROVIDERS].join(", ")}`);
   const b = c.req.valid("json");
+  // Credentials are checked before anything is saved. An empty token used to be stored and
+  // reported "Connected", and every sync after that failed with nothing pointing at why.
+  const config = Object.fromEntries(Object.entries(b.config).map(([k, v]) => [k, v.trim()]));
+  const required = REQUIRED_CREDENTIALS[provider] ?? [];
+  const missing = required.filter((k) => !config[k]);
+  if (missing.length) throw badRequest(`Missing ${missing.map((k) => CREDENTIAL_LABELS[k] ?? k).join(", ")}: fill in ${missing.length === 1 ? "this field" : "these fields"} to connect ${provider}.`, { missing });
+  if (!required.length && !Object.values(config).some(Boolean)) throw badRequest(`Enter the credentials for ${provider} before saving the connection.`);
+  if (config.url && !/^https?:\/\/[^\s]+$/i.test(config.url)) throw badRequest("URL must be a full http(s):// address.");
+  b.config = config;
   const { db } = getDb();
   const [row] = await db
     .insert(integrations)
@@ -236,6 +268,15 @@ miscRoutes.post("/billing/webhook", async (c) => {
    * `limitsFor("pro")` - whatever that resolves to - and an admin page that could not name
    * its plan. An unknown plan is logged and left alone, for a person to sort out.
    */
+  /**
+   * Admin overrides are stored merged into planLimits (admin.ts PATCH /orgs/:id/plan writes
+   * `{ ...limitsFor(plan), ...overrides }`), so they are whatever differs from the plan's defaults.
+   */
+  const adminOverrides = (oldPlan: string, current: unknown): Record<string, unknown> => {
+    const defaults = limitsFor(oldPlan) as unknown as Record<string, unknown>;
+    const cur = (current ?? {}) as Record<string, unknown>;
+    return Object.fromEntries(Object.entries(cur).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(defaults[k])));
+  };
   const planForPrice = (priceId: string | undefined | null) => (priceId ? Object.keys(PLANS).find((p) => env.stripe.priceForPlan(p) === priceId) : undefined);
   if (event.type === "checkout.session.completed") {
     const s = event.data.object as Stripe.Checkout.Session;
@@ -257,8 +298,19 @@ miscRoutes.post("/billing/webhook", async (c) => {
       // A plan switch made in the Stripe portal arrives here, as a new price on the item.
       const priceId = sub.items?.data?.[0]?.price?.id;
       const plan = planForPrice(priceId);
-      if (plan) await db.update(organizations).set({ plan, planLimits: limitsFor(plan), stripeSubscriptionId: sub.id }).where(eq(organizations.stripeCustomerId, customer));
-      else console.error(`[billing] subscription ${sub.id} has price ${priceId} that maps to no STRIPE_PRICE_<PLAN>; plan NOT changed`);
+      if (plan) {
+        // This event fires on every renewal, not just plan switches. Rewriting planLimits
+        // each time wiped whatever an admin had granted. Same plan: only the subscription id
+        // is refreshed. New plan: the new plan's limits, with admin overrides carried over.
+        const orgs = await db.query.organizations.findMany({ where: eq(organizations.stripeCustomerId, customer) });
+        for (const org of orgs) {
+          if (org.plan === plan) {
+            if (org.stripeSubscriptionId !== sub.id) await db.update(organizations).set({ stripeSubscriptionId: sub.id }).where(eq(organizations.id, org.id));
+            continue;
+          }
+          await db.update(organizations).set({ plan, planLimits: { ...limitsFor(plan), ...adminOverrides(org.plan, org.planLimits) }, stripeSubscriptionId: sub.id }).where(eq(organizations.id, org.id));
+        }
+      } else console.error(`[billing] subscription ${sub.id} has price ${priceId} that maps to no STRIPE_PRICE_<PLAN>; plan NOT changed`);
     }
     // past_due and incomplete: Stripe is still retrying payment; nothing changes yet.
   }

@@ -195,11 +195,47 @@ suite("hardening: jobs and sending", () => {
       expect(second.sent).toBe(0);
     });
 
-    it("keys the cap on the campaign's local date", () => {
+    it("localDate still reports the campaign's local date (used for the send window)", () => {
       // 2026-10-02 03:00 UTC is still Oct 1 in New York.
       const t = new Date("2026-10-02T03:00:00Z");
       expect(campaignsSvc.localDate("America/New_York", t)).toBe("2026-10-01");
       expect(campaignsSvc.localDate("UTC", t)).toBe("2026-10-02");
+    });
+
+    it("keys the shared account's counter on one UTC date, so campaigns in different zones do not reset each other", async () => {
+      // Two campaigns, far-apart time zones, one sender at cap 2. Keyed by each campaign's
+      // local date they alternately reset the counter and 6 of 6 sends went through.
+      const tzA = { timezone: "Pacific/Kiritimati", sendWindow: ALL_DAY.sendWindow };
+      const tzB = { timezone: "Pacific/Pago_Pago", sendWindow: ALL_DAY.sendWindow };
+      const { org, acct, campaign: cA, step: sA } = await setup({ dailyLimit: 2, campaignPatch: { settings: { ...tzA, dailyLimit: 500 } } });
+      const [cB] = await db.insert(schema.campaigns).values({ orgId: org.id, name: "B", emailAccountId: acct.id, status: "active", settings: { ...tzB, dailyLimit: 500 } }).returning();
+      const [sB] = await db.insert(schema.sequenceSteps).values({ campaignId: cB.id, stepNo: 1, channel: "email", subjectTemplate: "Hi", bodyTemplate: "Hello" }).returning();
+      let sent = 0;
+      for (let i = 0; i < 3; i++) {
+        const a = await newContact(org.id, cA.id);
+        const b = await newContact(org.id, cB.id);
+        if ((await campaignsSvc.sendStep(cA.id, a.cc.id, sA.id, { attempt: 1 })).sent) sent++;
+        if ((await campaignsSvc.sendStep(cB.id, b.cc.id, sB.id, { attempt: 1 })).sent) sent++;
+      }
+      expect(sent).toBe(2);
+      const a = await db.query.emailAccounts.findFirst({ where: schema.eq(schema.emailAccounts.id, acct.id) });
+      expect(a.sentTodayDate).toBe(campaignsSvc.accountDay());
+      expect(await usageOf(org.id, "emails")).toBe(2);
+    });
+
+    it("refunds the email charge when reserving the daily slot hits a database fault", async () => {
+      const { org, campaign, step } = await setup();
+      const { cc } = await newContact(org.id, campaign.id);
+      const sqlText = (q: any) => (q?.queryChunks ?? []).map((c: any) => (Array.isArray(c?.value) ? c.value.join("") : "")).join("");
+      const orig = db.execute.bind(db);
+      const spy = vi.spyOn(db, "execute").mockImplementation(((q: any) => {
+        if (/UPDATE email_accounts SET\s+sent_today/.test(sqlText(q))) return Promise.reject(new Error("connection reset"));
+        return orig(q);
+      }) as never);
+      await expect(campaignsSvc.sendStep(campaign.id, cc.id, step.id, { attempt: 1 })).rejects.toThrow(/connection reset/);
+      spy.mockRestore();
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      expect(mail.calls).toHaveLength(0);
     });
   });
 
@@ -517,6 +553,48 @@ suite("hardening: jobs and sending", () => {
       await db.insert(schema.jobs).values({ type: sched, payload: { recurring: true }, priority: 0 });
       const claimed = await schema.claimJob(db, "w-test", [busy, sched]);
       expect(claimed.type).toBe(sched);
+    });
+
+    it("a claimed job's final failure is recorded, not thrown (it used to crash the process)", async () => {
+      const type = `t.${uid()}`;
+      await schema.enqueue(db, type, {}, { maxAttempts: 1 });
+      const claimed = await schema.claimJob(db, "w-final", [type]);
+      // The claimed row came through raw SQL; its timestamps must be real Dates.
+      expect(claimed.runAt).toBeInstanceOf(Date);
+      expect(claimed.createdAt).toBeInstanceOf(Date);
+      const handlers = { [type]: async () => { throw new Error("unreachable host"); } };
+      await expect(schema.runJob(db, claimed, handlers, () => {})).resolves.toBeUndefined();
+      const row = await db.query.jobs.findFirst({ where: schema.eq(schema.jobs.id, claimed.id) });
+      expect(row.status).toBe("failed");
+      expect(row.error).toMatch(/unreachable host/);
+      // A row shaped the old way (string runAt) must not throw either.
+      const [j2] = await db.insert(schema.jobs).values({ type, status: "running", attempts: 3, maxAttempts: 3, lockedBy: "w-old" }).returning();
+      await expect(schema.failJob(db, { ...j2, runAt: "2026-01-01 00:00:00+00", createdAt: "2026-01-01" }, new Error("x"))).resolves.toBe(true);
+    });
+
+    it("a fault while recording a job's outcome is logged, never thrown", async () => {
+      const type = `t.${uid()}`;
+      const [j] = await db.insert(schema.jobs).values({ type, status: "running", attempts: 1, lockedAt: new Date(), lockedBy: "w-rec" }).returning();
+      const logs: string[] = [];
+      // A BigInt cannot be serialised into the result column, so completeJob throws.
+      const handlers = { [type]: async () => ({ n: BigInt(1) }) as never };
+      await expect(schema.runJob(db, j, handlers, (m: string) => logs.push(m))).resolves.toBeUndefined();
+      expect(logs.join("\n")).toMatch(/could not record outcome/);
+    });
+
+    it("runJobById runs only the named job, not the backlog ahead of it", async () => {
+      const type = `t.${uid()}`;
+      const ran: string[] = [];
+      const first = await schema.enqueue(db, type, { n: 1 }, { priority: 9 });
+      const mine = await schema.enqueue(db, type, { n: 2 });
+      const handlers = { [type]: async (job: any) => { ran.push(job.id); return { ok: true }; } };
+      expect(await schema.runJobById(db, handlers, mine.id)).toBe(true);
+      expect(ran).toEqual([mine.id]);
+      expect((await db.query.jobs.findFirst({ where: schema.eq(schema.jobs.id, first.id) })).status).toBe("queued");
+      expect((await db.query.jobs.findFirst({ where: schema.eq(schema.jobs.id, mine.id) })).status).toBe("done");
+      // Already done: not claimable again.
+      expect(await schema.runJobById(db, handlers, mine.id)).toBe(false);
+      await db.update(schema.jobs).set({ status: "done" }).where(schema.eq(schema.jobs.id, first.id));
     });
   });
 

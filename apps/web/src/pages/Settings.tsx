@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes } from "react-router-dom";
 import { API_URL, apiFetch, fmtDate } from "../lib/api";
+import { limitLabel, metricLabel } from "../lib/metrics";
 import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/ui";
 
 type Role = "owner" | "admin" | "member";
@@ -36,7 +37,7 @@ export function SettingsPage() {
   const tabs = [["", "Workspace"], ["team", "Team"], ["api-keys", "API keys"], ["webhooks", "Webhooks"], ["integrations", "Integrations"], ["billing", "Plan & usage"]];
   return (
     <Page title="Settings">
-      <div className="mb-4 flex gap-1 border-b border-black/10">{tabs.map(([p, l]) => <NavLink key={p} to={`/settings/${p}`} end className={({ isActive }) => `px-3 py-2 text-sm ${isActive ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`}>{l}</NavLink>)}</div>
+      <div className="-mx-4 mb-4 flex gap-1 overflow-x-auto whitespace-nowrap border-b border-black/10 px-4 sm:mx-0 sm:px-0">{tabs.map(([p, l]) => <NavLink key={p} to={`/settings/${p}`} end className={({ isActive }) => `shrink-0 px-3 py-2 text-sm ${isActive ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`}>{l}</NavLink>)}</div>
       <Routes>
         <Route path="/" element={<Workspace />} />
         <Route path="/api-keys" element={<ApiKeys />} />
@@ -166,7 +167,7 @@ function ApiKeys() {
         <div className="mb-2 font-medium">Use with AI agents</div>
         <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-600" href={`${API_URL}/openapi.json`} target="_blank" rel="noreferrer">{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">/docs</a>.</p>
         <p className="mt-2 text-ink-300">MCP (Claude Desktop, Claude Code, Cursor):</p>
-        <pre className="mt-1 overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{`{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
+        <pre className="mt-1 max-w-full overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{`{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
     "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "${API_URL}" } } } }`}</pre>
       </div>
     </div>
@@ -324,7 +325,7 @@ function Billing() {
   return (
     <div className="space-y-4">
       <div className="card p-5"><div className="mb-3 font-medium">Current plan: <span className="capitalize">{u.plan}</span> · {u.period}</div>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">{Object.entries(u.usage).map(([k, v]) => <div key={k} className="rounded-lg border border-black/10 p-3"><div className="text-xs capitalize text-ink-400">{k.replace(/([A-Z])/g, " $1")}</div><div className="text-lg font-semibold">{v.used.toLocaleString()} <span className="text-xs font-normal text-ink-500">/ {v.limit.toLocaleString()}</span></div></div>)}</div>
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">{Object.entries(u.usage).map(([k, v]) => <div key={k} className="rounded-lg border border-black/10 p-3"><div className="text-xs text-ink-400">{metricLabel(k)}</div><div className="text-lg font-semibold">{v.used.toLocaleString()} <span className="text-xs font-normal text-ink-500">/ {limitLabel(k, v.limit)}</span></div></div>)}</div>
         {plans.pilotMode && <p className="mt-3 text-sm text-emerald-600">Pilot mode: everything is free during the pilot. Limits reset monthly.</p>}
       </div>
       <div className="grid gap-3 md:grid-cols-4">{/* "pilot" is an internal plan, hidden here exactly as on the landing page - unless it

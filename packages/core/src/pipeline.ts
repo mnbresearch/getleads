@@ -7,7 +7,7 @@ import { completeJson, hasAi } from "./ai/provider.js";
 import { findCompanies, resolveCompanyDomain } from "./discovery/companies.js";
 import { findPeople } from "./discovery/people.js";
 import { crawlCompanyWebsite } from "./enrich/website.js";
-import { findEmail } from "./email/find.js";
+import { BULK_FIND_DEFAULTS, findEmail, type FindEmailOptions } from "./email/find.js";
 import { verifyEmail, type VerifyOptions } from "./email/verify.js";
 import { scoreLeadRules, type IcpCriteria } from "./icp/score.js";
 import { inferDepartment, inferSeniority } from "./util/names.js";
@@ -31,7 +31,7 @@ export interface PipelineLead extends PersonCandidate {
 
 export interface PipelineOptions {
   ai?: AiProvider;
-  verify?: VerifyOptions;
+  verify?: FindEmailOptions;
   icp?: IcpCriteria;
   onProgress?: (pct: number, msg: string) => void;
   companyCache?: Map<string, CompanyProfile>;
@@ -215,7 +215,9 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
         const prof = cache.get(lead.companyDomain);
         const r = await findEmail(
           { firstName: lead.firstName, lastName: lead.lastName, domain: lead.companyDomain, knownPattern: prof?.emailPattern, knownEmails: prof?.emailsFound },
-          opts.verify,
+          // Bulk path: one pay-as-you-go check per lead unless the caller says otherwise. Three
+          // paid checks per lead across every search/autopilot run was a cost blow-up.
+          { ...BULK_FIND_DEFAULTS, ...opts.verify },
         ).catch((e) => {
           emailErrors.push((e as Error).message ?? String(e));
           return null;

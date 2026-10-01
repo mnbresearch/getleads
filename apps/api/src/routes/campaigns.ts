@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions } from "@prospex/db";
-import { generateOutreach, classifyReply, draftReplyToInbound, isPublicHost } from "@prospex/core";
+import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, isPublicHost } from "@prospex/core";
 import { lookup } from "node:dns/promises";
 import { aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
@@ -108,15 +108,15 @@ const settingsInput = z.object({
   trackOpens: z.boolean().optional(),
   trackClicks: z.boolean().optional(),
   unsubscribeFooter: z.boolean().optional(),
-  senderName: z.string().optional(),
-  senderCompany: z.string().optional(),
-  senderTitle: z.string().optional(),
-  valueProp: z.string().optional(),
+  senderName: z.string().max(200).optional(),
+  senderCompany: z.string().max(200).optional(),
+  senderTitle: z.string().max(300).optional(),
+  valueProp: z.string().max(5000).optional(),
   tone: z.enum(["friendly", "direct", "formal", "casual"]).optional(),
 });
 // The references are nullable so a PATCH can detach them (`listId: null`), and so a body
 // read back from GET - where an unset reference is null - is accepted as-is.
-const campaignInput = z.object({ name: z.string().min(1), icpId: z.string().uuid().nullish(), listId: z.string().uuid().nullish(), emailAccountId: z.string().uuid().nullish(), clientId: z.string().uuid().nullish(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
+const campaignInput = z.object({ name: z.string().min(1).max(200), icpId: z.string().uuid().nullish(), listId: z.string().uuid().nullish(), emailAccountId: z.string().uuid().nullish(), clientId: z.string().uuid().nullish(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
 
 campaignRoutes.get("/", async (c) => {
   const { db } = getDb();
@@ -269,7 +269,10 @@ campaignRoutes.post("/:id/start", async (c) => {
   await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(eq(campaigns.id, cp.id));
   await emitEvent(oid, "campaign.started", { campaignId: cp.id }, { type: "campaign", id: cp.id });
   const tick = await tickCampaign(cp.id);
-  return c.json({ status: "active", tick });
+  // Starting an empty campaign is allowed (contacts can be enrolled later), but it must not
+  // look like sending has begun.
+  const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(campaignContacts).where(eq(campaignContacts.campaignId, cp.id));
+  return c.json({ status: "active", tick, contacts: n, ...(n === 0 ? { warning: "This campaign has no contacts yet - enroll leads to start sending." } : {}) });
 });
 
 campaignRoutes.post("/:id/pause", async (c) => {
@@ -375,8 +378,18 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
     lead = { firstName: l.firstName ?? undefined, lastName: l.lastName ?? undefined, fullName: l.fullName ?? undefined, title: l.title ?? undefined, company: co ? { name: co.name ?? undefined, domain: co.domain, industry: co.industry ?? undefined, description: co.description ?? undefined } : undefined };
   }
   if (!lead) throw badRequest("lead or leadId required");
-  await consume(db, oid, "aiMessages", 1);
-  return c.json(await generateOutreach(aiFor(c.get("auth")), { lead, sender: b.sender, instructions: b.instructions, stepNo: b.stepNo, language: b.language }));
+  const ai = aiFor(c.get("auth"));
+  const aiConfigured = hasAi(ai);
+  // No engine: nothing to meter, and the answer must say it is a template. It used to come
+  // back looking like a personalised draft (and was charged as an AI message).
+  if (aiConfigured) await consume(db, oid, "aiMessages", 1);
+  const out = await generateOutreach(ai, { lead, sender: b.sender, instructions: b.instructions, stepNo: b.stepNo, language: b.language });
+  const personalised = !!(out as { personalized?: boolean }).personalized;
+  return c.json({
+    ...out,
+    ai: personalised,
+    ...(personalised ? {} : { note: aiConfigured ? "The AI engine did not return a usable draft - this is a template, not a personalised draft." : "No AI engine configured - this is a template, not a personalised draft." }),
+  });
 });
 
 /** Positive-signal intents worth drafting an AI follow-up for. */

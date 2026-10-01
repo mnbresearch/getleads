@@ -63,3 +63,24 @@ describe("AI answer analysis ranks by where a brand really appears", () => {
     expect(r.usable).toBe(true);
   });
 });
+
+describe("starter questions read naturally", async () => {
+  const { starterPack, categoryPhrase, pluralRole } = await import("./templates.js");
+  it("turns a bare qualifier into a product phrase", () => {
+    expect(categoryPhrase("B2B").product).toBe("B2B software");
+    expect(categoryPhrase("").product).toBe("B2B software");
+    expect(categoryPhrase("CRM").product).toBe("CRM");
+    expect(categoryPhrase("lead generation platform").withArticle).toBe("a lead generation platform");
+    expect(categoryPhrase("B2B").withArticle).toBe("B2B software");
+  });
+  it("pluralises the audience role", () => {
+    expect(pluralRole("Founder")).toBe("founders");
+    expect(pluralRole("CEO")).toBe("CEOs");
+    expect(pluralRole("Head of Sales")).toBe("heads of Sales");
+  });
+  it("never asks 'What is the best B2B for ...'", () => {
+    const pack = starterPack({ brand: "Scout", category: "B2B", audience: "founders at software companies" });
+    expect(pack[0].text).toBe("What is the best B2B software for founders at software companies?");
+    for (const p of pack) expect(p.text).not.toMatch(/best B2B for|choosing a B2B software/);
+  });
+});

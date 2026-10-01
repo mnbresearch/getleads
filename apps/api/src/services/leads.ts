@@ -145,14 +145,16 @@ export async function upsertLead(orgId: string, input: UpsertLeadInput, opts: Up
     // don't downgrade a verified email to unknown
     if (existing.emailStatus === "valid" && clean.emailStatus && clean.emailStatus !== "valid" && clean.email === existing.email) delete clean.emailStatus;
 
-    // Tags and custom fields are merged, never replaced. Replacing them dropped every tag
-    // a user had added (and every `search:`/`saved:` provenance tag from earlier runs) the
-    // moment the same person turned up again, and wiped custom fields such as
-    // `invalidEmails` that exist precisely so a bad address is never resurrected.
-    if (clean.tags) clean.tags = [...new Set([...(existing.tags ?? []), ...clean.tags])];
-    if (clean.custom) clean.custom = { ...(existing.custom ?? {}), ...clean.custom };
-
     if (opts.fillOnly) {
+      // A rediscovery merges tags and custom fields, never replaces them. Replacing dropped
+      // every tag a user had added (and every `search:`/`saved:` provenance tag from earlier
+      // runs) the moment the same person turned up again, and wiped custom fields such as
+      // `invalidEmails` that exist precisely so a bad address is never resurrected.
+      // Manual edits, API writes and imports (no fillOnly) still overwrite: that is how a
+      // caller removes a tag.
+      if (clean.tags) clean.tags = [...new Set([...(existing.tags ?? []), ...clean.tags])];
+      if (clean.custom) clean.custom = { ...(existing.custom ?? {}), ...clean.custom };
+
       // Scalar fields: only fill what is empty. A rediscovery is a scrape and must not undo
       // a correction a person made.
       const fillable = ["firstName", "lastName", "fullName", "title", "seniority", "department", "linkedinUrl", "phone", "location", "country", "companyId", "icpId"] as const;
@@ -258,4 +260,19 @@ export async function countLeads(orgId: string) {
   const { db } = getDb();
   const [r] = await db.select({ n: sql<number>`count(*)::int` }).from(leads).where(eq(leads.orgId, orgId));
   return r.n;
+}
+
+/**
+ * Which verifier gave this verdict, for leads.email_verified_by. Null when no external
+ * verifier or SMTP probe actually answered (a syntax rule or "probe disabled" is not a
+ * verification, and must not be stamped as one).
+ */
+export function verifierOf(v: { reason?: string | null; verifiedBy?: string | null }): string | null {
+  const by = v.verifiedBy ?? "";
+  if (/^(reoon|millionverifier|hunter|abstract):/i.test(by) || by === "smtp") return by.slice(0, 80);
+  if (by) return null; // a local check ("syntax", "dns", "mx-only") is not a verification
+  const r = v.reason ?? "";
+  if (/^(reoon|millionverifier|hunter|abstract):/i.test(r)) return r.slice(0, 80);
+  if (/^SMTP (accepted|rejected)/.test(r)) return "smtp";
+  return null;
 }

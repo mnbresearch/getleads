@@ -49,9 +49,11 @@ toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("
   let providerBudget = await remainingPremiumBudget(db, oid);
   /** Set once saving has to stop; the lookups still run, nothing more is stored. */
   let saveStopped: string | undefined;
+  let saved = 0;
+  let skipped = 0;
   const results = await pMap(b.urls, async (url) => {
-    const p = await resolveLinkedinUrl(url).catch(() => null);
-    if (!p) return { url, found: false };
+    const resolved = await resolveLinkedinUrl(url).catch(() => null);
+    if (!resolved) return { url, found: false, reason: "Could not read this profile." };
     let viaProvider = null as Awaited<ReturnType<typeof enrichWithProviders>> | null;
     if (providerBudget > 0) {
       providerBudget--;
@@ -61,6 +63,13 @@ toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("
       // past the limit was simply never written down.
       if (viaProvider) await consume(db, oid, "premiumLeads", 1, { allowOverage: true });
     }
+    // A name read off the URL slug ("another-ee-1a2b3c" -> "Another Ee") is a guess, not a
+    // person. It is only good enough to search for an email with; on its own it is not a
+    // result and never a lead. A provider's name, or the profile page's, replaces it.
+    const slugOnly = resolved.source === "linkedin:slug";
+    const providerName = viaProvider?.fullName?.trim() ? viaProvider.fullName.trim() : null;
+    const p = providerName && slugOnly ? { ...resolved, ...splitFullName(providerName), fullName: providerName } : resolved;
+    const nameResolved = !slugOnly || !!providerName;
     let domain = viaProvider?.companyDomain ?? (p.companyName ? await resolveCompanyDomain(p.companyName).catch(() => null) : null);
     let email = viaProvider?.email;
     let status = viaProvider?.emailStatus;
@@ -71,20 +80,38 @@ toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("
       status = r.status;
       confidence = r.confidence;
     }
+    if (!nameResolved && !email) {
+      if (b.save) skipped++;
+      return { url, found: false, reason: "Profile not readable and no email found; the name in the URL alone is not enough to identify the person.", guessedName: p.fullName };
+    }
     let leadId: string | undefined;
+    let saveSkipped: string | undefined;
     if (b.save && !saveStopped) {
       // `save` used to store every lead without charging the leads quota at all. A new lead
       // is charged before it is stored; one the org already has is a free update.
       const input = { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title ?? viaProvider?.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName: p.companyName ?? viaProvider?.companyName, companyDomain: domain, email, emailStatus: status, emailConfidence: confidence, source: "linkedin_url" };
       const isNew = !(await findExistingLead(oid, input));
       const charge = isNew ? await tryConsume(db, oid, "leads", 1) : ({ ok: true } as const);
-      if (charge.ok) leadId = (await upsertLead(oid, input, { fillOnly: true })).lead.id;
-      else saveStopped = charge.reason === "quota" ? `Saving stopped: ${charge.message}` : `Saving stopped: could not record usage (${charge.message})`;
+      if (charge.ok) {
+        leadId = (await upsertLead(oid, input, { fillOnly: true })).lead.id;
+        saved++;
+      } else saveStopped = charge.reason === "quota" ? `Saving stopped: ${charge.message}` : `Saving stopped: could not record usage (${charge.message})`;
     }
-    return { url, found: true, person: { ...p, companyDomain: domain }, email, emailStatus: status, confidence, leadId };
+    if (b.save && !leadId) {
+      skipped++;
+      saveSkipped = saveStopped ?? "not saved";
+    }
+    return { url, found: true, person: { ...p, companyDomain: domain }, nameSource: slugOnly ? (providerName ? "provider" : "url") : "profile", email, emailStatus: status, confidence, leadId, ...(saveSkipped ? { saveSkipped } : {}) };
   }, 3);
-  return c.json({ results, saveStopped, skipped: saveStopped ? "quota" : undefined });
+  const found = results.filter((r) => r.found).length;
+  return c.json({ results, saveStopped, skipped: saveStopped ? "quota" : undefined, counts: { requested: b.urls.length, found, notFound: b.urls.length - found, saved, skipped } });
 });
+
+/** "Jane van Doe" -> first "Jane", last "van Doe". */
+function splitFullName(full: string): { firstName?: string; lastName?: string } {
+  const parts = full.split(/\s+/).filter(Boolean);
+  return { firstName: parts[0], lastName: parts.length > 1 ? parts.slice(1).join(" ") : undefined };
+}
 
 /** Email(s) → LinkedIn URL + name/title. */
 toolRoutes.post("/email-to-linkedin", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ emails: z.array(z.string().email()).min(1).max(25) })), async (c) => {
@@ -247,8 +274,11 @@ toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json
     })
     .where(eq(companies.id, company.id));
 
+  // orgId is internal bookkeeping, not something a tool result should show; the company's
+  // own id stays (it is how /v1/companies/:id addresses it).
+  const { orgId: _org, ...publicCompany } = company;
   return c.json({
-    company: { ...company, openRoles: hiringOk ? hiring!.openRoles : company.openRoles, intentScore: scoreIsReal ? intent : company.intentScore },
+    company: { ...publicCompany, openRoles: hiringOk ? hiring!.openRoles : company.openRoles, intentScore: scoreIsReal ? intent : company.intentScore },
     hiring,
     news: items.slice(0, 20),
     // Say which inputs were actually gathered, so a caller is never left reading a stale
@@ -308,7 +338,7 @@ toolRoutes.get("/saved-searches", async (c) => {
   const { db } = getDb();
   return c.json({ savedSearches: await db.select().from(savedSearches).where(eq(savedSearches.orgId, orgId(c))).orderBy(desc(savedSearches.createdAt)) });
 });
-toolRoutes.post("/saved-searches", zValidator("json", z.object({ name: z.string().min(1), query: z.record(z.unknown()), alert: z.boolean().default(false), alertEmail: z.string().email().optional(), listId: z.string().uuid().optional(), clientId: z.string().uuid().optional() })), async (c) => {
+toolRoutes.post("/saved-searches", zValidator("json", z.object({ name: z.string().min(1).max(200), query: z.record(z.unknown()), alert: z.boolean().default(false), alertEmail: z.string().email().optional(), listId: z.string().uuid().optional(), clientId: z.string().uuid().optional() })), async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const { clientId, ...b } = c.req.valid("json");
@@ -499,7 +529,7 @@ toolRoutes.delete("/team/:userId", requireUser, async (c) => {
 
 // ── Autopilot ──
 // References are nullable: GET returns null for an unset one, and PATCH null detaches it.
-const apInput = z.object({ name: z.string().min(1), query: z.record(z.unknown()), icpId: z.string().uuid().nullish(), listId: z.string().uuid().nullish(), campaignId: z.string().uuid().nullish(), dailyLeads: z.number().int().min(1).max(200).default(10), minScore: z.number().int().min(0).max(100).default(60), requireValidEmail: z.boolean().default(true), autoEnroll: z.boolean().default(false), active: z.boolean().default(true), runHourUtc: z.number().int().min(0).max(23).default(3) });
+const apInput = z.object({ name: z.string().min(1).max(200), query: z.record(z.unknown()), icpId: z.string().uuid().nullish(), listId: z.string().uuid().nullish(), campaignId: z.string().uuid().nullish(), dailyLeads: z.number().int().min(1).max(200).default(10), minScore: z.number().int().min(0).max(100).default(60), requireValidEmail: z.boolean().default(true), autoEnroll: z.boolean().default(false), active: z.boolean().default(true), runHourUtc: z.number().int().min(0).max(23).default(3) });
 toolRoutes.get("/autopilots", async (c) => {
   const { db } = getDb();
   return c.json({ autopilots: await db.select().from(autopilots).where(eq(autopilots.orgId, orgId(c))).orderBy(desc(autopilots.createdAt)) });

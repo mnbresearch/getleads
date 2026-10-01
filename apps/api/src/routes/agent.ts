@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { QuotaExceededError, consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
-import { generateOutreach, runLeadPipeline } from "@prospex/core";
+import { generateOutreach, runLeadPipelineDetailed } from "@prospex/core";
 import { aiFor } from "../lib/ai.js";
 import { env } from "../env.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
@@ -38,7 +38,8 @@ agentRoutes.post(
     await consume(db, oid, "searches", 1);
     const ai = aiFor(c.get("auth"));
     const providerBudget = await remainingPremiumBudget(db, oid);
-    const results = await runLeadPipeline({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey }, country: b.country, maxProviderLeads: providerBudget });
+    // Detailed, so an agent (and the console) can tell "nobody matched" from "no source could answer".
+    const { leads: results, providerFailures, notes } = await runLeadPipelineDetailed({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey }, country: b.country, maxProviderLeads: providerBudget });
     const out = [];
     /** Set when a quota or a fault stopped part of this run. Reported, not swallowed. */
     let emailSkipped: string | null = null;
@@ -92,6 +93,12 @@ agentRoutes.post(
       // An agent acting on this needs to know the difference between "that is everything"
       // and "we stopped early", and which of the two reasons it was.
       skipped: saveSkipped || emailSkipped ? { saving: saveSkipped ?? undefined, drafting: emailSkipped ?? undefined } : undefined,
+      providerFailures: providerFailures.length ? providerFailures : undefined,
+      note:
+        out.length === 0 && providerFailures.length
+          ? `No leads came back because ${providerFailures.length === 1 ? "a data source" : `${providerFailures.length} data sources`} could not answer: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nobody matching.`
+          : undefined,
+      notes: notes?.length ? notes : undefined,
       next: "Use POST /v1/campaigns to sequence these leads, or POST /v1/integrations/{provider}/sync to push to a CRM.",
     });
   },

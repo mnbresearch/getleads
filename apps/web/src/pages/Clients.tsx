@@ -345,7 +345,8 @@ function SuggestionTable({ title, rows, done, onAssign, contested }: { title: st
     <div>
       <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-400">{title}</div>
       <div className="max-h-80 overflow-auto rounded-lg border border-black/10">
-        <table className="w-full text-sm">
+        {/* Inside its own scroll box; long names wrap anywhere rather than widen the modal. */}
+        <table className="w-full text-sm [overflow-wrap:anywhere]">
           <tbody className="divide-y divide-black/[0.05]">
             {rows.map((s) => (
               <tr key={s.leadId} className={done.has(s.leadId) ? "opacity-40" : ""}>
@@ -371,8 +372,8 @@ function SuggestionTable({ title, rows, done, onAssign, contested }: { title: st
                     <span className="text-xs text-emerald-700">Assigned</span>
                   ) : contested && s.best && s.runnerUp ? (
                     <div className="flex justify-end gap-1">
-                      <button className="btn-secondary py-1 text-xs" onClick={() => onAssign(s.leadId, s.best!.clientId)}>{s.best.clientName}</button>
-                      <button className="btn-secondary py-1 text-xs" onClick={() => onAssign(s.leadId, s.runnerUp!.clientId)}>{s.runnerUp.clientName}</button>
+                      <button className="btn-secondary max-w-[8rem] py-1 text-xs" title={s.best.clientName} onClick={() => onAssign(s.leadId, s.best!.clientId)}><span className="truncate">{s.best.clientName}</span></button>
+                      <button className="btn-secondary max-w-[8rem] py-1 text-xs" title={s.runnerUp.clientName} onClick={() => onAssign(s.leadId, s.runnerUp!.clientId)}><span className="truncate">{s.runnerUp.clientName}</span></button>
                     </div>
                   ) : s.best ? (
                     <button className="btn-secondary py-1 text-xs" onClick={() => onAssign(s.leadId, s.best!.clientId)}>Assign</button>

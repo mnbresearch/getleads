@@ -42,7 +42,9 @@ export interface DiscoveryOptions {
 
 export interface DiscoveryResult {
   runId: string;
-  status: "completed" | "failed" | "blocked";
+  /** "quota": not run because the workspace's searches quota is spent (HTTP 402), distinct
+   * from "blocked" (every data source refused us). */
+  status: "completed" | "failed" | "blocked" | "quota";
   query: string;
   /** Leads the pipeline returned, before quota and dedupe. */
   found: number;
@@ -95,8 +97,10 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
       const charge = await tryConsume(db, orgIdValue, "searches", 1);
       if (!charge.ok) {
         const note = charge.reason === "quota" ? `Not run: ${charge.message}` : `Not run: could not record search usage (${charge.message})`;
+        // The run row keeps "blocked" (run history already shows it as "did not run"); the
+        // result says "quota" so the route can answer 402 rather than "providers unavailable".
         await finish({ status: charge.reason === "quota" ? "blocked" : "failed", error: note }, 0);
-        return { runId: run.id, status: charge.reason === "quota" ? "blocked" : "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error: charge.reason === "error" ? note : undefined, quotaStopped: charge.reason === "quota" ? charge.message : undefined, note };
+        return { runId: run.id, status: charge.reason === "quota" ? "quota" : "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error: charge.reason === "error" ? note : undefined, quotaStopped: charge.reason === "quota" ? charge.message : undefined, note };
       }
     }
 

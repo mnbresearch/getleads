@@ -375,7 +375,8 @@ suite("route hardening", () => {
     const r = await req("POST", "/v1/icps", A.token, { nope: true });
     expect(r.status).toBe(400);
     expect(r.body.error.code).toBe("validation_error");
-    expect(r.body.error.message).toMatch(/^name: /);
+    expect(r.body.error.message).toMatch(/^Name: /);
+    expect(r.body.error.issues[0].path).toEqual(["name"]);
     expect(Array.isArray(r.body.error.issues)).toBe(true);
     expect(r.body.success).toBeUndefined();
   });
@@ -434,7 +435,7 @@ suite("route hardening", () => {
     it("validates the send window and time zone", async () => {
       const bad1 = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { sendWindow: { start: "9:00", end: "17:00", days: [1] } } });
       expect(bad1.status).toBe(400);
-      expect(bad1.body.error.message).toMatch(/sendWindow\.start/);
+      expect(bad1.body.error.message).toMatch(/^Send window start: /);
       const bad2 = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { timezone: "Mars/Olympus_Mons" } });
       expect(bad2.status).toBe(400);
     });
@@ -689,6 +690,187 @@ suite("route hardening", () => {
       const shareToken = `share-${randomUUID()}`;
       await db.insert(S.clients).values({ orgId: A.orgId, name: "Archived", status: "archived", shareToken });
       expect((await req("GET", `/v1/public/clients/report/${shareToken}`)).status).toBe(404);
+    });
+  });
+  // ── Second pass: review and end-to-end findings ──
+  describe("second pass", () => {
+    const u8 = () => randomUUID().slice(0, 8);
+
+    it("a Stripe renewal on the same plan keeps admin overrides; a plan change carries them over", async () => {
+      const { env } = await import("./env.js");
+      const Stripe = (await import("stripe")).default;
+      const st = env.stripe as any;
+      const saved = { secretKey: st.secretKey, webhookSecret: st.webhookSecret };
+      st.secretKey = "sk_test_dummy";
+      st.webhookSecret = "whsec_test_secret";
+      process.env.STRIPE_PRICE_STARTER = "price_starter_t";
+      process.env.STRIPE_PRICE_GROWTH = "price_growth_t";
+      try {
+        const cus = `cus_${u8()}`;
+        const [org] = await db.insert(S.organizations).values({ name: "Stripe", slug: `stripe-${u8()}`, plan: "starter", planLimits: { ...S.limitsFor("starter"), leadsPerMonth: 99999 }, stripeCustomerId: cus }).returning();
+        const send = async (price: string) => {
+          const payload = JSON.stringify({ id: `evt_${u8()}`, object: "event", type: "customer.subscription.updated", data: { object: { id: "sub_1", object: "subscription", customer: cus, status: "active", items: { data: [{ price: { id: price } }] } } } });
+          const header = Stripe.webhooks.generateTestHeaderString({ payload, secret: "whsec_test_secret" });
+          return req("POST", "/v1/billing/webhook", undefined, payload, { "stripe-signature": header, "content-type": "application/json" });
+        };
+        expect((await send("price_starter_t")).status).toBe(200);
+        let row = await db.query.organizations.findFirst({ where: S.eq(S.organizations.id, org.id) });
+        expect(row.planLimits.leadsPerMonth).toBe(99999);
+        expect(row.stripeSubscriptionId).toBe("sub_1");
+        expect((await send("price_growth_t")).status).toBe(200);
+        row = await db.query.organizations.findFirst({ where: S.eq(S.organizations.id, org.id) });
+        expect(row.plan).toBe("growth");
+        expect(row.planLimits.leadsPerMonth).toBe(99999);
+        expect(row.planLimits.searchesPerMonth).toBe(S.limitsFor("growth").searchesPerMonth);
+      } finally {
+        st.secretKey = saved.secretKey;
+        st.webhookSecret = saved.webhookSecret;
+        delete process.env.STRIPE_PRICE_STARTER;
+        delete process.env.STRIPE_PRICE_GROWTH;
+      }
+    });
+
+    it("discovery with the searches quota spent is a 402 quota_exceeded, not a 502 provider outage", async () => {
+      const O = await signup("disc-quota");
+      await db.insert(S.usage).values({ orgId: O.orgId, period: S.currentPeriod(), metric: "searches", count: 1_000_000 });
+      const r = await req("POST", "/v1/automation/discover", O.token, { query: "founders at fintech startups" });
+      expect(r.status).toBe(402);
+      expect(r.body.error.code).toBe("quota_exceeded");
+      expect(r.body.status).toBe("quota");
+      expect(r.body.runId).toBeTruthy();
+    });
+
+    it("lead verify does not stamp verifiedAt for a DNS-only answer, and records a real verifier", async () => {
+      const core = await import("@prospex/core");
+      const l = await lead(A.orgId);
+      const spy = vi.spyOn(core, "verifyEmail").mockResolvedValueOnce({ email: l.email, status: "risky", confidence: 0.5, checks: {}, reason: "probe disabled", verifiedBy: "mx-only" } as never);
+      const r = await req("POST", `/v1/leads/${l.id}/verify`, A.token);
+      expect(r.status).toBe(200);
+      expect(r.body.lead.emailStatus).toBe("risky");
+      expect(r.body.lead.verifiedAt).toBeNull();
+      expect(r.body.lead.emailVerifiedBy).toBeNull();
+      spy.mockResolvedValueOnce({ email: l.email, status: "valid", confidence: 0.95, checks: {}, reason: "reoon:safe", verifiedBy: "reoon:safe" } as never);
+      const r2 = await req("POST", `/v1/leads/${l.id}/verify`, A.token);
+      expect(r2.body.lead.verifiedAt).not.toBeNull();
+      expect(r2.body.lead.emailVerifiedBy).toBe("reoon:safe");
+      spy.mockRestore();
+    });
+
+    it("visibility sampling with no AI engine configured is a 503 ai_not_configured, and the scheduled job skips", async () => {
+      const [prompt] = await db.insert(S.visibilityPrompts).values({ orgId: A.orgId, text: "What is the best B2B software for founders?" }).returning();
+      const r = await req("POST", `/v1/visibility/prompts/${prompt.id}/run`, A.token, {});
+      expect(r.status).toBe(503);
+      expect(r.body.error.code).toBe("ai_not_configured");
+      expect(r.body.error.message).toMatch(/GROQ_API_KEY or GEMINI_API_KEY/);
+      const { handlers } = await import("./jobs.js");
+      const out = await handlers["visibility.run"]({ id: randomUUID(), type: "visibility.run", payload: { promptId: prompt.id }, attempts: 1, maxAttempts: 3 } as never, { db, log: () => {}, progress: async () => {} } as never);
+      expect(out).toMatchObject({ skipped: true });
+      expect(String((out as any).note)).toMatch(/No AI engine/);
+    });
+
+    it("refuses to save an integration with an empty or whitespace token", async () => {
+      const r = await req("PUT", "/v1/integrations/hubspot", A.token, { config: { accessToken: "   " } });
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toMatch(/access token/);
+      const r2 = await req("PUT", "/v1/integrations/webhook", A.token, { config: { url: "" } });
+      expect(r2.status).toBe(400);
+      const ok = await req("PUT", "/v1/integrations/hubspot", A.token, { config: { accessToken: "pat-123" } });
+      expect(ok.status).toBe(200);
+      await req("DELETE", "/v1/integrations/hubspot", A.token);
+    });
+
+    it("a draft with no AI engine says it is a template, and is not charged as an AI message", async () => {
+      const l = await lead(A.orgId, { firstName: "Asha", lastName: "Rao" });
+      const before = (await db.select().from(S.usage).where(S.and(S.eq(S.usage.orgId, A.orgId), S.eq(S.usage.metric, "aiMessages"))))[0]?.count ?? 0;
+      const r = await req("POST", "/v1/campaigns/generate", A.token, { leadId: l.id, sender: { name: "Me", company: "Us", valueProp: "We help." } });
+      expect(r.status).toBe(200);
+      expect(r.body.subject).toBeTruthy();
+      expect(r.body.body).toBeTruthy();
+      expect(r.body.ai).toBe(false);
+      expect(r.body.note).toMatch(/No AI engine configured/);
+      const after = (await db.select().from(S.usage).where(S.and(S.eq(S.usage.orgId, A.orgId), S.eq(S.usage.metric, "aiMessages"))))[0]?.count ?? 0;
+      expect(after).toBe(before);
+    });
+
+    it("LinkedIn URL -> email does not report or save a person whose only data is the URL slug", async () => {
+      const core = await import("@prospex/core");
+      const slug = `another-ee-${u8()}`;
+      const url = `https://www.linkedin.com/in/${slug}`;
+      const r1 = vi.spyOn(core, "resolveLinkedinUrl").mockResolvedValue({ firstName: "Another", lastName: "Ee", fullName: "Another Ee", linkedinUrl: url, source: "linkedin:slug", confidence: 0.3 } as never);
+      const r2 = vi.spyOn(core, "enrichWithProviders").mockResolvedValue(null as never);
+      try {
+        const r = await req("POST", "/v1/tools/linkedin-to-email", A.token, { urls: [url], save: true });
+        expect(r.status).toBe(200);
+        expect(r.body.results[0].found).toBe(false);
+        expect(r.body.results[0].leadId).toBeUndefined();
+        expect(r.body.counts).toMatchObject({ requested: 1, found: 0, saved: 0, skipped: 1 });
+        const saved = await db.query.leads.findFirst({ where: S.and(S.eq(S.leads.orgId, A.orgId), S.eq(S.leads.linkedinUrl, url)) });
+        expect(saved).toBeUndefined();
+      } finally {
+        r1.mockRestore();
+        r2.mockRestore();
+      }
+    });
+
+    it("CSV import skips a row that names nobody, reports it, and imports the rest", async () => {
+      const csv = `title,email,name\nVP Sales,,\nCTO,imp-${u8()}@example.com,Real Person\n`;
+      const r = await req("POST", "/v1/leads/import", A.token, csv, { "content-type": "text/csv" });
+      expect(r.status).toBe(200);
+      expect(r.body.created).toBe(1);
+      expect(r.body.skipped).toBe(1);
+      expect(r.body.skippedRows[0]).toMatchObject({ row: 1 });
+      expect(r.body.errors).toHaveLength(0);
+    });
+
+    it("refuses a webhook to a non-public address", async () => {
+      const r = await req("POST", "/v1/webhooks", A.token, { url: "http://localhost:9/hook" });
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toMatch(/not a public address/);
+      expect((await req("POST", "/v1/webhooks", A.token, { url: "http://10.0.0.5/hook" })).status).toBe(400);
+    });
+
+    it("caps free-text name lengths", async () => {
+      expect((await req("POST", "/v1/leads", A.token, { fullName: "x".repeat(600), email: `long-${u8()}@example.com` })).status).toBe(400);
+      expect((await req("POST", "/v1/icps", A.token, { name: "x".repeat(500), buildWithAi: false })).status).toBe(400);
+      expect((await req("POST", "/v1/campaigns", A.token, { name: "x".repeat(300) })).status).toBe(400);
+      // A long-but-real title is fine.
+      expect((await req("POST", "/v1/leads", A.token, { fullName: "Long Title", title: "t".repeat(250), email: `lt-${u8()}@example.com` })).status).toBe(201);
+    });
+
+    it("validation messages name fields the way a person would", async () => {
+      const r = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { dailyLimit: 0 } });
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toMatch(/^Daily limit: /);
+      expect(r.body.error.issues[0].path).toEqual(["settings", "dailyLimit"]);
+    });
+
+    it("API create replaces tags rather than merging them (rediscovery still merges)", async () => {
+      const email = `tags-${u8()}@example.com`;
+      await req("POST", "/v1/leads", A.token, { email, fullName: "Tag Person", tags: ["a", "b"] });
+      const r = await req("POST", "/v1/leads", A.token, { email, tags: ["c"] });
+      expect(r.status).toBe(200);
+      expect(r.body.lead.tags).toEqual(["c"]);
+    });
+
+    it("starting a campaign with no contacts works but warns", async () => {
+      const [acct] = await db.insert(S.emailAccounts).values({ orgId: A.orgId, provider: "system", fromName: "T", fromEmail: `w-${u8()}@example.com` }).returning();
+      const cp = await req("POST", "/v1/campaigns", A.token, { name: "Empty", emailAccountId: acct.id, steps: [{ subjectTemplate: "Hi", bodyTemplate: "Hello" }] });
+      expect(cp.status).toBe(201);
+      const r = await req("POST", `/v1/campaigns/${cp.body.id ?? cp.body.campaign?.id}/start`, A.token);
+      expect(r.status).toBe(200);
+      expect(r.body.status).toBe("active");
+      expect(r.body.warning).toMatch(/no contacts yet/);
+      await req("POST", `/v1/campaigns/${cp.body.id ?? cp.body.campaign?.id}/pause`, A.token);
+    });
+
+    it("CSV export does not prefix phone numbers but still defuses formulas", async () => {
+      const { csvCell } = await import("./lib/csv.js");
+      expect(csvCell("+14155550100")).toBe('"+14155550100"');
+      expect(csvCell("+1 (415) 555-0100")).toBe('"+1 (415) 555-0100"');
+      expect(csvCell("-5")).toBe('"-5"');
+      expect(csvCell("=HYPERLINK(1)")).toBe(`"'=HYPERLINK(1)"`);
+      expect(csvCell("+cmd|' /C calc'!A0")).toMatch(/^"'\+/);
+      expect(csvCell("@SUM(1)")).toBe(`"'@SUM(1)"`);
     });
   });
 });

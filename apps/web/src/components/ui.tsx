@@ -5,7 +5,9 @@ export function Page({ title, actions, children, subtitle }: { title: string; su
   return (
     <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6">
       <div className="mb-6 flex flex-wrap items-start justify-between gap-3">
-        <div>
+        {/* min-w-0 + anywhere-wrapping: titles are often user data (a client or campaign
+            name), and one long unbroken name must wrap, not widen the page past the phone. */}
+        <div className="min-w-0 max-w-full [overflow-wrap:anywhere]">
           <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
           {subtitle && <p className="mt-1 text-sm text-ink-400">{subtitle}</p>}
         </div>
@@ -18,7 +20,7 @@ export function Page({ title, actions, children, subtitle }: { title: string; su
 
 export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
   return (
-    <div className="card p-4">
+    <div className="card min-w-0 p-4 [overflow-wrap:anywhere]">
       <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">{label}</div>
       <div className="mt-1 text-2xl font-semibold">{value}</div>
       {hint && <div className="mt-1 text-xs text-ink-400">{hint}</div>}
@@ -61,9 +63,9 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
   if (!open) return null;
   return (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-16" onClick={onClose}>
-      <div className={`card w-full ${wide ? "max-w-3xl" : "max-w-lg"} p-5`} onClick={(e) => e.stopPropagation()}>
-        <div className="mb-4 flex items-center justify-between">
-          <h2 className="text-lg font-semibold">{title}</h2>
+      <div className={`card w-full min-w-0 ${wide ? "max-w-3xl" : "max-w-lg"} p-5`} onClick={(e) => e.stopPropagation()}>
+        <div className="mb-4 flex items-center justify-between gap-3">
+          <h2 className="min-w-0 text-lg font-semibold [overflow-wrap:anywhere]">{title}</h2>
           <button onClick={onClose} className="text-ink-500 hover:text-ink-100" aria-label="Close">✕</button>
         </div>
         {children}
@@ -75,8 +77,8 @@ export function Modal({ open, onClose, title, children, wide }: { open: boolean;
 export function Empty({ title, hint, action }: { title: string; hint?: string; action?: ReactNode }) {
   return (
     <div className="card flex flex-col items-center justify-center gap-2 p-12 text-center">
-      <div className="text-base font-medium">{title}</div>
-      {hint && <div className="max-w-md text-sm text-ink-400">{hint}</div>}
+      <div className="max-w-full text-base font-medium [overflow-wrap:anywhere]">{title}</div>
+      {hint && <div className="max-w-md text-sm text-ink-400 [overflow-wrap:anywhere]">{hint}</div>}
       {action && <div className="mt-2">{action}</div>}
     </div>
   );

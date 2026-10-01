@@ -8,24 +8,26 @@ import { badRequest, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { csvCell, parseCsv } from "../lib/csv.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { findExistingLead, leadWithCompany, upsertCompany, upsertLead } from "../services/leads.js";
+import { findExistingLead, leadWithCompany, upsertCompany, upsertLead, verifierOf } from "../services/leads.js";
 import { emitEvent } from "../lib/events.js";
 
 export const leadRoutes = new Hono<Env>();
 leadRoutes.use("*", requireAuth);
 
 const leadInput = z.object({
-  firstName: z.string().optional(),
-  lastName: z.string().optional(),
-  fullName: z.string().optional(),
-  title: z.string().optional(),
+  // Limits generous enough for real imported data, tight enough that a pasted paragraph is
+  // refused rather than stored as a name.
+  firstName: z.string().max(200).optional(),
+  lastName: z.string().max(200).optional(),
+  fullName: z.string().max(200).optional(),
+  title: z.string().max(300).optional(),
   email: z.string().email().optional(),
   linkedinUrl: z.string().url().optional(),
   phone: z.string().optional(),
   location: z.string().optional(),
   country: z.string().optional(),
   companyDomain: z.string().optional(),
-  companyName: z.string().optional(),
+  companyName: z.string().max(200).optional(),
   icpId: z.string().uuid().optional(),
   tags: z.array(z.string()).optional(),
   custom: z.record(z.unknown()).optional(),
@@ -38,17 +40,17 @@ const leadInput = z.object({
  * "clear this field"; absent means "leave it".
  */
 const leadPatch = z.object({
-  firstName: z.string().nullish(),
-  lastName: z.string().nullish(),
-  fullName: z.string().nullish(),
-  title: z.string().nullish(),
+  firstName: z.string().max(200).nullish(),
+  lastName: z.string().max(200).nullish(),
+  fullName: z.string().max(200).nullish(),
+  title: z.string().max(300).nullish(),
   email: z.string().email().nullish(),
   linkedinUrl: z.string().url().nullish(),
   phone: z.string().nullish(),
   location: z.string().nullish(),
   country: z.string().nullish(),
   companyDomain: z.string().nullish(),
-  companyName: z.string().nullish(),
+  companyName: z.string().max(200).nullish(),
   icpId: z.string().uuid().nullish(),
   tags: z.array(z.string()).optional(),
   custom: z.record(z.unknown()).optional(),
@@ -184,8 +186,16 @@ leadRoutes.post("/import", async (c) => {
   let stopped: string | undefined;
   let notProcessed = 0;
   const errors: { row: number; error: string }[] = [];
+  const skippedRows: { row: number; reason: string }[] = [];
   for (let i = 0; i < items.length; i++) {
     const it = normalizeImportRow(items[i]);
+    // A row that names nobody (only a title, say) became a blank lead nobody could find,
+    // contact or dedupe. It is skipped and reported, and the import carries on.
+    const hasName = [it.fullName, it.firstName, it.lastName].some((v) => typeof v === "string" && v.trim());
+    if (!hasName && !it.email && !it.linkedinUrl) {
+      skippedRows.push({ row: i + 1, reason: "No name, email or LinkedIn URL - nothing identifies this person." });
+      continue;
+    }
     try {
       // Only a NEW lead costs a lead. Re-importing a file to refresh titles used to bill
       // every row again.
@@ -201,8 +211,8 @@ leadRoutes.post("/import", async (c) => {
       }
     }
   }
-  await emitEvent(oid, "leads.imported", { created, updated, errors: errors.length });
-  return c.json({ created, updated, errors: errors.slice(0, 50), stopped, notProcessed });
+  await emitEvent(oid, "leads.imported", { created, updated, errors: errors.length, skipped: skippedRows.length });
+  return c.json({ created, updated, errors: errors.slice(0, 50), stopped, notProcessed, skipped: skippedRows.length, skippedRows: skippedRows.slice(0, 50) });
 });
 
 // ── Static paths first ──
@@ -253,7 +263,7 @@ leadRoutes.get("/lists/all", async (c) => {
     .orderBy(desc(lists.createdAt));
   return c.json({ lists: rows.map((r) => ({ ...r.list, count: r.count })) });
 });
-leadRoutes.post("/lists", zValidator("json", z.object({ name: z.string().min(1), description: z.string().optional(), clientId: z.string().uuid().optional() })), async (c) => {
+leadRoutes.post("/lists", zValidator("json", z.object({ name: z.string().min(1).max(200), description: z.string().max(5000).optional(), clientId: z.string().uuid().optional() })), async (c) => {
   const { db } = getDb();
   await assertOwned(clients, c.req.valid("json").clientId, orgId(c), "Client");
   const [row] = await db.insert(lists).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
@@ -438,9 +448,11 @@ leadRoutes.post("/:id/verify", async (c) => {
   if (!l.email) throw badRequest("Lead has no email");
   await consume(db, oid, "verifications", 1);
   const v = await verifyEmail(l.email, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
-  // emailVerifiedBy records who actually answered ("reoon:safe", "smtp", "mx-only"...), so a
-  // "valid" from a mailbox check is distinguishable from one inferred from DNS alone.
-  const [row] = await db.update(leads).set({ emailStatus: v.status, emailConfidence: v.confidence, verifiedAt: new Date(), emailVerifiedBy: v.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id)).returning();
+  // Same rule as the lead.verify job: verifiedAt and emailVerifiedBy are stamped only when a
+  // real verifier or the SMTP probe answered. A DNS/syntax-only result still updates the
+  // status, but stamping it read as "verified" in the UI for an address nobody checked.
+  const by = verifierOf(v);
+  const [row] = await db.update(leads).set({ emailStatus: v.status, emailConfidence: v.confidence, ...(by ? { verifiedAt: new Date(), emailVerifiedBy: by } : {}), updatedAt: new Date() }).where(eq(leads.id, l.id)).returning();
   return c.json({ lead: row, verification: v });
 });
 

@@ -666,18 +666,18 @@ export function AdminDashboardPage() {
 
   return (
     <div className="min-h-screen">
-      <header className="flex items-center justify-between border-b border-black/10 px-6 py-4">
+      <header className="flex items-center justify-between border-b border-black/10 px-4 py-4 sm:px-6">
         <div className="flex items-center gap-3">
           <Logo size={24} textClassName="text-base" />
           <span className="badge border border-black/10 bg-black/5 text-ink-300">Admin</span>
         </div>
         <button className="btn-secondary" onClick={() => { adminAuth.set(null); navigate("/admin/login"); }}>Sign out</button>
       </header>
-      <main className="mx-auto max-w-6xl p-6">
+      <main className="mx-auto max-w-6xl p-4 sm:p-6">
         {plansErr && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">Could not load plans ({plansErr}) - plan names and the plan picker will be incomplete. Reload to retry.</div>}
-        <nav className="mb-5 flex gap-2">
+        <nav className="-mx-4 mb-5 flex gap-2 overflow-x-auto whitespace-nowrap px-4 sm:mx-0 sm:px-0">
           {([["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"]] as const).map(([id, label]) => (
-            <button key={id} className={`rounded-lg px-3 py-1.5 text-sm ${tab === id ? "bg-brand-600 text-white" : "text-ink-300 hover:bg-black/5"}`} onClick={() => setTab(id)}>{label}</button>
+            <button key={id} className={`shrink-0 rounded-lg px-3 py-1.5 text-sm ${tab === id ? "bg-brand-600 text-white" : "text-ink-300 hover:bg-black/5"}`} onClick={() => setTab(id)}>{label}</button>
           ))}
         </nav>
         {tab === "orgs" && <OrgsTab plans={plans} />}

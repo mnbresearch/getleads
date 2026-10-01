@@ -384,13 +384,18 @@ export function CampaignDetail() {
     );
   }
   if (!c) return <Page title="Campaign"><Spinner /></Page>;
-  const act = (path: string) => apiFetch("POST", `/v1/campaigns/${c.id}/${path}`).then(() => { toast("Done"); load(); }).catch((e) => toast(e.message, "err"));
+  // Name the action that happened, and pass on any warning the server attached (e.g.
+  // starting a campaign with nobody enrolled succeeds but will send nothing).
+  const act = (path: string, success: string) =>
+    apiFetch<{ warning?: string }>("POST", `/v1/campaigns/${c.id}/${path}`)
+      .then((r) => { toast(r?.warning ? `${success}. ${r.warning}` : success, r?.warning ? "err" : "ok"); load(); })
+      .catch((e) => toast(e.message, "err"));
   return (
     <Page title={c.name} subtitle={`${c.steps?.length ?? 0} steps · ${c.contacts} contacts`} actions={<>
       <Link to="/campaigns" className="btn-secondary">← All campaigns</Link>
       <button className="btn-secondary" onClick={() => setEditOpen(true)}>Edit</button>
       <button className="btn-secondary" onClick={() => setEnrollOpen(true)}>Enroll leads</button>
-      {c.status === "active" ? <button className="btn-secondary" onClick={() => act("pause")}>Pause</button> : <button className="btn-primary" onClick={() => act("start")}>Start</button>}
+      {c.status === "active" ? <button className="btn-secondary" onClick={() => act("pause", "Campaign paused")}>Pause</button> : <button className="btn-primary" onClick={() => act("start", "Campaign started")}>Start</button>}
       <DeleteButton
         what={`the campaign "${c.name}"`}
         consequence={`${c.contacts} enrolled contacts and this campaign's send history go with it. Campaigns count towards your plan limit, so a test campaign you cannot delete permanently occupies a slot.`}
@@ -414,7 +419,7 @@ export function CampaignDetail() {
         </div>
       )}
       <ExperimentsPanel campaignId={c.id} />
-      <div className="mb-3 flex gap-2 border-b border-black/10">{(["contacts", "messages"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}</button>)}</div>
+      <div className="-mx-4 mb-3 flex gap-2 overflow-x-auto whitespace-nowrap border-b border-black/10 px-4 sm:mx-0 sm:px-0">{(["contacts", "messages"] as const).map((t) => <button key={t} className={`shrink-0 px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}</button>)}</div>
       {tab === "contacts" && contactsErr && contacts.length === 0 ? <LoadError message={contactsErr} onRetry={load} /> : tab === "messages" && messagesErr && messages.length === 0 ? <LoadError message={messagesErr} onRetry={load} /> : tab === "contacts" ? (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">

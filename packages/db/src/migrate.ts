@@ -14,20 +14,30 @@ export async function runMigrations(url = process.env.DATABASE_URL) {
   const sql = postgres(url, { max: 1, ssl: url.includes("localhost") ? false : "prefer" });
   try {
     // Two processes starting at once (API + a worker, or a redeploy overlap) must not both
-    // apply the same migration. A session-level advisory lock serialises them; it is released
-    // when the connection closes in the finally below.
-    await sql`SELECT pg_advisory_lock(727274001)`;
-    await sql`CREATE TABLE IF NOT EXISTS _migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
+    // apply the same migration. Each migration takes a transaction-scoped advisory lock and
+    // re-checks _migrations inside that transaction. A session-level lock was used before,
+    // but behind PgBouncer transaction pooling (Neon/Supabase pooled URLs) the session lock
+    // could stay held by a pooled backend forever and hang every later boot.
+    // Under the same lock: two concurrent CREATE TABLE IF NOT EXISTS can still collide.
+    await sql.begin(async (tx) => {
+      await tx`SELECT pg_advisory_xact_lock(727274001)`;
+      await tx`CREATE TABLE IF NOT EXISTS _migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())`;
+    });
     const applied = new Set((await sql`SELECT name FROM _migrations`).map((r) => r.name as string));
     const files = (await readdir(migrationsDir)).filter((f) => f.endsWith(".sql")).sort();
     for (const file of files) {
       if (applied.has(file)) continue;
       const body = await readFile(join(migrationsDir, file), "utf8");
-      await sql.begin(async (tx) => {
+      const didApply = await sql.begin(async (tx) => {
+        await tx`SELECT pg_advisory_xact_lock(727274001)`;
+        // Another process may have applied it while we waited for the lock.
+        const already = await tx`SELECT 1 FROM _migrations WHERE name = ${file}`;
+        if (already.length) return false;
         await tx.unsafe(body);
         await tx`INSERT INTO _migrations (name) VALUES (${file})`;
+        return true;
       });
-      console.log(`[migrate] applied ${file}`);
+      if (didApply) console.log(`[migrate] applied ${file}`);
     }
     console.log(`[migrate] up to date (${files.length} migrations)`);
   } finally {

@@ -28,7 +28,7 @@
   .input { @apply w-full rounded-lg border border-black/10 bg-surface px-3 py-2 text-sm text-ink-100 placeholder:text-ink-500 shadow-sm focus:border-brand-400 focus:outline-none focus:ring-2 focus:ring-brand-300/40; }
   .label { @apply block text-xs font-semibold uppercase tracking-wide text-ink-400 mb-1; }
   .card { @apply rounded-xl border border-black/[0.06] bg-surface shadow-card; }
-  .badge { @apply inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium; }
+  .badge { @apply inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-xs font-medium; }
   .th { @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-ink-400; }
   .td { @apply px-3 py-2 text-sm align-top text-ink-200; }
 }

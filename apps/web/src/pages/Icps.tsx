@@ -15,6 +15,18 @@ const FIELDS: [keyof Icp["criteria"] & string, string, string][] = [
   ["techStack", "Tech stack", "Shopify, HubSpot…"],
 ];
 
+interface ScoreResponse {
+  counts?: { scored: number; assigned?: number; requested?: number; outOfScope?: number; scope?: string };
+  aiRerank?: { requested: number; done: number; skipped?: string };
+  scored?: unknown[];
+}
+
+const RERANK_SKIP: Record<string, string> = {
+  no_ai_provider: "no AI engine is configured, so rule scores were used",
+  quota: "your plan has no AI messages left this month",
+  error: "usage could not be recorded, so it was not run",
+};
+
 export function IcpPage() {
   const [icps, setIcps] = useState<Icp[]>([]);
   const [edit, setEdit] = useState<Partial<Icp> | null>(null);
@@ -69,10 +81,17 @@ export function IcpPage() {
     if (!confirm(`Score ${scope} against "${icp.name}"?\n\nTheir current score and ICP are replaced with this one's.`)) return;
     setScoring(icp.id);
     try {
-      const r = await apiFetch<{ scored?: unknown[]; considered?: number; updated?: number; notFound?: number; requested?: number }>("POST", `/v1/icps/${icp.id}/score`, { assign: true, aiRerankTop: 20 });
-      const n = typeof r.updated === "number" ? r.updated : r.scored?.length ?? 0;
-      const extra = [typeof r.considered === "number" && r.considered !== n ? `${r.considered} considered` : null, r.notFound ? `${r.notFound} not found` : null].filter(Boolean).join(", ");
-      toast(`Scored ${n} lead${n === 1 ? "" : "s"} against "${icp.name}"${extra ? ` (${extra})` : ""}`);
+      const r = await apiFetch<ScoreResponse>("POST", `/v1/icps/${icp.id}/score`, { assign: true, aiRerankTop: 20 });
+      // counts/aiRerank is what the API returns; the old fields (updated/considered/notFound)
+      // never existed, so every toast fell back to the scored list's length and said nothing
+      // about leads skipped or an AI pass that did not run.
+      const n = r.counts?.scored ?? r.scored?.length ?? 0;
+      const head = typeof r.counts?.requested === "number" ? `Scored ${n} of ${r.counts.requested} leads` : `Scored ${n} lead${n === 1 ? "" : "s"}`;
+      const extra = [
+        r.counts?.outOfScope ? `${r.counts.outOfScope} outside this ICP's scope, not scored` : null,
+        r.aiRerank?.skipped ? `AI re-rank ${r.aiRerank.done ? `stopped after ${r.aiRerank.done}` : "skipped"}: ${RERANK_SKIP[r.aiRerank.skipped] ?? r.aiRerank.skipped}` : null,
+      ].filter(Boolean).join(". ");
+      toast(`${head} against "${icp.name}"${extra ? `. ${extra}` : ""}`, r.aiRerank?.skipped === "error" ? "err" : "ok");
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setScoring(null); }
   };
@@ -84,12 +103,12 @@ export function IcpPage() {
       {/* A failed 5-second poll used to swap a loaded list for an error; only show it when there is nothing to show. */}
       {loadErr && loaded && <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">Couldn&apos;t refresh ({loadErr}) - showing the last loaded ICPs.</div>}
       {loadErr && !loaded ? <LoadError message={loadErr} onRetry={load} /> : !loaded ? <Spinner label="Loading ICPs…" /> : icps.length === 0 ? <Empty title="No ICPs yet" hint="Create one from a description like 'B2B SaaS founders in India with 20-200 employees' or from 3-5 of your best customers' websites." action={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>Create ICP</button>} /> : (
-        <div className="grid gap-4 md:grid-cols-2">
+        <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
           {icps.map((i) => (
-            <div key={i.id} className="card p-5">
-              <div className="flex items-start justify-between gap-2">
-                <div><div className="font-semibold">{i.name}</div><div className="text-xs text-ink-400">{i.leadCount} leads assigned</div></div>
-                <div className="flex gap-2"><button className="btn-secondary" disabled={scoring !== null} onClick={() => score(i)}>{scoring === i.id ? "Scoring…" : "Score leads"}</button><button className="btn-secondary" onClick={() => setChatIcp(i)}>Chat</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button><DeleteButton what={`the ICP "${i.name}"`} consequence={[
+            <div key={i.id} className="card min-w-0 p-5 [overflow-wrap:anywhere]">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0"><div className="font-semibold">{i.name}</div><div className="text-xs text-ink-400">{i.leadCount} leads assigned</div></div>
+                <div className="flex flex-wrap gap-2"><button className="btn-secondary" disabled={scoring !== null} onClick={() => score(i)}>{scoring === i.id ? "Scoring…" : "Score leads"}</button><button className="btn-secondary" onClick={() => setChatIcp(i)}>Chat</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button><DeleteButton what={`the ICP "${i.name}"`} consequence={[
                   usedBy(i).length ? `${usedBy(i).map((c) => c.name).join(", ")} ${usedBy(i).length === 1 ? "uses" : "use"} this ICP for routing - pooled leads will stop being routed to ${usedBy(i).length === 1 ? "that client" : "them"}.` : null,
                   i.leadCount > 0 ? `${i.leadCount} leads are scored against it and will lose that score.` : null,
                   "It is also selectable in Search, Campaigns and Autopilot.",
