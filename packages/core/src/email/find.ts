@@ -1,6 +1,7 @@
-import type { EmailFindResult, EmailStatus } from "../types.js";
+import type { EmailFindResult, EmailStatus, EmailVerification } from "../types.js";
 import { candidatesFor, inferPatternFromEmails, PATTERNS } from "./pattern.js";
-import { isCatchAll, resolveMxDetailed, smtpProbe, verifyEmail, type VerifyOptions } from "./verify.js";
+import { hasVerifierConfigured, isCatchAll, isVerifierVerdict, resolveMxDetailed, smtpProbe, verifyEmail, type VerifyOptions } from "./verify.js";
+import { hunterEmailVerdict } from "../providers/people.js";
 import { fetchJson } from "../util/http.js";
 import { webSearch } from "../search/index.js";
 import { meter } from "../util/meter.js";
@@ -15,26 +16,64 @@ export interface FindEmailInput {
   knownEmails?: string[];
 }
 
+export interface FindEmailOptions extends VerifyOptions {
+  /**
+   * Addresses already known to be bad (bounced, or verified invalid). Never returned and
+   * never spent a verification on. Compared lowercased.
+   */
+  exclude?: string[];
+  /**
+   * How many pattern candidates a paid verifier may check when SMTP cannot. Default 3: the
+   * first three patterns cover the large majority of real addresses, and each check costs
+   * a credit, so this is the cost ceiling per lead.
+   */
+  maxVerifierChecks?: number;
+}
+
 /**
  * Find a person's work email:
  * 1. Hunter.io (if key) - 25 free/month
  * 2. Web search for the literal address
- * 3. Pattern candidates + MX + SMTP probe (free)
+ * 3. Pattern candidates, checked by SMTP probe where port 25 is open, otherwise by the
+ *    configured verifier (Reoon / MillionVerifier / Hunter), otherwise returned as a guess.
  */
-export async function findEmail(input: FindEmailInput, opts: VerifyOptions = {}): Promise<EmailFindResult> {
+export async function findEmail(input: FindEmailInput, opts: FindEmailOptions = {}): Promise<EmailFindResult> {
   const { firstName, lastName, domain } = input;
   const candidates: EmailFindResult["candidates"] = [];
+  const excluded = new Set((opts.exclude ?? []).map((e) => e.trim().toLowerCase()));
+  const isExcluded = (e: string) => excluded.has(e.toLowerCase());
+  // A PAYG verifier only; Hunter is the finder here and spending a second Hunter credit to
+  // check its own answer would double the cost of every lead for no new information.
+  const paygOpts: VerifyOptions = { reoonApiKey: opts.reoonApiKey, millionVerifierApiKey: opts.millionVerifierApiKey, smtp: false };
+  const hasPayg = !!(opts.reoonApiKey || opts.millionVerifierApiKey);
 
   if (opts.hunterApiKey) {
     meter("hunter");
-    const h = await fetchJson<{ data?: { email?: string; score?: number } }>(
-      `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(lastName)}&api_key=${opts.hunterApiKey}`,
+    const h = await fetchJson<{ data?: { email?: string; score?: number; verification?: { status?: string | null } } }>(
+      `https://api.hunter.io/v2/email-finder?domain=${encodeURIComponent(domain)}&first_name=${encodeURIComponent(firstName)}&last_name=${encodeURIComponent(lastName)}&api_key=${encodeURIComponent(opts.hunterApiKey)}`,
+      { provider: "hunter" },
     );
-    if (h?.data?.email) {
-      const conf = (h.data.score ?? 60) / 100;
-      const status: EmailStatus = conf >= 0.8 ? "valid" : "risky";
-      candidates.push({ email: h.data.email.toLowerCase(), status, confidence: conf });
-      return { email: h.data.email.toLowerCase(), status, confidence: conf, pattern: patternOf(h.data.email, firstName, lastName), candidates };
+    const found = h?.data?.email?.toLowerCase();
+    if (found && !isExcluded(found)) {
+      // Hunter's score is how well the address fits the domain's pattern, not whether the
+      // mailbox exists. Mapping score >= 80 to "valid" labelled a pattern guess as verified,
+      // which clears the send gate. hunterEmailVerdict reads verification.status instead.
+      const verdict = hunterEmailVerdict(h!.data!.verification?.status ?? undefined, h!.data!.score);
+      let status: EmailStatus = verdict.status;
+      let confidence = verdict.confidence;
+      let verifiedBy: string | undefined = verdict.status === "valid" || verdict.status === "invalid" || verdict.status === "catch_all" ? `hunter:${h!.data!.verification?.status}` : undefined;
+      if (hasPayg) {
+        // A configured verifier gets the last word before anything is called valid.
+        const v = await verifyEmail(found, paygOpts);
+        if (isVerifierVerdict(v)) {
+          status = v.status;
+          confidence = v.status === "valid" ? Math.max(v.confidence, confidence) : v.confidence;
+          verifiedBy = v.verifiedBy;
+        }
+      }
+      candidates.push({ email: found, status, confidence });
+      if (status !== "invalid") return { email: found, status, confidence, pattern: patternOf(found, firstName, lastName), candidates, verifiedBy, source: "hunter" };
+      excluded.add(found);
     }
   }
 
@@ -46,14 +85,19 @@ export async function findEmail(input: FindEmailInput, opts: VerifyOptions = {})
     for (const r of results) {
       for (const m of `${r.title} ${r.snippet}`.match(re) ?? []) {
         const e = m.toLowerCase();
+        if (isExcluded(e)) continue;
         if (looksLikePerson(e, firstName, lastName)) {
           const v = await verifyEmail(e, opts);
           candidates.push({ email: e, status: v.status, confidence: Math.max(v.confidence, 0.75) });
-          if (v.status !== "invalid") return { email: e, status: v.status, confidence: Math.max(v.confidence, 0.8), pattern: patternOf(e, firstName, lastName), candidates };
+          if (v.status !== "invalid") return { email: e, status: v.status, confidence: Math.max(v.confidence, 0.8), pattern: patternOf(e, firstName, lastName), candidates, verifiedBy: verifiedByOf(v), source: "web" };
+          excluded.add(e);
         }
       }
     }
-  } catch {}
+  } catch (e) {
+    // Best-effort step: the pattern path below still runs. Logged so it is not invisible.
+    console.warn(`[findEmail] web search step failed for ${domain}: ${(e as Error).message}`);
+  }
 
   const { hosts: mx, answered: dnsAnswered } = await resolveMxDetailed(domain);
   if (!mx) {
@@ -65,38 +109,76 @@ export async function findEmail(input: FindEmailInput, opts: VerifyOptions = {})
   }
   const mxHost = mx[0].exchange;
   const preferred = input.knownPattern ?? inferPatternFromEmails(input.knownEmails ?? [])?.pattern ?? null;
-  const list = candidatesFor(firstName, lastName, domain, preferred);
+  const list = candidatesFor(firstName, lastName, domain, preferred).filter((e) => !isExcluded(e));
+  if (!list.length) return { status: "unknown", confidence: 0, candidates };
+  const guessPattern = (e: string) => patternOf(e, firstName, lastName) ?? preferred ?? PATTERNS[0];
+
+  /** The old answer when nothing could check: the best-ranked candidate, as a guess. */
+  const guess = (from: string[] = list): EmailFindResult => {
+    const best = from[0];
+    if (!best) return { status: "unknown", confidence: 0.2, candidates };
+    candidates.push({ email: best, status: "risky", confidence: preferred ? 0.6 : 0.35 });
+    return { email: best, status: "risky", confidence: preferred ? 0.6 : 0.35, pattern: guessPattern(best), candidates, source: "pattern" };
+  };
+
+  /**
+   * With SMTP unavailable (production: Render blocks port 25), check the top candidates with
+   * whichever verifier is configured. This path used to return list[0] as "risky" without
+   * asking the Reoon/MillionVerifier keys the operator was paying for.
+   */
+  const viaVerifier = async (): Promise<EmailFindResult> => {
+    const max = Math.max(0, opts.maxVerifierChecks ?? 3);
+    const vopts: VerifyOptions = { ...opts, smtp: false };
+    const rejected = new Set<string>();
+    let fallback: { email: string; status: EmailStatus; confidence: number; verifiedBy?: string } | null = null;
+    for (const e of list.slice(0, max)) {
+      const v = await verifyEmail(e, vopts);
+      if (!isVerifierVerdict(v)) {
+        // No verifier answered (out of credit, cooling off, unknown). Stop spending: the next
+        // candidate would get the same non-answer.
+        break;
+      }
+      candidates.push({ email: e, status: v.status, confidence: v.confidence });
+      if (v.status === "valid") return { email: e, status: "valid", confidence: v.confidence, pattern: guessPattern(e), candidates, verifiedBy: v.verifiedBy, source: "pattern" };
+      // A catch-all verdict is about the domain: every other candidate would get the same
+      // one, so stop here and say so rather than calling the first pattern verified.
+      if (v.status === "catch_all") return { email: e, status: "catch_all", confidence: Math.min(v.confidence, preferred ? 0.65 : 0.45), pattern: guessPattern(e), candidates, verifiedBy: v.verifiedBy, source: "pattern" };
+      if (v.status === "invalid") rejected.add(e);
+      else if (!fallback) fallback = { email: e, status: v.status, confidence: v.confidence, verifiedBy: v.verifiedBy };
+    }
+    if (fallback) return { email: fallback.email, status: fallback.status, confidence: fallback.confidence, pattern: guessPattern(fallback.email), candidates, verifiedBy: fallback.verifiedBy, source: "pattern" };
+    return guess(list.filter((e) => !rejected.has(e)));
+  };
 
   const smtpEnabled = opts.smtp ?? process.env.SMTP_PROBE_ENABLED !== "false";
-  if (!smtpEnabled) {
-    const best = list[0];
-    candidates.push({ email: best, status: "risky", confidence: preferred ? 0.6 : 0.35 });
-    return { email: best, status: "risky", confidence: preferred ? 0.6 : 0.35, pattern: preferred ?? PATTERNS[0], candidates };
-  }
+  if (!smtpEnabled) return hasVerifierConfigured(opts) ? viaVerifier() : guess();
 
   const catchAll = await isCatchAll(domain, mxHost);
   if (catchAll === true) {
     const best = list[0];
     candidates.push({ email: best, status: "catch_all", confidence: preferred ? 0.65 : 0.45 });
-    return { email: best, status: "catch_all", confidence: preferred ? 0.65 : 0.45, pattern: preferred ?? PATTERNS[0], candidates };
+    return { email: best, status: "catch_all", confidence: preferred ? 0.65 : 0.45, pattern: preferred ?? PATTERNS[0], candidates, verifiedBy: "smtp", source: "pattern" };
   }
   if (catchAll === null) {
-    // SMTP blocked (port 25 unavailable) → pattern-only guess
-    const best = list[0];
-    candidates.push({ email: best, status: "risky", confidence: preferred ? 0.6 : 0.35 });
-    return { email: best, status: "risky", confidence: preferred ? 0.6 : 0.35, pattern: preferred ?? PATTERNS[0], candidates };
+    // SMTP blocked (port 25 unavailable) -> a verifier if there is one, else a pattern guess
+    return hasVerifierConfigured(opts) ? viaVerifier() : guess();
   }
 
   for (const e of list.slice(0, 8)) {
     const p = await smtpProbe(e, mxHost);
     if (p.result === "accepted") {
       candidates.push({ email: e, status: "valid", confidence: 0.92 });
-      return { email: e, status: "valid", confidence: 0.92, pattern: patternOf(e, firstName, lastName), candidates };
+      return { email: e, status: "valid", confidence: 0.92, pattern: patternOf(e, firstName, lastName), candidates, verifiedBy: "smtp", source: "pattern" };
     }
     candidates.push({ email: e, status: p.result === "rejected" ? "invalid" : "unknown", confidence: p.result === "rejected" ? 0.9 : 0.3 });
     if (p.result === "blocked" || p.result === "error") break;
   }
   return { status: "unknown", confidence: 0.2, candidates };
+}
+
+/** The verifier that vouched for a verification, or undefined for an unchecked one. */
+function verifiedByOf(v: EmailVerification): string | undefined {
+  return isVerifierVerdict(v) || v.verifiedBy === "smtp" ? v.verifiedBy : undefined;
 }
 
 function looksLikePerson(email: string, first: string, last: string) {

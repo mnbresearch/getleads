@@ -39,7 +39,7 @@ export const env = {
     pass: secret(process.env.SMTP_PASS),
     secure: bool(process.env.SMTP_SECURE, false),
   },
-  mailFrom: process.env.MAIL_FROM ?? "Prospex <no-reply@localhost>",
+  mailFrom: process.env.MAIL_FROM ?? "Scout <no-reply@localhost>",
   hunterApiKey: secret(process.env.HUNTER_API_KEY),
   abstractEmailApiKey: secret(process.env.ABSTRACT_EMAIL_API_KEY),
   /** Pay-as-you-go verifiers. Either is enough; both are tried in order when set. */
@@ -63,12 +63,30 @@ export const env = {
     clientSecret: secret(process.env.GOOGLE_OAUTH_CLIENT_SECRET),
   },
   internalToken: process.env.INTERNAL_TOKEN ?? "",
+  /** Server-to-server admin API token. Separate from INTERNAL_TOKEN; see requireAdmin. */
+  adminApiToken: process.env.ADMIN_API_TOKEN ?? "",
   adminEmail: (process.env.ADMIN_EMAIL ?? "").toLowerCase(),
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
   /** Where "upgrade me" lead-capture emails are sent. Falls back to ADMIN_EMAIL. */
   leadNotifyEmail: process.env.LEAD_NOTIFY_EMAIL ?? process.env.ADMIN_EMAIL ?? "",
 };
 
-if (env.nodeEnv === "production" && env.jwtSecret === "dev-secret-change-me") {
-  console.warn("[env] WARNING: JWT_SECRET is the default. Set a real secret in production.");
+/**
+ * The default JWT secret is in this public source file, so anyone can mint a session for any
+ * user with it. In production that is not a misconfiguration to warn about, it is an open
+ * door - refuse to start. Only the exact default is fatal: render.yaml generates a value, and
+ * a deployment that has one must never be taken down by this check.
+ */
+export const DEFAULT_JWT_SECRET = "dev-secret-change-me";
+if (env.nodeEnv === "production" && env.jwtSecret === DEFAULT_JWT_SECRET) {
+  throw new Error("[env] JWT_SECRET is the built-in default. Refusing to start in production: set JWT_SECRET to a long random value.");
+}
+/**
+ * Without ENCRYPTION_KEY, stored credentials (SMTP passwords, CRM keys) are encrypted with a
+ * key derived from JWT_SECRET. Kept as a fallback - switching keys now would make every
+ * existing stored credential undecryptable - but said out loud, because rotating JWT_SECRET
+ * then silently breaks every saved sender and integration.
+ */
+if (env.nodeEnv === "production" && !env.encryptionKey) {
+  console.warn("[env] WARNING: ENCRYPTION_KEY is not set; stored credentials are encrypted with a key derived from JWT_SECRET. Rotating JWT_SECRET would make them unreadable.");
 }

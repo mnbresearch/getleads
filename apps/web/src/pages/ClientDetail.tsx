@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
 import { BUCKET_COPY, type ClientAttention, type ClientRow, type ClientStats, type TargetProgress } from "../lib/clients";
 import { ClientDot, ClientFormModal, StatusPill, TargetBar, type ClientFormValue, toClientPayload } from "../components/ClientBits";
-import { EmailStatusBadge, LoadError, Page, ScoreBar, Spinner, Stat, useToast } from "../components/ui";
+import { EmailStatusBadge, LoadError, Page, ScoreBar, Spinner, Stat, useFlash, useToast } from "../components/ui";
 
 interface Detail {
   client: Omit<ClientRow, "stats" | "attention" | "target"> & { shareToken: string | null };
@@ -25,16 +25,24 @@ export function ClientDetailPage() {
   const [editing, setEditing] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
   const { toast, Toast } = useToast();
+  useFlash(toast);
   const navigate = useNavigate();
 
+  // The id the latest request was for. Moving from one client to another kept the old
+  // client on screen (and a slow response for the old id could land after the new one), so
+  // "Delete" could act on a client the page no longer named.
+  const current = useRef(id);
   const load = useCallback(() => {
+    current.current = id;
     setErr(null);
-    apiFetch<Detail>("GET", `/v1/clients/${id}`).then(setD).catch((e) => setErr((e as Error).message));
+    apiFetch<Detail>("GET", `/v1/clients/${id}`)
+      .then((r) => { if (current.current === id && r.client.id === id) setD(r); })
+      .catch((e) => { if (current.current === id) setErr((e as Error).message); });
   }, [id]);
-  useEffect(() => { load(); }, [load]);
+  useEffect(() => { setD(null); load(); }, [load]);
 
   if (err) return <Page title="Client"><LoadError message={err} onRetry={load} /></Page>;
-  if (!d) return <Page title="Client"><Spinner label="Loading…" /></Page>;
+  if (!d || d.client.id !== id) return <Page title="Client"><Spinner label="Loading…" /></Page>;
 
   const c = d.client;
   const shareUrl = c.shareToken ? `${window.location.origin}/r/${c.shareToken}` : null;
@@ -82,8 +90,8 @@ export function ClientDetailPage() {
     if (!confirm(`Delete ${c.name}? Its ${d.stats.leads} leads go back to the pool - nothing about them is lost.`)) return;
     try {
       const r = await apiFetch<{ leadsReturnedToPool: number }>("DELETE", `/v1/clients/${id}`);
-      toast(`Deleted. ${r.leadsReturnedToPool} leads returned to the pool.`);
-      navigate("/clients");
+      // This page unmounts on navigate, taking its toast with it; /clients shows the message.
+      navigate("/clients", { state: { flash: `Deleted ${c.name}. ${r.leadsReturnedToPool} leads returned to the pool.` } });
     } catch (e) {
       toast((e as Error).message, "err");
     }
@@ -181,7 +189,7 @@ export function ClientDetailPage() {
         <div className="card p-5">
           <div className="mb-3 flex items-center justify-between">
             <span className="text-xs font-semibold uppercase tracking-wide text-ink-400">Campaigns</span>
-            <Link to="/campaigns" className="text-xs text-brand-600 hover:underline">New campaign</Link>
+            <Link to={`/campaigns?clientId=${id}`} className="text-xs text-brand-600 hover:underline">New campaign</Link>
           </div>
           {d.campaigns.length === 0 ? (
             <p className="text-sm text-ink-400">No campaigns tagged to this client yet. When you create one, choose this client so its results show up here.</p>
@@ -204,7 +212,9 @@ export function ClientDetailPage() {
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Client report</div>
             <p className="mt-1 max-w-xl text-sm text-ink-300">A read-only page you can send {c.name}: their pipeline, delivery against target, and every lead's name, title, company and stage. Email addresses, phone numbers and profile links are never included.</p>
           </div>
-          {shareUrl ? (
+          {c.status === "archived" ? (
+            shareUrl ? <button className="btn-secondary" onClick={() => share(false)}>Turn off</button> : null
+          ) : shareUrl ? (
             <button className="btn-secondary" onClick={() => share(false)}>Turn off</button>
           ) : (
             <button className="btn-primary" onClick={() => share(true)}>Create report link</button>
@@ -225,7 +235,12 @@ export function ClientDetailPage() {
           />
           Show this month's delivery against the target in the report
         </label>
-        {shareUrl && (
+        {/* The public report returns "not found" for an archived client, so a live-looking
+            link here would be one that 404s for whoever it was sent to. */}
+        {c.status === "archived" && (
+          <div className="mt-3 rounded-lg bg-black/[0.04] px-3 py-2 text-sm text-ink-300">Report disabled while archived. Set the client back to Active or Paused and the existing link works again.</div>
+        )}
+        {shareUrl && c.status !== "archived" && (
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <input className="input flex-1 font-mono text-xs" readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} aria-label="Report link" />
             <button className="btn-secondary" onClick={() => navigator.clipboard.writeText(shareUrl).then(() => toast("Link copied"))}>Copy</button>

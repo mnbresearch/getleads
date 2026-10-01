@@ -12,14 +12,16 @@ export function AgentPage() {
   const [busy, setBusy] = useState(false);
   const [res, setRes] = useState<Result[] | null>(null);
   const [elapsed, setElapsed] = useState(0);
+  const [skipped, setSkipped] = useState<{ saving?: string; drafting?: string } | null>(null);
   const { toast, Toast } = useToast();
   const run = async () => {
     setBusy(true);
     setRes(null);
     const t0 = Date.now();
     try {
-      const r = await apiFetch<{ leads: Result[] }>("POST", "/v1/agent/prospect", { query, limit, generateEmails: gen, sender: gen ? sender : undefined, save: true });
+      const r = await apiFetch<{ leads: Result[]; skipped?: { saving?: string; drafting?: string } }>("POST", "/v1/agent/prospect", { query, limit, generateEmails: gen, sender: gen ? sender : undefined, save: true });
       setRes(r.leads);
+      setSkipped(r.skipped ?? null);
       setElapsed(Math.round((Date.now() - t0) / 1000));
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
@@ -43,7 +45,21 @@ export function AgentPage() {
       </div>
       {res && (
         <div className="mt-6">
-          <div className="mb-2 text-sm text-ink-400">{res.length} leads in {elapsed}s · saved to your Leads (tag: agent)</div>
+          {/* "Saved" is only claimed for leads that actually came back with a leadId; a quota
+              stop or a fault mid-run is said out loud instead of hidden behind the count. */}
+          <div className="mb-2 text-sm text-ink-400">
+            {res.length} leads in {elapsed}s
+            {res.length > 0 && (() => {
+              const saved = res.filter((r) => r.leadId).length;
+              return saved === res.length ? " · saved to your Leads (tag: agent)" : ` · ${saved} of ${res.length} saved to your Leads (tag: agent)`;
+            })()}
+          </div>
+          {skipped && (skipped.saving || skipped.drafting) && (
+            <div className="mb-3 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800" role="status">
+              {skipped.saving && <div>Not all leads were saved: {skipped.saving}</div>}
+              {skipped.drafting && <div>Not all emails were drafted: {skipped.drafting}</div>}
+            </div>
+          )}
           <div className="grid gap-3 md:grid-cols-2">
             {res.map((r, i) => (
               <div key={i} className="card p-4">

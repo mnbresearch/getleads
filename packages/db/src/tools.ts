@@ -95,7 +95,7 @@ export async function recordProviderHealth(call: { provider: string; outcome: st
  * them nothing. "unverified" is its own state rather than being rounded up to healthy,
  * because a key nothing has called yet is exactly the case this whole change exists for.
  */
-export type KeyStatus = "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "erroring" | "retired";
+export type KeyStatus = "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "out_of_credit" | "erroring" | "retired";
 
 export function keyStatusFrom(configured: boolean, lastOutcome: string | null, retired = false): KeyStatus {
   // Retirement outranks everything, including a key that still technically authenticates:
@@ -114,6 +114,10 @@ export function keyStatusFrom(configured: boolean, lastOutcome: string | null, r
       return "gated";
     case "rate_limit":
       return "rate_limited";
+    // The key is fine and the account is empty. Its own state because the fix is a top-up,
+    // not a new key and not waiting - it previously fell through to "Working".
+    case "out_of_credit":
+      return "out_of_credit";
     case "server":
     case "network":
     case "bad_response":
@@ -132,6 +136,7 @@ export const KEY_STATUS_LABEL: Record<KeyStatus, string> = {
   rejected: "Key rejected",
   gated: "Not on this plan",
   rate_limited: "Rate limited",
+  out_of_credit: "Out of credit - top up",
   erroring: "Erroring",
   retired: "Retired by the provider",
 };

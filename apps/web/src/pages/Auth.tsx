@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { apiFetch, auth, API_URL } from "../lib/api";
+import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
+import { apiFetch, auth, API_URL, consumeReturnPath, sessionExpiredNotice } from "../lib/api";
 import { Logo, BRAND_NAME, BRAND_TAGLINE } from "../components/Logo";
 
 /** Google's four-colour mark, drawn inline so the button needs no external request. */
@@ -23,6 +23,17 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const [params] = useSearchParams();
   const navigate = useNavigate();
+  // Read once, at mount: someone already signed in who lands on /login or /signup goes
+  // to the app. Not reactive on purpose - signing in on this page sets the token too, and
+  // that path has its own destination (the API-key screen, or the saved return path).
+  const [signedInAtMount] = useState(() => !!auth.token);
+  const [notice, setNotice] = useState<string | null>(null);
+  useEffect(() => {
+    // The API client flags a rejected token; say so instead of a blank login form.
+    // Only set, never cleared here: StrictMode runs this twice and the second read is empty.
+    const n = sessionExpiredNotice();
+    if (n) setNotice(n);
+  }, []);
 
   // The Google button only appears when the server actually has OAuth credentials. A button
   // that leads to "not configured" is worse than no button.
@@ -44,15 +55,17 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
     setErr(null);
     try {
       const r = await apiFetch<{ token: string; apiKey?: string }>("POST", `/v1/auth/${mode}`, mode === "login" ? { email: form.email, password: form.password } : { ...form, inviteCode: form.inviteCode || undefined, orgName: form.orgName || undefined, name: form.name || undefined });
-      auth.set(r.token);
       if (r.apiKey) setApiKey(r.apiKey);
-      else navigate("/");
+      auth.set(r.token);
+      // Back to where the session ran out (or a deep link that bounced here), else home.
+      if (!r.apiKey) navigate(consumeReturnPath("/"), { replace: true });
     } catch (e) {
       setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
+  if (signedInAtMount && !apiKey) return <Navigate to="/" replace />;
   if (apiKey)
     return (
       <div className="mx-auto mt-24 max-w-md p-6">
@@ -60,7 +73,7 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
           <h1 className="text-xl font-semibold">Welcome to {BRAND_NAME}</h1>
           <p className="mt-2 text-sm text-ink-300">Here is your API key for agents and integrations. It is shown only once; you can create more in Settings.</p>
           <code className="mt-3 block break-all rounded-lg bg-black p-3 text-xs text-emerald-600">{apiKey}</code>
-          <button className="btn-primary mt-4 w-full justify-center" onClick={() => navigate("/")}>Go to dashboard</button>
+          <button className="btn-primary mt-4 w-full justify-center" onClick={() => navigate(consumeReturnPath("/"))}>Go to dashboard</button>
         </div>
       </div>
     );
@@ -72,6 +85,7 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
       <p className="mb-6 text-center text-sm text-ink-400">{BRAND_TAGLINE}</p>
       <form onSubmit={submit} className="card space-y-3 p-6">
         <h1 className="text-lg font-semibold">{mode === "login" ? "Sign in" : "Create your workspace"}</h1>
+        {notice && mode === "login" && <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-sm text-amber-800" role="status">{notice}</div>}
         {mode === "signup" && (
           <>
             <div><label className="label" htmlFor="auth-name">Your name</label><input id="auth-name" className="input" autoComplete="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
@@ -83,8 +97,19 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
         <div><label className="label" htmlFor="auth-email">Email</label><input id="auth-email" className="input" type="email" autoComplete="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
         <div><label className="label" htmlFor="auth-password">Password</label><input id="auth-password" className="input" type="password" autoComplete={mode === "login" ? "current-password" : "new-password"} required minLength={8} value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></div>
         {mode === "signup" && <div><label className="label" htmlFor="auth-invite">Invite code (if required)</label><input id="auth-invite" className="input" value={form.inviteCode} onChange={(e) => setForm({ ...form, inviteCode: e.target.value })} /></div>}
+        {mode === "login" && (
+          <div className="-mt-1 text-right text-xs">
+            <Link className="text-brand-600 hover:underline" to="/forgot-password">Forgot password?</Link>
+          </div>
+        )}
+        {/* The server's own message (e.g. a suspended workspace) is shown as-is. */}
         {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600" role="alert">{err}</div>}
         <button className="btn-primary w-full justify-center" disabled={busy}>{busy ? "…" : mode === "login" ? "Sign in" : "Create account"}</button>
+        {mode === "signup" && (
+          <p className="text-center text-xs text-ink-400">
+            By signing up you agree to the <Link className="text-brand-600 hover:underline" to="/terms">Terms of Service</Link> and <Link className="text-brand-600 hover:underline" to="/privacy">Privacy Policy</Link>.
+          </p>
+        )}
 
         {googleEnabled && (
           <>

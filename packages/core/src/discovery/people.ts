@@ -1,5 +1,5 @@
 import type { PersonCandidate, SearchResult } from "../types.js";
-import { webSearch, type WebSearchOptions } from "../search/index.js";
+import { summarizeWebSearchFailures, webSearch, type WebSearchOptions, type WebSearchOutcome } from "../search/index.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { splitName } from "../util/names.js";
 
@@ -82,6 +82,37 @@ export function buildPeopleQueries(input: PeopleSearchInput): string[] {
     queries.push(q.trim());
   }
   return queries;
+}
+
+/** What the web searches behind a discovery call did, for telling "nobody" from "could not ask". */
+export interface DiscoverySearchTrace {
+  /** One per web search fired. */
+  searches: WebSearchOutcome[];
+  /** Searches in which no provider answered. */
+  failedSearches: number;
+  /** True when at least one search ran and none got an answer from any provider. */
+  everySearchFailed: boolean;
+  /** One operator-readable sentence when everySearchFailed, else null. */
+  failureMessage: string | null;
+}
+
+export function traceFromOutcomes(searches: WebSearchOutcome[]): DiscoverySearchTrace {
+  const failureMessage = summarizeWebSearchFailures(searches);
+  return { searches, failedSearches: searches.filter((o) => o.everyProviderFailed).length, everySearchFailed: failureMessage !== null, failureMessage };
+}
+
+/** findPeople, plus what its web searches did. */
+export async function findPeopleDetailed(input: PeopleSearchInput, searchOpts: WebSearchOptions = {}): Promise<{ people: PersonCandidate[] } & DiscoverySearchTrace> {
+  const outcomes: WebSearchOutcome[] = [];
+  const outer = searchOpts.onOutcome;
+  const people = await findPeople(input, {
+    ...searchOpts,
+    onOutcome: (o, q) => {
+      outcomes.push(o);
+      outer?.(o, q);
+    },
+  });
+  return { people, ...traceFromOutcomes(outcomes) };
 }
 
 export async function findPeople(input: PeopleSearchInput, searchOpts: WebSearchOptions = {}): Promise<PersonCandidate[]> {

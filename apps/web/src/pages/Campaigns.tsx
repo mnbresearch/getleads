@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 
-interface Step { delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
+interface Step { id?: string; delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string | null; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
 interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; steps?: Step[]; createdAt: string }
 interface Account { id: string; provider: string; fromName: string; fromEmail: string; dailyLimit: number; status: string; sentToday: number }
 
@@ -18,7 +18,11 @@ export function CampaignsPage() {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [lists, setLists] = useState<{ id: string; name: string; count: number }[]>([]);
   const [icps, setIcps] = useState<{ id: string; name: string }[]>([]);
-  const [open, setOpen] = useState(false);
+  const [params, setParams] = useSearchParams();
+  // ClientDetail's "New campaign" links here with ?clientId=, so the new campaign arrives
+  // already tagged to that client instead of the user having to pick it again.
+  const presetClientId = params.get("clientId") ?? "";
+  const [open, setOpen] = useState(!!presetClientId);
   const [accOpen, setAccOpen] = useState(false);
   const [sysAvail, setSysAvail] = useState(false);
   const { toast, Toast } = useToast();
@@ -26,21 +30,48 @@ export function CampaignsPage() {
   // Without this the list rendered "No campaigns yet" whenever the request failed, telling
   // a customer with live campaigns that they had none.
   const [listErr, setListErr] = useState<string | null>(null);
+  // Same for the sender list: a failed fetch used to read as "Add a sender account first".
+  const [accErr, setAccErr] = useState<string | null>(null);
+  const [refsErr, setRefsErr] = useState<string | null>(null);
+  const [accLoaded, setAccLoaded] = useState(false);
   const load = useCallback(() => {
     apiFetch<{ campaigns: Campaign[] }>("GET", "/v1/campaigns")
       .then((r) => { setRows(r.campaigns); setListErr(null); })
       .catch((e) => setListErr((e as Error).message));
-    apiFetch<{ emailAccounts: Account[]; systemProviderAvailable: boolean }>("GET", "/v1/campaigns/email-accounts").then((r) => { setAccounts(r.emailAccounts); setSysAvail(r.systemProviderAvailable); });
-    apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists));
-    apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
   }, []);
+  const loadAccounts = useCallback(() => {
+    apiFetch<{ emailAccounts: Account[]; systemProviderAvailable: boolean }>("GET", "/v1/campaigns/email-accounts")
+      .then((r) => { setAccounts(r.emailAccounts); setSysAvail(r.systemProviderAvailable); setAccErr(null); setAccLoaded(true); })
+      .catch((e) => setAccErr((e as Error).message));
+  }, []);
+  const loadRefs = useCallback(() => {
+    Promise.all([
+      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)),
+      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps)),
+    ])
+      .then(() => setRefsErr(null))
+      .catch((e) => setRefsErr((e as Error).message));
+  }, []);
+  // Only the campaign list (which carries the live stats) is polled. Re-fetching senders,
+  // lists and ICPs every 8s re-rendered the create form under the user and re-filled a
+  // sender select they had just cleared.
   useEffect(() => { load(); const t = setInterval(load, 8000); return () => clearInterval(t); }, [load]);
+  useEffect(() => { loadAccounts(); loadRefs(); }, [loadAccounts, loadRefs]);
+  const closeCreate = () => {
+    setOpen(false);
+    if (presetClientId) { params.delete("clientId"); setParams(params, { replace: true }); }
+  };
 
   return (
-    <Page title="Campaigns" subtitle="AI-personalized sequences with send windows, daily limits, open/click/reply tracking and auto-stop on reply." actions={<><button className="btn-secondary" onClick={() => setAccOpen(true)}>Sender accounts ({accounts.length})</button><button className="btn-primary" onClick={() => setOpen(true)}>New campaign</button></>}>
+    <Page title="Campaigns" subtitle="AI-personalized sequences with send windows, daily limits, open/click/reply tracking and auto-stop on reply." actions={<><button className="btn-secondary" onClick={() => setAccOpen(true)}>Sender accounts ({accErr && !accLoaded ? "?" : accounts.length})</button><button className="btn-primary" onClick={() => setOpen(true)}>New campaign</button></>}>
       {Toast}
       <SendingHealthPanel />
-      {accounts.length === 0 && <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>}
+      {accErr ? (
+        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load your sender accounts: {accErr} <button className="underline" onClick={loadAccounts}>Try again</button></div>
+      ) : accLoaded && accounts.length === 0 && (
+        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>
+      )}
+      {refsErr && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load your lead lists and ICPs: {refsErr} <button className="underline" onClick={loadRefs}>Try again</button></div>}
       {listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">
@@ -69,8 +100,8 @@ export function CampaignsPage() {
           </table>
         </div>
       )}
-      <CampaignModal open={open} onClose={() => setOpen(false)} accounts={accounts} lists={lists} icps={icps} onDone={(id) => { setOpen(false); navigate(`/campaigns/${id}`); }} toast={toast} />
-      <AccountsModal open={accOpen} onClose={() => setAccOpen(false)} accounts={accounts} sysAvail={sysAvail} onChanged={load} toast={toast} />
+      <CampaignModal open={open} onClose={closeCreate} accounts={accounts} lists={lists} icps={icps} refsErr={refsErr} initialClientId={presetClientId} onDone={(id) => { closeCreate(); navigate(`/campaigns/${id}`); }} toast={toast} />
+      <AccountsModal open={accOpen} onClose={() => setAccOpen(false)} accounts={accounts} campaigns={rows} sysAvail={sysAvail} onChanged={() => { loadAccounts(); load(); }} toast={toast} />
     </Page>
   );
 }
@@ -83,8 +114,11 @@ interface Health { status: "ok" | "warn" | "halt"; bounceRate: number; complaint
  */
 function SendingHealthPanel() {
   const [rows, setRows] = useState<{ account: { id: string; fromEmail: string; dailyLimit: number }; health: Health }[]>([]);
-  useEffect(() => { apiFetch<{ accounts: typeof rows }>("GET", "/v1/analytics/sending-health").then((r) => setRows(r.accounts ?? [])).catch(() => setRows([])); }, []);
+  // A failed check used to look exactly like "all senders healthy", hiding a halt.
+  const [err, setErr] = useState<string | null>(null);
+  useEffect(() => { apiFetch<{ accounts: typeof rows }>("GET", "/v1/analytics/sending-health").then((r) => setRows(r.accounts ?? [])).catch((e) => setErr((e as Error).message)); }, []);
   const notable = rows.filter((r) => r.health.status !== "ok" || r.health.rampDay != null);
+  if (err) return <div className="mb-4 rounded-lg border border-black/10 bg-cream p-3 text-xs text-ink-400">Could not check sender deliverability right now ({err}), so any sending pause is not shown here.</div>;
   if (notable.length === 0) return null;
   return (
     <div className="mb-4 space-y-2">
@@ -113,27 +147,73 @@ function StatusBadge({ s }: { s: string }) {
   return <span className={`badge ${m[s] ?? "bg-black/[0.05] text-ink-300"}`}>{s}</span>;
 }
 
-function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, existing }: { open: boolean; onClose: () => void; accounts: Account[]; lists: { id: string; name: string }[]; icps: { id: string; name: string }[]; onDone: (id: string) => void; toast: (m: string, k?: "ok" | "err") => void; existing?: Campaign }) {
+const BLANK_FORM = { name: "", clientId: "", emailAccountId: "", listId: "", icpId: "", senderName: "", senderCompany: "", senderTitle: "", valueProp: "", tone: "friendly", dailyLimit: 50, timezone: "Asia/Kolkata", start: "09:00", end: "18:00" };
+
+/**
+ * Only the fields the step editor edits, shaped for the API. GET returns steps with
+ * server-side columns (aiInstructions: null, stepNo, campaignId...) and echoing them back
+ * verbatim failed validation, so a campaign could not be saved without touching every step.
+ * The step id goes back so the server can keep per-step history (A/B stats) attached.
+ */
+function stepForApi(s: Step) {
+  return {
+    ...(s.id ? { id: s.id } : {}),
+    delayDays: s.delayDays,
+    channel: s.channel ?? "email",
+    subjectTemplate: s.subjectTemplate ?? "",
+    bodyTemplate: s.bodyTemplate,
+    aiPersonalize: s.aiPersonalize,
+    aiInstructions: s.aiInstructions || undefined,
+    variants: (s.variants ?? []).map((v) => ({ subjectTemplate: v.subjectTemplate, bodyTemplate: v.bodyTemplate })),
+  };
+}
+
+function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, existing, refsErr, initialClientId }: { open: boolean; onClose: () => void; accounts: Account[]; lists: { id: string; name: string }[]; icps: { id: string; name: string }[]; onDone: (id: string) => void; toast: (m: string, k?: "ok" | "err") => void; existing?: Campaign; refsErr?: string | null; initialClientId?: string }) {
   const [clientOptions, setClientOptions] = useState<{ id: string; name: string }[]>([]);
   useEffect(() => {
     if (!open) return;
     apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClientOptions(r.clients)).catch(() => setClientOptions([]));
   }, [open]);
-  const [f, setF] = useState({ name: "", clientId: "", emailAccountId: "", listId: "", icpId: "", senderName: "", senderCompany: "", senderTitle: "", valueProp: "", tone: "friendly", dailyLimit: 50, timezone: "Asia/Kolkata", start: "09:00", end: "18:00" });
+  const [f, setF] = useState(BLANK_FORM);
   const [steps, setSteps] = useState<Step[]>(DEFAULT_STEPS);
   const [busy, setBusy] = useState(false);
+  // Seed the form once per opening. Seeding on every change of `existing` meant the detail
+  // page's 6s poll (a new object each time) wiped whatever the user was typing.
+  const existingRef = useRef(existing);
+  existingRef.current = existing;
+  const autoPickedSender = useRef(false);
   useEffect(() => {
-    if (existing) {
-      const s = existing.settings as Record<string, string | number | { start: string; end: string }>;
-      setF({ name: existing.name, clientId: (existing as Campaign & { clientId?: string | null }).clientId ?? "", emailAccountId: existing.emailAccountId ?? "", listId: existing.listId ?? "", icpId: existing.icpId ?? "", senderName: String(s.senderName ?? ""), senderCompany: String(s.senderCompany ?? ""), senderTitle: String(s.senderTitle ?? ""), valueProp: String(s.valueProp ?? ""), tone: String(s.tone ?? "friendly"), dailyLimit: Number(s.dailyLimit ?? 50), timezone: String(s.timezone ?? "Asia/Kolkata"), start: (s.sendWindow as { start: string })?.start ?? "09:00", end: (s.sendWindow as { end: string })?.end ?? "18:00" });
-      setSteps(existing.steps?.length ? existing.steps : DEFAULT_STEPS);
-    } else if (accounts[0] && !f.emailAccountId) setF((x) => ({ ...x, emailAccountId: accounts[0].id }));
-  }, [existing, accounts]); // eslint-disable-line
+    if (!open) return;
+    autoPickedSender.current = false;
+    const ex = existingRef.current;
+    if (ex) {
+      const s = ex.settings as Record<string, string | number | { start: string; end: string }>;
+      setF({ name: ex.name, clientId: (ex as Campaign & { clientId?: string | null }).clientId ?? "", emailAccountId: ex.emailAccountId ?? "", listId: ex.listId ?? "", icpId: ex.icpId ?? "", senderName: String(s.senderName ?? ""), senderCompany: String(s.senderCompany ?? ""), senderTitle: String(s.senderTitle ?? ""), valueProp: String(s.valueProp ?? ""), tone: String(s.tone ?? "friendly"), dailyLimit: Number(s.dailyLimit ?? 50), timezone: String(s.timezone ?? "Asia/Kolkata"), start: (s.sendWindow as { start: string })?.start ?? "09:00", end: (s.sendWindow as { end: string })?.end ?? "18:00" });
+      setSteps(ex.steps?.length ? ex.steps.map((x) => ({ ...x })) : DEFAULT_STEPS);
+      autoPickedSender.current = true;
+    } else {
+      // A fresh form every time "New campaign" opens - the previous campaign's fields
+      // used to still be there after saving.
+      setF({ ...BLANK_FORM, clientId: initialClientId ?? "" });
+      setSteps(DEFAULT_STEPS);
+    }
+  }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Default a new campaign to the first sender - once. Doing it on every render re-filled a
+  // select the user had deliberately cleared.
+  useEffect(() => {
+    if (!open || existing || autoPickedSender.current || !accounts[0]) return;
+    autoPickedSender.current = true;
+    setF((x) => (x.emailAccountId ? x : { ...x, emailAccountId: accounts[0].id }));
+  }, [open, existing, accounts]);
   const save = async () => {
     setBusy(true);
     try {
-      // null on edit, so choosing "No client" actually untags; omitted on create.
-      const body = { name: f.name, clientId: f.clientId || (existing ? null : undefined), emailAccountId: f.emailAccountId || undefined, listId: f.listId || undefined, icpId: f.icpId || undefined, settings: { senderName: f.senderName, senderCompany: f.senderCompany, senderTitle: f.senderTitle, valueProp: f.valueProp, tone: f.tone, dailyLimit: f.dailyLimit, timezone: f.timezone, sendWindow: { start: f.start, end: f.end, days: [1, 2, 3, 4, 5] } }, steps };
+      // On edit, a select the user emptied is sent as null so it actually detaches. Null
+      // goes only when there was something to detach, so an untouched empty field is
+      // omitted as before; on create empties are always omitted.
+      const detach = (was: string | null | undefined) => (existing && was ? null : undefined);
+      const ex = existing as (Campaign & { clientId?: string | null }) | undefined;
+      const body = { name: f.name, clientId: f.clientId || (existing ? null : undefined), emailAccountId: f.emailAccountId || detach(ex?.emailAccountId), listId: f.listId || detach(ex?.listId), icpId: f.icpId || detach(ex?.icpId), settings: { senderName: f.senderName, senderCompany: f.senderCompany, senderTitle: f.senderTitle, valueProp: f.valueProp, tone: f.tone, dailyLimit: f.dailyLimit, timezone: f.timezone, sendWindow: { start: f.start, end: f.end, days: [1, 2, 3, 4, 5] } }, steps: steps.map(stepForApi) };
       const r = existing ? await apiFetch<{ id: string }>("PATCH", `/v1/campaigns/${existing.id}`, body) : await apiFetch<{ id: string }>("POST", "/v1/campaigns", body);
       toast("Campaign saved");
       onDone(r.id);
@@ -144,11 +224,13 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
       <div className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2"><label className="label">Name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
-          <div><label className="label">Sender account</label><select className="input" value={f.emailAccountId} onChange={(e) => setF({ ...f, emailAccountId: e.target.value })}><option value="">Select…</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.fromName} &lt;{a.fromEmail}&gt; ({a.provider})</option>)}</select></div>
+          <div><label className="label">Sender account</label><select className="input" value={f.emailAccountId} onChange={(e) => setF({ ...f, emailAccountId: e.target.value })}><option value="">{existing ? "None (detach sender)" : "Select…"}</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.fromName} &lt;{a.fromEmail}&gt; ({a.provider})</option>)}</select></div>
           {clientOptions.length > 0 && (
             <div><label className="label">For client</label><select className="input" value={f.clientId} onChange={(e) => setF({ ...f, clientId: e.target.value })}><option value="">No client</option>{clientOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
           )}
           <div><label className="label">Lead list (for enrolment)</label><select className="input" value={f.listId} onChange={(e) => setF({ ...f, listId: e.target.value })}><option value="">None</option>{lists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></div>
+          <div><label className="label">ICP (scores enrolment by ICP fit)</label><select className="input" value={f.icpId} onChange={(e) => setF({ ...f, icpId: e.target.value })}><option value="">None</option>{icps.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</select></div>
+          {refsErr && <div className="text-xs text-red-700 sm:col-span-2" role="alert">Lead lists and ICPs could not be loaded ({refsErr}), so those dropdowns may be incomplete.</div>}
           <div><label className="label">Your name (for LinkedIn/WhatsApp steps)</label><input className="input" value={f.senderName} onChange={(e) => setF({ ...f, senderName: e.target.value })} /></div>
           <div><label className="label">Your company</label><input className="input" value={f.senderCompany} onChange={(e) => setF({ ...f, senderCompany: e.target.value })} /></div>
           <div><label className="label">Your title</label><input className="input" value={f.senderTitle} onChange={(e) => setF({ ...f, senderTitle: e.target.value })} /></div>
@@ -186,15 +268,36 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
   );
 }
 
-function AccountsModal({ open, onClose, accounts, sysAvail, onChanged, toast }: { open: boolean; onClose: () => void; accounts: Account[]; sysAvail: boolean; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
-  const [f, setF] = useState({ provider: sysAvail ? "system" : "resend", fromName: "", fromEmail: "", replyTo: "", signature: "", dailyLimit: 50, apiKey: "", host: "", port: 587, user: "", pass: "" });
+function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, onChanged, toast }: { open: boolean; onClose: () => void; accounts: Account[]; campaigns?: Campaign[]; sysAvail: boolean; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  const blank = { provider: sysAvail ? "system" : "resend", fromName: "", fromEmail: "", replyTo: "", signature: "", dailyLimit: 50, apiKey: "", host: "", port: 587, user: "", pass: "" };
+  const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
+  const [removing, setRemoving] = useState<string | null>(null);
+  const remove = async (a: Account) => {
+    // Deleting a sender detaches it from every campaign using it (the FK is ON DELETE SET
+    // NULL), and those campaigns then stop sending. Say which ones before it happens.
+    const using = campaigns.filter((c) => c.emailAccountId === a.id);
+    const lines = [
+      `Remove the sender ${a.fromEmail}?`,
+      using.length
+        ? `${using.length} campaign${using.length === 1 ? "" : "s"} use${using.length === 1 ? "s" : ""} this sender and will be left without one (they stop sending until you pick another):\n${using.map((c) => `- ${c.name}`).join("\n")}`
+        : "Any campaign using this sender will be left without one and stop sending until you pick another.",
+    ];
+    if (!confirm(lines.join("\n\n"))) return;
+    setRemoving(a.id);
+    try {
+      await apiFetch("DELETE", `/v1/campaigns/email-accounts/${a.id}`);
+      toast("Sender removed");
+      onChanged();
+    } catch (e) { toast((e as Error).message, "err"); } finally { setRemoving(null); }
+  };
   const add = async () => {
     setBusy(true);
     try {
       const config = f.provider === "resend" ? { apiKey: f.apiKey } : f.provider === "smtp" ? { host: f.host, port: Number(f.port), user: f.user || undefined, pass: f.pass || undefined, secure: Number(f.port) === 465 } : undefined;
       const r = await apiFetch<{ test: { ok: boolean; error?: string } }>("POST", "/v1/campaigns/email-accounts", { provider: f.provider, fromName: f.fromName, fromEmail: f.fromEmail, replyTo: f.replyTo || undefined, signature: f.signature || undefined, dailyLimit: f.dailyLimit, config });
       toast(r.test.ok ? "Sender added and verified" : `Added but connection test failed: ${r.test.error}`, r.test.ok ? "ok" : "err");
+      setF(blank);
       onChanged();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
@@ -202,7 +305,7 @@ function AccountsModal({ open, onClose, accounts, sysAvail, onChanged, toast }: 
     <Modal open={open} onClose={onClose} title="Sender accounts" wide>
       <ul className="mb-4 divide-y divide-slate-100 text-sm">
         {accounts.map((a) => (
-          <li key={a.id} className="flex items-center justify-between py-2"><div>{a.fromName} &lt;{a.fromEmail}&gt; <span className="badge ml-2 bg-black/[0.05] text-ink-300">{a.provider}</span> <StatusBadge s={a.status === "active" ? "active" : "failed"} /><div className="text-xs text-ink-400">{a.sentToday}/{a.dailyLimit} sent today</div></div><button className="text-red-600" onClick={() => apiFetch("DELETE", `/v1/campaigns/email-accounts/${a.id}`).then(onChanged)}>Remove</button></li>
+          <li key={a.id} className="flex items-center justify-between py-2"><div>{a.fromName} &lt;{a.fromEmail}&gt; <span className="badge ml-2 bg-black/[0.05] text-ink-300">{a.provider}</span> <StatusBadge s={a.status === "active" ? "active" : "failed"} /><div className="text-xs text-ink-400">{a.sentToday}/{a.dailyLimit} sent today</div></div><button className="text-red-600 disabled:opacity-50" disabled={removing === a.id} onClick={() => remove(a)}>{removing === a.id ? "Removing…" : "Remove"}</button></li>
         ))}
       </ul>
       <div className="grid gap-3 sm:grid-cols-2">
@@ -230,7 +333,7 @@ export function CampaignDetail() {
   const navigate = useNavigate();
   const [c, setC] = useState<Campaign | null>(null);
   const [stats, setStats] = useState<{ messages: Record<string, number>; contacts: Record<string, number>; rates: Record<string, number>; variants?: { stepId: string | null; variant: number; sent: number; opened: number; replied: number }[] } | null>(null);
-  const [contacts, setContacts] = useState<{ id: string; status: string; currentStep: number; nextSendAt: string | null; lead: { id: string; fullName: string | null; email: string | null; emailStatus: string; title: string | null; company: { name: string | null } | null } }[]>([]);
+  const [contacts, setContacts] = useState<{ id: string; status: string; currentStep: number; nextSendAt: string | null; lastError?: string | null; sendFailures?: number | null; lead: { id: string; fullName: string | null; email: string | null; emailStatus: string; title: string | null; company: { name: string | null } | null } }[]>([]);
   const [messages, setMessages] = useState<{ id: string; toEmail: string; subject: string; status: string; sentAt: string | null; openedAt: string | null; repliedAt: string | null; bodyText: string; direction: string; intent?: string | null; draftReply?: { subject: string; body: string } | null }[]>([]);
   const [tab, setTab] = useState<"contacts" | "messages">("contacts");
   const [enrollOpen, setEnrollOpen] = useState(false);
@@ -241,6 +344,12 @@ export function CampaignDetail() {
   const [icps, setIcps] = useState<{ id: string; name: string }[]>([]);
   const { toast, Toast } = useToast();
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  // One error per panel: a failed contacts fetch used to read as "No contacts enrolled".
+  const [statsErr, setStatsErr] = useState<string | null>(null);
+  const [contactsErr, setContactsErr] = useState<string | null>(null);
+  const [messagesErr, setMessagesErr] = useState<string | null>(null);
+  const [refsErr, setRefsErr] = useState<string | null>(null);
+  const [refsLoaded, setRefsLoaded] = useState(false);
   const load = useCallback(() => {
     if (!id) return;
     // Uncaught before, so a deleted campaign or a stale bookmark left a spinner turning
@@ -248,16 +357,25 @@ export function CampaignDetail() {
     apiFetch<Campaign>("GET", `/v1/campaigns/${id}`)
       .then((r) => { setC(r); setLoadErr(null); })
       .catch((e) => setLoadErr((e as Error).message));
-    apiFetch<typeof stats>("GET", `/v1/campaigns/${id}/stats`).then(setStats);
-    apiFetch<{ contacts: typeof contacts }>("GET", `/v1/campaigns/${id}/contacts`).then((r) => setContacts(r.contacts));
-    apiFetch<{ messages: typeof messages }>("GET", `/v1/campaigns/${id}/messages`).then((r) => setMessages(r.messages));
+    apiFetch<typeof stats>("GET", `/v1/campaigns/${id}/stats`).then((r) => { setStats(r); setStatsErr(null); }).catch((e) => setStatsErr((e as Error).message));
+    apiFetch<{ contacts: typeof contacts }>("GET", `/v1/campaigns/${id}/contacts`).then((r) => { setContacts(r.contacts); setContactsErr(null); }).catch((e) => setContactsErr((e as Error).message));
+    apiFetch<{ messages: typeof messages }>("GET", `/v1/campaigns/${id}/messages`).then((r) => { setMessages(r.messages); setMessagesErr(null); }).catch((e) => setMessagesErr((e as Error).message));
   }, [id]);
-  useEffect(() => { load(); const t = setInterval(load, 6000); return () => clearInterval(t); }, [load]);
-  useEffect(() => {
-    apiFetch<{ emailAccounts: Account[] }>("GET", "/v1/campaigns/email-accounts").then((r) => setAccounts(r.emailAccounts));
-    apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists));
-    apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
+  // Paused while the edit modal is open: nothing on screen behind it needs refreshing, and
+  // each poll handed the form a new campaign object.
+  const editingRef = useRef(false);
+  editingRef.current = editOpen;
+  useEffect(() => { load(); const t = setInterval(() => { if (!editingRef.current) load(); }, 6000); return () => clearInterval(t); }, [load]);
+  const loadRefs = useCallback(() => {
+    Promise.all([
+      apiFetch<{ emailAccounts: Account[] }>("GET", "/v1/campaigns/email-accounts").then((r) => setAccounts(r.emailAccounts)),
+      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)),
+      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps)),
+    ])
+      .then(() => { setRefsErr(null); setRefsLoaded(true); })
+      .catch((e) => setRefsErr((e as Error).message));
   }, []);
+  useEffect(() => { loadRefs(); }, [loadRefs]);
   if (loadErr && !c) {
     return (
       <Page title="Campaign" actions={<Link to="/campaigns" className="btn-secondary">← All campaigns</Link>}>
@@ -286,6 +404,8 @@ export function CampaignDetail() {
     </>}>
       {Toast}
       <div className="mb-4 flex items-center gap-2"><StatusBadge s={c.status} /><span className="text-sm text-ink-400">Sends only inside the send window and daily limit. Sequences stop automatically on reply or unsubscribe.</span></div>
+      {statsErr && !stats && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load this campaign's numbers: {statsErr} <button className="underline" onClick={load}>Try again</button></div>}
+      {refsErr && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load sender accounts, lists and ICPs ({refsErr}), so Edit and Enroll may show them as missing. <button className="underline" onClick={loadRefs}>Try again</button></div>}
       {stats && (
         <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-6">
           {[["Sent", stats.messages.sent], ["Opened", stats.messages.opened, stats.rates.open], ["Clicked", stats.messages.clicked, stats.rates.click], ["Replied", stats.messages.replied, stats.rates.reply], ["Bounced", stats.messages.bounced], ["Failed", stats.messages.failed]].map(([l, v, r]) => (
@@ -295,7 +415,7 @@ export function CampaignDetail() {
       )}
       <ExperimentsPanel campaignId={c.id} />
       <div className="mb-3 flex gap-2 border-b border-black/10">{(["contacts", "messages"] as const).map((t) => <button key={t} className={`px-3 py-2 text-sm capitalize ${tab === t ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`} onClick={() => setTab(t)}>{t}</button>)}</div>
-      {tab === "contacts" ? (
+      {tab === "contacts" && contactsErr && contacts.length === 0 ? <LoadError message={contactsErr} onRetry={load} /> : tab === "messages" && messagesErr && messages.length === 0 ? <LoadError message={messagesErr} onRetry={load} /> : tab === "contacts" ? (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[700px]">
             <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Lead</th><th className="th">Email</th><th className="th">Status</th><th className="th">Step</th><th className="th">Next send</th><th className="th"></th></tr></thead>
@@ -304,7 +424,17 @@ export function CampaignDetail() {
                 <tr key={x.id}>
                   <td className="td"><div className="font-medium">{x.lead.fullName}</div><div className="text-xs text-ink-400">{x.lead.title} · {x.lead.company?.name}</div></td>
                   <td className="td">{x.lead.email} <EmailStatusBadge status={x.lead.emailStatus} /></td>
-                  <td className="td"><StatusBadge s={x.status} /></td>
+                  <td className="td">
+                    <StatusBadge s={x.status} />
+                    {/* Why a send didn't go: a bounce or a provider error is worth seeing
+                        here rather than only as a "failed" badge. */}
+                    {(x.status === "bounced" || x.status === "failed" || (x.sendFailures ?? 0) > 0) && (x.lastError || (x.sendFailures ?? 0) > 0) && (
+                      <div className="mt-1 max-w-[240px] text-xs text-red-700" title={x.lastError ?? undefined}>
+                        {(x.sendFailures ?? 0) > 0 && <span>{x.sendFailures} failed attempt{x.sendFailures === 1 ? "" : "s"}{x.lastError ? ": " : ""}</span>}
+                        {x.lastError && <span className="line-clamp-2">{x.lastError}</span>}
+                      </div>
+                    )}
+                  </td>
                   <td className="td tabular-nums">{x.currentStep}/{c.steps?.length ?? 0}</td>
                   <td className="td text-xs text-ink-400">{fmtDate(x.nextSendAt)}</td>
                   <td className="td text-right">
@@ -358,8 +488,8 @@ export function CampaignDetail() {
         </div>
       )}
       <Modal open={!!preview} onClose={() => setPreview(null)} title={preview?.subject ?? ""}><pre className="whitespace-pre-wrap font-sans text-sm">{preview?.body}</pre></Modal>
-      <EnrollModal open={enrollOpen} onClose={() => setEnrollOpen(false)} campaign={c} lists={lists} onDone={() => { setEnrollOpen(false); load(); }} toast={toast} />
-      <CampaignModal open={editOpen} onClose={() => setEditOpen(false)} accounts={accounts} lists={lists} icps={icps} existing={c} onDone={() => { setEditOpen(false); load(); }} toast={toast} />
+      <EnrollModal open={enrollOpen} onClose={() => setEnrollOpen(false)} campaign={c} lists={lists} listsLoaded={refsLoaded} onDone={() => { setEnrollOpen(false); load(); }} toast={toast} />
+      <CampaignModal open={editOpen} onClose={() => setEditOpen(false)} accounts={accounts} lists={lists} icps={icps} refsErr={refsErr} existing={c} onDone={() => { setEditOpen(false); load(); }} toast={toast} />
     </Page>
   );
 }
@@ -443,7 +573,7 @@ function ReplyDraft({ message, onSent, toast }: { message: { id: string; draftRe
   );
 }
 
-function EnrollModal({ open, onClose, campaign, lists, onDone, toast }: { open: boolean; onClose: () => void; campaign: Campaign; lists: { id: string; name: string; count: number }[]; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+function EnrollModal({ open, onClose, campaign, lists, listsLoaded = true, onDone, toast }: { open: boolean; onClose: () => void; campaign: Campaign; lists: { id: string; name: string; count: number }[]; listsLoaded?: boolean; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const [mode, setMode] = useState<"list" | "score">("list");
   const [minScore, setMinScore] = useState(60);
   const [busy, setBusy] = useState(false);
@@ -464,10 +594,10 @@ function EnrollModal({ open, onClose, campaign, lists, onDone, toast }: { open: 
   return (
     <Modal open={open} onClose={onClose} title="Enroll leads">
       <div className="space-y-3 text-sm">
-        <label className="flex items-center gap-2"><input type="radio" checked={mode === "list"} onChange={() => setMode("list")} /> Everyone in the campaign's list {list ? `(${list.name}, ${list.count})` : "(no list attached - edit campaign)"}</label>
+        <label className="flex items-center gap-2"><input type="radio" checked={mode === "list"} onChange={() => setMode("list")} /> Everyone in the campaign's list {list ? `(${list.name}, ${list.count})` : campaign.listId && !listsLoaded ? "(list details could not be loaded)" : "(no list attached - edit campaign)"}</label>
         <label className="flex items-center gap-2"><input type="radio" checked={mode === "score"} onChange={() => setMode("score")} /> All leads with ICP score ≥ <input type="number" className="input w-20" value={minScore} onChange={(e) => setMinScore(Number(e.target.value))} /></label>
         <p className="text-xs text-ink-400">Only leads with a non-invalid email are enrolled. Suppressed/unsubscribed addresses are always skipped - see the do-not-contact list on the Leads page.</p>
-        <button className="btn-primary w-full justify-center" disabled={busy || (mode === "list" && !list)} onClick={go}>{busy ? "Enrolling…" : "Enroll"}</button>
+        <button className="btn-primary w-full justify-center" disabled={busy || (mode === "list" && !campaign.listId)} onClick={go}>{busy ? "Enrolling…" : "Enroll"}</button>
       </div>
     </Modal>
   );

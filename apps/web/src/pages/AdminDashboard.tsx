@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { adminAuth, adminFetch, useAdminToken } from "../lib/adminApi";
@@ -39,7 +39,7 @@ type ToolSummary = {
   used: number;
   percentUsed: number | null;
   status: "ok" | "warning" | "critical" | "unmetered";
-  keyStatus: "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "erroring" | "retired";
+  keyStatus: "not_configured" | "unverified" | "working" | "rejected" | "gated" | "rate_limited" | "out_of_credit" | "erroring" | "retired";
   keyStatusLabel: string;
   retired: boolean;
   lastOutcome: string | null;
@@ -63,6 +63,7 @@ const KEY_STATUS_STYLES: Record<ToolSummary["keyStatus"], string> = {
   rejected: "bg-red-50 text-red-700",
   gated: "bg-amber-50 text-amber-800",
   rate_limited: "bg-amber-50 text-amber-800",
+  out_of_credit: "bg-red-50 text-red-700",
   erroring: "bg-red-50 text-red-700",
   // Grey, not red: there is nothing to fix, so it must not compete for attention with a
   // key that genuinely needs replacing.
@@ -208,10 +209,20 @@ function OrgDetailPanel({ orgId, plans, onChanged, onClose }: { orgId: string; p
 function OrgsTab({ plans }: { plans: Plan[] }) {
   const [orgs, setOrgs] = useState<OrgRow[] | null>(null);
   const [q, setQ] = useState("");
+  const [debouncedQ, setDebouncedQ] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
-
-  const load = () => adminFetch<{ orgs: OrgRow[] }>("GET", `/v1/admin/orgs${q ? `?q=${encodeURIComponent(q)}` : ""}`).then((r) => setOrgs(r.orgs));
-  useEffect(() => { load(); }, [q]);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  // Searches used to fire on every keystroke, and a slow early response could land after a
+  // later one and overwrite it. Debounce, and only accept the newest request's answer.
+  const seq = useRef(0);
+  useEffect(() => { const t = setTimeout(() => setDebouncedQ(q.trim()), 300); return () => clearTimeout(t); }, [q]);
+  const load = () => {
+    const mine = ++seq.current;
+    return adminFetch<{ orgs: OrgRow[] }>("GET", `/v1/admin/orgs${debouncedQ ? `?q=${encodeURIComponent(debouncedQ)}` : ""}`)
+      .then((r) => { if (mine === seq.current) { setOrgs(r.orgs); setLoadErr(null); } })
+      .catch((e) => { if (mine === seq.current) setLoadErr((e as Error).message); });
+  };
+  useEffect(() => { load(); }, [debouncedQ]); // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div className="grid gap-4 lg:grid-cols-[1fr_360px]">
@@ -219,6 +230,8 @@ function OrgsTab({ plans }: { plans: Plan[] }) {
         <div className="border-b border-black/10 p-3">
           <input className="input" placeholder="Search workspace or email…" value={q} onChange={(e) => setQ(e.target.value)} />
         </div>
+        {loadErr && <div className="border-b border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">Could not load workspaces: {loadErr} <button className="ml-2 underline" onClick={load}>Retry</button></div>}
+        {!orgs && !loadErr && <div className="p-6 text-center text-sm text-ink-400">Loading…</div>}
         <table className="w-full text-sm">
           <thead><tr className="text-left text-ink-400"><th className="th">Workspace</th><th className="th">Plan</th><th className="th">Status</th><th className="th">Leads</th><th className="th">Premium</th><th className="th">Users</th><th className="th">Joined</th></tr></thead>
           <tbody>
@@ -243,25 +256,39 @@ function OrgsTab({ plans }: { plans: Plan[] }) {
             ))}
           </tbody>
         </table>
-        {orgs && orgs.length === 0 && <div className="p-6 text-center text-sm text-ink-400">No workspaces match.</div>}
+        {orgs && orgs.length === 0 && !loadErr && <div className="p-6 text-center text-sm text-ink-400">No workspaces match.</div>}
       </div>
-      {selected ? <OrgDetailPanel orgId={selected} plans={plans} onChanged={load} onClose={() => setSelected(null)} /> : <div className="card p-5 text-sm text-ink-400">Select a workspace to manage its plan, status, and credits.</div>}
+      {/* key: a fresh panel per workspace. Without it the previous org's state (loaded detail,
+          pending confirm) survived the switch and actions could fire against the wrong org. */}
+      {selected ? <OrgDetailPanel key={selected} orgId={selected} plans={plans} onChanged={load} onClose={() => setSelected(null)} /> : <div className="card p-5 text-sm text-ink-400">Select a workspace to manage its plan, status, and credits.</div>}
     </div>
   );
 }
 
 function LeadsTab({ plans }: { plans: Plan[] }) {
   const [requests, setRequests] = useState<UpgradeRequest[] | null>(null);
-  const load = () => adminFetch<{ requests: UpgradeRequest[] }>("GET", "/v1/admin/upgrade-requests").then((r) => setRequests(r.requests));
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [actionErr, setActionErr] = useState<string | null>(null);
+  const load = () => adminFetch<{ requests: UpgradeRequest[] }>("GET", "/v1/admin/upgrade-requests")
+    .then((r) => { setRequests(r.requests); setLoadErr(null); })
+    .catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { load(); }, []);
 
   const setStatus = async (id: string, status: string) => {
-    await adminFetch("PATCH", `/v1/admin/upgrade-requests/${id}`, { status });
+    setActionErr(null);
+    try {
+      await adminFetch("PATCH", `/v1/admin/upgrade-requests/${id}`, { status });
+    } catch (e) {
+      setActionErr(`Status change failed: ${(e as Error).message}`);
+    }
     load();
   };
 
   return (
     <div className="card overflow-x-auto p-0">
+      {loadErr && <div className="border-b border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">Could not load upgrade requests: {loadErr} <button className="ml-2 underline" onClick={load}>Retry</button></div>}
+      {actionErr && <div className="border-b border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">{actionErr}</div>}
+      {!requests && !loadErr && <div className="p-6 text-center text-sm text-ink-400">Loading…</div>}
       <table className="w-full text-sm">
         <thead><tr className="text-left text-ink-400"><th className="th">Name</th><th className="th">Contact</th><th className="th">Country</th><th className="th">Plan wanted</th><th className="th">Status</th><th className="th">Received</th></tr></thead>
         <tbody>
@@ -298,9 +325,11 @@ function ToolRow({ tool, onSaved }: { tool: ToolSummary; onSaved: (t: ToolSummar
   const [limit, setLimit] = useState(tool.usageLimit ?? "");
   const [threshold, setThreshold] = useState(tool.alertThresholdPct);
   const [busy, setBusy] = useState(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
 
   const save = async () => {
     setBusy(true);
+    setSaveErr(null);
     try {
       const updated = await adminFetch<ToolSummary>("PATCH", `/v1/admin/tools/${tool.provider}`, {
         usageLimit: limit === "" ? null : Number(limit),
@@ -308,6 +337,9 @@ function ToolRow({ tool, onSaved }: { tool: ToolSummary; onSaved: (t: ToolSummar
       });
       onSaved(updated);
       setEditing(false);
+    } catch (e) {
+      // Without this a rejected limit closed nothing and said nothing - it looked saved.
+      setSaveErr((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -356,7 +388,8 @@ function ToolRow({ tool, onSaved }: { tool: ToolSummary; onSaved: (t: ToolSummar
             <input className="input w-20 py-1 text-xs" type="number" min={0} placeholder="limit" value={limit} onChange={(e) => setLimit(e.target.value === "" ? "" : Number(e.target.value))} />
             <input className="input w-16 py-1 text-xs" type="number" min={1} max={100} value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} title="Alert at % used" />
             <button className="btn-primary py-1 text-xs" disabled={busy} onClick={save}>Save</button>
-            <button className="text-xs text-ink-400 hover:text-ink-50" onClick={() => setEditing(false)}>Cancel</button>
+            <button className="text-xs text-ink-400 hover:text-ink-50" onClick={() => { setEditing(false); setSaveErr(null); }}>Cancel</button>
+            {saveErr && <span className="text-xs text-red-600" role="alert">{saveErr}</span>}
           </div>
         ) : (
           <button className="btn-secondary py-1 text-xs" onClick={() => setEditing(true)}>Set limit</button>
@@ -371,7 +404,11 @@ function ToolsTab() {
   const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState<{ results: ProviderCheck[]; summary: string; checkedAt: string } | null>(null);
   const [checkError, setCheckError] = useState<string | null>(null);
-  const load = () => adminFetch<{ tools: ToolSummary[] }>("GET", "/v1/admin/tools").then((r) => setTools(r.tools));
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+  // Uncaught before: a failed load left "Loading…" on screen forever.
+  const load = () => adminFetch<{ tools: ToolSummary[] }>("GET", "/v1/admin/tools")
+    .then((r) => { setTools(r.tools); setLoadErr(null); })
+    .catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { load(); }, []);
 
   // Spends one real request per configured provider. Worth saying out loud on a page whose
@@ -390,12 +427,13 @@ function ToolsTab() {
     }
   };
 
+  if (!tools && loadErr) return <div className="card p-5 text-sm text-red-700" role="alert">Could not load tools: {loadErr} <button className="ml-2 underline" onClick={load}>Retry</button></div>;
   if (!tools) return <div className="card p-5 text-sm text-ink-400">Loading…</div>;
 
   // Retired providers are deliberately excluded: a banner that keeps demanding a fix which
   // does not exist teaches people to stop reading banners.
   const keyProblems = tools.filter(
-    (t) => !t.retired && (t.keyStatus === "rejected" || t.keyStatus === "erroring" || t.keyStatus === "gated" || t.keyStatus === "rate_limited"),
+    (t) => !t.retired && (t.keyStatus === "rejected" || t.keyStatus === "erroring" || t.keyStatus === "gated" || t.keyStatus === "rate_limited" || t.keyStatus === "out_of_credit"),
   );
   const retired = tools.filter((t) => t.retired);
   const needsAttention = tools.filter((t) => t.status === "warning" || t.status === "critical");
@@ -613,11 +651,13 @@ export function AdminDashboardPage() {
   const [tab, setTab] = useState<"orgs" | "leads" | "tools" | "credits" | "plans">("orgs");
   const [plans, setPlans] = useState<Plan[] | null>(null);
   const [authError, setAuthError] = useState(false);
+  const [plansErr, setPlansErr] = useState<string | null>(null);
 
   useEffect(() => {
     if (!token) return;
-    adminFetch<{ ok: boolean }>("GET", "/v1/admin/session").catch(() => setAuthError(true));
-    adminFetch<{ plans: Plan[] }>("GET", "/v1/admin/plans").then((r) => setPlans(r.plans)).catch(() => setPlans([]));
+    // Only a rejected token means "sign in again"; a network blip used to log the admin out.
+    adminFetch<{ ok: boolean }>("GET", "/v1/admin/session").catch((e) => { if ([401, 403].includes((e as { status?: number }).status ?? 0)) setAuthError(true); });
+    adminFetch<{ plans: Plan[] }>("GET", "/v1/admin/plans").then((r) => { setPlans(r.plans); setPlansErr(null); }).catch((e) => { setPlans([]); setPlansErr((e as Error).message); });
   }, [token]);
 
   if (!token) return <Navigate to="/admin/login" replace />;
@@ -634,6 +674,7 @@ export function AdminDashboardPage() {
         <button className="btn-secondary" onClick={() => { adminAuth.set(null); navigate("/admin/login"); }}>Sign out</button>
       </header>
       <main className="mx-auto max-w-6xl p-6">
+        {plansErr && <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">Could not load plans ({plansErr}) - plan names and the plan picker will be incomplete. Reload to retry.</div>}
         <nav className="mb-5 flex gap-2">
           {([["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"]] as const).map(([id, label]) => (
             <button key={id} className={`rounded-lg px-3 py-1.5 text-sm ${tab === id ? "bg-brand-600 text-white" : "text-ink-300 hover:bg-black/5"}`} onClick={() => setTab(id)}>{label}</button>

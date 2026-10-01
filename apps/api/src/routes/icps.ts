@@ -1,10 +1,12 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, clients, companies, consume, desc, inArray, enqueue, eq, getDb, icps, leads, organizations, sql } from "@prospex/db";
+import { and, clients, companies, consume, desc, inArray, enqueue, eq, getDb, icps, isNull, leads, or, sql } from "@prospex/db";
 import { assertOwned } from "../lib/ownership.js";
-import { createAiProvider, createAiProviderForPlan, scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriteria, type IcpChatMessage } from "@prospex/core";
-import { notFound } from "../lib/errors.js";
+import { scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriteria, type IcpChatMessage } from "@prospex/core";
+import { ApiError, notFound, requireSomeFields } from "../lib/errors.js";
+import { aiFor } from "../lib/ai.js";
+import { assertQuotaAvailable, tryConsume } from "../lib/quota.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { scoreLeadsWithLearning } from "../services/insights.js";
 
@@ -23,7 +25,9 @@ const criteria = z.object({
   excludeKeywords: z.array(z.string()).optional(),
   techStack: z.array(z.string()).optional(),
 });
-const icpInput = z.object({ name: z.string().min(1), description: z.string().optional(), criteria: criteria.optional(), seedDomains: z.array(z.string()).max(10).optional(), product: z.string().optional(), buildWithAi: z.boolean().default(true), clientId: z.string().uuid().optional() });
+// description, seedDomains and clientId are nullable because GET returns null for them, and
+// the edit form sends back what it read.
+const icpInput = z.object({ name: z.string().min(1), description: z.string().nullish(), criteria: criteria.optional(), seedDomains: z.array(z.string()).max(10).nullish(), product: z.string().optional(), buildWithAi: z.boolean().default(true), clientId: z.string().uuid().nullish() });
 
 icpRoutes.get("/", async (c) => {
   const { db } = getDb();
@@ -40,7 +44,7 @@ icpRoutes.post("/", zValidator("json", icpInput), async (c) => {
   const b = c.req.valid("json");
   const { db } = getDb();
   await assertOwned(clients, b.clientId, oid, "Client");
-  const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [], clientId: b.clientId ?? null }).returning();
+  const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description ?? null, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [], clientId: b.clientId ?? null }).returning();
   let jobId: string | null = null;
   if (b.buildWithAi && (b.description || b.seedDomains?.length)) jobId = (await enqueue(db, "icp.build", { icpId: row.id, product: b.product }, { orgId: oid })).id;
   return c.json({ icp: row, jobId }, 201);
@@ -53,13 +57,19 @@ icpRoutes.get("/:id", async (c) => {
   return c.json(row);
 });
 
-icpRoutes.patch("/:id", zValidator("json", icpInput.partial()), async (c) => {
+// `.partial()` keeps buildWithAi's default, so an empty body would still look non-empty.
+icpRoutes.patch("/:id", zValidator("json", icpInput.omit({ buildWithAi: true }).partial().extend({ buildWithAi: z.boolean().optional() })), async (c) => {
   const { db } = getDb();
+  const oid = orgId(c);
   const b = c.req.valid("json");
+  requireSomeFields(b);
+  // clientId used to be accepted here and dropped, so moving an ICP to a client saved
+  // nothing. It is applied now, after the same ownership check as on create.
+  await assertOwned(clients, b.clientId, oid, "Client");
   const [row] = await db
     .update(icps)
-    .set({ ...(b.name ? { name: b.name } : {}), ...(b.description !== undefined ? { description: b.description } : {}), ...(b.criteria ? { criteria: b.criteria } : {}), ...(b.seedDomains ? { seedDomains: b.seedDomains } : {}), updatedAt: new Date() })
-    .where(and(eq(icps.id, c.req.param("id")), eq(icps.orgId, orgId(c))))
+    .set({ ...(b.name ? { name: b.name } : {}), ...(b.description !== undefined ? { description: b.description } : {}), ...(b.criteria ? { criteria: b.criteria } : {}), ...(b.seedDomains !== undefined ? { seedDomains: b.seedDomains ?? [] } : {}), ...(b.clientId !== undefined ? { clientId: b.clientId } : {}), updatedAt: new Date() })
+    .where(and(eq(icps.id, c.req.param("id")), eq(icps.orgId, oid)))
     .returning();
   if (!row) throw notFound("ICP");
   return c.json(row);
@@ -67,7 +77,8 @@ icpRoutes.patch("/:id", zValidator("json", icpInput.partial()), async (c) => {
 
 icpRoutes.delete("/:id", async (c) => {
   const { db } = getDb();
-  await db.delete(icps).where(and(eq(icps.id, c.req.param("id")), eq(icps.orgId, orgId(c))));
+  const gone = await db.delete(icps).where(and(eq(icps.id, c.req.param("id")), eq(icps.orgId, orgId(c)))).returning({ id: icps.id });
+  if (!gone.length) throw notFound("ICP");
   return c.json({ ok: true });
 });
 
@@ -91,15 +102,18 @@ icpRoutes.post("/:id/chat", zValidator("json", z.object({ message: z.string().mi
   if (!icp) throw notFound("ICP");
   const b = c.req.valid("json");
 
-  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
-  const ai = createAiProviderForPlan(org?.plan ?? "free");
-  if (!hasAi(ai)) throw notFound("No AI provider configured");
+  const ai = aiFor(c.get("auth"));
+  // 503, not 404: the ICP exists; the service it needs is not available.
+  if (!hasAi(ai)) throw new ApiError(503, "No AI provider is configured on the server, so the ICP assistant is unavailable.", "ai_unavailable");
+  // Checked before the call and charged after it worked. The charge used to come after with
+  // its error swallowed, so an org past its AI quota chatted on for free.
+  await assertQuotaAvailable(db, oid, "aiMessages", 1);
 
   const history = (icp.chatHistory ?? []) as IcpChatMessage[];
   const summary = String((icp.aiProfile as { summary?: string } | null)?.summary ?? icp.description ?? "");
   const result = await refineIcpWithAi(ai, { criteria: (icp.criteria ?? {}) as IcpCriteria, summary, history, message: b.message });
-  if (!result) throw notFound("AI did not return a response - try again");
-  await consume(db, oid, "aiMessages", 1).catch(() => {});
+  if (!result) throw new ApiError(502, "The AI did not return a usable answer. Try again.", "ai_no_response");
+  await consume(db, oid, "aiMessages", 1);
 
   const nextHistory = [...history, { role: "user" as const, content: b.message }, { role: "assistant" as const, content: result.reply }].slice(-20);
   const [row] = await db
@@ -117,11 +131,21 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
   const icp = await db.query.icps.findFirst({ where: and(eq(icps.id, c.req.param("id")), eq(icps.orgId, oid)) });
   if (!icp) throw notFound("ICP");
   const b = c.req.valid("json");
+  /**
+   * Which leads this ICP may score.
+   *
+   * It used to take the first 5000 leads in the WORKSPACE, and with `assign` wrote this ICP's
+   * score and id onto all of them - for an agency, overwriting every other client's scores
+   * with one client's profile. A client's ICP scores that client's leads; a workspace ICP
+   * scores the unassigned pool plus leads already on it. Explicit leadIds are still limited
+   * to the same set, so a request cannot reach past it.
+   */
+  const scope = icp.clientId ? eq(leads.clientId, icp.clientId) : or(isNull(leads.clientId), eq(leads.icpId, icp.id))!;
   const rows = await db
     .select({ lead: leads, company: companies })
     .from(leads)
     .leftJoin(companies, eq(leads.companyId, companies.id))
-    .where(b.leadIds ? and(eq(leads.orgId, oid), inArray(leads.id, b.leadIds)) : eq(leads.orgId, oid))
+    .where(and(eq(leads.orgId, oid), scope, b.leadIds ? inArray(leads.id, b.leadIds) : undefined))
     .limit(5000);
   const scored = rows.map(({ lead, company }) => ({ lead, company, ...scoreLeadRules({ title: lead.title, location: lead.location, country: lead.country, emailStatus: lead.emailStatus, company }, icp.criteria as IcpCriteria) }));
   /**
@@ -152,10 +176,19 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
   const predictionById = new Map((learningApplied?.scored ?? []).map((p) => [p.id, p.prediction]));
 
   scored.sort((a, b2) => b2.score - a.score);
-  const ai = createAiProvider();
+  const ai = aiFor(c.get("auth"));
+  // Each rerank is one AI call and is charged as one, before it is made. It used to be free.
+  const rerank = { requested: Math.min(b.aiRerankTop, scored.length), done: 0, skipped: undefined as string | undefined };
+  if (b.aiRerankTop > 0 && !hasAi(ai)) rerank.skipped = "no_ai_provider";
   if (b.aiRerankTop > 0 && hasAi(ai)) {
     const summary = String((icp.aiProfile as { summary?: string } | null)?.summary ?? icp.description ?? icp.name);
     for (const s of scored.slice(0, b.aiRerankTop)) {
+      const charge = await tryConsume(db, oid, "aiMessages", 1);
+      if (!charge.ok) {
+        rerank.skipped = charge.reason === "quota" ? "quota" : "error";
+        break;
+      }
+      rerank.done++;
       const r = await scoreLeadWithAi(ai, { fullName: s.lead.fullName, title: s.lead.title, location: s.lead.location, company: s.company }, summary).catch(() => null);
       if (r) {
         s.score = Math.round(s.score * 0.5 + r.score * 0.5);
@@ -184,9 +217,11 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
   scored.sort((a, b2) => b2.score - a.score);
 
   if (b.assign) {
-    for (const s of scored) await db.update(leads).set({ score: s.score, scoreReasons: s.reasons, icpId: icp.id, updatedAt: new Date() }).where(eq(leads.id, s.lead.id));
+    for (const s of scored) await db.update(leads).set({ score: s.score, scoreReasons: s.reasons, icpId: icp.id, updatedAt: new Date() }).where(and(eq(leads.id, s.lead.id), eq(leads.orgId, oid)));
   }
   return c.json({
+    counts: { scored: scored.length, assigned: b.assign ? scored.length : 0, requested: b.leadIds ? new Set(b.leadIds).size : undefined, outOfScope: b.leadIds ? new Set(b.leadIds).size - scored.length : undefined, scope: icp.clientId ? "client" : "pool_and_icp" },
+    aiRerank: b.aiRerankTop > 0 ? rerank : undefined,
     scored: scored.map((s) => ({
       leadId: s.lead.id,
       fullName: s.lead.fullName,

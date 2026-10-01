@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { apiFetch } from "../lib/api";
-import { attentionTotal, type ClientRow, type Overview } from "../lib/clients";
+import { BUCKET_COPY, attentionTotal, type ClientAttention, type ClientRow, type Overview } from "../lib/clients";
 import { ClientDot, ClientFormModal, StatusPill, TargetBar, emptyClientForm, toClientPayload } from "../components/ClientBits";
-import { Empty, LoadError, Modal, Page, Spinner, Stat, useToast } from "../components/ui";
+import { Empty, LoadError, Modal, Page, Spinner, Stat, useFlash, useToast } from "../components/ui";
 
 /**
  * The agency view: every client, how each is tracking against what was promised, what is
@@ -16,7 +16,9 @@ export function ClientsPage() {
   const [routing, setRouting] = useState(false);
   const [showArchived, setShowArchived] = useState(false);
   const { toast, Toast } = useToast();
+  useFlash(toast);
   const navigate = useNavigate();
+  const [acting, setActing] = useState<string | null>(null);
 
   const load = useCallback(() => {
     setErr(null);
@@ -71,6 +73,28 @@ export function ClientsPage() {
             </div>
           )}
 
+          {data.pool.attention && attentionTotal(data.pool.attention) > 0 && (
+            <PoolAttention
+              attention={data.pool.attention}
+              acting={acting}
+              onAct={async (bucket, action) => {
+                setActing(bucket);
+                try {
+                  const r = await apiFetch<{ queued?: number; note?: string; skippedForQuota?: number; remainingInBucket?: number }>("POST", "/v1/clients/pool/act", { bucket, action });
+                  const more = r.remainingInBucket ? ` ${r.remainingInBucket} more remain - run it again after these finish.` : "";
+                  const quota = r.skippedForQuota ? ` ${r.skippedForQuota} not queued: your plan has no verifications left this month.` : "";
+                  if (r.note) toast(r.note + quota, r.skippedForQuota ? "err" : "ok");
+                  else toast(`${r.queued ?? 0} queued - results land over the next few minutes.${quota}${more}`);
+                  setTimeout(load, 1500);
+                } catch (e) {
+                  toast((e as Error).message, "err");
+                } finally {
+                  setActing(null);
+                }
+              }}
+            />
+          )}
+
           <div className="mt-6 flex items-center justify-between">
             <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-400">Clients</h2>
             <label className="flex items-center gap-2 text-xs text-ink-400">
@@ -105,8 +129,7 @@ export function ClientsPage() {
         onSubmit={async (f) => {
           const c = await apiFetch<{ id: string; name: string }>("POST", "/v1/clients", toClientPayload(f));
           setCreating(false);
-          toast(`${c.name} created`);
-          navigate(`/clients/${c.id}`);
+          navigate(`/clients/${c.id}`, { state: { flash: `${c.name} created` } });
         }}
       />
 
@@ -117,6 +140,41 @@ export function ClientsPage() {
         toast={toast}
       />
     </Page>
+  );
+}
+
+/**
+ * The pool's own needs-attention buckets. Leads with no client are still paid for, and
+ * until this existed their missing or unverified emails were only visible per client.
+ * The pool endpoint takes enrich/verify only, so "ready but idle" offers View alone.
+ */
+function PoolAttention({ attention, acting, onAct }: { attention: ClientAttention; acting: string | null; onAct: (bucket: keyof ClientAttention, action: "enrich" | "verify") => void }) {
+  return (
+    <div className="mt-6">
+      <h2 className="text-sm font-semibold uppercase tracking-wide text-ink-400">Pool - needs attention</h2>
+      <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-2 xl:grid-cols-4">
+        {(Object.keys(BUCKET_COPY) as (keyof ClientAttention)[]).map((b) => {
+          const copy = BUCKET_COPY[b];
+          const count = attention[b] ?? 0;
+          const action = copy.action === "list" ? null : copy.action;
+          return (
+            <div key={b} className={`card flex flex-col p-4 ${count ? "" : "opacity-60"}`}>
+              <div className="text-2xl font-semibold tabular-nums text-ink-50">{count.toLocaleString()}</div>
+              <div className="mt-1 font-medium text-ink-100">{copy.title}</div>
+              <p className="mt-1 flex-1 text-xs text-ink-400">{copy.why}</p>
+              <div className="mt-3 flex gap-2">
+                {action && (
+                  <button className="btn-primary py-1 text-xs" disabled={!count || acting !== null} onClick={() => onAct(b, action)}>
+                    {acting === b ? "Working…" : copy.actionLabel}
+                  </button>
+                )}
+                {count > 0 && <Link className="btn-secondary py-1 text-xs" to={`/leads?clientId=none&${copy.leadsQuery}`}>View</Link>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 

@@ -219,6 +219,62 @@ export function configFromEnv(env = process.env): AiConfig {
   };
 }
 
+/**
+ * Try each configured engine in order until one answers.
+ *
+ * render.yaml has always promised "second one is automatic fallback if the first is
+ * rate-limited", and createAiProvider returned exactly one engine - so a Groq 429 failed the
+ * whole call (and, through parseQuery, the whole search) while a working Gemini key sat
+ * unused. Every error falls through, not just 429/5xx: a rejected Groq key is no reason to
+ * refuse a request Gemini can serve, and if the request itself is bad every engine will say
+ * so and the last error is what the caller sees.
+ *
+ * Reports itself under the primary's name and model so existing `hasAi()` checks and logs
+ * read the same as before; `lastAnsweredBy` says which engine actually answered.
+ */
+export class FallbackAiProvider implements AiProvider {
+  /** Engine that answered the most recent successful call. */
+  lastAnsweredBy: string | null = null;
+  /** Errors from engines skipped on the most recent call, oldest first. */
+  lastFailures: { provider: string; message: string }[] = [];
+
+  constructor(public readonly chain: AiProvider[]) {
+    if (!chain.length) throw new Error("FallbackAiProvider needs at least one provider");
+  }
+
+  get name() {
+    return this.chain[0].name;
+  }
+
+  get model() {
+    return this.chain[0].model;
+  }
+
+  async complete(messages: AiMessage[], opts: CompleteOpts = {}) {
+    const failures: { provider: string; message: string }[] = [];
+    for (const p of this.chain) {
+      try {
+        const out = await p.complete(messages, opts);
+        this.lastAnsweredBy = p.name;
+        this.lastFailures = failures;
+        if (failures.length) console.warn(`[ai] ${p.name} answered after ${failures.map((f) => `${f.provider} failed (${f.message.slice(0, 80)})`).join(", ")}`);
+        return out;
+      } catch (e) {
+        failures.push({ provider: p.name, message: ((e as Error).message ?? String(e)).slice(0, 300) });
+      }
+    }
+    this.lastFailures = failures;
+    throw new Error(failures.map((f) => f.message).join(" | "));
+  }
+}
+
+/** One engine as itself, several as a fallback chain, none as the deterministic NullProvider. */
+function chainOf(list: AiProvider[]): AiProvider {
+  if (!list.length) return new NullProvider();
+  if (list.length === 1) return list[0];
+  return new FallbackAiProvider(list);
+}
+
 export function createAiProvider(cfg: AiConfig = configFromEnv()): AiProvider {
   const want = (cfg.provider ?? "auto").toLowerCase();
   const groq = () =>
@@ -233,15 +289,16 @@ export function createAiProvider(cfg: AiConfig = configFromEnv()): AiProvider {
     new OpenAICompatProvider("openai-compat", cfg.openaiCompatBaseUrl, cfg.openaiCompatApiKey ?? "none", cfg.openaiCompatModel ?? "gpt-4o-mini");
 
   const table: Record<string, () => AiProvider | undefined | "" > = { groq, gemini, anthropic, "openai-compat": compat };
-  if (want !== "auto" && table[want]) {
-    const p = table[want]();
-    if (p) return p;
-  }
-  for (const f of [anthropic, groq, gemini, compat]) {
+  // An explicitly chosen engine goes first; every other configured engine follows in the
+  // usual priority order as fallback.
+  const order: (() => AiProvider | undefined | "")[] = [anthropic, groq, gemini, compat];
+  const first = want !== "auto" ? table[want] : undefined;
+  const chain: AiProvider[] = [];
+  for (const f of first ? [first, ...order.filter((f) => f !== first)] : order) {
     const p = f();
-    if (p) return p;
+    if (p) chain.push(p);
   }
-  return new NullProvider();
+  return chainOf(chain);
 }
 
 /**

@@ -18,7 +18,7 @@
 
 import { fetchWithTimeout } from "../util/http.js";
 import { readSecret, describeSecretShape, type SecretShape } from "../util/secret.js";
-import { classifyHttp, classifyThrown, explainOutcome, type ProviderOutcome } from "./health.js";
+import { classifyHttp, classifyThrown, explainOutcome, looksLikeOutOfCredit, type ProviderOutcome } from "./health.js";
 
 export interface ProviderCheck {
   provider: string;
@@ -105,6 +105,20 @@ async function run(
   }
 }
 
+/** Read a JSON body without consuming the response run() still has to classify. */
+async function readJson(res: Response): Promise<unknown> {
+  try {
+    return JSON.parse(await res.clone().text());
+  } catch {
+    return null;
+  }
+}
+
+/** A key that authenticates on an account with nothing left to spend. */
+function outOfCredit(r: ProviderCheck, detail: string): ProviderCheck {
+  return { ...r, ok: false, outcome: "out_of_credit", detail, summary: explainOutcome("out_of_credit", detail) };
+}
+
 /** Apollo: one person-search page of a single row. */
 export async function checkApollo(raw = process.env.APOLLO_API_KEY): Promise<ProviderCheck> {
   const { value: apiKey, shape } = readSecret(raw);
@@ -143,16 +157,26 @@ export async function checkApolloEnrich(raw = process.env.APOLLO_API_KEY): Promi
   return r;
 }
 
-/** Hunter: domain-search capped to one result. */
+/**
+ * Hunter: the account endpoint, which is free.
+ *
+ * Was a one-row domain search, which spends a search credit out of a free plan measured in
+ * tens per month every time someone opened the admin page. /v2/account proves the key
+ * without spending anything, and an exhausted plan is reported rather than read as working.
+ */
 export async function checkHunter(raw = process.env.HUNTER_API_KEY): Promise<ProviderCheck> {
   const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("hunter", "HUNTER_API_KEY");
-  return run("hunter", "GET /v2/domain-search", () =>
-    fetchWithTimeout(`https://api.hunter.io/v2/domain-search?domain=example.com&limit=1&api_key=${encodeURIComponent(apiKey)}`, {
-      timeoutMs: TIMEOUT,
-    }),
-    shape,
-  );
+  let left: number | null = null;
+  const r = await run("hunter", "GET /v2/account", async () => {
+    const res = await fetchWithTimeout(`https://api.hunter.io/v2/account?api_key=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT });
+    const j = (await readJson(res)) as { data?: { requests?: { searches?: { used?: number; available?: number }; credits?: { used?: number; available?: number } } } } | null;
+    const c = j?.data?.requests?.credits ?? j?.data?.requests?.searches;
+    if (c && typeof c.available === "number" && typeof c.used === "number") left = Math.max(0, c.available - c.used);
+    return res;
+  }, shape);
+  if (r.ok && left === 0) return outOfCredit(r, "no Hunter credits left this period");
+  return r;
 }
 
 /** PDL: person enrich with a deliberately unmatchable identity. */
@@ -171,14 +195,34 @@ export async function checkPdl(raw = process.env.PDL_API_KEY): Promise<ProviderC
   return r;
 }
 
-/** Reoon: the balance endpoint, which is free and still proves the key. */
+/**
+ * Reoon: the balance endpoint, which is free and still proves the key.
+ *
+ * Reoon answers a bad key with HTTP 200 and `{"status":"error","reason":...}`, so judging by
+ * the status code reported a rejected key as working. The body decides.
+ */
 export async function checkReoon(raw = process.env.REOON_API_KEY): Promise<ProviderCheck> {
   const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("reoon", "REOON_API_KEY");
-  return run("reoon", "GET /api/v1/check-account-balance/", () =>
-    fetchWithTimeout(`https://emailverifier.reoon.com/api/v1/check-account-balance/?key=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT }),
-    shape,
-  );
+  type ReoonBalance = { status?: string; reason?: string; remaining_daily_credits?: number | string; remaining_instant_credits?: number | string };
+  const got: { body: ReoonBalance | null } = { body: null };
+  const r = await run("reoon", "GET /api/v1/check-account-balance/", async () => {
+    const res = await fetchWithTimeout(`https://emailverifier.reoon.com/api/v1/check-account-balance/?key=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT });
+    got.body = (await readJson(res)) as ReoonBalance | null;
+    return res;
+  }, shape);
+  if (!r.ok) return r;
+  const b = got.body;
+  if (!b) return { ...r, ok: false, outcome: "bad_response", detail: "200 with a body that is not JSON", summary: explainOutcome("bad_response", "200 with a body that is not JSON") };
+  if (b.status && b.status !== "success") {
+    const reason = (b.reason ?? b.status).slice(0, 200);
+    if (looksLikeOutOfCredit(reason)) return outOfCredit(r, reason);
+    return { ...r, ok: false, outcome: "auth", detail: reason, summary: `${explainOutcome("auth", reason)}${r.keyNote ? ` - ${r.keyNote}` : ""}` };
+  }
+  const daily = Number(b.remaining_daily_credits ?? NaN);
+  const instant = Number(b.remaining_instant_credits ?? NaN);
+  if (daily === 0 && instant === 0) return outOfCredit(r, "no Reoon credits left (daily and instant both 0)");
+  return r;
 }
 
 /**
@@ -244,12 +288,39 @@ export async function checkSerper(raw = process.env.SERPER_API_KEY): Promise<Pro
   );
 }
 
-/** SerpAPI, when configured as the paid search fallback. */
+/**
+ * SerpAPI, when configured as the paid search fallback.
+ *
+ * Uses account.json, which SerpAPI does not bill. The old probe ran a real search, spending
+ * one of 100 free monthly searches on every check.
+ */
 export async function checkSerpApi(raw = process.env.SERPAPI_KEY): Promise<ProviderCheck> {
   const { value: apiKey, shape } = readSecret(raw);
   if (!apiKey) return notConfigured("serpapi", "SERPAPI_KEY");
-  return run("serpapi", "GET /search.json", () =>
-    fetchWithTimeout(`https://serpapi.com/search.json?q=test&num=1&api_key=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT }),
+  let left: number | null = null;
+  const r = await run("serpapi", "GET /account.json", async () => {
+    const res = await fetchWithTimeout(`https://serpapi.com/account.json?api_key=${encodeURIComponent(apiKey)}`, { timeoutMs: TIMEOUT });
+    const j = (await readJson(res)) as { total_searches_left?: number; plan_searches_left?: number } | null;
+    const n = j?.total_searches_left ?? j?.plan_searches_left;
+    if (typeof n === "number") left = n;
+    return res;
+  }, shape);
+  if (r.ok && left === 0) return outOfCredit(r, "no SerpAPI searches left this month");
+  return r;
+}
+
+/**
+ * Brave Search. There is no free account endpoint, so this costs one query (count=1) - the
+ * cheapest honest proof the key works. Brave has had no free tier since Feb 2026.
+ */
+export async function checkBrave(raw = process.env.BRAVE_SEARCH_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
+  if (!apiKey) return notConfigured("brave", "BRAVE_SEARCH_API_KEY");
+  return run("brave", "GET /res/v1/web/search", () =>
+    fetchWithTimeout("https://api.search.brave.com/res/v1/web/search?q=test&count=1", {
+      timeoutMs: TIMEOUT,
+      headers: { "x-subscription-token": apiKey, accept: "application/json" },
+    }),
     shape,
   );
 }
@@ -286,6 +357,7 @@ export const PROVIDER_CHECKS: { provider: string; label: string; run: () => Prom
   { provider: "google_cse", label: "Google Programmable Search", run: () => checkGoogleCse() },
   { provider: "serper", label: "Serper", run: () => checkSerper() },
   { provider: "serpapi", label: "SerpAPI", run: () => checkSerpApi() },
+  { provider: "brave", label: "Brave Search", run: () => checkBrave() },
   { provider: "resend", label: "Resend", run: () => checkResend() },
   { provider: "reoon", label: "Reoon (verification)", run: () => checkReoon() },
   { provider: "millionverifier", label: "MillionVerifier (verification)", run: () => checkMillionVerifier() },

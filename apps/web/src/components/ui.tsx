@@ -1,4 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
+import { useLocation, useNavigate } from "react-router-dom";
 
 export function Page({ title, actions, children, subtitle }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
   return (
@@ -216,4 +217,24 @@ export function TagInput({ value, onChange, placeholder }: { value: string[]; on
       />
     </div>
   );
+}
+
+/**
+ * Show a message handed over by the page we came from.
+ *
+ * A page that navigates away right after an action (delete, create) unmounts with its own
+ * toast still queued, so "Deleted" was never seen. The sender passes
+ * `navigate(to, { state: { flash } })`; the receiver calls this once. The state is cleared
+ * so a reload or Back doesn't repeat it.
+ */
+export function useFlash(toast: (m: string, k?: "ok" | "err") => void) {
+  const loc = useLocation();
+  const navigate = useNavigate();
+  const flash = (loc.state as { flash?: unknown } | null)?.flash;
+  useEffect(() => {
+    if (typeof flash !== "string" || !flash) return;
+    toast(flash);
+    navigate(loc.pathname + loc.search, { replace: true, state: null });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [flash]);
 }

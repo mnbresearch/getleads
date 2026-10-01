@@ -59,7 +59,7 @@ async function zoho(cfg: Cfg, lead: Lead, company: { name?: string | null } | nu
   const res = await fetch(`${cfg.apiDomain ?? "https://www.zohoapis.in"}/crm/v2/Leads`, {
     method: "POST",
     headers: { authorization: `Zoho-oauthtoken ${cfg.accessToken}`, "content-type": "application/json" },
-    body: JSON.stringify({ data: [{ Last_Name: lead.lastName ?? lead.fullName ?? "Unknown", First_Name: lead.firstName, Email: lead.email, Company: company?.name ?? "Unknown", Designation: lead.title, Lead_Source: "Prospex" }] }),
+    body: JSON.stringify({ data: [{ Last_Name: lead.lastName ?? lead.fullName ?? "Unknown", First_Name: lead.firstName, Email: lead.email, Company: company?.name ?? "Unknown", Designation: lead.title, Lead_Source: "Scout" }] }),
   });
   const data = (await res.json()) as { data?: { details?: { id: string }; message?: string }[] };
   return { ok: res.ok, externalId: data.data?.[0]?.details?.id, error: data.data?.[0]?.message };

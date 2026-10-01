@@ -1,15 +1,15 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import Stripe from "stripe";
-import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
+import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, inArray, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
 import { sendingHealthForAccount } from "../services/campaigns.js";
 import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
 import { campaignAttribution, leadFunnel, sourcePerformance } from "../services/analytics.js";
 import { encryptJson, randomToken } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
-import { orgId, requireAuth, requireUser, type Env } from "../middleware.js";
+import { orgId, requireAuth, requireRole, requireUser, type Env } from "../middleware.js";
 import { INTEGRATION_PROVIDERS } from "../services/integrations.js";
 /** Channel/data providers configured via the same integrations table (config-only, no lead sync). */
 const CHANNEL_PROVIDERS = ["whatsapp", "apollo", "hunter", "pdl", "ipinfo"];
@@ -123,23 +123,33 @@ miscRoutes.get("/webhooks", requireAuth, async (c) => {
   const { db } = getDb();
   return c.json({ webhooks: await db.select().from(webhooks).where(eq(webhooks.orgId, orgId(c))).orderBy(desc(webhooks.createdAt)) });
 });
-miscRoutes.post("/webhooks", requireAuth, zValidator("json", z.object({ url: z.string().url(), events: z.array(z.string()).default(["*"]) })), async (c) => {
+/** The full signing secret is in this response - shown once at creation, as with API keys. */
+miscRoutes.post("/webhooks", requireAuth, requireRole("owner", "admin"), zValidator("json", z.object({ url: z.string().url(), events: z.array(z.string()).default(["*"]) })), async (c) => {
   const { db } = getDb();
   const [row] = await db.insert(webhooks).values({ orgId: orgId(c), url: c.req.valid("json").url, events: c.req.valid("json").events, secret: randomToken(24) }).returning();
   return c.json(row, 201);
 });
-miscRoutes.delete("/webhooks/:id", requireAuth, async (c) => {
+miscRoutes.delete("/webhooks/:id", requireAuth, requireRole("owner", "admin"), async (c) => {
   const { db } = getDb();
-  await db.delete(webhooks).where(and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c))));
+  const gone = await db.delete(webhooks).where(and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c)))).returning({ id: webhooks.id });
+  if (!gone.length) throw notFound("Webhook");
   return c.json({ ok: true });
 });
-miscRoutes.post("/webhooks/:id/test", requireAuth, async (c) => {
+/**
+ * Send a test event to THIS webhook.
+ *
+ * It used to emit a `webhook.test` event to the whole org, which went to every hook
+ * subscribed to "*" - and to none at all for the hook being tested if it listened to, say,
+ * `lead.*` only. The Test button reported "queued" either way. Now it is delivered to the
+ * one hook asked about, whatever its event filter.
+ */
+miscRoutes.post("/webhooks/:id/test", requireAuth, requireRole("owner", "admin"), async (c) => {
   const { db } = getDb();
   const hook = await db.query.webhooks.findFirst({ where: and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c))) });
   if (!hook) throw notFound("Webhook");
-  const { emitEvent } = await import("../lib/events.js");
-  await emitEvent(hook.orgId, "webhook.test", { hello: "world" });
-  return c.json({ queued: true });
+  const [ev] = await db.insert(events).values({ orgId: hook.orgId, type: "webhook.test", data: { hello: "world", webhookId: hook.id } }).returning();
+  const job = await enqueue(db, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { orgId: hook.orgId, maxAttempts: 1 });
+  return c.json({ queued: true, webhookId: hook.id, eventId: ev.id, jobId: job.id, active: hook.active, note: hook.active ? undefined : "This webhook is disabled (too many failures); the test is sent anyway." });
 });
 
 // ── Integrations (CRM) ──
@@ -148,7 +158,7 @@ miscRoutes.get("/integrations", requireAuth, async (c) => {
   const rows = await db.select().from(integrations).where(eq(integrations.orgId, orgId(c)));
   return c.json({ integrations: rows.map(({ configEncrypted: _x, ...r }) => r), providers: INTEGRATION_PROVIDERS, channelProviders: CHANNEL_PROVIDERS });
 });
-miscRoutes.put("/integrations/:provider", requireAuth, zValidator("json", z.object({ config: z.record(z.string()), settings: z.record(z.unknown()).optional(), autoSync: z.boolean().default(false) })), async (c) => {
+miscRoutes.put("/integrations/:provider", requireAuth, requireRole("owner", "admin"), zValidator("json", z.object({ config: z.record(z.string()), settings: z.record(z.unknown()).optional(), autoSync: z.boolean().default(false) })), async (c) => {
   const provider = c.req.param("provider");
   if (!INTEGRATION_PROVIDERS.includes(provider) && !CHANNEL_PROVIDERS.includes(provider)) throw badRequest(`Unknown provider. Supported: ${[...INTEGRATION_PROVIDERS, ...CHANNEL_PROVIDERS].join(", ")}`);
   const b = c.req.valid("json");
@@ -161,9 +171,10 @@ miscRoutes.put("/integrations/:provider", requireAuth, zValidator("json", z.obje
   const { configEncrypted: _x, ...pub } = row;
   return c.json(pub);
 });
-miscRoutes.delete("/integrations/:provider", requireAuth, async (c) => {
+miscRoutes.delete("/integrations/:provider", requireAuth, requireRole("owner", "admin"), async (c) => {
   const { db } = getDb();
-  await db.delete(integrations).where(and(eq(integrations.provider, c.req.param("provider")), eq(integrations.orgId, orgId(c))));
+  const gone = await db.delete(integrations).where(and(eq(integrations.provider, c.req.param("provider")), eq(integrations.orgId, orgId(c)))).returning({ id: integrations.id });
+  if (!gone.length) throw notFound("Integration");
   return c.json({ ok: true });
 });
 miscRoutes.post("/integrations/:provider/sync", requireAuth, zValidator("json", z.object({ leadIds: z.array(z.string().uuid()).min(1).max(500) })), async (c) => {
@@ -171,14 +182,18 @@ miscRoutes.post("/integrations/:provider/sync", requireAuth, zValidator("json", 
   const { db } = getDb();
   const integ = await db.query.integrations.findFirst({ where: and(eq(integrations.provider, c.req.param("provider")), eq(integrations.orgId, oid)) });
   if (!integ) throw notFound("Integration");
-  for (const leadId of c.req.valid("json").leadIds) await enqueue(db, "integration.sync", { integrationId: integ.id, leadId }, { orgId: oid, maxAttempts: 3 });
-  return c.json({ queued: c.req.valid("json").leadIds.length }, 202);
+  // Only this workspace's leads are queued. The job rejects any other id, so counting them
+  // as queued reported work that was never going to happen.
+  const requested = [...new Set(c.req.valid("json").leadIds)];
+  const owned = (await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, requested)))).map((r) => r.id);
+  for (const leadId of owned) await enqueue(db, "integration.sync", { integrationId: integ.id, leadId }, { orgId: oid, maxAttempts: 3 });
+  return c.json({ queued: owned.length, requested: requested.length, notFound: requested.length - owned.length }, 202);
 });
 
 // ── Billing (optional Stripe; pilot is free) ──
 miscRoutes.get("/billing/plans", (c) => c.json({ plans: Object.entries(PLANS).map(([id, p]) => ({ id, ...p })), stripeEnabled: !!env.stripe.secretKey, pilotMode: env.pilotMode }));
 
-miscRoutes.post("/billing/checkout", requireAuth, requireUser, zValidator("json", z.object({ plan: z.string() })), async (c) => {
+miscRoutes.post("/billing/checkout", requireAuth, requireUser, requireRole("owner", "admin"), zValidator("json", z.object({ plan: z.string() })), async (c) => {
   if (!env.stripe.secretKey) throw badRequest("Stripe is not configured");
   const stripe = new Stripe(env.stripe.secretKey);
   const a = c.get("auth");
@@ -215,15 +230,51 @@ miscRoutes.post("/billing/webhook", async (c) => {
     return c.json({ error: (e as Error).message }, 400);
   }
   const { db } = getDb();
+  /**
+   * Plan changes only ever land on a plan that exists. The old fallback to "pro" for a
+   * session with no plan in its metadata set a plan id that is not in PLANS, so the org got
+   * `limitsFor("pro")` - whatever that resolves to - and an admin page that could not name
+   * its plan. An unknown plan is logged and left alone, for a person to sort out.
+   */
+  const planForPrice = (priceId: string | undefined | null) => (priceId ? Object.keys(PLANS).find((p) => env.stripe.priceForPlan(p) === priceId) : undefined);
   if (event.type === "checkout.session.completed") {
     const s = event.data.object as Stripe.Checkout.Session;
     const orgId = s.metadata?.orgId;
-    const plan = s.metadata?.plan ?? "pro";
-    if (orgId) await db.update(organizations).set({ plan, planLimits: limitsFor(plan), stripeSubscriptionId: String(s.subscription ?? "") }).where(eq(organizations.id, orgId));
+    const plan = s.metadata?.plan;
+    if (orgId && plan && PLANS[plan]) {
+      await db.update(organizations).set({ plan, planLimits: limitsFor(plan), stripeSubscriptionId: String(s.subscription ?? "") }).where(eq(organizations.id, orgId));
+    } else if (orgId) {
+      console.error(`[billing] checkout ${s.id} for org ${orgId} names unknown plan ${JSON.stringify(plan)}; plan NOT changed`);
+      await db.update(organizations).set({ stripeSubscriptionId: String(s.subscription ?? "") }).where(eq(organizations.id, orgId));
+    }
+  }
+  if (event.type === "customer.subscription.updated") {
+    const sub = event.data.object as Stripe.Subscription;
+    const customer = String(sub.customer);
+    if (["canceled", "unpaid", "incomplete_expired"].includes(sub.status)) {
+      await db.update(organizations).set({ plan: "free", planLimits: limitsFor("free"), stripeSubscriptionId: null }).where(eq(organizations.stripeCustomerId, customer));
+    } else if (sub.status === "active" || sub.status === "trialing") {
+      // A plan switch made in the Stripe portal arrives here, as a new price on the item.
+      const priceId = sub.items?.data?.[0]?.price?.id;
+      const plan = planForPrice(priceId);
+      if (plan) await db.update(organizations).set({ plan, planLimits: limitsFor(plan), stripeSubscriptionId: sub.id }).where(eq(organizations.stripeCustomerId, customer));
+      else console.error(`[billing] subscription ${sub.id} has price ${priceId} that maps to no STRIPE_PRICE_<PLAN>; plan NOT changed`);
+    }
+    // past_due and incomplete: Stripe is still retrying payment; nothing changes yet.
   }
   if (event.type === "customer.subscription.deleted") {
     const sub = event.data.object as Stripe.Subscription;
     await db.update(organizations).set({ plan: "free", planLimits: limitsFor("free"), stripeSubscriptionId: null }).where(eq(organizations.stripeCustomerId, String(sub.customer)));
+  }
+  if (event.type === "invoice.payment_failed") {
+    // Not a downgrade: Stripe retries, and the subscription events above carry the outcome.
+    // Recorded as an event so the workspace (and its webhooks) can see it happened.
+    const inv = event.data.object as Stripe.Invoice;
+    const org = inv.customer ? await db.query.organizations.findFirst({ where: eq(organizations.stripeCustomerId, String(inv.customer)) }) : null;
+    if (org) {
+      const { emitEvent } = await import("../lib/events.js");
+      await emitEvent(org.id, "billing.payment_failed", { invoiceId: inv.id, amountDue: inv.amount_due, attemptCount: inv.attempt_count, nextAttempt: inv.next_payment_attempt });
+    } else console.error(`[billing] payment failed for unknown customer ${String(inv.customer)}`);
   }
   return c.json({ received: true });
 });

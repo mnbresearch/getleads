@@ -17,8 +17,11 @@ export function VisitorsPage() {
   const [busy, setBusy] = useState(false);
   const { toast, Toast } = useToast();
   const [listErr, setListErr] = useState<string | null>(null);
+  // A failed pixels fetch used to show "No pixel yet" to a customer with a live pixel.
+  const [pixErr, setPixErr] = useState<string | null>(null);
+  const [pixLoaded, setPixLoaded] = useState(false);
   const load = useCallback(() => {
-    apiFetch<{ pixels: Pixel[] }>("GET", "/v1/visitors/pixels").then((r) => setPixels(r.pixels));
+    apiFetch<{ pixels: Pixel[] }>("GET", "/v1/visitors/pixels").then((r) => { setPixels(r.pixels); setPixErr(null); setPixLoaded(true); }).catch((e) => setPixErr((e as Error).message));
     apiFetch<{ companies: VC[]; totals: typeof totals }>("GET", `/v1/visitors?days=${days}${status ? `&status=${status}` : ""}`)
       .then((r) => { setRows(r.companies); setTotals(r.totals); setListErr(null); })
       .catch((e) => setListErr((e as Error).message))
@@ -29,15 +32,18 @@ export function VisitorsPage() {
   const createPixel = async () => {
     const name = prompt("Name this website", "Main site");
     if (!name) return;
-    await apiFetch("POST", "/v1/visitors/pixels", { name });
-    load();
-    setSetup(true);
+    try {
+      await apiFetch("POST", "/v1/visitors/pixels", { name });
+      load();
+      setSetup(true);
+    } catch (e) { toast((e as Error).message, "err"); }
   };
   const findPeople = async (vc: VC) => {
     setBusy(true);
     try {
-      const r = await apiFetch<{ people: unknown[]; savedLeadIds: string[] }>("POST", `/v1/visitors/${vc.domain}/decision-makers`, {});
-      toast(`${r.people.length} decision makers found, ${r.savedLeadIds.length} saved as leads`);
+      const r = await apiFetch<{ people: unknown[]; savedLeadIds: string[]; stopped?: string }>("POST", `/v1/visitors/${vc.domain}/decision-makers`, {});
+      // A quota stop is said out loud: a short list must not read as "that is all there was".
+      toast(`${r.people.length} decision makers found, ${r.savedLeadIds.length} saved as leads${r.stopped ? `. ${r.stopped}` : ""}`, r.stopped ? "err" : "ok");
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
@@ -73,15 +79,17 @@ export function VisitorsPage() {
       .catch((e) => { if (journeyToken.current === token) setJourneyErr((e as Error).message); });
   };
 
-  const setStat = (vc: VC, s: string) => apiFetch("PATCH", `/v1/visitors/${vc.domain}`, { status: s }).then(load);
+  const setStat = (vc: VC, s: string) => apiFetch("PATCH", `/v1/visitors/${vc.domain}`, { status: s }).then(load).catch((e) => { toast(`Status not changed: ${(e as Error).message}`, "err"); load(); });
 
   return (
     <Page title="Website visitors" subtitle="Identify the companies browsing your site, see what they looked at, and pull their decision makers into your pipeline." actions={<><button className="btn-secondary" onClick={() => setSetup(true)}>Install pixel</button><button className="btn-primary" onClick={createPixel}>New website</button></>}>
       {Toast}
-      {pixels.length === 0 && <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">No pixel yet. Click "New website" to get a one-line script for your site.</div>}
+      {pixErr ? (
+        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load your pixels: {pixErr} <button className="underline" onClick={load}>Try again</button></div>
+      ) : pixLoaded && pixels.length === 0 && <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">No pixel yet. Click "New website" to get a one-line script for your site.</div>}
       {totals && (
         <div className="mb-4 grid grid-cols-3 gap-3">
-          <div className="card p-3"><div className="text-xs uppercase text-ink-400">Page views</div><div className="text-xl font-semibold">{totals.visits}</div></div>
+          <div className="card p-3"><div className="text-xs uppercase text-ink-400">Page views ({days}d)</div><div className="text-xl font-semibold">{totals.visits}</div></div>
           <div className="card p-3"><div className="text-xs uppercase text-ink-400">Identified as business</div><div className="text-xl font-semibold">{totals.identified} <span className="text-xs font-normal text-ink-400">{totals.visits ? Math.round((totals.identified / totals.visits) * 100) : 0}%</span></div></div>
           <div className="card p-3"><div className="text-xs uppercase text-ink-400">Filtered (ISP / hosting)</div><div className="text-xl font-semibold">{totals.isp}</div></div>
         </div>
@@ -89,11 +97,15 @@ export function VisitorsPage() {
       <div className="mb-3 flex flex-wrap gap-2">
         <select className="input w-36" value={days} onChange={(e) => setDays(Number(e.target.value))}><option value={7}>Last 7 days</option><option value={30}>Last 30 days</option><option value={90}>Last 90 days</option></select>
         <select className="input w-40" value={status} onChange={(e) => setStatus(e.target.value)}><option value="">All statuses</option><option value="new">New</option><option value="reviewed">Reviewed</option><option value="contacted">Contacted</option><option value="ignored">Ignored</option></select>
+        {/* The day filter picks which companies are listed (seen in the window); the per-company
+            visits, sessions and pages are running totals since first seen. Said here so a
+            "last 7 days" view with 400 visits isn't read as 400 visits this week. */}
+        <span className="self-center text-xs text-ink-400">Companies seen in the last {days} days. Visits, sessions and pages per company are all-time totals.</span>
       </div>
       {loading ? <Spinner /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No identified companies yet" hint="Once the pixel is installed, business visitors appear here within seconds of their visit. Consumer ISPs and cloud/hosting IPs are filtered out." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[800px]">
-            <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Company</th><th className="th">Intent</th><th className="th">Top pages</th><th className="th">Visits</th><th className="th">Last seen</th><th className="th">Status</th><th className="th"></th></tr></thead>
+            <thead className="border-b border-black/10 bg-cream"><tr><th className="th">Company</th><th className="th">Intent</th><th className="th">Top pages (all time)</th><th className="th">Visits (all time)</th><th className="th">Last seen</th><th className="th">Status</th><th className="th"></th></tr></thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((v) => (
                 <tr key={v.id} className="hover:bg-black/[0.05]">
@@ -127,7 +139,7 @@ export function VisitorsPage() {
                   back out, so every typo stayed in this list permanently. */}
               <DeleteButton
                 what={`the pixel "${p.name}"`}
-                consequence="Any site still running this snippet stops being tracked. Visits already recorded are kept."
+                consequence="Any site still running this snippet stops being tracked, and the individual visits it recorded (the page-by-page journeys) are deleted. The identified companies stay in your list."
                 label="Remove"
                 className="text-xs"
                 onDelete={async () => { await apiFetch("DELETE", `/v1/visitors/pixels/${p.id}`); toast("Pixel removed"); load(); }}
@@ -135,7 +147,7 @@ export function VisitorsPage() {
               />
             </div>
             <pre className="overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{p.snippet}</pre>
-            <button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied"))}>Copy</button>
+            <button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied")).catch(() => toast("Could not copy - select the snippet and copy it manually", "err"))}>Copy</button>
           </div>
         ))}
         {pixels.length === 0 && <button className="btn-primary" onClick={createPixel}>Create your first pixel</button>}
@@ -145,7 +157,7 @@ export function VisitorsPage() {
           <div className="text-ink-300">{detail.company?.description}</div>
           <div className="text-xs text-ink-400">{[detail.company?.industry, detail.company?.location, detail.company?.openRoles ? `${detail.company.openRoles} open roles` : null].filter(Boolean).join(" · ")}</div>
           {detail.company?.techStack?.length ? <div className="flex flex-wrap gap-1">{detail.company.techStack.map((t) => <span key={t} className="badge bg-black/[0.05] text-ink-300">{t}</span>)}</div> : null}
-          <div className="mt-2 font-medium">Pages viewed</div>
+          <div className="mt-2 font-medium">Pages viewed (all time)</div>
           <ul className="text-xs">{Object.entries(detail.pages).sort((a, b) => b[1] - a[1]).map(([p, n]) => <li key={p} className="flex justify-between border-b border-black/5 py-1"><span>{p}</span><span className="text-ink-500">{n}</span></li>)}</ul>
 
           <div className="mt-4 font-medium">Their journey</div>

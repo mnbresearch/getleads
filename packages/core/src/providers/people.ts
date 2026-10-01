@@ -10,7 +10,7 @@ import { fetchJson, fetchWithTimeout } from "../util/http.js";
 import { splitName } from "../util/names.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { meter } from "../util/meter.js";
-import { ProviderUnavailableError, recordHttp } from "./health.js";
+import { ProviderUnavailableError, providerCoolOff, recordHttp } from "./health.js";
 import { secret } from "../util/secret.js";
 
 export interface PeopleProviderQuery {
@@ -238,6 +238,13 @@ export async function searchProvidersDetailed(q: PeopleProviderQuery): Promise<P
   const failures: { provider: string; message: string }[] = [];
   const answered: string[] = [];
   for (const p of peopleProviders()) {
+    // A provider that just answered 401/402/429 will answer it again. Recorded as a failure
+    // rather than silently skipped, so an all-cooling run still reads as "could not ask".
+    const cooling = providerCoolOff(p.name);
+    if (cooling) {
+      failures.push({ provider: p.name, message: `skipped: cooling off after ${cooling.outcome} until ${new Date(cooling.until).toISOString()}` });
+      continue;
+    }
     try {
       const rows = await p.search(q);
       answered.push(p.name);
@@ -263,14 +270,29 @@ export async function searchProviders(q: PeopleProviderQuery): Promise<ProviderP
 }
 
 export async function enrichWithProviders(input: { email?: string; linkedinUrl?: string; firstName?: string; lastName?: string; companyDomain?: string }): Promise<ProviderPerson | null> {
+  return (await enrichWithProvidersDetailed(input)).person;
+}
+
+/**
+ * Enrichment with the reason it came back empty.
+ *
+ * The plain version swallowed every thrown provider error, so "no provider knows this person"
+ * and "every provider rejected us" both arrived as null.
+ */
+export async function enrichWithProvidersDetailed(input: { email?: string; linkedinUrl?: string; firstName?: string; lastName?: string; companyDomain?: string }): Promise<{ person: ProviderPerson | null; failures: { provider: string; message: string }[]; tried: string[] }> {
+  const failures: { provider: string; message: string }[] = [];
+  const tried: string[] = [];
   for (const p of peopleProviders()) {
     if (!p.enrich) continue;
+    tried.push(p.name);
     try {
       const r = await p.enrich(input);
-      if (r) return r;
-    } catch {}
+      if (r) return { person: r, failures, tried };
+    } catch (e) {
+      failures.push({ provider: p.name, message: ((e as Error).message ?? String(e)).slice(0, 200) });
+    }
   }
-  return null;
+  return { person: null, failures, tried };
 }
 
 export function sizeBand(n: number) {

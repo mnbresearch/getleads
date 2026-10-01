@@ -45,12 +45,21 @@ export const braveProvider = (apiKey = secret(process.env.BRAVE_SEARCH_API_KEY))
  * the chain spending a round trip on every single search to be told that again, so it now
  * retires itself for the life of the process the first time it hears it.
  */
-const CSE_CLOSED = /does not have the access to custom search/i;
+const CSE_CLOSED = /does not have the access to custom search|custom search (json )?api (is|has been) (closed|discontinued|deprecated|shut ?down|turned down)|no longer (available|supported)/i;
+
+/** Google's announced end of the Custom Search JSON API for existing projects. */
+export const CSE_SHUTDOWN_AT = Date.parse("2027-01-01T00:00:00Z");
 
 export const googleCseProvider = (apiKey = secret(process.env.GOOGLE_CSE_API_KEY), cx = secret(process.env.GOOGLE_CSE_CX)): SearchProvider => ({
   name: "google_cse",
   available: () => !!apiKey && !!cx,
   async search(query, opts = {}) {
+    // Past the shutdown date there is nothing to ask. Retiring here, before the request,
+    // means no round trip and no metered call while webSearch moves straight on to Serper.
+    if (Date.now() >= CSE_SHUTDOWN_AT) {
+      retireProvider("google_cse", "Google shut down the Custom Search JSON API on 1 Jan 2027");
+      throw new ProviderUnavailableError("google_cse", "forbidden", "Custom Search JSON API ended 1 Jan 2027");
+    }
     meter("google_cse");
     const start = (opts.offset ?? 0) + 1;
     const params = new URLSearchParams({ key: apiKey!, cx: cx!, q: query, num: String(Math.min(opts.count ?? 10, 10)), start: String(start) });

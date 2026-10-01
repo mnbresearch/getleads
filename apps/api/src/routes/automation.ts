@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { discoveredLeads, recentAgentRuns, runDiscoveryAgent } from "../services/agents/discovery.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
@@ -24,6 +24,18 @@ const runInput = z.object({
   preview: z.boolean().default(false),
 });
 
+/**
+ * Failed and blocked runs carry `error` as a plain string, while every other error response
+ * in this API is `{ error: { code, message } }` - which is what the web client reads, so a
+ * failed run showed as a bare "HTTP 502". The run's fields all stay; only `error` takes the
+ * standard shape (its text moves to `error.message`, and is kept as `errorText` too).
+ */
+function withErrorShape<T extends { status: string; error?: string; note?: string }>(r: T) {
+  if (r.status !== "failed" && r.status !== "blocked") return r;
+  const message = r.error ?? r.note ?? (r.status === "blocked" ? "No data source could answer this run." : "The discovery run failed.");
+  return { ...r, error: { code: r.status === "blocked" ? "providers_unavailable" : "discovery_failed", message }, errorText: r.error };
+}
+
 const leadsQuery = z.object({
   company: z.string().optional(),
   runId: z.string().uuid().optional(),
@@ -43,7 +55,7 @@ automationRoutes.post("/discover", rateLimit({ perMinute: 6 }), zValidator("json
 
   // 502 when every source refused us. A run that found nothing because nothing answered is
   // not a successful run that found nothing, and a caller polling this needs to know which.
-  return c.json(r, r.status === "blocked" ? 502 : r.status === "failed" ? 500 : 200);
+  return c.json(withErrorShape(r), r.status === "blocked" ? 502 : r.status === "failed" ? 500 : 200);
 });
 
 /** Kept for the existing scheduled workflow, which posts to this path. */
@@ -52,7 +64,7 @@ automationRoutes.post("/linkedin-scrape", rateLimit({ perMinute: 6 }), zValidato
   const r = await runDiscoveryAgent(orgId(c), b.query, { limit: b.count, icpId: b.icpId, preview: b.preview });
   return c.json(
     {
-      ...r,
+      ...withErrorShape(r),
       // A separate key. Overwriting `note` erased the run's own explanation - and on the
       // blocked path that note is the ONLY place the provider outage is described, so a 502
       // came back saying nothing but "this endpoint was renamed".

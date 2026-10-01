@@ -33,6 +33,11 @@ services:
         generateValue: true
       - key: INTERNAL_TOKEN
         generateValue: true
+      # Optional: a separate token for server-to-server calls to /v1/admin (header
+      # x-admin-token). Until it is set, the admin API still accepts INTERNAL_TOKEN and logs a
+      # warning. Not generated here, so an existing integration using INTERNAL_TOKEN keeps working.
+      - key: ADMIN_API_TOKEN
+        sync: false
       - key: APP_URL
         sync: false
       - key: API_URL

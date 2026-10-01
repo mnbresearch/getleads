@@ -1,0 +1,84 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { resetSearchCache, serperProvider, summarizeWebSearchFailures, webSearchDetailed, NO_WEB_SEARCH_CONFIGURED, type SearchProvider } from "./index.js";
+import { ProviderUnavailableError, reportProviderCall, resetProviderSkips } from "../providers/health.js";
+import { findPeopleDetailed } from "../discovery/people.js";
+
+/**
+ * A search where every provider failed must say so. webSearch returns [] for both "nobody
+ * matched" and "nothing could answer"; webSearchDetailed is what lets the pipeline tell them
+ * apart and stop finishing such a search as done/0/error:null.
+ */
+const failing = (name: string, outcome: "rate_limit" | "server" | "out_of_credit" = "server"): SearchProvider => ({
+  name,
+  available: () => true,
+  search: async () => {
+    throw new ProviderUnavailableError(name, outcome, `${name} said no (${outcome})`);
+  },
+});
+
+beforeEach(() => {
+  resetSearchCache();
+  resetProviderSkips();
+});
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("webSearchDetailed", () => {
+  it("reports every provider failing, with each provider's reason", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const o = await webSearchDetailed("head of growth fintech", { providers: [failing("serper", "rate_limit"), failing("brave")] });
+    expect(o.results).toEqual([]);
+    expect(o.everyProviderFailed).toBe(true);
+    expect(o.nothingConfigured).toBe(false);
+    expect(o.attempts.map((a) => [a.provider, a.ok, a.outcome])).toEqual([
+      ["serper", false, "rate_limit"],
+      ["brave", false, "server"],
+    ]);
+    expect(o.attempts[0].error).toMatch(/serper said no/);
+    expect(summarizeWebSearchFailures([o])).toMatch(/Every web search provider failed across 1 search: serper: .*; brave: /);
+  });
+
+  it("is not a failure when one provider answered with nothing", async () => {
+    const empty: SearchProvider = { name: "serper", available: () => true, search: async () => [] };
+    const o = await webSearchDetailed("zzzz no match", { providers: [failing("google_cse"), empty] });
+    expect(o.everyProviderFailed).toBe(false);
+    expect(summarizeWebSearchFailures([o])).toBeNull();
+  });
+
+  it("says nothing is configured when only the keyless scrapers exist", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const o = await webSearchDetailed("q", { providers: [failing("duckduckgo"), failing("bing_html")] });
+    expect(o.nothingConfigured).toBe(true);
+    expect(summarizeWebSearchFailures([o])).toContain(NO_WEB_SEARCH_CONFIGURED);
+  });
+
+  it("records a cooling-off provider as skipped instead of calling it", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    reportProviderCall({ provider: "serper", outcome: "rate_limit", status: 429 });
+    let called = 0;
+    const serper: SearchProvider = { name: "serper", available: () => true, search: async () => (called++, []) };
+    const o = await webSearchDetailed("q", { providers: [serper] });
+    expect(called).toBe(0);
+    expect(o.attempts[0]).toMatchObject({ provider: "serper", ok: false, outcome: "skipped" });
+    expect(o.everyProviderFailed).toBe(true);
+  });
+
+  it("surfaces a real 402 from Serper as out_of_credit (mocked fetch)", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ message: "Not enough credits" }), { status: 402 })));
+    const o = await webSearchDetailed("q", { providers: [serperProvider("key")] });
+    expect(o.everyProviderFailed).toBe(true);
+    expect(o.attempts[0].outcome).toBe("out_of_credit");
+  });
+
+  it("threads outcomes through findPeopleDetailed", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const r = await findPeopleDetailed({ titles: ["CTO"], limit: 5 }, { providers: [failing("serper")] });
+    expect(r.people).toEqual([]);
+    expect(r.everySearchFailed).toBe(true);
+    expect(r.failedSearches).toBe(r.searches.length);
+    expect(r.failureMessage).toMatch(/serper/);
+  });
+});

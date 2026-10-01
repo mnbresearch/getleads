@@ -1,11 +1,11 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
-import { drainJobs, getDb } from "@prospex/db";
+import { getDb } from "@prospex/db";
 import { env } from "./env.js";
 import { errorHandler } from "./lib/errors.js";
-import type { Env } from "./middleware.js";
+import { requireInternalToken, type Env } from "./middleware.js";
 import { authRoutes } from "./routes/auth.js";
 import { leadRoutes } from "./routes/leads.js";
 import { clientReportPublic, clientRoutes } from "./routes/clients.js";
@@ -24,7 +24,8 @@ import { adminRoutes } from "./routes/admin.js";
 import { leadCaptureRoutes } from "./routes/leadCapture.js";
 import { visibilityRoutes } from "./routes/visibility.js";
 import { docsHtml, openapi } from "./openapi.js";
-import { handlers } from "./jobs.js";
+import { runMaintenanceTick } from "./jobs.js";
+import { emailEventRoutes } from "./routes/emailEvents.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
 
 export function createApp() {
@@ -45,7 +46,7 @@ export function createApp() {
     }),
   );
 
-  app.get("/", (c) => c.json({ name: "Prospex API", version: "1.0.0", docs: `${env.apiUrl}/docs`, openapi: `${env.apiUrl}/openapi.json`, health: `${env.apiUrl}/health` }));
+  app.get("/", (c) => c.json({ name: "Scout API", version: "1.0.0", docs: `${env.apiUrl}/docs`, openapi: `${env.apiUrl}/openapi.json`, health: `${env.apiUrl}/health` }));
   app.get("/health", async (c) => {
     try {
       const { sql } = getDb();
@@ -79,18 +80,22 @@ export function createApp() {
   app.route("/v1", leadCaptureRoutes);
   app.route("/v1/admin", adminRoutes);
   app.route("/t", trackRoutes);
+  // Provider delivery events (bounces, complaints). Authenticated by the provider signature, not a session.
+  app.route("/v1/email-events", emailEventRoutes);
 
-  /** Serverless job runner: call from an external cron (cron-job.org is free) when JOB_MODE=inline. */
-  app.post("/internal/jobs/run", async (c) => {
-    if (env.internalToken && c.req.header("x-internal-token") !== env.internalToken) return c.json({ error: "forbidden" }, 403);
-    const n = await drainJobs(getDb().db, handlers, Number(c.req.query("maxMs") ?? 25_000));
-    return c.json({ processed: n });
-  });
-  app.get("/internal/jobs/run", async (c) => {
-    if (env.internalToken && c.req.query("token") !== env.internalToken) return c.json({ error: "forbidden" }, 403);
-    const n = await drainJobs(getDb().db, handlers, Number(c.req.query("maxMs") ?? 25_000));
-    return c.json({ processed: n });
-  });
+  /**
+   * Serverless job runner: call from an external cron (cron-job.org is free) when JOB_MODE=inline.
+   * It also revives the recurring schedulers and reaps dead jobs, which a serverless deploy has
+   * no long-lived worker to do. The token check fails closed: with INTERNAL_TOKEN unset the
+   * endpoint is disabled rather than open.
+   */
+  const runJobs = async (c: Context<Env>) => {
+    const maxMs = Math.min(Math.max(Number(c.req.query("maxMs") ?? 25_000) || 25_000, 1_000), 55_000);
+    const r = await runMaintenanceTick({ maxMs });
+    return c.json(r);
+  };
+  app.post("/internal/jobs/run", requireInternalToken, runJobs);
+  app.get("/internal/jobs/run", requireInternalToken, runJobs);
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: `No route for ${c.req.method} ${c.req.path}` } }, 404));
   return app;

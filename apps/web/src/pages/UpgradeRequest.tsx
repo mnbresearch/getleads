@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { Logo, BRAND_NAME } from "../components/Logo";
-import { apiFetch } from "../lib/api";
+import { apiFetch, auth } from "../lib/api";
 
 type Plan = { id: string; name: string; priceUsd: number };
 
@@ -13,11 +13,29 @@ export function UpgradeRequestPage() {
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [done, setDone] = useState(false);
+  const [plansErr, setPlansErr] = useState<string | null>(null);
+  const [workspace, setWorkspace] = useState<string | null>(null);
 
-  useEffect(() => {
+  const loadPlans = () => {
+    setPlansErr(null);
     apiFetch<{ plans: Plan[] }>("GET", "/v1/billing/plans")
       .then((r) => setPlans(r.plans))
-      .catch(() => setPlans([]));
+      // Said, not swallowed: the heading fell back to a generic "Upgrade your plan" with
+      // nothing to tell the visitor which plan they were asking for, or that it failed.
+      .catch((e) => { setPlans([]); setPlansErr((e as Error).message); });
+  };
+  useEffect(() => { loadPlans(); }, []);
+
+  // A signed-in customer should not have to retype who they are. Only fills empty fields,
+  // so anything already typed wins.
+  useEffect(() => {
+    if (!auth.token) return;
+    apiFetch<{ user: { name?: string; email?: string } | null; org: { name?: string } | null }>("GET", "/v1/auth/me")
+      .then((r) => {
+        setForm((f) => ({ ...f, name: f.name || r.user?.name || "", email: f.email || r.user?.email || "" }));
+        if (r.org?.name) setWorkspace(r.org.name);
+      })
+      .catch(() => {});
   }, []);
 
   const plan = plans?.find((p) => p.id === planId);
@@ -66,6 +84,12 @@ export function UpgradeRequestPage() {
           {plan ? `Upgrade to ${plan.name}` : "Upgrade your plan"}
           {plan && <span className="ml-2 text-sm font-normal text-ink-400">${plan.priceUsd}/mo</span>}
         </h1>
+        {plansErr && (
+          <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-sm text-amber-800" role="status">
+            Plan details could not be loaded ({plansErr}). You can still send this request for the "{planId}" plan. <button type="button" className="underline" onClick={loadPlans}>Try again</button>
+          </div>
+        )}
+        {workspace && <p className="text-xs text-ink-400">For workspace <span className="font-medium text-ink-200">{workspace}</span>.</p>}
         <p className="text-sm text-ink-400">
           Leave your details and we'll reach out to set up billing and switch your plan on our side — no card needed here.
         </p>

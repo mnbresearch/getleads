@@ -4,7 +4,7 @@
  */
 import * as cheerio from "cheerio";
 import { fetchText } from "../util/http.js";
-import { webSearch } from "../search/index.js";
+import { webSearchDetailed } from "../search/index.js";
 
 const CAREER_PATHS = ["/careers", "/jobs", "/careers/", "/join-us", "/work-with-us", "/company/careers", "/about/careers", "/openings"];
 const FUNCTION_RULES: [RegExp, string][] = [
@@ -86,8 +86,12 @@ export async function detectHiring(domain: string, companyName?: string, opts: {
   }
   let source: HiringSignal["source"] = titles.size ? "careers_page" : "none";
   if (!titles.size && companyName) {
-    const res = await webSearch(`site:linkedin.com/jobs "${companyName}"`, { count: 20, minResults: 1 }).catch(() => null);
-    searchAnswered = res !== null;
+    // webSearch never throws - it returns [] when every provider failed - so `res !== null`
+    // counted an outage as the search having answered, and "reached" reported a company
+    // with no open roles. The detailed outcome says whether any provider actually replied.
+    const o = await webSearchDetailed(`site:linkedin.com/jobs "${companyName}"`, { count: 20, minResults: 1 }).catch(() => null);
+    const res = o?.results ?? null;
+    searchAnswered = !!o && !o.everyProviderFailed;
     for (const r of res ?? []) {
       const t = r.title.replace(/\s*[-|–].*$/, "").trim();
       if (t.length >= 6 && t.length <= 70) titles.add(t);

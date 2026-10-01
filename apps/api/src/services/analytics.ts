@@ -238,7 +238,7 @@ export async function sourcePerformance(orgId: string, days: number) {
     days,
     sources,
     note:
-      "Reply rate is per lead CONTACTED, not per lead acquired: a source that produced 500 leads of which 10 were emailed has a contact problem, not a reply problem. `sufficient` is false where too few were contacted for the rate to mean anything.",
+      "Reply rate is per lead CONTACTED, not per lead acquired: a source that produced 500 leads of which 10 were emailed has a contact problem, not a reply problem. Sources where too few leads were contacted are marked as not enough data, because the rate would not mean anything yet.",
   };
 }
 
@@ -331,6 +331,6 @@ export async function campaignAttribution(orgId: string, days: number) {
     days,
     campaigns,
     model:
-      "Replies are last-touch: a reply is credited to the message it replies to. `qualifiedLeads` is NOT - it is any-touch, counting every lead this campaign messaged that is now qualified or a customer, so a lead worked by two campaigns is counted by both and the column does not sum to your qualified total. Crediting one campaign would need a decision this data cannot make: only the lead's current status is stored, with no record of when it changed relative to each send.",
+      "Replies are last-touch: a reply is credited to the message it replies to. Qualified leads are NOT - they are any-touch, counting every lead this campaign messaged that is now qualified or a customer, so a lead worked by two campaigns is counted by both and the column does not sum to your qualified total. Crediting one campaign would need a decision this data cannot make: only the lead's current status is stored, with no record of when it changed relative to each send.",
   };
 }

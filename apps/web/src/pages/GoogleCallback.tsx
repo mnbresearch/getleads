@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { auth } from "../lib/api";
+import { auth, consumeReturnPath } from "../lib/api";
 import { Logo } from "../components/Logo";
 
 /**
@@ -37,7 +37,9 @@ export function GoogleCallbackPage() {
     }
     auth.set(token);
     // Only ever a path on this app; an absolute URL here would be an open redirect.
-    navigate(next.startsWith("/") && !next.startsWith("//") ? next : "/", { replace: true });
+    const safeNext = next.startsWith("/") && !next.startsWith("//") ? next : "/";
+    // The login button always asks for "/"; if a session expired mid-page, go back there.
+    navigate(safeNext === "/" ? consumeReturnPath("/") : safeNext, { replace: true });
   }, [navigate]);
 
   return (

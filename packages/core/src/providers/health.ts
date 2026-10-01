@@ -42,7 +42,16 @@ export type ProviderOutcome =
    * dead provider, so it must not cool the provider off: the very next plain query will
    * succeed. It is still actionable, because the fix is a plan upgrade.
    */
-  | "unsupported_query";
+  | "unsupported_query"
+  /**
+   * The credential is fine and the account has run out of paid credit: HTTP 402, or a body
+   * that says "not enough credits" / "run out of searches" whatever the status code.
+   *
+   * Used to land in bad_response ("Unexpected response"), which is not actionable and so
+   * never alerted - while every call to that provider kept failing until somebody happened to
+   * open the admin page. Topping up is the fix, and it is the operator's to make.
+   */
+  | "out_of_credit";
 
 export interface ProviderCall {
   provider: string;
@@ -54,7 +63,7 @@ export interface ProviderCall {
 }
 
 /** Outcomes that mean an operator has something to fix, as opposed to a transient blip. */
-export const ACTIONABLE: ProviderOutcome[] = ["auth", "forbidden", "rate_limit", "unsupported_query"];
+export const ACTIONABLE: ProviderOutcome[] = ["auth", "forbidden", "rate_limit", "unsupported_query", "out_of_credit"];
 
 export function isActionable(outcome: ProviderOutcome): boolean {
   return ACTIONABLE.includes(outcome);
@@ -127,6 +136,12 @@ function looksLikeCredentialProblem(message: string): boolean {
 export function classifyHttp(status: number, body = ""): { outcome: ProviderOutcome; detail: string } {
   const summary = summarise(body);
   if (status >= 200 && status < 300) return { outcome: "ok", detail: "" };
+  // Ahead of 401/403/429 on purpose: providers disagree on which code means "no credit left"
+  // (SerpAPI uses 429, Serper 400, Hunter 403), but the words in the body are consistent and
+  // the operator action - top up - is the same for all of them.
+  if (status === 402 || looksLikeOutOfCredit(summary)) {
+    return { outcome: "out_of_credit", detail: summary || `out of credit (${status}); top up or upgrade the plan` };
+  }
   if (status === 401) {
     return { outcome: "auth", detail: summary || "credential rejected (401); the API key is wrong, expired or revoked" };
   }
@@ -164,6 +179,16 @@ export function classifyHttp(status: number, body = ""): { outcome: ProviderOutc
  */
 function looksLikeUnsupportedQuery(message: string): boolean {
   return /query pattern not allowed|not allowed for free account|unsupported query|operator.{0,20}not (allowed|supported)/i.test(message);
+}
+
+/**
+ * Does this message say the account has no credit left, as opposed to a rate limit?
+ *
+ * Narrow, for the same reason as the other two: "quota" alone is left out because Google uses
+ * it for per-minute limits that clear on their own.
+ */
+export function looksLikeOutOfCredit(message: string): boolean {
+  return /not enough credits?|insufficient (credits?|balance|funds)|out of credits?|no (more )?credits?( left| remaining)?\b|credits? (exhausted|depleted)|run out of (searches|credits?)|payment required|top ?up/i.test(message);
 }
 
 /** Map a thrown fetch error to an outcome. Timeouts and DNS failures are not auth problems. */
@@ -232,7 +257,15 @@ export function recordThrown(provider: string, e: unknown) {
  * in the database: core has no DB dependency, and a restart re-probing once is correct.
  */
 const SKIP_MS = 30 * 60 * 1000;
+/**
+ * A 429 cools off too, but briefly. Hammering a rate-limited provider on every search only
+ * extends the limit and burns the request budget proving it again; a couple of minutes is
+ * long enough for a per-minute window to clear and short enough that a daily cap lifting
+ * is noticed quickly.
+ */
+export const RATE_LIMIT_COOL_MS = 2 * 60 * 1000;
 const skipUntil = new Map<string, number>();
+const skipReason = new Map<string, ProviderOutcome>();
 
 /** True while a provider is in its cooling-off window after rejecting us. */
 export function providerRecentlyRejected(provider: string, now = Date.now()): boolean {
@@ -240,18 +273,37 @@ export function providerRecentlyRejected(provider: string, now = Date.now()): bo
   if (until === undefined) return false;
   if (now >= until) {
     skipUntil.delete(provider);
+    skipReason.delete(provider);
     return false;
   }
   return true;
 }
 
-/** Only credential and permission failures cool off; a timeout deserves an immediate retry. */
+/** Why a provider is cooling off, and until when - so a skipped provider can say why. */
+export function providerCoolOff(provider: string, now = Date.now()): { outcome: ProviderOutcome; until: number } | null {
+  if (!providerRecentlyRejected(provider, now)) return null;
+  return { outcome: skipReason.get(provider) ?? "auth", until: skipUntil.get(provider)! };
+}
+
+/** Credential, permission and credit failures cool off for long; a 429 briefly; a timeout deserves an immediate retry. */
 function noteForSkipping(call: ProviderCall, now = Date.now()) {
   // Deliberately excludes unsupported_query: the provider is healthy and the next query of a
   // different shape will work, so cooling it off would turn one rejected query into thirty
   // minutes of not using a provider that was never broken.
-  if (call.outcome === "auth" || call.outcome === "forbidden") skipUntil.set(call.provider, now + SKIP_MS);
-  else if (call.outcome === "ok") skipUntil.delete(call.provider);
+  if (call.outcome === "auth" || call.outcome === "forbidden" || call.outcome === "out_of_credit") {
+    skipUntil.set(call.provider, now + SKIP_MS);
+    skipReason.set(call.provider, call.outcome);
+  } else if (call.outcome === "rate_limit") {
+    // Never shortens a longer window already running for a worse reason.
+    const until = now + RATE_LIMIT_COOL_MS;
+    if ((skipUntil.get(call.provider) ?? 0) < until) {
+      skipUntil.set(call.provider, until);
+      skipReason.set(call.provider, "rate_limit");
+    }
+  } else if (call.outcome === "ok") {
+    skipUntil.delete(call.provider);
+    skipReason.delete(call.provider);
+  }
 }
 
 /**
@@ -280,6 +332,7 @@ export function retiredReason(provider: string): string | undefined {
 /** Testing seam: clears the cooling-off state. */
 export function resetProviderSkips() {
   skipUntil.clear();
+  skipReason.clear();
   retired.clear();
 }
 
@@ -295,6 +348,7 @@ export function explainOutcome(outcome: ProviderOutcome, detail?: string): strin
     network: "Could not reach the provider",
     bad_response: "Unexpected response",
     unsupported_query: "Key works, but this query type needs a paid plan",
+    out_of_credit: "Out of credit - top up or upgrade the plan",
   };
   return detail ? `${base[outcome]}: ${detail}` : base[outcome];
 }

@@ -1,19 +1,77 @@
-import { and, autopilots, campaigns, companies, consume, consumeLead, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, ne, organizations, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type JobHandler, visibilityPrompts, webhooks } from "@prospex/db";
-import { buildIcpWithAi, crawlCompanyWebsite, createAiProvider, findEmail, isPublicHost, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
+import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, ne, organizations, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, webhooks } from "@prospex/db";
+import { buildIcpWithAi, crawlCompanyWebsite, createAiProviderForPlan, findEmail, isPublicHost, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { hmacSign } from "./lib/crypto.js";
-import { pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
+import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead } from "./services/leads.js";
 import { knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { sendStep, tickCampaign } from "./services/campaigns.js";
 import { syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
-import { tryConsume } from "./lib/quota.js";
+import { tryConsume, type QuotaOutcome } from "./lib/quota.js";
 import { scanJobChanges } from "./services/jobChanges.js";
 import { identifyVisit } from "./services/visitors.js";
 import { refreshCompanySignals, runSubscription } from "./services/signals.js";
 import { runMonitor } from "./services/monitors.js";
 import { runAutopilot } from "./services/autopilot.js";
 import { sendMail } from "./lib/mailer.js";
+
+/** Org's plan, for the plan-gated AI factory. A missing org is treated as free. */
+async function planOf(db: Db, orgId: string | null | undefined): Promise<string> {
+  if (!orgId) return "free";
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId) });
+  return org?.plan ?? "free";
+}
+
+/**
+ * The AI engine this org's plan pays for. `createAiProvider()` picks Anthropic whenever it
+ * is configured, so every background job gave free workspaces the paid model.
+ */
+async function aiFor(db: Db, orgId: string | null | undefined) {
+  return createAiProviderForPlan(await planOf(db, orgId));
+}
+
+/** Only orgs that are allowed to run: a suspended workspace's schedules must not fire. */
+const orgIsActive = (col: unknown) => dsql`${col} IN (SELECT id FROM organizations WHERE status = 'active')`;
+
+/**
+ * Which verifier gave this verdict, for leads.email_verified_by. Null when no external
+ * verifier or SMTP probe actually answered (a syntax rule or "probe disabled" is not a
+ * verification, and must not be stamped as one).
+ */
+export function verifierOf(v: { reason?: string | null; verifiedBy?: string | null }): string | null {
+  const by = v.verifiedBy ?? "";
+  if (/^(reoon|millionverifier|hunter|abstract):/i.test(by) || by === "smtp") return by.slice(0, 80);
+  if (by) return null; // a local check ("syntax", "dns", "mx-only") is not a verification
+  const r = v.reason ?? "";
+  if (/^(reoon|millionverifier|hunter|abstract):/i.test(r)) return r.slice(0, 80);
+  if (/^SMTP (accepted|rejected)/.test(r)) return "smtp";
+  return null;
+}
+
+/**
+ * Charge one unit for this job exactly once, across all its attempts.
+ *
+ * Gating on `attempts <= 1` let a retry do the work free whenever the first attempt was
+ * refused for quota (or failed to record the charge). The charge is instead marked on the
+ * job itself, so a retry knows whether it has been paid for - and a plan limit is
+ * returned as an answer, for the caller to end the job with, not thrown into a retry.
+ */
+async function chargeJobOnce(db: Db, job: Job, orgId: string, metric: "verifications"): Promise<QuotaOutcome> {
+  const key = `charged_${metric}`;
+  if (job.payload?.[key]) return { ok: true };
+  const r = await tryConsume(db, orgId, metric, 1);
+  if (r.ok) {
+    await db.execute(dsql`UPDATE jobs SET payload = payload || ${JSON.stringify({ [key]: true })}::jsonb WHERE id = ${job.id}`);
+    job.payload = { ...(job.payload ?? {}), [key]: true };
+  }
+  return r;
+}
+
+/** Give back a job's charge when its last attempt failed: no work was delivered. */
+async function refundJobCharge(db: Db, job: Job, orgId: string, metric: "verifications") {
+  if (!job.payload?.[`charged_${metric}`] || job.attempts < job.maxAttempts) return;
+  await consume(db, orgId, metric, -1, { allowOverage: true }).catch(() => {});
+}
 
 const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
 
@@ -54,6 +112,13 @@ export const RECURRING_JOBS: Record<string, number> = {
  *
  * The error is rethrown, so a genuinely broken scheduler still records its failure.
  */
+/**
+ * Schedulers outrank all work. They were priority 0 while each pageview enqueued a
+ * priority-4 visit.identify, so a busy site starved campaign.tick - and with it sending.
+ * claimJob also orders recurring jobs first, which covers rows enqueued before this.
+ */
+export const SCHEDULER_PRIORITY = 100;
+
 export async function withReschedule<T>(
   db: Parameters<typeof enqueue>[0],
   job: { payload: Record<string, unknown> },
@@ -67,11 +132,111 @@ export async function withReschedule<T>(
       const delayMs = RECURRING_JOBS[type] ?? 3600_000;
       // Best-effort: a failure to reschedule must not replace the body's error, which is
       // the more informative one. The keeper below is what recovers from this case.
-      await enqueue(db, type, { recurring: true }, { runAt: new Date(Date.now() + delayMs), maxAttempts: 1 }).catch(() => {});
+      await enqueue(db, type, { recurring: true }, { runAt: new Date(Date.now() + delayMs), maxAttempts: 1, priority: SCHEDULER_PRIORITY }).catch(() => {});
     }
   }
 }
 
+
+/** Result of findEmail, including what C1's core change adds when present. */
+type FoundEmail = Awaited<ReturnType<typeof findEmail>> & { verifiedBy?: string | null };
+
+/** findEmail with addresses it must never return (known bad, or the one being replaced). */
+async function findEmailExcluding(input: Parameters<typeof findEmail>[0], exclude: string[]): Promise<FoundEmail> {
+  const ex = new Set(exclude.map((e) => e.toLowerCase()));
+  // `exclude` tells the core finder to skip those candidates (and not spend a verification
+  // on them); the check below enforces it here too, so a bad address can never come back.
+  const opts: Parameters<typeof findEmail>[1] & { exclude?: string[] } = { ...verifyOpts(), exclude: [...ex] };
+  const r = (await findEmail(input, opts)) as FoundEmail;
+  if (r.email && ex.has(r.email.toLowerCase())) return { ...r, email: undefined, status: "unknown", confidence: 0, verifiedBy: undefined };
+  return r;
+}
+
+async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
+  let company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
+  let profile: CompanyProfile | null = null;
+  if (company && (!company.enrichedAt || Date.now() - company.enrichedAt.getTime() > 30 * 86_400_000)) {
+    profile = await crawlCompanyWebsite(company.domain).catch(() => null);
+    // A crawl that fetched nothing is not an enrichment. Writing it would stamp
+    // `enrichedAt` and lock the company out of re-enrichment for thirty days on the
+    // strength of one bad minute.
+    if (profile && !profile.crawlFailed) company = await upsertCompany(lead.orgId, company.domain, { ...profile, name: profile.name ?? company.name ?? undefined });
+  }
+  const patch: Record<string, unknown> = {};
+  const knownPattern = company?.emailPattern ?? undefined;
+  const custom = { ...(lead.custom ?? {}) } as Record<string, unknown>;
+  const priorBad = Array.isArray(custom.invalidEmails) ? (custom.invalidEmails as string[]) : [];
+  /** Is this address already another lead's in the org? The (org, email) index is unique. */
+  const takenByOther = async (email: string) => {
+    const other = await db.query.leads.findFirst({ where: and(eq(leads.orgId, lead.orgId), eq(leads.email, email.toLowerCase())) });
+    return !!other && other.id !== lead.id;
+  };
+  /** A plan limit ends the job as skipped; nothing below is done for free on a retry. */
+  const charge = async () => {
+    const c = await chargeJobOnce(db, job, lead.orgId, "verifications");
+    if (!c.ok && c.reason === "error") throw new Error(`could not record verification usage: ${c.message}`);
+    return c;
+  };
+
+  if (!lead.email && company && lead.firstName && lead.lastName) {
+    const c = await charge();
+    if (!c.ok) return { skipped: "quota", detail: c.message };
+    const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, priorBad);
+    if (r.email) {
+      // The same "taken" check replaceInvalid has. Writing an address another lead
+      // already holds hit the unique index, and the job failed three times over it.
+      if (await takenByOther(r.email)) {
+        custom.emailLookup = { at: new Date().toISOString(), result: `found ${r.email.toLowerCase()}, which another lead already has` };
+        Object.assign(patch, { custom });
+      } else {
+        const by = r.verifiedBy ?? null;
+        Object.assign(patch, { email: r.email.toLowerCase(), emailStatus: r.status, emailConfidence: r.confidence, ...(by ? { verifiedAt: new Date(), emailVerifiedBy: by } : { emailVerifiedBy: null }) });
+      }
+    }
+    if (r.pattern && !company.emailPattern) await db.update(companies).set({ emailPattern: r.pattern }).where(eq(companies.id, company.id));
+  } else if (lead.email && lead.emailStatus === "unknown") {
+    const c = await charge();
+    if (!c.ok) return { skipped: "quota", detail: c.message };
+    const v = await verifyEmail(lead.email, verifyOpts());
+    const by = verifierOf(v);
+    Object.assign(patch, { emailStatus: v.status, emailConfidence: v.confidence, ...(by ? { verifiedAt: new Date(), emailVerifiedBy: by } : {}) });
+  } else if (job.payload.replaceInvalid && lead.email && lead.emailStatus === "invalid" && company && lead.firstName && lead.lastName) {
+    // Asked for explicitly ("find a working address"): the person may be right and only
+    // the address wrong. Look for a replacement; keep the bad one on record rather than
+    // throwing it away, so it is never tried again and never silently resurrected.
+    const c = await charge();
+    if (!c.ok) return { skipped: "quota", detail: c.message };
+    // Every address already known bad, and the current one, are excluded - the finder
+    // used to hand back an address from invalidEmails as the "replacement".
+    const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, [...priorBad, lead.email]);
+    const usable = r.email && r.email.toLowerCase() !== lead.email.toLowerCase() && (r.status === "valid" || r.status === "catch_all" || r.status === "risky");
+    const taken = usable ? await takenByOther(r.email!) : false;
+    if (usable && !taken) {
+      custom.invalidEmails = [...new Set([...priorBad, lead.email])];
+      const by = r.verifiedBy ?? null;
+      // verifiedAt only when a verifier actually answered. A pattern guess with the SMTP
+      // probe off is "risky" and unverified, and must not be shown as verified.
+      Object.assign(patch, { email: r.email!.toLowerCase(), emailStatus: r.status, emailConfidence: r.confidence, ...(by ? { verifiedAt: new Date(), emailVerifiedBy: by } : { verifiedAt: null, emailVerifiedBy: null }), custom });
+    } else {
+      // Recorded, so the next look at this lead can tell "tried, nothing better" from
+      // "never tried" - and the dashboard is not asked to repeat the same lookup.
+      custom.replacementSearchedAt = new Date().toISOString();
+      custom.replacementResult = taken ? "found an address another lead already has" : r.email ? `only found ${r.status} candidates` : "no candidate found";
+      Object.assign(patch, { custom });
+    }
+  }
+  const icp = lead.icpId ? await db.query.icps.findFirst({ where: eq(icps.id, lead.icpId) }) : null;
+  if (icp) {
+    const s = scoreLeadRules({ title: lead.title, location: lead.location, country: lead.country, emailStatus: String(patch.emailStatus ?? lead.emailStatus), company }, icp.criteria as IcpCriteria);
+    Object.assign(patch, { score: s.score, scoreReasons: s.reasons });
+  }
+  await db.update(leads).set({ ...patch, enrichedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, lead.id));
+  await emitEvent(lead.orgId, "lead.enriched", { leadId: lead.id, ...patch }, { type: "lead", id: lead.id });
+  return patch;
+}
+
+/** Consecutive finally-failed deliveries after which a webhook is switched off. */
+export const WEBHOOK_DISABLE_AFTER = 10;
 
 export const handlers: Record<string, JobHandler> = {
   /** Run a lead search end-to-end and persist results. payload: { searchId, query, icpId?, listId? } */
@@ -86,7 +251,7 @@ export const handlers: Record<string, JobHandler> = {
     try {
       const providerBudget = await remainingPremiumBudget(db, orgId);
       const { leads: results, providerFailures } = await runLeadPipelineDetailed(query, {
-        ai: createAiProvider(),
+        ai: await aiFor(db, orgId),
         verify: verifyOpts(),
         icp: (icp?.criteria as IcpCriteria | undefined) ?? undefined,
         maxProviderLeads: providerBudget,
@@ -99,15 +264,25 @@ export const handlers: Record<string, JobHandler> = {
       const ids: string[] = [];
       /** Set when the plan's lead quota, not the data, ended the run. */
       let quotaStopped: string | null = null;
+      /** Set when usage could not be recorded at all - a fault, not the customer's limit. */
+      let chargeError: string | null = null;
       for (const r of results) {
-        try {
-          await consumeLead(db, orgId, r.source);
-        } catch (e) {
-          quotaStopped = (e as Error).message;
-          ctx.log(`quota hit: ${quotaStopped}`);
-          break;
+        // Charged only for a lead the org does not have yet. A retry of this job re-runs
+        // the pipeline and finds the leads its earlier attempt already saved (and paid
+        // for): those now exist, so they are not charged again. Charging every result
+        // before the upsert billed rediscoveries and re-billed every lead on each retry.
+        const existing = await findExistingLead(orgId, { email: r.email, linkedinUrl: r.linkedinUrl });
+        if (!existing) {
+          const charge = await chargeNewLead(orgId, r.source);
+          if (!charge.ok) {
+            if (charge.reason === "quota") quotaStopped = charge.message;
+            else chargeError = charge.message;
+            ctx.log(`stopped: ${charge.message}`);
+            break;
+          }
         }
-        const { lead, created: c } = await upsertLead(orgId, pipelineLeadToInput(r, { icpId, source: r.source, tags: [`search:${searchId.slice(0, 8)}`] }));
+        // fillOnly: a rediscovery fills gaps and never overwrites what the user edited.
+        const { lead, created: c } = await upsertLead(orgId, pipelineLeadToInput(r, { icpId, source: r.source, tags: [`search:${searchId.slice(0, 8)}`] }), { fillOnly: true });
         if (c) created++;
         ids.push(lead.id);
       }
@@ -135,7 +310,7 @@ export const handlers: Record<string, JobHandler> = {
       // hit their limit saw a completed search with fewer leads and no reason. The pipeline
       // found more; the plan would not let them have them. Saying so is the difference
       // between an upgrade prompt and a silent quality complaint.
-      const truncated = quotaStopped !== null && results.length > ids.length;
+      const truncated = (quotaStopped !== null || chargeError !== null) && results.length > ids.length;
 
       // A search that found nothing because a configured provider refused us is not a
       // search that found nothing. Reporting `resultCount: 0, error: null` asserts "no
@@ -143,7 +318,7 @@ export const handlers: Record<string, JobHandler> = {
       // billing or credential problem on our side.
       const blockedByProviders = ids.length === 0 && providerFailures.length > 0;
       const providerNote = blockedByProviders
-        ? `No leads were returned, and ${providerFailures.length === 1 ? "the data provider we tried could not answer" : `${providerFailures.length} data providers could not answer`}: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nobody matching your criteria.`
+        ? `No leads were returned, and ${providerFailures.length === 1 ? "the data source we tried could not answer" : `${providerFailures.length} data sources could not answer`}: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nobody matching your criteria.`
         : null;
 
       await db
@@ -151,7 +326,11 @@ export const handlers: Record<string, JobHandler> = {
         .set({
           status: "done",
           resultCount: ids.length,
-          error: truncated ? `Stopped at your plan's limit: ${results.length - ids.length} more matching leads were found but not saved. ${quotaStopped}` : providerNote,
+          error: truncated
+            ? quotaStopped !== null
+              ? `Stopped at your plan's limit: ${results.length - ids.length} more matching leads were found but not saved. ${quotaStopped}`
+              : `Stopped early: ${results.length - ids.length} more matching leads were found but not saved, because usage could not be recorded (${chargeError}). This is a fault on our side, not your plan limit.`
+            : providerNote,
           clientClaim: clientClaim ?? undefined,
           completedAt: new Date(),
         })
@@ -172,60 +351,14 @@ export const handlers: Record<string, JobHandler> = {
   /** Enrich one lead: crawl company site, find + verify email, rescore. payload: { leadId } */
   "lead.enrich": async (job, ctx) => {
     const { db } = ctx;
-    // Charged on the first attempt only. Enrichment is retried up to three times, and
-    // billing each attempt charged an org three verifications for one lookup.
-    const firstAttempt = job.attempts <= 1;
     const lead = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)) });
     if (!lead) return { skipped: "missing" };
-    let company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
-    let profile: CompanyProfile | null = null;
-    if (company && (!company.enrichedAt || Date.now() - company.enrichedAt.getTime() > 30 * 86_400_000)) {
-      profile = await crawlCompanyWebsite(company.domain).catch(() => null);
-      // A crawl that fetched nothing is not an enrichment. Writing it would stamp
-      // `enrichedAt` and lock the company out of re-enrichment for thirty days on the
-      // strength of one bad minute.
-      if (profile && !profile.crawlFailed) company = await upsertCompany(lead.orgId, company.domain, { ...profile, name: profile.name ?? company.name ?? undefined });
+    try {
+      return await enrichLead(db, job, lead);
+    } catch (e) {
+      await refundJobCharge(db, job, lead.orgId, "verifications");
+      throw e;
     }
-    const patch: Record<string, unknown> = {};
-    const knownPattern = company?.emailPattern ?? undefined;
-    if (!lead.email && company && lead.firstName && lead.lastName) {
-      if (firstAttempt) await consume(db, lead.orgId, "verifications", 1);
-      const r = await findEmail({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, verifyOpts());
-      if (r.email) Object.assign(patch, { email: r.email, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: new Date() });
-      if (r.pattern && !company.emailPattern) await db.update(companies).set({ emailPattern: r.pattern }).where(eq(companies.id, company.id));
-    } else if (lead.email && lead.emailStatus === "unknown") {
-      if (firstAttempt) await consume(db, lead.orgId, "verifications", 1);
-      const v = await verifyEmail(lead.email, verifyOpts());
-      Object.assign(patch, { emailStatus: v.status, emailConfidence: v.confidence, verifiedAt: new Date() });
-    } else if (job.payload.replaceInvalid && lead.email && lead.emailStatus === "invalid" && company && lead.firstName && lead.lastName) {
-      // Asked for explicitly ("find a working address"): the person may be right and only
-      // the address wrong. Look for a replacement; keep the bad one on record rather than
-      // throwing it away, so it is never tried again and never silently resurrected.
-      if (firstAttempt) await consume(db, lead.orgId, "verifications", 1);
-      const r = await findEmail({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, verifyOpts());
-      const usable = r.email && r.email.toLowerCase() !== lead.email.toLowerCase() && (r.status === "valid" || r.status === "catch_all" || r.status === "risky");
-      const taken = usable ? await db.query.leads.findFirst({ where: and(eq(leads.orgId, lead.orgId), eq(leads.email, r.email!.toLowerCase())) }) : null;
-      const custom = { ...(lead.custom ?? {}) } as Record<string, unknown>;
-      const priorBad = Array.isArray(custom.invalidEmails) ? (custom.invalidEmails as string[]) : [];
-      if (usable && !taken) {
-        custom.invalidEmails = [...new Set([...priorBad, lead.email])];
-        Object.assign(patch, { email: r.email!.toLowerCase(), emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: new Date(), custom });
-      } else {
-        // Recorded, so the next look at this lead can tell "tried, nothing better" from
-        // "never tried" - and the dashboard is not asked to repeat the same lookup.
-        custom.replacementSearchedAt = new Date().toISOString();
-        custom.replacementResult = taken ? "found an address another lead already has" : r.email ? `only found ${r.status} candidates` : "no candidate found";
-        Object.assign(patch, { custom });
-      }
-    }
-    const icp = lead.icpId ? await db.query.icps.findFirst({ where: eq(icps.id, lead.icpId) }) : null;
-    if (icp) {
-      const s = scoreLeadRules({ title: lead.title, location: lead.location, country: lead.country, emailStatus: String(patch.emailStatus ?? lead.emailStatus), company }, icp.criteria as IcpCriteria);
-      Object.assign(patch, { score: s.score, scoreReasons: s.reasons });
-    }
-    await db.update(leads).set({ ...patch, enrichedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, lead.id));
-    await emitEvent(lead.orgId, "lead.enriched", { leadId: lead.id, ...patch }, { type: "lead", id: lead.id });
-    return patch;
   },
 
   /** Verify a lead's email. payload: { leadId } */
@@ -233,13 +366,26 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const lead = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)) });
     if (!lead?.email) return { skipped: "no email" };
-    // One lookup, one charge, however many times the job is retried - the same guard
-    // lead.enrich already has. verifyEmail and the update after it can both throw.
-    if (job.attempts <= 1) await consume(db, lead.orgId, "verifications", 1);
-    const v = await verifyEmail(lead.email, verifyOpts());
-    await db.update(leads).set({ emailStatus: v.status, emailConfidence: v.confidence, verifiedAt: new Date(), updatedAt: new Date() }).where(eq(leads.id, lead.id));
-    await emitEvent(lead.orgId, "lead.verified", { leadId: lead.id, email: lead.email, status: v.status, confidence: v.confidence }, { type: "lead", id: lead.id });
-    return { status: v.status, confidence: v.confidence };
+    // One lookup, one charge, however many times the job is retried. A plan limit ends the
+    // job (no retry does the lookup for free); a fault is thrown and retried.
+    const charge = await chargeJobOnce(db, job, lead.orgId, "verifications");
+    if (!charge.ok && charge.reason === "quota") return { skipped: "quota", detail: charge.message };
+    if (!charge.ok) throw new Error(`could not record verification usage: ${charge.message}`);
+    try {
+      const v = await verifyEmail(lead.email, verifyOpts());
+      const by = verifierOf(v);
+      // verifiedAt means "a verifier answered". A "probe disabled" guess stamped it too,
+      // and the UI then showed an unchecked address as verified.
+      await db
+        .update(leads)
+        .set({ emailStatus: v.status, emailConfidence: v.confidence, ...(by ? { verifiedAt: new Date(), emailVerifiedBy: by } : {}), updatedAt: new Date() })
+        .where(eq(leads.id, lead.id));
+      await emitEvent(lead.orgId, "lead.verified", { leadId: lead.id, email: lead.email, status: v.status, confidence: v.confidence, verifiedBy: by }, { type: "lead", id: lead.id });
+      return { status: v.status, confidence: v.confidence, verifiedBy: by };
+    } catch (e) {
+      await refundJobCharge(db, job, lead.orgId, "verifications");
+      throw e;
+    }
   },
 
   /** Build AI ICP profile from description + seed domains. payload: { icpId } */
@@ -255,7 +401,7 @@ export const handlers: Record<string, JobHandler> = {
         seeds.push({ domain: d, name: p.name, description: p.description });
       } else seeds.push({ domain: d });
     }
-    const profile = await buildIcpWithAi(createAiProvider(), { description: icp.description ?? undefined, seedCompanies: seeds, product: String(job.payload.product ?? "") });
+    const profile = await buildIcpWithAi(await aiFor(db, icp.orgId), { description: icp.description ?? undefined, seedCompanies: seeds, product: String(job.payload.product ?? "") });
     if (!profile) return { skipped: "no AI provider configured" };
     const merged: IcpCriteria = {
       ...(icp.criteria as IcpCriteria),
@@ -275,7 +421,7 @@ export const handlers: Record<string, JobHandler> = {
   "campaign.tick": async (job, ctx) => {
     const { db } = ctx;
     return withReschedule(db, job, "campaign.tick", async () => {
-      const active = await db.select().from(campaigns).where(eq(campaigns.status, "active"));
+      const active = await db.select().from(campaigns).where(and(eq(campaigns.status, "active"), orgIsActive(campaigns.orgId)));
       const out: Record<string, unknown> = {};
       for (const c of active) out[c.id] = await tickCampaign(c.id).catch((e) => ({ error: (e as Error).message }));
       return out;
@@ -304,8 +450,23 @@ export const handlers: Record<string, JobHandler> = {
       signal: AbortSignal.timeout(10_000),
     }).catch((e) => ({ ok: false, status: 0, statusText: (e as Error).message }));
     if (!res.ok) {
-      const failures = hook.failures + 1;
-      await db.update(webhooks).set({ failures, active: failures < 20 }).where(eq(webhooks.id, hook.id));
+      // Only a delivery that has used up its retries counts against the hook. Counting
+      // every attempt meant four events during one short outage (5 attempts each) disabled
+      // a customer's webhook for good. Ten events that finally failed in a row is a dead
+      // endpoint; a blip is not.
+      if (job.attempts >= job.maxAttempts) {
+        const [row] = await db.update(webhooks).set({ failures: dsql`${webhooks.failures} + 1` }).where(eq(webhooks.id, hook.id)).returning({ failures: webhooks.failures });
+        if ((row?.failures ?? 0) >= WEBHOOK_DISABLE_AFTER) {
+          const [disabled] = await db.update(webhooks).set({ active: false }).where(and(eq(webhooks.id, hook.id), eq(webhooks.active, true))).returning({ id: webhooks.id });
+          if (disabled) {
+            ctx.log(`webhook ${hook.id} disabled after ${row!.failures} consecutive failed deliveries`);
+            console.warn(`[webhooks] disabled ${hook.id} (${hook.url}) for org ${hook.orgId}: ${row!.failures} consecutive deliveries failed`);
+            // Recorded where the org can see it. The hook is inactive now, so this event
+            // is not delivered to it.
+            await emitEvent(hook.orgId, "webhook.disabled", { webhookId: hook.id, url: hook.url, consecutiveFailures: row!.failures, lastError: `${res.status} ${res.statusText}` }).catch(() => {});
+          }
+        }
+      }
       throw new Error(`webhook ${hook.url} → ${res.status} ${res.statusText}`);
     }
     if (hook.failures) await db.update(webhooks).set({ failures: 0 }).where(eq(webhooks.id, hook.id));
@@ -330,7 +491,20 @@ export const handlers: Record<string, JobHandler> = {
   },
 
   // ── v2 ──
-  "visit.identify": async (job) => identifyVisit(String(job.payload.visitId), String(job.payload.ip), (job.payload.identify as Record<string, unknown> | null) ?? null),
+  "visit.identify": async (job, ctx) => {
+    // The raw IP is needed to identify the visit and for nothing after. It is dropped from
+    // the job row once identification is done - or once the last attempt has failed - so
+    // the jobs table does not keep a log of visitors' addresses.
+    const forget = () => ctx.db.execute(dsql`UPDATE jobs SET payload = payload - 'ip' WHERE id = ${job.id}`).catch(() => {});
+    try {
+      const r = await identifyVisit(String(job.payload.visitId), String(job.payload.ip), (job.payload.identify as Record<string, unknown> | null) ?? null);
+      await forget();
+      return r;
+    } catch (e) {
+      if (job.attempts >= job.maxAttempts) await forget();
+      throw e;
+    }
+  },
 
   /** Enrich a company row (crawl + hiring + news). payload: { companyId } */
   "company.enrich": async (job, ctx) => {
@@ -430,6 +604,7 @@ export const handlers: Record<string, JobHandler> = {
       let alreadyKnown = 0;
       let failed = 0;
       let backedOff = 0;
+      let planLimited = 0;
       let stoppedEarly = false;
       for (const org of orgs) {
         const remaining = DEADLINE_MS - (Date.now() - startedAt);
@@ -446,7 +621,10 @@ export const handlers: Record<string, JobHandler> = {
         // down the rotation, or one org failing loudly blocks everyone behind it forever.
         await db.update(organizations).set({ jobCheckTickAt: new Date() }).where(eq(organizations.id, org.id));
 
-        const r = await scanJobChanges(org.id, { limit: budget, deadlineAt: startedAt + DEADLINE_MS }).catch((e) => {
+        // Paid provider lookups, so bounded by the org's premium budget like every other
+        // paid call. A free plan has none and is not scanned at all.
+        const premiumBudget = await remainingPremiumBudget(db, org.id).catch(() => 0);
+        const r = await scanJobChanges(org.id, { limit: budget, deadlineAt: startedAt + DEADLINE_MS, premiumBudget }).catch((e) => {
           ctx.log(`job change scan failed for ${org.id}: ${(e as Error).message}`);
           return null;
         });
@@ -462,10 +640,11 @@ export const handlers: Record<string, JobHandler> = {
         alreadyKnown += r.alreadyKnown;
         backedOff += r.skippedRecentlyAttempted;
         if (r.blocked) blocked++;
+        if (r.planLimited) planLimited++;
       }
       // `blocked` is reported separately from `changed: 0`, because an org where no
       // provider answered has not been told that nobody moved.
-      return { orgs: orgs.length, scanned, changed, alreadyKnown, leadsLeftForNextRun: backedOff, orgsWhereScanThrew: failed, orgsWhereNothingAnswered: blocked, stoppedEarly };
+      return { orgs: orgs.length, scanned, changed, alreadyKnown, leadsLeftForNextRun: backedOff, orgsWhereScanThrew: failed, orgsWhereNothingAnswered: blocked, orgsWithoutProviderBudget: planLimited, stoppedEarly };
     });
   },
 
@@ -473,7 +652,7 @@ export const handlers: Record<string, JobHandler> = {
   "signals.scan": async (job, ctx) => {
     const { db } = ctx;
     return withReschedule(db, job, "signals.scan", async () => {
-      const subs = await db.select().from(signalSubscriptions).where(and(eq(signalSubscriptions.active, true), dsql`(${signalSubscriptions.lastRunAt} IS NULL OR ${signalSubscriptions.lastRunAt} < now() - interval '5 hours')`));
+      const subs = await db.select().from(signalSubscriptions).where(and(eq(signalSubscriptions.active, true), orgIsActive(signalSubscriptions.orgId), dsql`(${signalSubscriptions.lastRunAt} IS NULL OR ${signalSubscriptions.lastRunAt} < now() - interval '5 hours')`));
       for (const s of subs) await enqueue(db, "signals.subscription", { subscriptionId: s.id }, { orgId: s.orgId, priority: 1 });
       return { queued: subs.length };
     });
@@ -489,7 +668,7 @@ export const handlers: Record<string, JobHandler> = {
   "monitors.tick": async (job, ctx) => {
     const { db } = ctx;
     return withReschedule(db, job, "monitors.tick", async () => {
-      const due = await db.select().from(monitors).where(and(eq(monitors.active, true), dsql`(${monitors.lastRunAt} IS NULL OR ${monitors.lastRunAt} < now() - (${monitors.intervalMinutes} || ' minutes')::interval)`));
+      const due = await db.select().from(monitors).where(and(eq(monitors.active, true), orgIsActive(monitors.orgId), dsql`(${monitors.lastRunAt} IS NULL OR ${monitors.lastRunAt} < now() - (${monitors.intervalMinutes} || ' minutes')::interval)`));
       for (const m of due) await enqueue(db, "monitor.run", { monitorId: m.id }, { orgId: m.orgId, priority: 1 });
       return { queued: due.length };
     });
@@ -509,7 +688,10 @@ export const handlers: Record<string, JobHandler> = {
     const others = await knownBrands(db, prompt.orgId);
     // Every configured engine, not just the priority winner: engines disagree, so one of
     // them is not an answer to "what does AI say about us".
-    const r = await sampleAcrossEngines(db, prompt.orgId, prompt, { others });
+    // The plan decides which engines are sampled. Without it the scheduled path defaulted
+    // to the free-tier set for paying orgs - and the manual path, which passed it, did not
+    // agree with the scheduled one.
+    const r = await sampleAcrossEngines(db, prompt.orgId, prompt, { others, plan: await planOf(db, prompt.orgId) });
     return { engines: r.engines, samplesPerEngine: r.samplesPerEngine, total: r.total, usable: r.usable };
   },
 
@@ -520,7 +702,7 @@ export const handlers: Record<string, JobHandler> = {
       const due = await db
         .select()
         .from(visibilityPrompts)
-        .where(and(eq(visibilityPrompts.active, true), dsql`(${visibilityPrompts.lastRunAt} IS NULL OR ${visibilityPrompts.lastRunAt} < now() - interval '20 hours')`));
+        .where(and(eq(visibilityPrompts.active, true), orgIsActive(visibilityPrompts.orgId), dsql`(${visibilityPrompts.lastRunAt} IS NULL OR ${visibilityPrompts.lastRunAt} < now() - interval '20 hours')`));
       for (const p of due) await enqueue(db, "visibility.run", { promptId: p.id }, { orgId: p.orgId, priority: 3 });
       return { queued: due.length };
     });
@@ -537,14 +719,23 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     return withReschedule(db, job, "autopilots.tick", async () => {
       const hour = new Date().getUTCHours();
-      const due = await db.select().from(autopilots).where(and(eq(autopilots.active, true), eq(autopilots.runHourUtc, hour), dsql`(${autopilots.lastRunAt} IS NULL OR ${autopilots.lastRunAt} < now() - interval '20 hours')`));
+      // At or after the target hour and not yet run today (UTC), rather than an exact hour
+      // match: a tick that ran late, a worker that was down for that hour, or a starved
+      // scheduler skipped the whole day. Not-run-today keeps it to once a day.
+      const notToday = (col: unknown) => dsql`(${col} IS NULL OR ${col} < date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')`;
+      const due = await db
+        .select()
+        .from(autopilots)
+        .where(and(eq(autopilots.active, true), orgIsActive(autopilots.orgId), dsql`${autopilots.runHourUtc} <= ${hour}`, notToday(autopilots.lastRunAt)));
       for (const ap of due) await enqueue(db, "autopilot.run", { autopilotId: ap.id }, { orgId: ap.orgId, priority: 1 });
-      // saved-search alerts run daily at 02:00 UTC
-      if (hour === 2) {
-        const ss = await db.select().from(savedSearches).where(and(eq(savedSearches.alert, true), dsql`(${savedSearches.lastRunAt} IS NULL OR ${savedSearches.lastRunAt} < now() - interval '20 hours')`));
+      // saved-search alerts run daily from 02:00 UTC
+      let savedQueued = 0;
+      if (hour >= 2) {
+        const ss = await db.select().from(savedSearches).where(and(eq(savedSearches.alert, true), orgIsActive(savedSearches.orgId), notToday(savedSearches.lastRunAt)));
         for (const s of ss) await enqueue(db, "savedsearch.run", { savedSearchId: s.id }, { orgId: s.orgId, priority: 1 });
+        savedQueued = ss.length;
       }
-      return { queued: due.length };
+      return { queued: due.length, savedSearchesQueued: savedQueued };
     });
   },
 
@@ -562,15 +753,29 @@ export const handlers: Record<string, JobHandler> = {
       if (!charge.ok) throw new Error(`could not record search usage: ${charge.message}`);
     }
     const providerBudget = await remainingPremiumBudget(db, ss.orgId);
-    const results = await runLeadPipeline({ ...(ss.query as Record<string, unknown>), limit: Number((ss.query as { limit?: number }).limit ?? 25) }, { ai: createAiProvider(), verify: verifyOpts(), maxProviderLeads: providerBudget });
+    const { leads: results, providerFailures } = await runLeadPipelineDetailed(
+      { ...(ss.query as Record<string, unknown>), limit: Number((ss.query as { limit?: number }).limit ?? 25) } as Parameters<typeof runLeadPipeline>[0],
+      { ai: await aiFor(db, ss.orgId), verify: verifyOpts(), maxProviderLeads: providerBudget },
+    );
     let fresh = 0;
     const names: string[] = [];
+    const freshIds: string[] = [];
+    let stoppedBecause: string | null = null;
     for (const r of results) {
-      const q = await consumeLead(db, ss.orgId, r.source).then(() => true, () => false);
-      if (!q) break;
-      const { lead, created } = await upsertLead(ss.orgId, pipelineLeadToInput(r, { tags: [`saved:${ss.id.slice(0, 8)}`] }));
+      // Charged for new leads only, after a plan/fault distinction - not for every result
+      // before the upsert, which billed the same people again at every daily re-run.
+      const existing = await findExistingLead(ss.orgId, { email: r.email, linkedinUrl: r.linkedinUrl });
+      if (!existing) {
+        const charge = await chargeNewLead(ss.orgId, r.source);
+        if (!charge.ok) {
+          stoppedBecause = charge.reason === "quota" ? `Stopped at your plan's lead limit: ${charge.message}` : `Stopped: could not record lead usage (${charge.message})`;
+          break;
+        }
+      }
+      const { lead, created } = await upsertLead(ss.orgId, pipelineLeadToInput(r, { tags: [`saved:${ss.id.slice(0, 8)}`] }), { fillOnly: true });
       if (created) {
         fresh++;
+        freshIds.push(lead.id);
         names.push(`${lead.fullName ?? ""} - ${lead.title ?? ""}`);
         if (ss.listId) {
           const { listLeads } = await import("@prospex/db");
@@ -578,9 +783,31 @@ export const handlers: Record<string, JobHandler> = {
         }
       }
     }
+    // "0 new" because the sources could not answer is not "nothing new matched". The saved
+    // search row has no note column, so the reason goes in the job result (shown by the
+    // admin job view) and the digest says it instead of staying silent.
+    const blocked = results.length === 0 && providerFailures.length > 0;
+    const note = blocked
+      ? `No leads were returned, and ${providerFailures.length} data source(s) could not answer: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nothing new matching.`
+      : stoppedBecause;
+    // A saved search made for a client delivers its new leads to that client, the same way a
+    // one-off search does - otherwise every daily re-run would pile leads into the pool.
+    // claimSearchLeads re-checks the client (deleted/archived) and never steals another
+    // client's lead.
+    const ssClientId = (ss.query as { clientId?: unknown }).clientId;
+    let clientClaim: Awaited<ReturnType<typeof import("./services/clients.js").claimSearchLeads>> | null = null;
+    if (typeof ssClientId === "string" && freshIds.length) {
+      try {
+        const { claimSearchLeads } = await import("./services/clients.js");
+        clientClaim = await claimSearchLeads(db, ss.orgId, ssClientId, freshIds);
+      } catch (e) {
+        clientClaim = { claimed: 0, ownedByAnotherClient: 0, skipped: `error: ${(e as Error).message}` };
+      }
+    }
     await db.update(savedSearches).set({ lastRunAt: new Date(), lastNewCount: fresh }).where(eq(savedSearches.id, ss.id));
-    if (ss.alert && fresh > 0 && ss.alertEmail) await sendMail(null, { from: env.mailFrom, to: ss.alertEmail, subject: `${fresh} new leads for "${ss.name}"`, text: `Prospex found ${fresh} new leads matching "${ss.name}":\n\n${names.join("\n")}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
-    return { results: results.length, fresh };
+    if (ss.alert && fresh > 0 && ss.alertEmail) await sendMail(null, { from: env.mailFrom, to: ss.alertEmail, subject: `${fresh} new leads for "${ss.name}"`, text: `Scout found ${fresh} new leads matching "${ss.name}":\n\n${names.join("\n")}${stoppedBecause ? `\n\n${stoppedBecause}` : ""}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
+    else if (ss.alert && blocked && ss.alertEmail) await sendMail(null, { from: env.mailFrom, to: ss.alertEmail, subject: `Could not check "${ss.name}" today`, text: `${note}\n\nThe search will run again tomorrow.` });
+    return { results: results.length, fresh, providerFailures, note, clientClaim };
   },
 
   /** Housekeeping: prune old done jobs, reset nothing else. */
@@ -627,7 +854,7 @@ export async function ensureRecurringJobs(): Promise<string[]> {
     for (const type of Object.keys(RECURRING_JOBS)) {
       const rows = await tx`SELECT 1 FROM jobs WHERE type = ${type} AND status IN ('queued','running') AND (payload->>'recurring')::boolean = true LIMIT 1`;
       if (rows.length === 0) {
-        await enqueue(db, type, { recurring: true }, { maxAttempts: 1 });
+        await enqueue(db, type, { recurring: true }, { maxAttempts: 1, priority: SCHEDULER_PRIORITY });
         revived.push(type);
       }
     }
@@ -662,4 +889,28 @@ export function startRecurringJobKeeper(opts: { intervalMs?: number; log?: (m: s
   // Do not hold the process open for this alone.
   if (typeof timer.unref === "function") timer.unref();
   return () => clearInterval(timer);
+}
+
+/**
+ * Everything a long-running worker does in the background, as one call - for inline mode.
+ *
+ * On Vercel (JOB_MODE=inline) there is no worker process: an external cron hits
+ * /internal/jobs/run and that request drains the queue. Draining alone never re-seeded a
+ * dead scheduler and never reaped a job whose function invocation was killed mid-run, so
+ * one timeout left a job "running" forever and one dropped reschedule stopped campaign
+ * sending for good. This does all three, in the order that matters: revive schedulers,
+ * release dead locks, then run what is due.
+ */
+export async function runMaintenanceTick(opts: { maxMs?: number } = {}): Promise<{ revived: string[]; reaped: { failed: number; requeued: number }; processed: number }> {
+  const { db } = getDb();
+  const revived = await ensureRecurringJobs().catch((e) => {
+    console.warn(`[jobs] ensureRecurringJobs failed: ${(e as Error).message}`);
+    return [] as string[];
+  });
+  const reaped = await reapStaleJobs(db).catch((e) => {
+    console.warn(`[jobs] reapStaleJobs failed: ${(e as Error).message}`);
+    return { failed: 0, requeued: 0 };
+  });
+  const processed = await drainJobs(db, handlers, opts.maxMs ?? 25_000);
+  return { revived, reaped, processed };
 }

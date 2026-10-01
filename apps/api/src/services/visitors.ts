@@ -34,6 +34,22 @@ export async function collectHit(input: CollectInput) {
     await db.execute(sql`UPDATE visits SET duration_ms = GREATEST(duration_ms, ${input.durationMs ?? 0}) WHERE id = (SELECT id FROM visits WHERE pixel_id = ${pixel.id} AND session_id = ${input.sessionId} ORDER BY visited_at DESC LIMIT 1)`);
     return true;
   }
+  if (input.event === "identify") {
+    // identify() is a statement about a visit already recorded, not a page view. Inserting
+    // a row for it counted every login as an extra visit to whatever page called it.
+    const [latest] = await db
+      .select({ id: visits.id })
+      .from(visits)
+      .where(and(eq(visits.pixelId, pixel.id), eq(visits.sessionId, input.sessionId)))
+      .orderBy(sql`${visits.visitedAt} DESC`)
+      .limit(1);
+    if (latest) {
+      await enqueue(db, "visit.identify", { visitId: latest.id, ip: input.ip, identify: input.identify ?? null }, { orgId: pixel.orgId, priority: 4, maxAttempts: 2 });
+      return true;
+    }
+    // No view recorded for this session (beacon lost, or identify fired first): fall
+    // through and record one, so the identification has a visit to attach to.
+  }
   const [row] = await db
     .insert(visits)
     .values({ orgId: pixel.orgId, pixelId: pixel.id, sessionId: input.sessionId, ipHash, page: input.page?.slice(0, 500), referrer: input.referrer?.slice(0, 500), userAgent: input.userAgent?.slice(0, 300), durationMs: input.durationMs ?? 0 })
@@ -77,6 +93,9 @@ export async function identifyVisit(visitId: string, ip: string, identify?: Reco
   }
   await db.update(visits).set({ companyDomain: domain, companyName: name, orgName: id.orgName, country: id.country, city: id.city, isIsp: false }).where(eq(visits.id, visitId));
   if (!domain) return { unidentified: true, org: id.orgName };
+  // This visit was already rolled up under this company (an identify() for a visit the IP
+  // lookup had already placed). Counting it again inflated visits and intent.
+  if (v.companyDomain === domain) return { domain, name, alreadyCounted: true };
   const weight = pageIntentWeight(v.page ?? "/");
   const existing = await db.query.visitorCompanies.findFirst({ where: and(eq(visitorCompanies.orgId, v.orgId), eq(visitorCompanies.domain, domain)) });
   const pageKey = (v.page ?? "/").split("?")[0].slice(0, 120);

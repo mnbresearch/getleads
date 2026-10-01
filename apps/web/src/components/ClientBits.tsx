@@ -82,11 +82,17 @@ export function ClientFormModal({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [icps, setIcps] = useState<{ id: string; name: string }[]>([]);
+  const [icpErr, setIcpErr] = useState<string | null>(null);
+  const loadIcps = () => {
+    setIcpErr(null);
+    // A failed fetch used to leave only "None yet", which says the workspace has no ICPs.
+    apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcps(r.icps)).catch((e) => setIcpErr((e as Error).message));
+  };
   useEffect(() => {
     if (!open) return;
     setF(initial);
     setErr(null);
-    apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcps(r.icps)).catch(() => setIcps([]));
+    loadIcps();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
   const set = (k: keyof ClientFormValue, v: string) => setF((p) => ({ ...p, [k]: v }));
@@ -131,11 +137,19 @@ export function ClientFormModal({
           <div>
             <label className="label" htmlFor="cf-icp">Ideal customer profile</label>
             <select id="cf-icp" className="input" value={f.icpId} onChange={(e) => set("icpId", e.target.value)}>
-              <option value="">None yet</option>
+              <option value="">{icpErr ? "(couldn't load ICPs)" : "None yet"}</option>
               {icps.map((i) => (
                 <option key={i.id} value={i.id}>{i.name}</option>
               ))}
+              {/* Keep the current ICP selectable even when the list failed, so saving doesn't clear it. */}
+              {f.icpId && !icps.some((i) => i.id === f.icpId) && <option value={f.icpId}>Current ICP</option>}
             </select>
+            {icpErr && (
+              <div className="mt-1 text-xs text-red-600" role="alert">
+                Couldn&apos;t load your ICPs ({icpErr}).{" "}
+                <button type="button" className="underline" onClick={loadIcps}>Retry</button>
+              </div>
+            )}
           </div>
         </div>
         <p className="text-xs text-ink-400">The ICP is what lets Scout route unassigned leads to this client. Without one, leads only arrive here when you assign them or search for this client.</p>

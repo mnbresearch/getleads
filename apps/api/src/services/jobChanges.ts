@@ -1,4 +1,4 @@
-import { and, companies, desc, eq, getDb, leads, signals, sql, type Db } from "@prospex/db";
+import { and, companies, consume, desc, eq, getDb, leads, signals, sql, type Db } from "@prospex/db";
 import { detectJobChange, enrichWithProviders, type JobChangeResult } from "@prospex/core";
 import { emitEvent } from "../lib/events.js";
 
@@ -35,6 +35,8 @@ export interface JobChangeScanResult {
   blocked?: string;
   /** The caller's deadline arrived before every selected lead had been looked at. */
   stoppedAtDeadline?: boolean;
+  /** The org's paid-provider budget, not the data, limited this scan. */
+  planLimited?: string;
   changes: { leadId: string; fullName: string | null; change: JobChangeResult }[];
 }
 
@@ -45,10 +47,34 @@ function worthRechecking(minScore: number) {
 
 export async function scanJobChanges(
   orgId: string,
-  opts: { limit?: number; minScore?: number; staleDays?: number; retryDays?: number; deadlineAt?: number } = {},
+  opts: {
+    limit?: number;
+    minScore?: number;
+    staleDays?: number;
+    retryDays?: number;
+    deadlineAt?: number;
+    /**
+     * Paid-provider lookups this scan may spend (remainingPremiumBudget). Each lookup goes
+     * to Apollo/PDL-class providers, so the scheduled scan used to spend up to 500 paid
+     * calls per org per night with no plan gate and no metering. When given, the scan
+     * stops at it and records each answered lookup against premiumLeads.
+     */
+    premiumBudget?: number;
+  } = {},
 ): Promise<JobChangeScanResult> {
   const { db } = getDb();
-  const limit = Math.min(opts.limit ?? 50, 500);
+  if (opts.premiumBudget !== undefined && opts.premiumBudget <= 0) {
+    return {
+      checked: 0,
+      changed: 0,
+      unconfirmed: 0,
+      alreadyKnown: 0,
+      skippedRecentlyAttempted: 0,
+      changes: [],
+      planLimited: "Job-change checks use paid data providers, and this workspace's plan has no provider lookups left this month. Nobody was checked - this is not a month in which nobody moved.",
+    };
+  }
+  const limit = Math.min(opts.limit ?? 50, opts.premiumBudget ?? Number.POSITIVE_INFINITY, 500);
   const minScore = opts.minScore ?? 70;
   const staleDays = opts.staleDays ?? 30;
   // Backoff for a lead nothing could be confirmed about. Never longer than staleDays,
@@ -135,6 +161,9 @@ export async function scanJobChanges(
       continue;
     }
     answered++;
+    // Metered when a provider actually answered - that is the paid call. Recorded even
+    // past the limit, since the call has already been made.
+    if (opts.premiumBudget !== undefined) await consume(db, orgId, "premiumLeads", 1, { allowOverage: true }).catch(() => {});
 
     const change = detectJobChange({
       previous: { companyName: company?.name ?? null, companyDomain: company?.domain ?? null, title: lead.title },

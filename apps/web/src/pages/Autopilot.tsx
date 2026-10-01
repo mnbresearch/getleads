@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Empty, LoadError, Modal, Page, useToast } from "../components/ui";
+import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 
 interface AP { id: string; name: string; query: { query?: string }; icpId: string | null; listId: string | null; campaignId: string | null; dailyLeads: number; minScore: number; requireValidEmail: boolean; autoEnroll: boolean; active: boolean; runHourUtc: number; lastRunAt: string | null; stats: Record<string, number> }
 interface SS { id: string; name: string; query: Record<string, unknown>; alert: boolean; alertEmail: string | null; lastRunAt: string | null; lastNewCount: number }
@@ -12,49 +12,121 @@ export function AutopilotPage() {
   const [lists, setLists] = useState<{ id: string; name: string }[]>([]);
   const [camps, setCamps] = useState<{ id: string; name: string }[]>([]);
   const [open, setOpen] = useState(false);
+  const [editing, setEditing] = useState<AP | null>(null);
   const { toast, Toast } = useToast();
   const [listErr, setListErr] = useState<string | null>(null);
+  const [loaded, setLoaded] = useState(false);
+  const [savedErr, setSavedErr] = useState<string | null>(null);
+  const [savedLoaded, setSavedLoaded] = useState(false);
+  // The pickers in the form. A failure here used to leave them silently empty, which reads
+  // as "you have no ICPs/lists/campaigns".
+  const [pickErr, setPickErr] = useState<string | null>(null);
+  const [running, setRunning] = useState<Set<string>>(new Set());
+  const timers = useRef<number[]>([]);
+  useEffect(() => () => timers.current.forEach((t) => clearTimeout(t)), []);
   const load = useCallback(() => {
     apiFetch<{ autopilots: AP[] }>("GET", "/v1/tools/autopilots")
-      .then((r) => { setAps(r.autopilots); setListErr(null); })
+      .then((r) => { setAps(r.autopilots); setListErr(null); setLoaded(true); })
       .catch((e) => setListErr((e as Error).message));
-    apiFetch<{ savedSearches: SS[] }>("GET", "/v1/tools/saved-searches").then((r) => setSaved(r.savedSearches));
-    apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
-    apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists));
-    apiFetch<{ campaigns: typeof camps }>("GET", "/v1/campaigns").then((r) => setCamps(r.campaigns));
+    apiFetch<{ savedSearches: SS[] }>("GET", "/v1/tools/saved-searches")
+      .then((r) => { setSaved(r.savedSearches); setSavedErr(null); setSavedLoaded(true); })
+      .catch((e) => setSavedErr((e as Error).message));
+    const fails: string[] = [];
+    Promise.all([
+      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps)).catch((e) => { fails.push(`ICPs (${(e as Error).message})`); }),
+      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)).catch((e) => { fails.push(`lists (${(e as Error).message})`); }),
+      apiFetch<{ campaigns: typeof camps }>("GET", "/v1/campaigns").then((r) => setCamps(r.campaigns)).catch((e) => { fails.push(`campaigns (${(e as Error).message})`); }),
+    ]).then(() => setPickErr(fails.length ? `Couldn't load ${fails.join(", ")}.` : null));
   }, []);
   useEffect(() => { load(); }, [load]);
+
+  const runNow = async (a: AP) => {
+    try {
+      await apiFetch("POST", `/v1/tools/autopilots/${a.id}/run`);
+      toast("Run queued (takes 1-3 min) - stats refresh when it finishes");
+      // The run is a background job with no completion signal on this page, so refresh the
+      // stats on the schedule it usually takes rather than leaving the old numbers up.
+      setRunning((s) => new Set(s).add(a.id));
+      for (const ms of [60_000, 120_000, 180_000]) timers.current.push(window.setTimeout(load, ms));
+      timers.current.push(window.setTimeout(() => setRunning((s) => { const n = new Set(s); n.delete(a.id); return n; }), 180_000));
+    } catch (e) {
+      toast((e as Error).message, "err");
+    }
+  };
   return (
     <Page title="Autopilot" subtitle="An autonomous prospecting agent: every day it finds fresh leads for your query, enriches and verifies them, scores against your ICP, and can enroll qualified ones into a campaign. Set it and check the pipeline." actions={<button className="btn-primary" onClick={() => setOpen(true)}>New autopilot</button>}>
       {Toast}
-      {listErr && aps.length === 0 ? <LoadError message={listErr} onRetry={load} /> : aps.length === 0 ? <Empty title="No autopilots yet" hint="Example: 'Founders of D2C brands in Mumbai using Shopify', 10 leads/day, score ≥ 60, verified email only, auto-enroll in 'D2C intro sequence'." action={<button className="btn-primary" onClick={() => setOpen(true)}>Create autopilot</button>} /> : (
+      {pickErr && <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">{pickErr} The pickers below may be incomplete. <button className="underline" onClick={load}>Retry</button></div>}
+      {listErr && aps.length === 0 ? <LoadError message={listErr} onRetry={load} /> : !loaded ? <Spinner label="Loading autopilots…" /> : aps.length === 0 ? <Empty title="No autopilots yet" hint="Example: 'Founders of D2C brands in Mumbai using Shopify', 10 leads/day, score ≥ 60, verified email only, auto-enroll in 'D2C intro sequence'." action={<button className="btn-primary" onClick={() => setOpen(true)}>Create autopilot</button>} /> : (
         <div className="grid gap-3 md:grid-cols-2">
           {aps.map((a) => (
             <div key={a.id} className="card p-4">
               <div className="flex items-start justify-between gap-2"><div><div className="font-semibold">{a.name}</div><div className="text-sm text-ink-300">{a.query.query ?? JSON.stringify(a.query)}</div></div><span className={`badge ${a.active ? "bg-emerald-50 text-emerald-700" : "bg-black/[0.05] text-ink-300"}`}>{a.active ? "active" : "paused"}</span></div>
               <div className="mt-2 text-xs text-ink-400">{a.dailyLeads}/day · score ≥ {a.minScore} · {a.requireValidEmail ? "verified email only" : "any email"} · {a.autoEnroll ? "auto-enrolls" : "saves only"} · runs {String(a.runHourUtc).padStart(2, "0")}:00 UTC</div>
               <div className="mt-2 grid grid-cols-4 gap-2 text-center text-xs">{[["runs", a.stats.runs], ["found", a.stats.found], ["saved", a.stats.saved], ["enrolled", a.stats.enrolled]].map(([l, v]) => <div key={String(l)} className="rounded-lg bg-cream p-2"><div className="text-ink-400">{l}</div><div className="text-base font-semibold">{v ?? 0}</div></div>)}</div>
-              <div className="mt-2 flex items-center gap-2 text-xs"><span className="text-ink-500">last run {fmtDate(a.lastRunAt)}</span><button className="btn-secondary ml-auto py-1" onClick={() => apiFetch("POST", `/v1/tools/autopilots/${a.id}/run`).then(() => toast("Run queued (takes 1-3 min)")).catch((e) => toast((e as Error).message, "err"))}>Run now</button><button className="btn-secondary py-1" onClick={() => apiFetch("PATCH", `/v1/tools/autopilots/${a.id}`, { active: !a.active }).then(load).catch((e) => toast((e as Error).message, "err"))}>{a.active ? "Pause" : "Resume"}</button><button className="text-red-600" onClick={() => { if (!confirm(`Delete the autopilot "${a.name}"? This cannot be undone.`)) return; apiFetch("DELETE", `/v1/tools/autopilots/${a.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>
+              <div className="mt-2 flex items-center gap-2 text-xs"><span className="text-ink-500">last run {fmtDate(a.lastRunAt)}</span><button className="btn-secondary ml-auto py-1" disabled={running.has(a.id)} onClick={() => runNow(a)}>{running.has(a.id) ? "Running…" : "Run now"}</button><button className="btn-secondary py-1" onClick={() => setEditing(a)}>Edit</button><button className="btn-secondary py-1" onClick={() => apiFetch("PATCH", `/v1/tools/autopilots/${a.id}`, { active: !a.active }).then(load).catch((e) => toast((e as Error).message, "err"))}>{a.active ? "Pause" : "Resume"}</button><button className="text-red-600" onClick={() => { if (!confirm(`Delete the autopilot "${a.name}"? This cannot be undone.`)) return; apiFetch("DELETE", `/v1/tools/autopilots/${a.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>
             </div>
           ))}
         </div>
       )}
       <div className="mt-8">
         <div className="mb-2 font-medium">Saved searches & alerts</div>
-        {saved.length === 0 ? <div className="text-sm text-ink-400">Save a search from the Find leads page to re-run it daily and get an email when new matches appear.</div> : (
-          <div className="card divide-y divide-slate-100">{saved.map((s) => <div key={s.id} className="flex flex-wrap items-center gap-3 p-3 text-sm"><div className="flex-1"><div className="font-medium">{s.name}</div><div className="text-xs text-ink-400">{JSON.stringify(s.query).slice(0, 100)} · {s.alert ? `alerts → ${s.alertEmail}` : "no alerts"} · last run {fmtDate(s.lastRunAt)} · {s.lastNewCount} new</div></div><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/tools/saved-searches/${s.id}/run`).then(() => toast("Queued"))}>Run</button><button className="text-xs text-red-600" onClick={() => { if (!confirm(`Delete the saved search "${s.name}"?`)) return; apiFetch("DELETE", `/v1/tools/saved-searches/${s.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>)}</div>
+        {savedErr && !savedLoaded ? <LoadError message={savedErr} onRetry={load} /> : !savedLoaded ? <Spinner /> : saved.length === 0 ? <div className="text-sm text-ink-400">Save a search from the Find leads page to re-run it daily and get an email when new matches appear.</div> : (
+          <div className="card divide-y divide-slate-100">{saved.map((s) => <div key={s.id} className="flex flex-wrap items-center gap-3 p-3 text-sm"><div className="flex-1"><div className="font-medium">{s.name}</div><div className="text-xs text-ink-400">{JSON.stringify(s.query).slice(0, 100)} · {s.alert ? `alerts → ${s.alertEmail}` : "no alerts"} · last run {fmtDate(s.lastRunAt)} · {s.lastNewCount} new</div></div><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/tools/saved-searches/${s.id}/run`).then(() => toast("Queued")).catch((e) => toast((e as Error).message, "err"))}>Run</button><button className="text-xs text-red-600" onClick={() => { if (!confirm(`Delete the saved search "${s.name}"?`)) return; apiFetch("DELETE", `/v1/tools/saved-searches/${s.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>)}</div>
         )}
       </div>
       <Modal open={open} onClose={() => setOpen(false)} title="New autopilot" wide>
         <ApForm icps={icps} lists={lists} camps={camps} onDone={() => { setOpen(false); load(); }} toast={toast} />
       </Modal>
+      <Modal open={!!editing} onClose={() => setEditing(null)} title="Edit autopilot" wide>
+        {editing && <ApForm key={editing.id} initial={editing} icps={icps} lists={lists} camps={camps} onDone={() => { setEditing(null); load(); }} toast={toast} />}
+      </Modal>
     </Page>
   );
 }
 
-function ApForm({ icps, lists, camps, onDone, toast }: { icps: { id: string; name: string }[]; lists: { id: string; name: string }[]; camps: { id: string; name: string }[]; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
-  const [f, setF] = useState({ name: "", query: "", icpId: "", listId: "", campaignId: "", dailyLeads: 10, minScore: 60, requireValidEmail: true, autoEnroll: false, runHourUtc: 3 });
+/** Create, or (with `initial`) edit through the existing PATCH. */
+function ApForm({ initial, icps, lists, camps, onDone, toast }: { initial?: AP; icps: { id: string; name: string }[]; lists: { id: string; name: string }[]; camps: { id: string; name: string }[]; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  const [f, setF] = useState(() =>
+    initial
+      ? { name: initial.name, query: initial.query.query ?? "", icpId: initial.icpId ?? "", listId: initial.listId ?? "", campaignId: initial.autoEnroll ? initial.campaignId ?? "" : "", dailyLeads: initial.dailyLeads, minScore: initial.minScore, requireValidEmail: initial.requireValidEmail, autoEnroll: initial.autoEnroll, runHourUtc: initial.runHourUtc }
+      : { name: "", query: "", icpId: "", listId: "", campaignId: "", dailyLeads: 10, minScore: 60, requireValidEmail: true, autoEnroll: false, runHourUtc: 3 },
+  );
   const [busy, setBusy] = useState(false);
+  const rangeErr =
+    !Number.isInteger(f.dailyLeads) || f.dailyLeads < 1 || f.dailyLeads > 200 ? "Leads per day must be a whole number from 1 to 200."
+    : !Number.isInteger(f.minScore) || f.minScore < 0 || f.minScore > 100 ? "Minimum score must be from 0 to 100."
+    : !Number.isInteger(f.runHourUtc) || f.runHourUtc < 0 || f.runHourUtc > 23 ? "Run hour must be from 0 to 23 (UTC)."
+    : null;
+  const save = async () => {
+    setBusy(true);
+    try {
+      if (initial) {
+        // The API cannot clear an ICP/list/campaign once set (they are optional, not
+        // nullable), so only send ones that are chosen; turning enrollment off is autoEnroll.
+        // An object query (made elsewhere) is kept as-is unless the text was changed.
+        const queryChanged = f.query !== (initial.query.query ?? "");
+        await apiFetch("PATCH", `/v1/tools/autopilots/${initial.id}`, {
+          name: f.name,
+          ...(queryChanged ? { query: { ...initial.query, query: f.query } } : {}),
+          // null clears a reference the API already holds; "" in the select means "none".
+          icpId: f.icpId || null,
+          listId: f.listId || null,
+          campaignId: f.campaignId || null,
+          autoEnroll: f.autoEnroll,
+          dailyLeads: f.dailyLeads,
+          minScore: f.minScore,
+          requireValidEmail: f.requireValidEmail,
+          runHourUtc: f.runHourUtc,
+        });
+        toast("Autopilot updated");
+      } else {
+        await apiFetch("POST", "/v1/tools/autopilots", { name: f.name, query: { query: f.query }, icpId: f.icpId || undefined, listId: f.listId || undefined, campaignId: f.campaignId || undefined, dailyLeads: f.dailyLeads, minScore: f.minScore, requireValidEmail: f.requireValidEmail, autoEnroll: f.autoEnroll, runHourUtc: f.runHourUtc });
+        toast("Autopilot created");
+      }
+      onDone();
+    } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
+  };
   return (
     <div className="grid gap-3 sm:grid-cols-2">
       <div className="sm:col-span-2"><label className="label">Name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
@@ -66,7 +138,8 @@ function ApForm({ icps, lists, camps, onDone, toast }: { icps: { id: string; nam
       <div><label className="label">Run at (UTC hour)</label><input type="number" min={0} max={23} className="input" value={f.runHourUtc} onChange={(e) => setF({ ...f, runHourUtc: Number(e.target.value) })} /></div>
       <div><label className="label">Auto-enroll in campaign</label><select className="input" value={f.campaignId} onChange={(e) => setF({ ...f, campaignId: e.target.value, autoEnroll: !!e.target.value })}><option value="">Don't enroll</option>{camps.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
       <label className="flex items-center gap-2 text-sm sm:col-span-2"><input type="checkbox" checked={f.requireValidEmail} onChange={(e) => setF({ ...f, requireValidEmail: e.target.checked })} /> Only keep leads with a verified or catch-all email</label>
-      <button className="btn-primary w-full justify-center sm:col-span-2" disabled={busy || !f.name || !f.query} onClick={async () => { setBusy(true); try { await apiFetch("POST", "/v1/tools/autopilots", { name: f.name, query: { query: f.query }, icpId: f.icpId || undefined, listId: f.listId || undefined, campaignId: f.campaignId || undefined, dailyLeads: f.dailyLeads, minScore: f.minScore, requireValidEmail: f.requireValidEmail, autoEnroll: f.autoEnroll, runHourUtc: f.runHourUtc }); toast("Autopilot created"); onDone(); } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); } }}>{busy ? "…" : "Create autopilot"}</button>
+      {rangeErr && <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800 sm:col-span-2" role="alert">{rangeErr}</div>}
+      <button className="btn-primary w-full justify-center sm:col-span-2" disabled={busy || !f.name || (!initial && !f.query) || !!rangeErr} onClick={save}>{busy ? "…" : initial ? "Save changes" : "Create autopilot"}</button>
     </div>
   );
 }

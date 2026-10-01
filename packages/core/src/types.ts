@@ -81,6 +81,14 @@ export interface EmailVerification {
   };
   mxHost?: string;
   reason?: string;
+  /**
+   * What produced the verdict: "reoon:safe", "millionverifier:ok", "hunter:valid",
+   * "abstract:DELIVERABLE", "smtp", or a local check ("syntax", "disposable", "dns",
+   * "mx-only" when nothing actually checked the mailbox). Always set by verifyEmail.
+   */
+  verifiedBy?: string;
+  /** Verifiers that were tried and did not give a verdict, with why. Empty when none were. */
+  verifierAttempts?: { verifier: string; result: string }[];
 }
 
 export interface EmailFindResult {
@@ -89,6 +97,13 @@ export interface EmailFindResult {
   confidence: number;
   pattern?: string;
   candidates: { email: string; status: EmailStatus; confidence: number }[];
+  /**
+   * Which verifier vouched for the returned address ("reoon:safe", "hunter:valid", "smtp"),
+   * or undefined when it is an unverified guess. Matches leads.email_verified_by.
+   */
+  verifiedBy?: string;
+  /** How the address was found: "hunter", "web", "pattern". */
+  source?: string;
 }
 
 export interface LeadSearchQuery {

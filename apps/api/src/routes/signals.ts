@@ -1,8 +1,8 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, campaigns, desc, enqueue, eq, getDb, icps, inArray, monitorResults, monitors, or, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
-import { notFound } from "../lib/errors.js";
+import { and, campaigns, desc, enqueue, eq, getDb, icps, inArray, monitorResults, monitors, or, remainingPremiumBudget, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
+import { notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { scanJobChanges } from "../services/jobChanges.js";
@@ -19,7 +19,7 @@ signalRoutes.use("*", requireAuth);
 const SIGNAL_TYPES = ["funding", "acquisition", "hiring", "leadership", "expansion", "launch", "partnership", "job_change", "news"] as const;
 
 /** Signal feed: global signals + matches for this org. */
-signalRoutes.get("/", zValidator("query", z.object({ type: z.string().optional(), q: z.string().optional(), matched: z.enum(["true", "false"]).optional(), days: z.coerce.number().default(14), limit: z.coerce.number().max(500).default(100) })), async (c) => {
+signalRoutes.get("/", zValidator("query", z.object({ type: z.string().optional(), q: z.string().optional(), matched: z.enum(["true", "false"]).optional(), days: z.coerce.number().int().min(1).max(365).default(14), limit: z.coerce.number().int().min(1).max(500).default(100) })), async (c) => {
   const q = c.req.valid("query");
   const oid = orgId(c);
   const { db } = getDb();
@@ -48,7 +48,9 @@ signalRoutes.post(
   zValidator("json", z.object({ limit: z.coerce.number().min(1).max(500).default(50), minScore: z.coerce.number().min(0).max(100).default(70), staleDays: z.coerce.number().min(1).max(365).default(30), retryDays: z.coerce.number().min(1).max(365).default(3) }).optional()),
   async (c) => {
     const b = c.req.valid("json") ?? {};
-    const r = await scanJobChanges(orgId(c), b);
+    // Each re-check is a paid provider lookup, so it is held to the plan's premium budget
+    // like every other paid lookup. A zero budget answers planLimited without calling anyone.
+    const r = await scanJobChanges(orgId(c), { ...b, premiumBudget: await remainingPremiumBudget(getDb().db, orgId(c)) });
     // 502 when nothing answered: "nobody moved" and "we could not ask" are different
     // answers and only one of them is about the customer's market.
     return c.json(r, r.blocked ? 502 : 200);
@@ -84,7 +86,7 @@ signalRoutes.post("/scan", zValidator("json", z.object({ types: z.array(z.enum(S
 });
 
 // ── Subscriptions ──
-const subInput = z.object({ name: z.string().min(1), types: z.array(z.enum(SIGNAL_TYPES)).min(1), keywords: z.array(z.string()).default([]), industries: z.array(z.string()).default([]), locations: z.array(z.string()).default([]), icpId: z.string().uuid().optional(), targetTitles: z.array(z.string()).default(["CEO", "Founder", "Head of Sales", "Head of Marketing"]), autoCreateLeads: z.boolean().default(false), campaignId: z.string().uuid().optional(), active: z.boolean().default(true) });
+const subInput = z.object({ name: z.string().min(1), types: z.array(z.enum(SIGNAL_TYPES)).min(1), keywords: z.array(z.string()).default([]), industries: z.array(z.string()).default([]), locations: z.array(z.string()).default([]), icpId: z.string().uuid().nullish(), targetTitles: z.array(z.string()).default(["CEO", "Founder", "Head of Sales", "Head of Marketing"]), autoCreateLeads: z.boolean().default(false), campaignId: z.string().uuid().nullish(), active: z.boolean().default(true) });
 
 signalRoutes.get("/subscriptions", async (c) => {
   const { db } = getDb();
@@ -106,6 +108,7 @@ signalRoutes.patch("/subscriptions/:id", zValidator("json", subInput.partial()),
   const { db } = getDb();
   const oid = orgId(c);
   const b = c.req.valid("json");
+  requireSomeFields(b);
   await assertOwned(campaigns, b.campaignId, oid, "Campaign");
   await assertOwned(icps, b.icpId, oid, "ICP");
   const [row] = await db.update(signalSubscriptions).set(b).where(and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, oid))).returning();
@@ -114,7 +117,8 @@ signalRoutes.patch("/subscriptions/:id", zValidator("json", subInput.partial()),
 });
 signalRoutes.delete("/subscriptions/:id", async (c) => {
   const { db } = getDb();
-  await db.delete(signalSubscriptions).where(and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, orgId(c))));
+  const gone = await db.delete(signalSubscriptions).where(and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, orgId(c)))).returning({ id: signalSubscriptions.id });
+  if (!gone.length) throw notFound("Subscription");
   return c.json({ ok: true });
 });
 signalRoutes.post("/subscriptions/:id/run", async (c) => {
@@ -139,13 +143,15 @@ signalRoutes.post("/monitors", zValidator("json", monitorInput), async (c) => {
 });
 signalRoutes.patch("/monitors/:id", zValidator("json", monitorInput.partial()), async (c) => {
   const { db } = getDb();
+  requireSomeFields(c.req.valid("json"));
   const [row] = await db.update(monitors).set(c.req.valid("json")).where(and(eq(monitors.id, c.req.param("id")), eq(monitors.orgId, orgId(c)))).returning();
   if (!row) throw notFound("Monitor");
   return c.json(row);
 });
 signalRoutes.delete("/monitors/:id", async (c) => {
   const { db } = getDb();
-  await db.delete(monitors).where(and(eq(monitors.id, c.req.param("id")), eq(monitors.orgId, orgId(c))));
+  const gone = await db.delete(monitors).where(and(eq(monitors.id, c.req.param("id")), eq(monitors.orgId, orgId(c)))).returning({ id: monitors.id });
+  if (!gone.length) throw notFound("Monitor");
   return c.json({ ok: true });
 });
 signalRoutes.post("/monitors/:id/run", async (c) => {

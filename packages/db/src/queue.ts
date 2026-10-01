@@ -51,7 +51,12 @@ export async function claimJob(db: Db, workerId: string, types?: string[]): Prom
     WHERE id = (
       SELECT id FROM jobs
       WHERE status = 'queued' AND run_at <= now() ${typeFilter}
-      ORDER BY priority DESC, run_at ASC
+      -- Schedulers first, whatever their stored priority. They were enqueued at priority 0
+      -- while every pageview enqueues a priority-4 visit.identify, so with a small worker
+      -- pool a busy site starved campaign.tick (and with it all sending) indefinitely.
+      -- The expression also covers scheduler rows enqueued before they were given a
+      -- priority of their own.
+      ORDER BY (CASE WHEN payload->>'recurring' = 'true' THEN 1 ELSE 0 END) DESC, priority DESC, run_at ASC
       FOR UPDATE SKIP LOCKED
       LIMIT 1
     )
@@ -84,18 +89,28 @@ function normalizeJob(j: Record<string, unknown>): Job {
   } as Job;
 }
 
-export async function completeJob(db: Db, id: string, result?: Record<string, unknown> | void) {
-  await db
+/**
+ * Mark a job done - only if this worker still holds it.
+ *
+ * `lockedBy` guards the double-run case: a job the reaper took back (because its worker
+ * looked dead) and handed to someone else must not be completed or failed by the first
+ * worker when it finally returns, overwriting the second run's state. Returns false when
+ * the lock had already moved on.
+ */
+export async function completeJob(db: Db, id: string, result?: Record<string, unknown> | void, lockedBy?: string | null) {
+  const rows = await db
     .update(jobs)
     .set({ status: "done", result: result ?? null, progress: 100, lockedAt: null, lockedBy: null, updatedAt: new Date() })
-    .where(eq(jobs.id, id));
+    .where(lockedBy ? and(eq(jobs.id, id), eq(jobs.lockedBy, lockedBy), eq(jobs.status, "running")) : eq(jobs.id, id))
+    .returning({ id: jobs.id });
+  return rows.length > 0;
 }
 
 export async function failJob(db: Db, job: Job, err: unknown) {
   const message = err instanceof Error ? `${err.message}` : String(err);
   const retry = job.attempts < job.maxAttempts;
   const backoffMs = Math.min(60_000 * 2 ** (job.attempts - 1), 30 * 60_000);
-  await db
+  const rows = await db
     .update(jobs)
     .set({
       status: retry ? "queued" : "failed",
@@ -105,15 +120,39 @@ export async function failJob(db: Db, job: Job, err: unknown) {
       lockedBy: null,
       updatedAt: new Date(),
     })
-    .where(eq(jobs.id, job.id));
+    // Same ownership check as completeJob: a stale worker must not requeue or fail a job
+    // that has since been reaped and reclaimed by another.
+    .where(job.lockedBy ? and(eq(jobs.id, job.id), eq(jobs.lockedBy, job.lockedBy), eq(jobs.status, "running")) : eq(jobs.id, job.id))
+    .returning({ id: jobs.id });
+  return rows.length > 0;
 }
 
-/** Release jobs whose worker died (locked > 15 min). */
+/** How long a running job may go without a heartbeat before its worker is presumed dead. */
+export const STALE_LOCK_MS = 15 * 60_000;
+/** Heartbeat interval while a job runs. Far below STALE_LOCK_MS so a slow job is never reaped. */
+export const HEARTBEAT_MS = 60_000;
+
+/**
+ * Release jobs whose worker died (no heartbeat for 15 min).
+ *
+ * A reaped job has already spent the attempt its claim counted, so one that has used them
+ * all is FAILED, not requeued. Requeueing regardless meant a job that reliably killed its
+ * worker (out of memory, a hang) was retried forever - a poison loop that also re-ran
+ * whatever it had done before dying, every fifteen minutes.
+ */
 export async function reapStaleJobs(db: Db) {
-  await db
+  const cutoff = new Date(Date.now() - STALE_LOCK_MS);
+  const failed = await db
     .update(jobs)
-    .set({ status: "queued", lockedAt: null, lockedBy: null })
-    .where(and(eq(jobs.status, "running"), lte(jobs.lockedAt, new Date(Date.now() - 15 * 60_000))));
+    .set({ status: "failed", error: "worker stopped responding (no heartbeat for 15 minutes) on its final attempt", lockedAt: null, lockedBy: null, updatedAt: new Date() })
+    .where(and(eq(jobs.status, "running"), lte(jobs.lockedAt, cutoff), dsql`${jobs.attempts} >= ${jobs.maxAttempts}`))
+    .returning({ id: jobs.id });
+  const requeued = await db
+    .update(jobs)
+    .set({ status: "queued", lockedAt: null, lockedBy: null, updatedAt: new Date() })
+    .where(and(eq(jobs.status, "running"), lte(jobs.lockedAt, cutoff), dsql`${jobs.attempts} < ${jobs.maxAttempts}`))
+    .returning({ id: jobs.id });
+  return { failed: failed.length, requeued: requeued.length };
 }
 
 export interface WorkerOptions {
@@ -165,21 +204,37 @@ export async function runJob(db: Db, job: Job, handlers: Record<string, JobHandl
     await failJob(db, { ...job, attempts: job.maxAttempts }, new Error(`no handler for ${job.type}`));
     return;
   }
+  // Refresh the lock while the job runs. Without a heartbeat, any job longer than the
+  // reaper's 15 minutes (a big search, a job-change sweep) was declared dead mid-run and
+  // handed to a second worker - running it twice, and billing it twice.
+  const beat = async () => {
+    await db
+      .update(jobs)
+      .set({ lockedAt: new Date() })
+      .where(job.lockedBy ? and(eq(jobs.id, job.id), eq(jobs.lockedBy, job.lockedBy)) : eq(jobs.id, job.id));
+  };
   const ctx: JobContext = {
     db,
     progress: async (pct) => {
-      await db.update(jobs).set({ progress: Math.max(0, Math.min(100, Math.round(pct))) }).where(eq(jobs.id, job.id));
+      await db
+        .update(jobs)
+        .set({ progress: Math.max(0, Math.min(100, Math.round(pct))), lockedAt: new Date() })
+        .where(job.lockedBy ? and(eq(jobs.id, job.id), eq(jobs.lockedBy, job.lockedBy)) : eq(jobs.id, job.id));
     },
     log: (m) => log(`[${job.type}:${job.id.slice(0, 8)}] ${m}`),
   };
+  const heartbeat = setInterval(() => void beat().catch(() => {}), HEARTBEAT_MS);
+  if (typeof heartbeat.unref === "function") heartbeat.unref();
   const started = Date.now();
   try {
     const result = await handler(job, ctx);
-    await completeJob(db, job.id, result ?? undefined);
-    ctx.log(`done in ${Date.now() - started}ms`);
+    const owned = await completeJob(db, job.id, result ?? undefined, job.lockedBy);
+    ctx.log(owned ? `done in ${Date.now() - started}ms` : `finished in ${Date.now() - started}ms, but the job had been reaped and reclaimed; result not recorded`);
   } catch (err) {
     ctx.log(`failed: ${err instanceof Error ? err.message : String(err)}`);
     await failJob(db, job, err);
+  } finally {
+    clearInterval(heartbeat);
   }
 }
 

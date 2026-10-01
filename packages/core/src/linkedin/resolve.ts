@@ -4,7 +4,7 @@
  */
 import * as cheerio from "cheerio";
 import type { PersonCandidate } from "../types.js";
-import { webSearch } from "../search/index.js";
+import { webSearch, type WebSearchOutcome } from "../search/index.js";
 import { fetchText } from "../util/http.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { parseLinkedinTitle } from "../discovery/people.js";
@@ -38,6 +38,29 @@ export async function resolveLinkedinUrl(url: string): Promise<PersonCandidate |
 
 /** Find a LinkedIn URL for a person from name + company (or email). */
 export async function findLinkedinUrl(input: { firstName?: string; lastName?: string; fullName?: string; companyName?: string; email?: string }): Promise<{ url: string; confidence: number } | null> {
+  return (await findLinkedinUrlDetailed(input)).match;
+}
+
+/**
+ * findLinkedinUrl, plus whether the searches behind a null could actually run.
+ *
+ * null used to mean both "no profile found" and "every search provider failed".
+ */
+export async function findLinkedinUrlDetailed(input: { firstName?: string; lastName?: string; fullName?: string; companyName?: string; email?: string }): Promise<{ match: { url: string; confidence: number } | null; searches: number; failedSearches: number; searchFailed: boolean }> {
+  let searches = 0;
+  let failedSearches = 0;
+  const onOutcome = (o: WebSearchOutcome) => {
+    searches++;
+    if (o.everyProviderFailed) failedSearches++;
+  };
+  const match = await findLinkedinUrlInner(input, onOutcome);
+  return { match, searches, failedSearches, searchFailed: !match && searches > 0 && failedSearches === searches };
+}
+
+async function findLinkedinUrlInner(
+  input: { firstName?: string; lastName?: string; fullName?: string; companyName?: string; email?: string },
+  onOutcome: (o: WebSearchOutcome) => void,
+): Promise<{ url: string; confidence: number } | null> {
   const name = input.fullName ?? [input.firstName, input.lastName].filter(Boolean).join(" ");
   const domain = input.email?.split("@")[1];
   const queries = [
@@ -46,7 +69,7 @@ export async function findLinkedinUrl(input: { firstName?: string; lastName?: st
     name ? `site:linkedin.com/in "${name}"` : null,
   ].filter(Boolean) as string[];
   for (const q of queries) {
-    const results = await webSearch(q, { count: 10, minResults: 1 }).catch(() => []);
+    const results = await webSearch(q, { count: 10, minResults: 1, onOutcome }).catch(() => []);
     for (const r of results) {
       const li = normalizeLinkedinUrl(r.url);
       if (!li?.includes("/in/")) continue;

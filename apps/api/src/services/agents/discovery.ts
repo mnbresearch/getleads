@@ -1,6 +1,7 @@
-import { and, agentRuns, consumeLead, desc, eq, getDb, leads, scrapedLeads, QuotaExceededError, type Db } from "@prospex/db";
-import { createAiProvider, runLeadPipelineDetailed, scoreLeadRules, type IcpCriteria, type PipelineLead } from "@prospex/core";
-import { upsertLead } from "../leads.js";
+import { and, agentRuns, desc, eq, getDb, leads, organizations, remainingPremiumBudget, scrapedLeads, type Db } from "@prospex/db";
+import { createAiProviderForPlan, runLeadPipelineDetailed, scoreLeadRules, type IcpCriteria, type PipelineLead } from "@prospex/core";
+import { chargeNewLead, upsertLead } from "../leads.js";
+import { tryConsume } from "../../lib/quota.js";
 import { emitEvent } from "../../lib/events.js";
 import { env } from "../../env.js";
 
@@ -86,13 +87,28 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
       ? await db.query.icps.findFirst({ where: (t, { eq: e, and: a }) => a(e(t.id, opts.icpId!), e(t.orgId, orgIdValue)) })
       : null;
     const criteria = (icp?.criteria as IcpCriteria | undefined) ?? undefined;
+    const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgIdValue) });
+
+    // A run is a search, and is metered as one - it was the one discovery path that cost
+    // nothing against the searches quota. A preview stores nothing and is not charged.
+    if (!opts.preview) {
+      const charge = await tryConsume(db, orgIdValue, "searches", 1);
+      if (!charge.ok) {
+        const note = charge.reason === "quota" ? `Not run: ${charge.message}` : `Not run: could not record search usage (${charge.message})`;
+        await finish({ status: charge.reason === "quota" ? "blocked" : "failed", error: note }, 0);
+        return { runId: run.id, status: charge.reason === "quota" ? "blocked" : "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error: charge.reason === "error" ? note : undefined, quotaStopped: charge.reason === "quota" ? charge.message : undefined, note };
+      }
+    }
 
     const { leads: found, providerFailures } = await runLeadPipelineDetailed(
       { query, limit, findEmails: true },
       {
-        ai: createAiProvider(),
+        // Plan-gated engine, and the paid-provider budget passed in so the provider call
+        // itself is capped. Without it a free workspace drew unlimited Apollo leads here.
+        ai: createAiProviderForPlan(org?.plan ?? "free"),
         icp: criteria,
         verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
+        maxProviderLeads: await remainingPremiumBudget(db, orgIdValue),
       },
     );
 
@@ -136,7 +152,9 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
         ? `Stopped at your plan's limit: ${notSaved} more were found but not saved. ${quotaStopped}`
         : `Stopped at your plan's limit after saving ${created}. ${quotaStopped}`
       : found.length === 0
-        ? "Every configured source answered, and nobody matched this query."
+        ? providerFailures.length
+          ? `Nobody matched, and ${providerFailures.length} source(s) could not answer: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}.`
+          : "Every configured source answered, and nobody matched this query."
         : undefined;
 
     await finish({ status: "completed" }, created, note);
@@ -194,6 +212,7 @@ async function storeDiscoveredLead(
     email: lead.email,
     emailStatus: lead.emailStatus,
     emailConfidence: lead.emailConfidence,
+    emailVerifiedBy: (lead as { emailVerifiedBy?: string }).emailVerifiedBy,
     linkedinUrl: lead.linkedinUrl,
     location: lead.location,
     country: lead.company?.country,
@@ -204,7 +223,7 @@ async function storeDiscoveredLead(
     scoreReasons: score?.reasons,
     source: lead.source ?? "agent:discovery",
     tags: ["agent", `run:${ctx.runId.slice(0, 8)}`],
-  });
+  }, { fillOnly: true });
 
   // Provenance, always - including for a lead we already had, because knowing that a source
   // keeps rediscovering the same people is itself a measurement of that source.
@@ -242,12 +261,11 @@ async function storeDiscoveredLead(
 
   // Charged only for a lead the org did not already have, and only after it exists - so a
   // source that keeps returning the same people costs nothing to re-check.
-  try {
-    await consumeLead(db, orgIdValue, lead.source ?? "agent:discovery");
-  } catch (e) {
-    if (e instanceof QuotaExceededError) return { created: true, quotaStopped: e.message };
-    throw e;
-  }
+  // The premium sub-quota is recorded too (it used to be swallowed by a `.catch`), and a
+  // database fault is thrown as a fault rather than read as the plan limit.
+  const charge = await chargeNewLead(orgIdValue, lead.source ?? "agent:discovery");
+  if (!charge.ok && charge.reason === "quota") return { created: true, quotaStopped: charge.message };
+  if (!charge.ok) throw new Error(`could not record lead usage: ${charge.message}`);
   return { created: true };
 }
 

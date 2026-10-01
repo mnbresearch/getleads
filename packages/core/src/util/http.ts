@@ -2,7 +2,7 @@ import { classifyHttp, classifyThrown, reportProviderCall } from "../providers/h
 import { isPublicHost } from "./publicHost.js";
 
 const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ProspexBot/0.1 (+https://prospex.dev/bot)";
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ScoutBot/1.0 (+https://scout.mnbresearch.com)";
 
 export interface FetchOpts extends RequestInit {
   timeoutMs?: number;

@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "../lib/api";
-import { DeleteButton, Empty, LoadError, Modal, Page, TagInput, useToast } from "../components/ui";
+import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 
-interface Icp { id: string; name: string; description: string | null; criteria: Record<string, string[] | undefined>; seedDomains: string[]; aiProfile: { summary?: string; searchQueries?: string[] } | null; chatHistory: { role: "user" | "assistant"; content: string }[]; leadCount: number; createdAt: string }
+interface Icp { id: string; name: string; description: string | null; criteria: Record<string, string[] | undefined>; seedDomains: string[]; aiProfile: { summary?: string; searchQueries?: string[] } | null; chatHistory: { role: "user" | "assistant"; content: string }[]; leadCount: number; createdAt: string; clientId?: string | null }
 
 const FIELDS: [keyof Icp["criteria"] & string, string, string][] = [
   ["titles", "Job titles", "Head of Sales, CTO…"],
@@ -22,8 +22,17 @@ export function IcpPage() {
   const [busy, setBusy] = useState(false);
   const { toast, Toast } = useToast();
   const [loadErr, setLoadErr] = useState<string | null>(null);
-  const load = () => apiFetch<{ icps: Icp[] }>("GET", "/v1/icps").then((r) => { setIcps(r.icps); setLoadErr(null); }).catch((e) => setLoadErr((e as Error).message));
+  const [loaded, setLoaded] = useState(false);
+  const [scoring, setScoring] = useState<string | null>(null);
+  // Which clients route by each ICP, so the delete and score confirmations can say who is
+  // affected. Best-effort: without it the confirmations fall back to generic wording.
+  const [clients, setClients] = useState<{ id: string; name: string; icpId: string | null }[]>([]);
+  const load = () => apiFetch<{ icps: Icp[] }>("GET", "/v1/icps").then((r) => { setIcps(r.icps); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
+  useEffect(() => {
+    apiFetch<{ clients: { id: string; name: string; icpId: string | null }[] }>("GET", "/v1/clients?includeArchived=true").then((r) => setClients(r.clients ?? [])).catch(() => {});
+  }, []);
+  const usedBy = (i: Icp) => clients.filter((c) => c.icpId === i.id);
 
   const remove = async (i: Icp) => {
     await apiFetch("DELETE", `/v1/icps/${i.id}`);
@@ -35,7 +44,9 @@ export function IcpPage() {
     if (!edit) return;
     setBusy(true);
     try {
-      const body = { name: edit.name, description: edit.description, criteria: edit.criteria ?? {}, seedDomains: edit.seedDomains ?? [], buildWithAi: true };
+      // `?? undefined`: an ICP with no description comes back as null, and sending null back
+      // failed validation on an optional (not nullable) field, so the edit could not be saved.
+      const body = { name: edit.name, description: edit.description ?? undefined, criteria: edit.criteria ?? {}, seedDomains: edit.seedDomains ?? undefined, buildWithAi: true };
       if (edit.id) {
         await apiFetch("PATCH", `/v1/icps/${edit.id}`, body);
         // PATCH accepts buildWithAi and then ignores it - only POST enqueues the build job.
@@ -52,24 +63,37 @@ export function IcpPage() {
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
   const score = async (icp: Icp) => {
+    // Re-scoring overwrites every in-scope lead's score and ICP, so say which leads first.
+    const owner = icp.clientId ? clients.find((c) => c.id === icp.clientId)?.name ?? "this ICP's client" : null;
+    const scope = owner ? `the leads belonging to ${owner}` : "the leads in the pool (not assigned to a client)";
+    if (!confirm(`Score ${scope} against "${icp.name}"?\n\nTheir current score and ICP are replaced with this one's.`)) return;
+    setScoring(icp.id);
     try {
-      const r = await apiFetch<{ scored: unknown[] }>("POST", `/v1/icps/${icp.id}/score`, { assign: true, aiRerankTop: 20 });
-      toast(`Scored ${r.scored.length} leads against "${icp.name}"`);
+      const r = await apiFetch<{ scored?: unknown[]; considered?: number; updated?: number; notFound?: number; requested?: number }>("POST", `/v1/icps/${icp.id}/score`, { assign: true, aiRerankTop: 20 });
+      const n = typeof r.updated === "number" ? r.updated : r.scored?.length ?? 0;
+      const extra = [typeof r.considered === "number" && r.considered !== n ? `${r.considered} considered` : null, r.notFound ? `${r.notFound} not found` : null].filter(Boolean).join(", ");
+      toast(`Scored ${n} lead${n === 1 ? "" : "s"} against "${icp.name}"${extra ? ` (${extra})` : ""}`);
       load();
-    } catch (e) { toast((e as Error).message, "err"); }
+    } catch (e) { toast((e as Error).message, "err"); } finally { setScoring(null); }
   };
 
   return (
     <Page title="Ideal customer profiles" subtitle="Describe your best customers (or give example domains) and Scout builds lookalike criteria to score every lead." actions={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>New ICP</button>}>
       {Toast}
       <IcpLearningPanel />
-      {loadErr ? <LoadError message={loadErr} onRetry={load} /> : icps.length === 0 ? <Empty title="No ICPs yet" hint="Create one from a description like 'B2B SaaS founders in India with 20-200 employees' or from 3-5 of your best customers' websites." action={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>Create ICP</button>} /> : (
+      {/* A failed 5-second poll used to swap a loaded list for an error; only show it when there is nothing to show. */}
+      {loadErr && loaded && <div className="mb-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">Couldn&apos;t refresh ({loadErr}) - showing the last loaded ICPs.</div>}
+      {loadErr && !loaded ? <LoadError message={loadErr} onRetry={load} /> : !loaded ? <Spinner label="Loading ICPs…" /> : icps.length === 0 ? <Empty title="No ICPs yet" hint="Create one from a description like 'B2B SaaS founders in India with 20-200 employees' or from 3-5 of your best customers' websites." action={<button className="btn-primary" onClick={() => setEdit({ criteria: {}, seedDomains: [] })}>Create ICP</button>} /> : (
         <div className="grid gap-4 md:grid-cols-2">
           {icps.map((i) => (
             <div key={i.id} className="card p-5">
               <div className="flex items-start justify-between gap-2">
                 <div><div className="font-semibold">{i.name}</div><div className="text-xs text-ink-400">{i.leadCount} leads assigned</div></div>
-                <div className="flex gap-2"><button className="btn-secondary" onClick={() => score(i)}>Score leads</button><button className="btn-secondary" onClick={() => setChatIcp(i)}>Chat</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button><DeleteButton what={`the ICP "${i.name}"`} consequence={i.leadCount > 0 ? `${i.leadCount} leads are scored against it and will lose that score. It is also selectable in Search, Campaigns and Autopilot.` : "It is selectable in Search, Campaigns and Autopilot."} onDelete={() => remove(i)} onError={(m) => toast(m, "err")} className="btn-secondary" /></div>
+                <div className="flex gap-2"><button className="btn-secondary" disabled={scoring !== null} onClick={() => score(i)}>{scoring === i.id ? "Scoring…" : "Score leads"}</button><button className="btn-secondary" onClick={() => setChatIcp(i)}>Chat</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button><DeleteButton what={`the ICP "${i.name}"`} consequence={[
+                  usedBy(i).length ? `${usedBy(i).map((c) => c.name).join(", ")} ${usedBy(i).length === 1 ? "uses" : "use"} this ICP for routing - pooled leads will stop being routed to ${usedBy(i).length === 1 ? "that client" : "them"}.` : null,
+                  i.leadCount > 0 ? `${i.leadCount} leads are scored against it and will lose that score.` : null,
+                  "It is also selectable in Search, Campaigns and Autopilot.",
+                ].filter(Boolean).join(" ")} onDelete={() => remove(i)} onError={(m) => toast(m, "err")} className="btn-secondary" /></div>
               </div>
               {i.aiProfile?.summary ? <p className="mt-3 text-sm text-ink-300">{i.aiProfile.summary}</p> : i.description ? <p className="mt-3 text-sm text-ink-300">{i.description}</p> : null}
               <div className="mt-3 space-y-1 text-xs">

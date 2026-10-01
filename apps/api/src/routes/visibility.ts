@@ -1,8 +1,8 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, consume, desc, eq, getDb, organizations, visibilityPrompts, visibilityRuns } from "@prospex/db";
-import { notFound } from "../lib/errors.js";
+import { notFound, requireSomeFields } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { enginesForPlan, knownBrands, observationsFor, sampleAcrossEngines, saveVisibilityConfig, suggestPrompts, visibilityConfig, visibilityOverview } from "../services/visibility.js";
 
@@ -62,9 +62,10 @@ visibilityRoutes.post(
 
 visibilityRoutes.patch(
   "/prompts/:id",
-  zValidator("json", z.object({ active: z.boolean().optional(), samplesPerRun: z.number().int().min(1).max(10).optional(), topic: z.string().max(80).optional() })),
+  zValidator("json", z.object({ active: z.boolean().optional(), samplesPerRun: z.number().int().min(1).max(10).optional(), topic: z.string().max(80).nullish() })),
   async (c) => {
     const { db } = getDb();
+    requireSomeFields(c.req.valid("json"));
     const [row] = await db
       .update(visibilityPrompts)
       .set(c.req.valid("json"))
@@ -77,7 +78,8 @@ visibilityRoutes.patch(
 
 visibilityRoutes.delete("/prompts/:id", async (c) => {
   const { db } = getDb();
-  await db.delete(visibilityPrompts).where(and(eq(visibilityPrompts.id, c.req.param("id")), eq(visibilityPrompts.orgId, orgId(c))));
+  const gone = await db.delete(visibilityPrompts).where(and(eq(visibilityPrompts.id, c.req.param("id")), eq(visibilityPrompts.orgId, orgId(c)))).returning({ id: visibilityPrompts.id });
+  if (!gone.length) throw notFound("Prompt");
   return c.json({ ok: true });
 });
 
@@ -128,8 +130,9 @@ visibilityRoutes.post(
     const { db } = getDb();
     const body = c.req.valid("json") ?? { ai: false };
     const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
-    // One model call, charged like any other.
-    if (body.ai) await consume(db, oid, "aiMessages", 1).catch(() => {});
+    // One model call, charged like any other - before it is made, and an org with no AI
+    // quota left gets a 402 instead of a free call (the charge's error used to be swallowed).
+    if (body.ai) await consume(db, oid, "aiMessages", 1);
     return c.json(await suggestPrompts(db, oid, { plan: org?.plan ?? "free", useAi: body.ai, category: body.category }));
   },
 );

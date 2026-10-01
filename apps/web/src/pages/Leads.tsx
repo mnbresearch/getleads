@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { API_URL, apiFetch, auth, fmtDate } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
+import { BUCKET_COPY, type ClientAttention } from "../lib/clients";
 
 interface Company { id: string; domain: string; name: string | null; industry: string | null; size: string | null; description: string | null; techStack: string[]; location: string | null; linkedinUrl: string | null; emailPattern: string | null }
 interface Lead { id: string; status: string; fullName: string | null; firstName: string | null; lastName: string | null; title: string | null; seniority: string | null; email: string | null; emailStatus: string; emailConfidence: number; linkedinUrl: string | null; phone: string | null; location: string | null; score: number; scoreReasons: string[]; tags: string[]; source: string; createdAt: string; company: Company | null; custom: Record<string, unknown>; clientId?: string | null }
@@ -69,15 +70,40 @@ export function LeadsPage() {
     if (!silent) setLoading(true);
     const qs = new URLSearchParams({ limit: String(limit), offset: String(offset), sort: q.sort ?? "created", order: q.order ?? "desc", ...Object.fromEntries(Object.entries(q).filter(([k, v]) => v && !["limit", "offset", "sort", "order"].includes(k))) });
     apiFetch<{ leads: Lead[]; total: number }>("GET", `/v1/leads?${qs}`)
-      .then((r) => { setRows(r.leads); setTotal(r.total); setListErr(null); })
+      .then((r) => {
+        // Deleting everything on the last page left an empty page reading "No leads match"
+        // while the earlier pages still had leads. Step back to the real last page instead.
+        if (r.leads.length === 0 && r.total > 0 && offset > 0) {
+          const p = new URLSearchParams(params);
+          p.set("offset", String(Math.max(0, Math.floor((r.total - 1) / limit) * limit)));
+          setParams(p, { replace: true });
+          return;
+        }
+        setRows(r.leads); setTotal(r.total); setListErr(null);
+      })
       .catch((e) => setListErr((e as Error).message))
       .finally(() => setLoading(false));
-  }, [q, limit, offset]);
+  }, [q, limit, offset]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
+  // The selection is of rows on screen. Kept across a page or filter change it went on
+  // holding leads the user could no longer see - and "Delete 12 leads" then deleted them.
+  const paramKey = params.toString();
+  useEffect(() => { setSel(new Set()); }, [paramKey]);
   useEffect(() => { if (!detail) return; const t = setInterval(() => load(true), 4000); return () => clearInterval(t); }, [detail?.id, load]);
   // keep the open detail modal in sync with freshly loaded rows
   useEffect(() => { if (detail) { const fresh = rows.find((r) => r.id === detail.id); if (fresh && fresh !== detail) setDetail(fresh); } }, [rows]); // eslint-disable-line
-  useEffect(() => { apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)); }, []);
+  const reloadLists = useCallback(() => {
+    apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all")
+      .then((r) => setLists(r.lists))
+      .catch((e) => toast(`Couldn't load your lists: ${(e as Error).message}`, "err"));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { reloadLists(); }, [reloadLists]);
+  // Only for naming the ICP chip; a failure just leaves the chip saying "ICP".
+  const [icpNames, setIcpNames] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!q.icpId) return;
+    apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcpNames(new Map(r.icps.map((i) => [i.id, i.name])))).catch(() => {});
+  }, [q.icpId]);
   useEffect(() => { apiFetch<{ clients: typeof clients }>("GET", "/v1/clients").then((r) => setClients(r.clients)).catch(() => setClients([])); }, []);
   const clientById = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients]);
   useEffect(() => {
@@ -90,10 +116,25 @@ export function LeadsPage() {
   const ids = [...sel];
   const bulk = async (action: string) => {
     try {
-      if (action === "enrich") { await apiFetch("POST", "/v1/leads/bulk/enrich", { ids }); toast(`Enrichment queued for ${ids.length} leads`); }
+      if (action === "enrich") {
+        const r = await apiFetch<{ queued?: number; requested?: number; notFound?: number }>("POST", "/v1/leads/bulk/enrich", { ids });
+        const queued = r?.queued ?? ids.length - (r?.notFound ?? 0);
+        toast(`Enrichment queued for ${queued} lead${queued === 1 ? "" : "s"}${r?.notFound ? `, ${r.notFound} not found (deleted?)` : ""}`);
+      }
       if (action === "delete") { if (!confirm(`Delete ${ids.length} leads?`)) return; await apiFetch("POST", "/v1/leads/bulk/delete", { ids }); toast("Deleted"); }
-      if (action.startsWith("list:")) { await apiFetch("POST", `/v1/leads/lists/${action.slice(5)}/leads`, { ids }); toast("Added to list"); }
-      if (action === "newlist") { const name = prompt("List name"); if (!name) return; const l = await apiFetch<{ id: string }>("POST", "/v1/leads/lists", { name }); await apiFetch("POST", `/v1/leads/lists/${l.id}/leads`, { ids }); toast("List created"); apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)); }
+      if (action.startsWith("list:")) {
+        const r = await apiFetch<AddToListResult>("POST", `/v1/leads/lists/${action.slice(5)}/leads`, { ids });
+        toast(addToListMessage(r, ids.length));
+        reloadLists();
+      }
+      if (action === "newlist") {
+        const name = prompt("List name");
+        if (!name) return;
+        const l = await apiFetch<{ id: string }>("POST", "/v1/leads/lists", { name });
+        const r = await apiFetch<AddToListResult>("POST", `/v1/leads/lists/${l.id}/leads`, { ids });
+        toast(`List "${name}" created - ${addToListMessage(r, ids.length)}`);
+        reloadLists();
+      }
       if (action === "tag") { const t = prompt("Tag to add"); if (!t) return; await apiFetch("POST", "/v1/leads/bulk/tag", { ids, add: [t] }); toast("Tagged"); }
       if (action.startsWith("sync:")) {
         const provider = action.slice(5);
@@ -159,7 +200,13 @@ export function LeadsPage() {
       if (!res.ok) {
         const text = await res.text().catch(() => "");
         let msg = `Export failed (${res.status})`;
-        try { msg = (JSON.parse(text) as { error?: string }).error ?? msg; } catch { /* not JSON */ }
+        // The error may be an object ({code,message}) or a string; handing the object to the
+        // toast crashed React ("Objects are not valid as a React child").
+        try {
+          const e = (JSON.parse(text) as { error?: unknown }).error;
+          if (typeof e === "string" && e) msg = e;
+          else if (e && typeof e === "object" && typeof (e as { message?: unknown }).message === "string") msg = (e as { message: string }).message;
+        } catch { /* not JSON */ }
         toast(msg, "err");
         return;
       }
@@ -184,7 +231,8 @@ export function LeadsPage() {
     <Page title="Leads" subtitle={`${total.toLocaleString()} leads`} actions={<><button className="btn-secondary" onClick={() => setSuppressOpen(true)}>Do-not-contact</button><button className="btn-secondary" onClick={() => setImportOpen(true)}>Import CSV</button><button className="btn-secondary" onClick={exportCsv}>Export CSV</button><button className="btn-primary" onClick={() => setAddOpen(true)}>Add lead</button></>}>
       {Toast}
       <div className="card mb-4 flex flex-wrap items-center gap-2 p-3">
-        <input className="input w-56" placeholder="Search name, email, title…" defaultValue={q.q ?? ""} onKeyDown={(e) => e.key === "Enter" && set("q", (e.target as HTMLInputElement).value)} />
+        {/* Keyed on the URL value: an uncontrolled input otherwise keeps showing the old text after the URL changes (back button, a chip cleared). */}
+        <input key={`q:${q.q ?? ""}`} className="input w-56" placeholder="Search name, email, title…" defaultValue={q.q ?? ""} onKeyDown={(e) => e.key === "Enter" && set("q", (e.target as HTMLInputElement).value)} />
         <select className="input w-40" value={q.emailStatus ?? ""} onChange={(e) => set("emailStatus", e.target.value)}><option value="">Any email status</option><option value="valid">valid</option><option value="catch_all">catch-all</option><option value="risky">risky</option><option value="invalid">invalid</option><option value="unknown">unknown</option></select>
         <select className="input w-40" value={q.status ?? ""} onChange={(e) => set("status", e.target.value)} aria-label="Pipeline stage"><option value="">Any stage</option>{STAGES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
         <select className="input w-40" value={q.seniority ?? ""} onChange={(e) => set("seniority", e.target.value)}><option value="">Any seniority</option>{["c_level", "vp", "director", "manager", "senior", "individual", "entry"].map((s) => <option key={s} value={s}>{s}</option>)}</select>
@@ -210,8 +258,16 @@ export function LeadsPage() {
             onError={(m) => toast(m, "err")}
           />
         )}
-        <input className="input w-28" placeholder="Min score" type="number" defaultValue={q.minScore ?? ""} onKeyDown={(e) => e.key === "Enter" && set("minScore", (e.target as HTMLInputElement).value)} />
+        <input key={`ms:${q.minScore ?? ""}`} className="input w-28" placeholder="Min score" type="number" defaultValue={q.minScore ?? ""} onKeyDown={(e) => e.key === "Enter" && set("minScore", (e.target as HTMLInputElement).value)} />
         {q.tag && <span className="badge bg-brand-50 text-brand-700">tag: {q.tag} <button className="ml-1" onClick={() => set("tag", "")}>×</button></span>}
+        {/* Filters that arrive by link (from Clients, ICPs, the dashboard) have no control of
+            their own. Unshown, they silently narrowed the list with no way to see or clear them. */}
+        {hiddenFilterChips(q, { clients: clients.length > 0 ? clientById : null, icpNames }).map((c) => (
+          <span key={c.key} className="badge bg-brand-50 text-brand-700">
+            {c.label}
+            <button className="ml-1" aria-label={`Clear filter ${c.label}`} onClick={() => set(c.key, "")}>×</button>
+          </span>
+        ))}
         <select className="input ml-auto w-40" value={`${q.sort ?? "created"}:${q.order ?? "desc"}`} onChange={(e) => { const [s, o] = e.target.value.split(":"); const p = new URLSearchParams(params); p.set("sort", s); p.set("order", o); setParams(p); }}>
           <option value="created:desc">Newest</option><option value="score:desc">Highest score</option><option value="updated:desc">Recently updated</option><option value="name:asc">Name A-Z</option>
         </select>
@@ -238,12 +294,12 @@ export function LeadsPage() {
         </div>
       )}
 
-      {loading ? <Spinner label="Loading leads…" /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
+      {loading ? <Spinner label="Loading leads…" /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={() => load()} /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[900px]">
             <thead className="border-b border-black/10 bg-cream">
               <tr>
-                <th className="th w-8"><input type="checkbox" checked={sel.size === rows.length} onChange={(e) => setSel(e.target.checked ? new Set(rows.map((r) => r.id)) : new Set())} /></th>
+                <th className="th w-8"><input type="checkbox" aria-label="Select all on this page" checked={rows.length > 0 && rows.every((r) => sel.has(r.id))} onChange={(e) => { const s = new Set(sel); rows.forEach((r) => (e.target.checked ? s.add(r.id) : s.delete(r.id))); setSel(s); }} /></th>
                 <th className="th">Name</th><th className="th">Company</th><th className="th">Email</th><th className="th">Stage</th><th className="th">Score</th><th className="th">Location</th><th className="th">Added</th>
               </tr>
             </thead>
@@ -439,7 +495,13 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>
         <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
         {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast("No AI provider configured", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
-        <button className="btn-danger ml-auto" onClick={() => act("del", () => apiFetch("DELETE", `/v1/leads/${lead.id}`).then(onClose))}>Delete</button>
+        <DeleteButton
+          className="btn-danger ml-auto !text-white"
+          what={lead.fullName ?? lead.email ?? "this lead"}
+          consequence="Their activity history and list memberships go with them."
+          onDelete={async () => { await apiFetch("DELETE", `/v1/leads/${lead.id}`); toast("Lead deleted"); onClose(); onChanged(); }}
+          onError={(m) => toast(m, "err")}
+        />
       </div>
       {brief && (
         <div className="mt-4 rounded-lg bg-cream p-3 text-sm">
@@ -455,8 +517,11 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
 }
 
 function AddLeadModal({ open, onClose, onDone, toast }: { open: boolean; onClose: () => void; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
-  const [f, setF] = useState({ fullName: "", title: "", email: "", linkedinUrl: "", companyName: "", companyDomain: "", location: "" });
+  const blank = { fullName: "", title: "", email: "", linkedinUrl: "", companyName: "", companyDomain: "", location: "" };
+  const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
+  // Fresh form each time it opens; it used to reopen holding the last lead's details.
+  useEffect(() => { if (open) setF(blank); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   const submit = async () => {
     setBusy(true);
     try {
@@ -559,4 +624,33 @@ function SuppressionsModal({ open, onClose, toast }: { open: boolean; onClose: (
       </div>
     </Modal>
   );
+}
+
+type AddToListResult = { requested?: number; added?: number; alreadyInList?: number; notFound?: number };
+
+/** What actually happened, not "Added to list": counts say what was NOT done too. */
+function addToListMessage(r: AddToListResult | null | undefined, sent: number): string {
+  if (!r || typeof r.added !== "number") return `Added ${sent} lead${sent === 1 ? "" : "s"} to the list`;
+  const parts = [`${r.added} added to the list`];
+  if (r.alreadyInList) parts.push(`${r.alreadyInList} already in it`);
+  if (r.notFound) parts.push(`${r.notFound} not found`);
+  return parts.join(", ");
+}
+
+const HAS_EMAIL_LABEL: Record<string, string> = { true: "Has an email", false: "No email" };
+
+/** Removable chips for URL filters that have no control on the filter bar. */
+function hiddenFilterChips(
+  q: Record<string, string>,
+  ctx: { clients: Map<string, { name: string }> | null; icpNames: Map<string, string> },
+): { key: string; label: string }[] {
+  const out: { key: string; label: string }[] = [];
+  if (q.attention) out.push({ key: "attention", label: BUCKET_COPY[q.attention as keyof ClientAttention]?.title ?? `Needs attention: ${q.attention}` });
+  if (q.icpId) out.push({ key: "icpId", label: `ICP: ${ctx.icpNames.get(q.icpId) ?? "selected ICP"}` });
+  if (q.companyDomain) out.push({ key: "companyDomain", label: `Company: ${q.companyDomain}` });
+  if (q.hasEmail) out.push({ key: "hasEmail", label: HAS_EMAIL_LABEL[q.hasEmail] ?? `Has email: ${q.hasEmail}` });
+  if (q.department) out.push({ key: "department", label: `Department: ${q.department.split(",").join(", ")}` });
+  // The client filter has a select only when clients have loaded; otherwise show it here.
+  if (q.clientId && !ctx.clients) out.push({ key: "clientId", label: q.clientId === "none" ? "Unassigned (pool)" : "Client: selected client" });
+  return out;
 }

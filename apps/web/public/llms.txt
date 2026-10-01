@@ -1,0 +1,15 @@
+# Scout
+
+> Scout (scout.mnbresearch.com) is B2B lead intelligence and AI-visibility measurement, built by MNB Research (Faridabad, India). It finds business prospects from live sources, verifies their email addresses before anything is sent, runs AI-personalised outbound email sequences, identifies companies visiting your website, and measures how AI models (such as Gemini, Claude and Llama) describe your brand when buyers research your category - reporting sample sizes and confidence intervals rather than single answers. Everything is available in a web app, a REST API and an MCP server for AI agents.
+
+## Key pages
+
+- [Home](https://scout.mnbresearch.com/): what Scout does, how the AI-visibility (AEO / GEO) measurement works, pricing and FAQ.
+- [Sign up](https://scout.mnbresearch.com/signup): create a workspace.
+- [Sign in](https://scout.mnbresearch.com/login)
+- [Privacy Policy](https://scout.mnbresearch.com/privacy): what data Scout processes, sub-processors, retention and your rights (India DPDP Act 2023, GDPR).
+- [Terms of Service](https://scout.mnbresearch.com/terms): acceptable use (no spam), plans and credits, liability, governing law (India).
+
+## Contact
+
+- contact@mnbresearch.com

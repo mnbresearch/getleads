@@ -1,9 +1,9 @@
-import { and, companies, consume, eq, getDb, inArray, signalMatches, signalSubscriptions, signals, sql, type SignalSubscription } from "@prospex/db";
-import { companyNews, domainHintFromUrl, findPeople, resolveCompanyDomain, scanSignals, scoreLeadRules, type IcpCriteria, type ParsedSignal, type SignalType } from "@prospex/core";
+import { and, companies, eq, getDb, inArray, isNull, or, signalMatches, signalSubscriptions, signals, sql, type SignalSubscription } from "@prospex/db";
+import { companyNews, domainHintFromUrl, findPeopleDetailed, resolveCompanyDomain, scanSignals, scoreLeadRules, type IcpCriteria, type ParsedSignal, type SignalType } from "@prospex/core";
 import { upsertCompany, upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
-import { enrollLeads } from "./campaigns.js";
+import { enrollEligibleLeads } from "./campaigns.js";
 
 /** Persist parsed signals (global scope unless orgId given). Returns inserted rows. */
 export async function storeSignals(items: ParsedSignal[], orgId: string | null = null) {
@@ -23,26 +23,43 @@ export async function storeSignals(items: ParsedSignal[], orgId: string | null =
 /** Run one subscription: scan → store → match → (optionally) create decision-maker leads. */
 export async function runSubscription(sub: SignalSubscription, log: (m: string) => void = () => {}) {
   const { db } = getDb();
-  const types = sub.types as SignalType[];
-  const parsed = await scanSignals({ types, keywords: sub.keywords, industries: sub.industries, locations: sub.locations, days: 7, maxPerQuery: 25 });
+  // job_change is not something the news scanner can find: those signals are written by
+  // the org's own job-change scan (services/jobChanges.ts). Asking the scanner for them
+  // returned nothing, so a job_change subscription never matched anything at all.
+  const scanTypes = sub.types.filter((t) => t !== "job_change") as SignalType[];
+  const parsed = scanTypes.length ? await scanSignals({ types: scanTypes, keywords: sub.keywords, industries: sub.industries, locations: sub.locations, days: 7, maxPerQuery: 25 }) : [];
   const stored = await storeSignals(parsed, null);
   log(`${parsed.length} parsed, ${stored.length} new`);
-  // Match: any signal (new or existing in last 7 days) of the right type and keyword context not yet matched to this sub
+  // Match: any signal (new or existing in last 7 days) of the right type and keyword context not yet matched to this sub.
+  //
+  // Global signals (orgId null, from the news scan) or this org's own. Without the org
+  // condition, one org's private signals - job changes derived from its own pipeline -
+  // were matched, and their leads created, in every other org's subscriptions.
   const recent = await db
     .select()
     .from(signals)
-    .where(and(inArray(signals.type, sub.types), sql`${signals.createdAt} > now() - interval '7 days'`, sql`${signals.id} NOT IN (SELECT signal_id FROM signal_matches WHERE subscription_id = ${sub.id})`))
+    .where(
+      and(
+        inArray(signals.type, sub.types),
+        or(isNull(signals.orgId), eq(signals.orgId, sub.orgId)),
+        sql`${signals.createdAt} > now() - interval '7 days'`,
+        sql`${signals.id} NOT IN (SELECT signal_id FROM signal_matches WHERE subscription_id = ${sub.id})`,
+      ),
+    )
     .limit(200);
   const kw = [...sub.keywords, ...sub.industries, ...sub.locations].map((k) => k.toLowerCase());
   let matched = 0;
   let leadsCreated = 0;
   for (const s of recent) {
     const text = `${s.title} ${s.summary ?? ""}`.toLowerCase();
-    if (kw.length && !kw.some((k) => text.includes(k))) continue;
-    if (!s.companyName) continue;
+    // The org's own job changes are about people it already tracks; keyword filters are
+    // written for news headlines and would drop most of them.
+    const ownJobChange = s.type === "job_change" && s.orgId === sub.orgId;
+    if (!ownJobChange && kw.length && !kw.some((k) => text.includes(k))) continue;
+    if (!s.companyName && !ownJobChange) continue;
     await db.insert(signalMatches).values({ signalId: s.id, subscriptionId: sub.id, orgId: sub.orgId }).onConflictDoNothing();
     matched++;
-    if (sub.autoCreateLeads && sub.targetTitles.length) {
+    if (sub.autoCreateLeads && sub.targetTitles.length && s.companyName) {
       try {
         const n = await leadsFromSignal(sub, s.id, s.companyName, s.type);
         leadsCreated += n;
@@ -66,14 +83,18 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
     await db.update(companies).set({ signalsCount: sql`${companies.signalsCount} + 1`, lastSignalAt: new Date(), intentScore: sql`LEAST(100, ${companies.intentScore} + 20)` }).where(and(eq(companies.orgId, sub.orgId), eq(companies.domain, domain)));
     await db.update(signals).set({ companyDomain: domain }).where(and(eq(signals.id, signalId), sql`${signals.companyDomain} IS NULL`));
   }
-  const people = await findPeople({ companyName, titles: sub.targetTitles, limit: 3 });
+  // Detailed, so "the search could not run" is recorded as that and not as "nobody works there".
+  const found = await findPeopleDetailed({ companyName, titles: sub.targetTitles, limit: 3 });
+  const people = found.people;
+  const searchFailed = people.length === 0 && found.everySearchFailed;
+  if (searchFailed) console.warn(`[signals] subscription ${sub.id}: people search failed for ${companyName}: ${found.failureMessage ?? "every search failed"}`);
   let created = 0;
   let stoppedBecause: string | null = null;
   const ids: string[] = [];
   const icp = sub.icpId ? await db.query.icps.findFirst({ where: (t, { eq: e }) => e(t.id, sub.icpId!) }) : null;
   for (const p of people) {
     const score = icp ? scoreLeadRules({ title: p.title, location: p.location, company: { name: companyName } }, icp.criteria as IcpCriteria).score : 70;
-    const { lead, created: c } = await upsertLead(sub.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName, companyDomain: domain, source: `signal:${type}`, tags: [`signal:${type}`, `sub:${sub.id.slice(0, 8)}`], icpId: sub.icpId, score, custom: { signalId } });
+    const { lead, created: c } = await upsertLead(sub.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName, companyDomain: domain, source: `signal:${type}`, tags: [`signal:${type}`, `sub:${sub.id.slice(0, 8)}`], icpId: sub.icpId, score, custom: { signalId } }, { fillOnly: true });
     // Charged for a lead the org did not already have. A subscription re-reads the same
     // people whenever a signal matches again; billing before the upsert charged for those
     // repeats, which produce nothing.
@@ -96,13 +117,15 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
   if (stoppedBecause) console.warn(`[signals] subscription ${sub.id} stopped after ${created} leads: ${stoppedBecause}`);
   await db
     .update(signalMatches)
-    .set({ leadsCreated: created, status: stoppedBecause ? "stopped" : created ? "leads_created" : "no_leads" })
+    .set({ leadsCreated: created, status: stoppedBecause ? "stopped" : searchFailed ? "search_failed" : created ? "leads_created" : "no_leads" })
     .where(and(eq(signalMatches.signalId, signalId), eq(signalMatches.subscriptionId, sub.id)));
   if (sub.campaignId && ids.length) {
     // Same org as the subscription, not just the same id: enrolling into a foreign campaign
     // would hand our leads to another tenant's sequence, which then emails them.
     const cp = await db.query.campaigns.findFirst({ where: (t, { eq: e, and: a }) => a(e(t.id, sub.campaignId!), e(t.orgId, sub.orgId)) });
-    if (cp) await enrollLeads(cp, ids);
+    // The enroll route's filters, not a bare insert: leads with no usable address were
+    // enrolled only to fail at the first send, and a client campaign took other clients' leads.
+    if (cp) await enrollEligibleLeads(cp, ids);
   }
   return created;
 }
@@ -114,7 +137,7 @@ export async function refreshCompanySignals(orgId: string, domain: string, name?
   const news = await companyNews(name, 60).catch(() => []);
   const stored = await storeSignals(news.filter((n) => n.type !== "news").map((n) => ({ ...n, companyName: name })), null);
   for (const s of stored) await db.update(signals).set({ companyDomain: domain }).where(eq(signals.id, s.id));
-  const [{ n, last }] = await db.select({ n: sql<number>`count(*)::int`, last: sql<Date | null>`max(created_at)` }).from(signals).where(eq(signals.companyDomain, domain));
+  const [{ n, last }] = await db.select({ n: sql<number>`count(*)::int`, last: sql<Date | null>`max(created_at)` }).from(signals).where(and(eq(signals.companyDomain, domain), or(isNull(signals.orgId), eq(signals.orgId, orgId))));
   await db.update(companies).set({ signalsCount: n, lastSignalAt: last ?? undefined }).where(and(eq(companies.orgId, orgId), eq(companies.domain, domain)));
   return stored.length;
 }

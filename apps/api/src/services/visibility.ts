@@ -187,12 +187,14 @@ export async function sampleAcrossEngines(
    * that failed is the same mistake as counting a failure as a result, pointed at the
    * invoice instead of the metrics.
    *
-   * Still `.catch(() => {})`: an org over its limit is not stopped from measuring, because
-   * silently ceasing to sample would corrupt the time series the whole feature depends on.
-   * The overage is recorded and visible.
+   * An org over its limit is not stopped from measuring, because silently ceasing to
+   * sample would corrupt the time series the whole feature depends on. The overage IS
+   * recorded now (`allowOverage`): the plain consume() rolled the increment back before
+   * throwing, and the `.catch` here swallowed that, so usage past the limit was never
+   * written - the opposite of what this comment used to claim.
    */
   const billable = results.filter((r) => r.ok).length;
-  if (billable > 0) await consume(db, orgIdValue, "aiMessages", billable).catch(() => {});
+  if (billable > 0) await consume(db, orgIdValue, "aiMessages", billable, { allowOverage: true }).catch((e) => console.warn(`[visibility] usage not recorded for ${orgIdValue}: ${(e as Error).message}`));
   return {
     engines: providers.map((p) => p.name),
     samplesPerEngine: samples,

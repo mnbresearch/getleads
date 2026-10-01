@@ -2,6 +2,7 @@ import type { Context, MiddlewareHandler } from "hono";
 import { authenticate, verifyAdminJwt, type AuthContext } from "./lib/auth.js";
 import { ApiError } from "./lib/errors.js";
 import { env } from "./env.js";
+import { safeEqual } from "./lib/crypto.js";
 
 export type Env = { Variables: { auth: AuthContext } };
 
@@ -16,13 +17,29 @@ export const requireAuth: MiddlewareHandler<Env> = async (c, next) => {
   await next();
 };
 
-/** Super-admin dashboard auth - a signed admin JWT from POST /v1/admin/login, or the legacy
- * shared INTERNAL_TOKEN header for server-to-server calls. Not connected to customer accounts. */
+/**
+ * Super-admin dashboard auth - a signed admin JWT from POST /v1/admin/login, or a shared
+ * token header for server-to-server calls. Not connected to customer accounts.
+ *
+ * The server-to-server token is ADMIN_API_TOKEN when set. INTERNAL_TOKEN is the job-runner's
+ * credential, and it is pasted into third-party cron services (it is in their URLs); letting
+ * that same string open the admin API meant anyone who could read the cron config could
+ * change any customer's plan. It is still accepted when ADMIN_API_TOKEN is unset, so an
+ * existing integration does not break the day this ships, with a warning in the log.
+ */
+let warnedLegacyAdminToken = false;
 export const requireAdmin: MiddlewareHandler = async (c, next) => {
-  const internal = c.req.header("x-internal-token");
-  if (internal && env.internalToken && internal === env.internalToken) {
-    await next();
-    return;
+  const presented = c.req.header("x-internal-token") ?? c.req.header("x-admin-token");
+  if (presented) {
+    const expected = env.adminApiToken || env.internalToken;
+    if (expected && safeEqual(presented, expected)) {
+      if (!env.adminApiToken && !warnedLegacyAdminToken) {
+        warnedLegacyAdminToken = true;
+        console.warn("[auth] admin API reached with INTERNAL_TOKEN. Set ADMIN_API_TOKEN to separate admin access from the job runner's token.");
+      }
+      await next();
+      return;
+    }
   }
   const header = c.req.header("authorization");
   const token = header?.toLowerCase().startsWith("bearer ") ? header.slice(7) : undefined;
@@ -33,31 +50,101 @@ export const requireAdmin: MiddlewareHandler = async (c, next) => {
   throw new ApiError(401, "Admin authentication required", "unauthorized");
 };
 
+/**
+ * Guard for the serverless job runner (/internal/jobs/run).
+ *
+ * Fails CLOSED: with INTERNAL_TOKEN unset the route answers 503 rather than running the
+ * queue for anyone who finds the URL. The header is preferred; `?token=` stays supported
+ * because the documented external-cron setup can only put it in the URL.
+ */
+export const requireInternalToken: MiddlewareHandler = async (c, next) => {
+  if (!env.internalToken) throw new ApiError(503, "INTERNAL_TOKEN is not configured on the server, so the job runner endpoint is disabled.", "not_configured");
+  const presented = c.req.header("x-internal-token") ?? c.req.query("token") ?? "";
+  if (!presented || !safeEqual(presented, env.internalToken)) throw new ApiError(403, "forbidden", "forbidden");
+  await next();
+};
+
+/**
+ * Owner/admin-only actions: API keys, org settings, members and invites, webhooks,
+ * integrations, billing.
+ *
+ * An API key has no user and therefore no role. It is an org-level credential that only an
+ * owner or admin can create, so it is treated as one; a member's session is not.
+ */
+export function requireRole(...roles: string[]): MiddlewareHandler<Env> {
+  const allowed = roles.length ? roles : ["owner", "admin"];
+  return async (c, next) => {
+    const a = c.get("auth");
+    if (a?.user && !allowed.includes(a.user.role)) {
+      throw new ApiError(403, `Only a workspace ${allowed.join(" or ")} can do this. Your role is "${a.user.role}" - ask an owner or admin.`, "forbidden_role");
+    }
+    await next();
+  };
+}
+
 export const requireUser: MiddlewareHandler<Env> = async (c, next) => {
   const a = c.get("auth");
   if (!a?.user) throw new ApiError(403, "This endpoint requires a user session (not an API key)", "forbidden");
   await next();
 };
 
-/** Simple in-memory token bucket per org/IP. Fine for a single instance; swap for Upstash later. */
-const buckets = new Map<string, { tokens: number; at: number }>();
-export function rateLimit(opts: { perMinute: number; burst?: number }): MiddlewareHandler<Env> {
+/**
+ * The caller's IP, as reported by the proxy in front of us - never as claimed by the client.
+ *
+ * `x-forwarded-for` is a list the client starts and every proxy appends to, so its FIRST
+ * entry is whatever the client typed. Keying a limiter on it let anyone rotate a header
+ * value and get a fresh bucket on every request, which made the login and signup limits
+ * decorative. Render sits behind Cloudflare, which sets `cf-connecting-ip` itself
+ * (overwriting any client value); failing that, the RIGHT-most XFF entry is the one our
+ * own proxy appended.
+ */
+export function clientIp(c: Context): string {
+  const cf = c.req.header("cf-connecting-ip")?.trim();
+  if (cf) return cf;
+  const xff = c.req.header("x-forwarded-for");
+  if (xff) {
+    const parts = xff.split(",").map((p) => p.trim()).filter(Boolean);
+    if (parts.length) return parts[parts.length - 1];
+  }
+  return c.req.header("x-real-ip")?.trim() || "unknown";
+}
+
+/**
+ * In-memory token bucket, one bucket per (limiter, org or IP).
+ *
+ * Every limiter used to share one bucket per org, so six calls to a 6/min endpoint
+ * rate-limited an unrelated 30/min one, and each limiter's numbers were wrong for the
+ * others. Each `rateLimit()` call now owns its buckets. Fine for a single instance; swap for
+ * a shared store if the API is ever scaled out.
+ */
+const MAX_BUCKETS = 10_000;
+let limiterSeq = 0;
+export function rateLimit(opts: { perMinute: number; burst?: number; name?: string }): MiddlewareHandler<Env> {
   const cap = opts.burst ?? opts.perMinute;
   const refill = opts.perMinute / 60_000; // tokens per ms
+  const name = opts.name ?? `rl${++limiterSeq}`;
+  const buckets = new Map<string, { tokens: number; at: number }>();
   return async (c, next) => {
     const auth = c.get("auth") as AuthContext | undefined;
-    const key = auth?.org.id ?? c.req.header("x-forwarded-for") ?? c.req.header("cf-connecting-ip") ?? "anon";
+    const key = `${name}:${auth?.org.id ?? `ip:${clientIp(c)}`}`;
     const now = Date.now();
     const b = buckets.get(key) ?? { tokens: cap, at: now };
     b.tokens = Math.min(cap, b.tokens + (now - b.at) * refill);
     b.at = now;
+    // Re-inserted on every hit so Map order is least-recently-used first. Clearing the whole
+    // map on overflow (as before) handed every caller - including one mid-attack - a full
+    // bucket; evicting the stalest keys only forgets callers who went quiet.
+    buckets.delete(key);
+    buckets.set(key, b);
+    if (buckets.size > MAX_BUCKETS) {
+      const it = buckets.keys();
+      for (let n = buckets.size - MAX_BUCKETS; n > 0; n--) buckets.delete(it.next().value as string);
+    }
     if (b.tokens < 1) {
-      c.header("retry-after", "10");
-      throw new ApiError(429, "Rate limit exceeded", "rate_limited");
+      c.header("retry-after", String(Math.max(1, Math.ceil((1 - b.tokens) / refill / 1000))));
+      throw new ApiError(429, "Rate limit exceeded. Wait a moment and try again.", "rate_limited");
     }
     b.tokens -= 1;
-    buckets.set(key, b);
-    if (buckets.size > 10_000) buckets.clear();
     c.header("x-ratelimit-limit", String(opts.perMinute));
     c.header("x-ratelimit-remaining", String(Math.floor(b.tokens)));
     await next();

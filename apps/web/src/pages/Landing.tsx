@@ -3,6 +3,12 @@ import { Link } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { HeroDemo } from "../components/HeroDemo";
 import { DemoVideo } from "../components/DemoVideo";
+
+/**
+ * Same env the DemoVideo component reads. With no video id it renders nothing, so the
+ * "Watch" links to #demo would jump nowhere; they are hidden in that case.
+ */
+const HAS_DEMO_VIDEO = !!((import.meta.env.VITE_DEMO_VIDEO_ID as string | undefined) ?? "");
 import { FAQS } from "../content/faq";
 import { apiFetch } from "../lib/api";
 
@@ -33,7 +39,7 @@ const problems = [
   {
     pain: "They read your email, then ask ChatGPT about you.",
     why: "Whatever the AI says next is now part of your funnel, and almost nobody can tell you what it said.",
-    fix: "Scout asks the engines your buyers use and shows you the answer, the rivals named, and where you are missing.",
+    fix: "Scout asks AI models like Gemini, Claude and Llama the questions your buyers ask, and shows you the answer, the rivals named, and where you are missing.",
   },
 ];
 
@@ -43,7 +49,7 @@ const features = [
   { icon: "✉", title: "Outreach written from research", desc: "Drafts built on what Scout found about the account, sequenced and A/B tested with a statistical winner, not a hunch." },
   { icon: "◉", title: "Website visitor identification", desc: "Turn anonymous traffic into named companies and route hot visitors straight into the pipeline." },
   { icon: "◈", title: "Intent signals", desc: "Funding, hiring, leadership changes and news, watched continuously so timing stops being luck." },
-  { icon: "◐", title: "AI visibility across engines", desc: "Track what Gemini, Groq and the rest say when a buyer researches you, per engine, with the raw answers kept." },
+  { icon: "◐", title: "AI visibility across engines", desc: "Track how AI models like Gemini, Claude and Llama describe you when a buyer researches you, per model, with the raw answers kept." },
   { icon: "⚑", title: "Deliverability that defends you", desc: "Warm-up, per-mailbox health scoring and an automatic stop before a bad run damages your domain." },
   { icon: "⚡", title: "Built for AI agents", desc: "A first-class MCP server and REST API, so your agents can prospect, enrich and send with the same tools your reps use." },
 ];
@@ -276,7 +282,7 @@ export function LandingPage() {
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
           <Logo size={28} textClassName="text-lg" />
           <nav className="hidden items-center gap-6 text-sm text-ink-300 sm:flex">
-            <a href="#demo" className="hover:text-ink-50">Watch</a>
+            {HAS_DEMO_VIDEO && <a href="#demo" className="hover:text-ink-50">Watch</a>}
             <a href="#problems" className="hover:text-ink-50">Why Scout</a>
             <a href="#ai" className="hover:text-ink-50">The AI layer</a>
             <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
@@ -613,7 +619,7 @@ export function LandingPage() {
           <div>
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Product</div>
             <ul className="mt-3 space-y-2 text-ink-300">
-              <li><a href="#demo" className="hover:text-ink-50">Watch the demo</a></li>
+              {HAS_DEMO_VIDEO && <li><a href="#demo" className="hover:text-ink-50">Watch the demo</a></li>}
               <li><a href="#problems" className="hover:text-ink-50">Why Scout</a></li>
               <li><a href="#ai" className="hover:text-ink-50">The AI layer</a></li>
               <li><a href="#visibility" className="hover:text-ink-50">AI visibility</a></li>
@@ -636,6 +642,8 @@ export function LandingPage() {
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Contact</div>
             <ul className="mt-3 space-y-2 text-ink-300">
               <li><a href="mailto:contact@mnbresearch.com" className="hover:text-ink-50">contact@mnbresearch.com</a></li>
+              <li><Link to="/privacy" className="hover:text-ink-50">Privacy Policy</Link></li>
+              <li><Link to="/terms" className="hover:text-ink-50">Terms of Service</Link></li>
               <li className="text-ink-500">A product by MNB Research</li>
             </ul>
           </div>

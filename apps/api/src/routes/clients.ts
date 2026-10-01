@@ -1,7 +1,7 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, enqueue, eq, getDb, getUsage, listLeads, lists } from "@prospex/db";
+import { and, clients, enqueue, eq, getDb, getUsage, listLeads, lists, organizations } from "@prospex/db";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { notFound } from "../lib/errors.js";
 import {
@@ -182,6 +182,13 @@ async function act(oid: string, clientId: string | null, bucket: (typeof BUCKETS
  */
 export const clientReportPublic = new Hono<Env>();
 clientReportPublic.get("/clients/report/:token", rateLimit({ perMinute: 30 }), async (c) => {
+  // A suspended workspace's reports go dark with the rest of it, and an archived client's
+  // report is closed - both answer exactly like a token that never existed.
+  const { db } = getDb();
+  const client = await db.query.clients.findFirst({ where: eq(clients.shareToken, c.req.param("token")) });
+  if (!client || client.status === "archived") throw notFound("Report");
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, client.orgId) });
+  if (!org || org.status === "deactivated" || org.status === "revoked") throw notFound("Report");
   const r = await publicReport(c.req.param("token"));
   // One answer for "no such token" and "sharing was turned off": telling them apart would
   // confirm which tokens once existed.

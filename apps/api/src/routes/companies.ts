@@ -1,6 +1,8 @@
 import { Hono } from "hono";
-import { and, companies, consume, count, desc, eq, getDb, leads, organizations, signals } from "@prospex/db";
-import { createAiProviderForPlan, generateAccountBrief } from "@prospex/core";
+import { and, companies, consume, count, desc, eq, getDb, isNull, leads, or, signals } from "@prospex/db";
+import { generateAccountBrief, hasAi } from "@prospex/core";
+import { aiFor } from "../lib/ai.js";
+import { assertQuotaAvailable } from "../lib/quota.js";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 
@@ -34,13 +36,18 @@ companyRoutes.post("/:id/brief", async (c) => {
   const cached = company.aiBrief as { summary: string; whyNow: string; angles: string[] } | null;
   if (cached && !refresh) return c.json({ brief: cached, cached: true, generatedAt: company.aiBriefAt });
 
-  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
-  const ai = createAiProviderForPlan(org?.plan ?? "free");
+  const ai = aiFor(c.get("auth"));
+  if (!hasAi(ai)) return c.json({ brief: null, cached: false, error: "No AI provider configured" }, 200);
+  // Refuse before the AI call when the plan has no room; charge after it succeeds. Charging
+  // only after meant an over-quota org got the brief (the paid part) and then a 402.
+  await assertQuotaAvailable(db, oid, "aiMessages", 1);
 
   const companySignals = await db
     .select()
     .from(signals)
-    .where(eq(signals.companyDomain, company.domain))
+    // Shared signals plus this org's own. Private job-change signals belong to the org that
+    // tracks the person; reading by domain alone put another workspace's in this brief.
+    .where(and(eq(signals.companyDomain, company.domain), or(isNull(signals.orgId), eq(signals.orgId, oid))))
     .orderBy(desc(signals.occurredAt))
     .limit(8);
 

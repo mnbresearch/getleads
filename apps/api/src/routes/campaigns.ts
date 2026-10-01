@@ -1,11 +1,14 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql } from "@prospex/db";
-import { createAiProvider, createAiProviderForPlan, generateOutreach, classifyReply, draftReplyToInbound } from "@prospex/core";
+import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions } from "@prospex/db";
+import { generateOutreach, classifyReply, draftReplyToInbound, isPublicHost } from "@prospex/core";
+import { lookup } from "node:dns/promises";
+import { aiFor, NO_AI } from "../lib/ai.js";
+import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
 import { encryptJson } from "../lib/crypto.js";
-import { badRequest, notFound } from "../lib/errors.js";
+import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
@@ -33,17 +36,41 @@ campaignRoutes.get("/email-accounts", async (c) => {
   return c.json({ emailAccounts: rows.map(({ configEncrypted: _c, ...r }) => r), systemProviderAvailable: !!systemMailerConfig() || env.nodeEnv !== "production" });
 });
 
+/**
+ * An SMTP host must be a public mail server.
+ *
+ * Saving an account immediately opens a connection to the host and port it names and reports
+ * whether that worked - so with any host allowed, this endpoint was a port scanner for our
+ * own private network (database, metadata service, internal admin ports), one probe per
+ * request. The name is checked, and so is every address it resolves to, so a public name
+ * pointed at 10.0.0.5 is refused too.
+ */
+async function assertPublicSmtpHost(host: string) {
+  const bad = () => badRequest("SMTP host must be a public mail server address (for example smtp.gmail.com). Private, local and internal addresses are not allowed.");
+  if (!isPublicHost(host)) throw bad();
+  if (/^[\d.]+$|:/.test(host)) return; // a literal IP, already checked above
+  const addrs = await lookup(host, { all: true }).catch(() => null);
+  if (!addrs?.length) throw badRequest(`SMTP host "${host}" could not be found. Check the spelling.`);
+  if (addrs.some((a) => !isPublicHost(a.address))) throw bad();
+}
+
 campaignRoutes.post("/email-accounts", zValidator("json", accountInput), async (c) => {
   const b = c.req.valid("json");
   const { db } = getDb();
   if (b.provider === "system" && !systemMailerConfig() && env.nodeEnv === "production") throw badRequest("No system email provider configured on the server (RESEND_API_KEY or SMTP_*)");
   if (b.provider === "resend" && !b.config?.apiKey) throw badRequest("config.apiKey required for Resend");
   if (b.provider === "smtp" && !b.config?.host) throw badRequest("config.host required for SMTP");
+  if (b.provider === "smtp") await assertPublicSmtpHost(b.config!.host!);
   const [row] = await db
     .insert(emailAccounts)
     .values({ orgId: orgId(c), provider: b.provider, fromName: b.fromName, fromEmail: b.fromEmail, replyTo: b.replyTo, signature: b.signature, dailyLimit: b.dailyLimit, configEncrypted: b.config ? encryptJson(b.config) : null })
     .returning();
-  const test = b.provider === "system" ? { ok: true } : await testMailer(mailerFromAccount(row)!);
+  const raw = b.provider === "system" ? { ok: true } : await testMailer(mailerFromAccount(row)!);
+  // The driver's own error text distinguishes "connection refused" from "timed out" from
+  // "auth failed", which is a port-state oracle. Logged in full here; the caller gets a
+  // message that says what to check without describing the network.
+  if (!raw.ok) console.warn(`[campaigns] email account ${row.id} test failed: ${raw.error}`);
+  const test = raw.ok ? raw : { ok: false, error: b.provider === "smtp" ? "Could not connect and sign in to the SMTP server. Check the host, port, security setting, username and password." : "The email provider rejected the API key. Check that it is correct and active." };
   if (!test.ok) await db.update(emailAccounts).set({ status: "error" }).where(eq(emailAccounts.id, row.id));
   const { configEncrypted: _c, ...pub } = row;
   return c.json({ emailAccount: { ...pub, status: test.ok ? "active" : "error" }, test }, 201);
@@ -51,16 +78,32 @@ campaignRoutes.post("/email-accounts", zValidator("json", accountInput), async (
 
 campaignRoutes.delete("/email-accounts/:id", async (c) => {
   const { db } = getDb();
-  await db.delete(emailAccounts).where(and(eq(emailAccounts.id, c.req.param("id")), eq(emailAccounts.orgId, orgId(c))));
+  const gone = await db.delete(emailAccounts).where(and(eq(emailAccounts.id, c.req.param("id")), eq(emailAccounts.orgId, orgId(c)))).returning({ id: emailAccounts.id });
+  if (!gone.length) throw notFound("Email account");
   return c.json({ ok: true });
 });
 
 // ── Campaigns ──
-const stepInput = z.object({ delayDays: z.number().int().min(0).max(60).default(0), channel: z.enum(["email", "linkedin_connect", "linkedin_message", "whatsapp", "call", "task"]).default("email"), subjectTemplate: z.string().default(""), bodyTemplate: z.string().min(1), aiPersonalize: z.boolean().default(true), aiInstructions: z.string().optional(), variants: z.array(z.object({ subjectTemplate: z.string(), bodyTemplate: z.string() })).max(4).default([]) });
+/**
+ * `aiInstructions` is nullable because GET returns null for a step that has none. The edit
+ * page sends back what it read, so with `.optional()` saving ANY campaign that had such a
+ * step failed validation. `id` is optional: a step that carries its id is updated in place.
+ */
+const stepInput = z.object({ id: z.string().uuid().optional(), delayDays: z.number().int().min(0).max(60).default(0), channel: z.enum(["email", "linkedin_connect", "linkedin_message", "whatsapp", "call", "task"]).default("email"), subjectTemplate: z.string().nullish().transform((v) => v ?? ""), bodyTemplate: z.string().min(1), aiPersonalize: z.boolean().default(true), aiInstructions: z.string().nullish(), variants: z.array(z.object({ subjectTemplate: z.string(), bodyTemplate: z.string() })).max(4).nullish().transform((v) => v ?? []) });
+const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+/** A real IANA zone. An unknown one made the scheduler throw on every tick for that campaign. */
+const isTimeZone = (tz: string) => {
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return true;
+  } catch {
+    return false;
+  }
+};
 const settingsInput = z.object({
   dailyLimit: z.number().int().min(1).max(2000).optional(),
-  timezone: z.string().optional(),
-  sendWindow: z.object({ start: z.string(), end: z.string(), days: z.array(z.number().int().min(0).max(6)) }).optional(),
+  timezone: z.string().refine(isTimeZone, { message: "Unknown time zone; use an IANA name such as Asia/Kolkata or America/New_York" }).optional(),
+  sendWindow: z.object({ start: z.string().regex(HHMM, "Use 24-hour HH:MM, e.g. 09:00"), end: z.string().regex(HHMM, "Use 24-hour HH:MM, e.g. 17:30"), days: z.array(z.number().int().min(0).max(6)) }).optional(),
   stopOnReply: z.boolean().optional(),
   trackOpens: z.boolean().optional(),
   trackClicks: z.boolean().optional(),
@@ -71,7 +114,9 @@ const settingsInput = z.object({
   valueProp: z.string().optional(),
   tone: z.enum(["friendly", "direct", "formal", "casual"]).optional(),
 });
-const campaignInput = z.object({ name: z.string().min(1), icpId: z.string().uuid().optional(), listId: z.string().uuid().optional(), emailAccountId: z.string().uuid().optional(), clientId: z.string().uuid().nullable().optional(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
+// The references are nullable so a PATCH can detach them (`listId: null`), and so a body
+// read back from GET - where an unset reference is null - is accepted as-is.
+const campaignInput = z.object({ name: z.string().min(1), icpId: z.string().uuid().nullish(), listId: z.string().uuid().nullish(), emailAccountId: z.string().uuid().nullish(), clientId: z.string().uuid().nullish(), settings: settingsInput.optional(), steps: z.array(stepInput).max(10).optional() });
 
 campaignRoutes.get("/", async (c) => {
   const { db } = getDb();
@@ -92,8 +137,8 @@ campaignRoutes.post("/", zValidator("json", campaignInput), async (c) => {
   await assertOwned(icps, b.icpId, oid, "ICP");
   await assertOwned(lists, b.listId, oid, "List");
   await assertOwned(clients, b.clientId, oid, "Client");
-  const [row] = await db.insert(campaigns).values({ orgId: oid, name: b.name, icpId: b.icpId, listId: b.listId, emailAccountId: b.emailAccountId, clientId: b.clientId ?? null, settings: b.settings ?? {} }).returning();
-  if (b.steps?.length) await db.insert(sequenceSteps).values(b.steps.map((s, i) => ({ campaignId: row.id, stepNo: i + 1, ...s })));
+  const [row] = await db.insert(campaigns).values({ orgId: oid, name: b.name, icpId: b.icpId ?? null, listId: b.listId ?? null, emailAccountId: b.emailAccountId ?? null, clientId: b.clientId ?? null, settings: b.settings ?? {} }).returning();
+  if (b.steps?.length) await db.insert(sequenceSteps).values(b.steps.map(({ id: _id, ...s }, i) => ({ campaignId: row.id, stepNo: i + 1, ...s })));
   return c.json(await fullCampaign(oid, row.id), 201);
 });
 
@@ -113,20 +158,56 @@ campaignRoutes.patch("/:id", zValidator("json", campaignInput.partial()), async 
   await assertOwned(icps, b.icpId, oid, "ICP");
   await assertOwned(lists, b.listId, oid, "List");
   await assertOwned(clients, b.clientId, oid, "Client");
+  requireSomeFields(b);
   await db
     .update(campaigns)
     .set({ ...(b.name ? { name: b.name } : {}), ...(b.clientId !== undefined ? { clientId: b.clientId } : {}), ...(b.icpId !== undefined ? { icpId: b.icpId } : {}), ...(b.listId !== undefined ? { listId: b.listId } : {}), ...(b.emailAccountId !== undefined ? { emailAccountId: b.emailAccountId } : {}), ...(b.settings ? { settings: { ...existing.settings, ...b.settings } } : {}), updatedAt: new Date() })
     .where(eq(campaigns.id, existing.id));
-  if (b.steps) {
-    await db.delete(sequenceSteps).where(eq(sequenceSteps.campaignId, existing.id));
-    if (b.steps.length) await db.insert(sequenceSteps).values(b.steps.map((s, i) => ({ campaignId: existing.id, stepNo: i + 1, ...s })));
-  }
+  if (b.steps) await syncSteps(existing.id, b.steps);
   return c.json(await fullCampaign(oid, existing.id));
 });
 
+/**
+ * Bring a campaign's steps in line with the edited list, keeping step identity.
+ *
+ * This used to delete every step and insert new ones. Step ids are not just keys: queued
+ * send jobs carry them (and then found nothing and dropped the send), sent messages point
+ * at them (and had step_id nulled by the cascade), and A/B results are grouped by them (and
+ * were wiped). So a typo fix in step 2 silently broke a running campaign.
+ *
+ * Matching: a step that carries an id keeps that row. A step without one takes over the
+ * row at the same position, unless that row was claimed by id elsewhere in the list. Only
+ * rows nothing matched are deleted.
+ */
+async function syncSteps(campaignId: string, steps: z.infer<typeof stepInput>[]) {
+  const { db } = getDb();
+  const current = await db.select().from(sequenceSteps).where(eq(sequenceSteps.campaignId, campaignId)).orderBy(asc(sequenceSteps.stepNo));
+  const byId = new Map(current.map((s) => [s.id, s]));
+  const claimedById = new Set(steps.map((s) => s.id).filter((id): id is string => !!id && byId.has(id)));
+  const used = new Set<string>();
+  for (let i = 0; i < steps.length; i++) {
+    const { id, ...fields } = steps[i];
+    let target = id && byId.has(id) && !used.has(id) ? byId.get(id)! : undefined;
+    if (!target && !id) {
+      const atPos = current[i];
+      if (atPos && !claimedById.has(atPos.id) && !used.has(atPos.id)) target = atPos;
+    }
+    const values = { ...fields, aiInstructions: fields.aiInstructions ?? null, stepNo: i + 1 };
+    if (target) {
+      used.add(target.id);
+      await db.update(sequenceSteps).set(values).where(eq(sequenceSteps.id, target.id));
+    } else {
+      await db.insert(sequenceSteps).values({ campaignId, ...values });
+    }
+  }
+  const removed = current.filter((s) => !used.has(s.id)).map((s) => s.id);
+  if (removed.length) await db.delete(sequenceSteps).where(and(eq(sequenceSteps.campaignId, campaignId), inArray(sequenceSteps.id, removed)));
+}
+
 campaignRoutes.delete("/:id", async (c) => {
   const { db } = getDb();
-  await db.delete(campaigns).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c))));
+  const gone = await db.delete(campaigns).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c)))).returning({ id: campaigns.id });
+  if (!gone.length) throw notFound("Campaign");
   return c.json({ ok: true });
 });
 
@@ -193,7 +274,8 @@ campaignRoutes.post("/:id/start", async (c) => {
 
 campaignRoutes.post("/:id/pause", async (c) => {
   const { db } = getDb();
-  await db.update(campaigns).set({ status: "paused", updatedAt: new Date() }).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c))));
+  const [row] = await db.update(campaigns).set({ status: "paused", updatedAt: new Date() }).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c)))).returning({ id: campaigns.id });
+  if (!row) throw notFound("Campaign");
   return c.json({ status: "paused" });
 });
 
@@ -262,7 +344,7 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
   const account = cp.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, cp.emailAccountId) }) : null;
   const s = cp.settings as Record<string, unknown>;
   if (step.aiPersonalize) await consume(db, oid, "aiMessages", 1);
-  const out = await generateOutreach(step.aiPersonalize ? createAiProvider() : { name: "none", model: "none", complete: async () => "" }, {
+  const out = await generateOutreach(step.aiPersonalize ? aiFor(c.get("auth")) : NO_AI, {
     lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null },
     sender: { name: account?.fromName ?? "Me", company: String(s.senderCompany ?? ""), title: s.senderTitle ? String(s.senderTitle) : undefined, valueProp: String(s.valueProp ?? step.aiInstructions ?? ""), signature: account?.signature ?? undefined, tone: s.tone as "friendly" | undefined },
     subjectTemplate: step.subjectTemplate,
@@ -294,7 +376,7 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   }
   if (!lead) throw badRequest("lead or leadId required");
   await consume(db, oid, "aiMessages", 1);
-  return c.json(await generateOutreach(createAiProvider(), { lead, sender: b.sender, instructions: b.instructions, stepNo: b.stepNo, language: b.language }));
+  return c.json(await generateOutreach(aiFor(c.get("auth")), { lead, sender: b.sender, instructions: b.instructions, stepNo: b.stepNo, language: b.language }));
 });
 
 /** Positive-signal intents worth drafting an AI follow-up for. */
@@ -305,11 +387,17 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
   const oid = orgId(c);
   const b = c.req.valid("json");
   const email = (b.from.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0] ?? b.from).toLowerCase();
-  const org = await getDb().db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
-  const ai = createAiProviderForPlan(org?.plan ?? "free");
-  const cls = await classifyReply(ai, `${b.subject ?? ""}\n${b.text}`);
   const { db } = getDb();
-  const matched = await markReplied(oid, email, cls.intent);
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+  const ai = aiFor(c.get("auth"));
+  // Classification is an AI call and is metered like one. Over quota it still runs - on the
+  // rule-based path - because marking the reply (which stops the sequence) must never depend
+  // on the AI budget. The response says which path was taken.
+  const clsCharge = await tryConsume(db, oid, "aiMessages", 1);
+  const cls = await classifyReply(clsCharge.ok ? ai : NO_AI, `${b.subject ?? ""}\n${b.text}`);
+  let aiSkipped: string | undefined = clsCharge.ok ? undefined : clsCharge.reason === "quota" ? "quota" : "error";
+  // The message itself goes along so an out-of-office auto-reply is not taken for a real one.
+  const matched = await markReplied(oid, email, cls.intent, { subject: b.subject, text: b.text });
   if (matched) {
     const lead = await db.query.leads.findFirst({ where: and(eq(leads.orgId, oid), eq(leads.email, email)) });
     const company = lead?.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
@@ -323,7 +411,11 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
     const cs = (campaign?.settings ?? {}) as Record<string, unknown>;
 
     let draftReply: { subject: string; body: string } | null = null;
-    if (lead && REPLY_WORTHY_INTENTS.has(cls.intent)) {
+    // Charged before the call, so an org past its cap does not keep getting drafts for free
+    // (the old charge-after was wrapped in `.catch(() => {})`).
+    const draftCharge = lead && REPLY_WORTHY_INTENTS.has(cls.intent) && !aiSkipped ? await tryConsume(db, oid, "aiMessages", 1) : null;
+    if (draftCharge && !draftCharge.ok) aiSkipped = draftCharge.reason === "quota" ? "quota" : "error";
+    if (lead && draftCharge?.ok) {
       const styleExamples = ((org?.settings as Record<string, unknown> | undefined)?.aiReplyStyleExamples as { subject: string; body: string }[] | undefined) ?? [];
       draftReply = await draftReplyToInbound(ai, {
         inboundText: b.text,
@@ -340,7 +432,6 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
         },
         styleExamples,
       }).catch(() => null);
-      if (draftReply) await consume(db, oid, "aiMessages", 1).catch(() => {});
     }
 
     await db.insert(messages).values({
@@ -356,7 +447,7 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
       draftReply: draftReply ?? undefined,
     });
   }
-  return c.json({ matched, intent: cls.intent, confidence: cls.confidence });
+  return c.json({ matched, intent: cls.intent, confidence: cls.confidence, ...(aiSkipped ? { skipped: aiSkipped, note: aiSkipped === "quota" ? "AI quota reached: the reply was classified with rules only and no draft was written." : "Could not record AI usage, so the AI steps were skipped." } : {}) });
 });
 
 /** Send (or edit-and-send) the AI-drafted follow-up for an inbound message. */
@@ -374,8 +465,12 @@ campaignRoutes.post(
     const bodyText = b.body ?? draft?.body;
     if (!subject || !bodyText) throw badRequest("No draft available - pass subject and body");
     if (!inbound.leadId) throw badRequest("Inbound message has no matched lead");
-    const lead = await db.query.leads.findFirst({ where: eq(leads.id, inbound.leadId) });
+    const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, inbound.leadId), eq(leads.orgId, oid)) });
     if (!lead?.email) throw badRequest("Lead has no email");
+    // The same gates every campaign send passes. This path skipped both: it would email
+    // someone who had unsubscribed, and it never counted against the plan's email quota.
+    const suppressed = await db.query.suppressions.findFirst({ where: and(eq(suppressions.orgId, oid), eq(suppressions.email, lead.email.toLowerCase())) });
+    if (suppressed || lead.status === "unsubscribed") throw new ApiError(409, `${lead.email} has unsubscribed or is on your suppression list, so no email was sent.`, "suppressed");
 
     // Both scoped to the caller's org. This path also reaches mailerFromAccount, so it
     // decrypts SMTP credentials and sends from that address - exactly what the sendStep
@@ -387,6 +482,7 @@ campaignRoutes.post(
 
     const mailer = mailerFromAccount(account);
     if (!mailer) throw badRequest("Sending account is not configured correctly");
+    await consume(db, oid, "emails", 1);
 
     const [msg] = await db
       .insert(messages)

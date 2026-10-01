@@ -28,7 +28,7 @@ export function openapi(apiUrl: string) {
   return {
     openapi: "3.1.0",
     info: {
-      title: "Prospex API",
+      title: "Scout API",
       version: "1.0.0",
       description:
         "Lead generation infrastructure for sales teams and AI agents: real-time B2B discovery, company enrichment, email finding + verification, ICP lookalike scoring, AI-personalized outreach, sequences, tracking, webhooks and CRM sync.\n\nAuthenticate with `x-api-key: px_live_...` (recommended for agents) or `Authorization: Bearer <jwt>`.\n\nLong-running operations return `202` with a `jobId`; poll `GET /v1/search/{id}` or `GET /v1/search/jobs/{jobId}`.",
@@ -44,6 +44,12 @@ export function openapi(apiUrl: string) {
     paths: {
       "/v1/auth/signup": { post: { tags: ["Auth"], security: [], summary: "Create workspace + user; returns JWT and an API key", requestBody: j(obj({ email: str, password: str, name: str, orgName: str, inviteCode: str }, ["email", "password"])), responses: ok() } },
       "/v1/auth/login": { post: { tags: ["Auth"], security: [], summary: "Login", requestBody: j(obj({ email: str, password: str }, ["email", "password"])), responses: ok() } },
+      "/v1/auth/password/forgot": { post: { tags: ["Auth"], security: [], summary: "Email a password-reset link. Always 200 {ok:true}, whether or not the address has an account", requestBody: j(obj({ email: str }, ["email"])), responses: ok(obj({ ok: bool })) } },
+      "/v1/auth/password/reset": { post: { tags: ["Auth"], security: [], summary: "Set a new password from an emailed token (1 hour, single use); returns the same body as /v1/auth/login", requestBody: j(obj({ token: str, password: { ...str, minLength: 8 } }, ["token", "password"])), responses: ok() } },
+      "/v1/auth/password/change": { post: { tags: ["Auth"], summary: "Change your password. currentPassword is required unless the account has never had one (Google sign-up)", requestBody: j(obj({ currentPassword: str, newPassword: { ...str, minLength: 8 } }, ["newPassword"])), responses: ok(obj({ ok: bool })) } },
+      "/v1/tools/team/invites/{id}": { delete: { tags: ["Team"], summary: "Revoke a pending invite (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
+      "/v1/tools/team/invites/{id}/resend": { post: { tags: ["Team"], summary: "Re-send a pending invite and renew its 14-day expiry (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
+      "/v1/webhooks/{id}/test": { post: { tags: ["Webhooks"], summary: "Deliver a webhook.test event to this webhook only, regardless of its event filter", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/auth/me": { get: { tags: ["Auth"], summary: "Current identity + plan limits", responses: ok() } },
       "/v1/auth/api-keys": { get: { tags: ["Auth"], summary: "List API keys", responses: ok() }, post: { tags: ["Auth"], summary: "Create API key", requestBody: j(obj({ name: str }, ["name"])), responses: ok() } },
       "/v1/search": {
@@ -136,7 +142,7 @@ export function openapi(apiUrl: string) {
 }
 
 export const docsHtml = (specUrl: string) => `<!doctype html>
-<html><head><meta charset="utf-8"><title>Prospex API Docs</title>
+<html><head><meta charset="utf-8"><title>Scout API Docs</title>
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"></head>
 <body><div id="ui"></div>
 <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>

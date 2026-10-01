@@ -71,6 +71,8 @@ suite("route surface", () => {
     // Exactly this route, not /v1/public/* - a future public route should have to earn its
     // own line here rather than inherit one. Its tests are in "client workspaces over HTTP".
     { match: /^\/v1\/public\/clients\/report\/:token$/, why: "the client-facing report; the unguessable token in the URL is the credential" },
+    // Exactly this route. The provider's Svix signature is the credential; it is covered by the jobs hardening suite.
+    { match: /^\/v1\/email-events\/resend$/, why: "the email provider's bounce/complaint webhook; authenticated by its signature, not a session" },
   ];
 
   beforeAll(async () => {
@@ -238,7 +240,10 @@ suite("route surface", () => {
         // embeddable lead-capture form and tracking pixels (org token in the body), and
         // the pricing page's "contact me about upgrading" form, which is filled in by
         // people who by definition do not have an account yet.
-        !/webhook|capture|track|unsubscribe|px|upgrade-requests/.test(String(r.path)),
+        !/webhook|capture|track|unsubscribe|px|upgrade-requests/.test(String(r.path)) &&
+        // The email provider's bounce/complaint webhook: signed (Svix), and refused with 401
+        // on a bad signature or 503 when no secret is configured. Tested in hardening.jobs.
+        String(r.path) !== "/v1/email-events/resend",
     );
     expect(writes.length).toBeGreaterThan(10);
 

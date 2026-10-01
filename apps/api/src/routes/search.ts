@@ -1,9 +1,11 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, consume, consumeLead, desc, drainJobs, enqueue, eq, getDb, getJob, icps, jobs, lists, remainingPremiumBudget, searches } from "@prospex/db";
+import { and, consume, consumeLead, desc, drainJobs, enqueue, eq, getDb, getJob, icps, jobs, listLeads, lists, QuotaExceededError, remainingPremiumBudget, searches } from "@prospex/db";
 import { assertOwned } from "../lib/ownership.js";
-import { crawlCompanyWebsite, extractDomain, findCompanies, findEmail, findPeople, resolveCompanyDomain, runLeadPipeline, createAiProvider, verifyEmail, parseQuery, pMap } from "@prospex/core";
+import { crawlCompanyWebsite, extractDomain, findCompanies, findEmail, findPeople, resolveCompanyDomain, runLeadPipeline, verifyEmail, parseQuery, pMap } from "@prospex/core";
+import { aiFor, NO_AI } from "../lib/ai.js";
+import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
@@ -90,22 +92,69 @@ searchRoutes.post("/quick", rateLimit({ perMinute: 10 }), zValidator("json", sea
   const oid = orgId(c);
   const body = c.req.valid("json");
   const { db } = getDb();
+  // The same ownership checks as the async search. This route took icpId on trust and
+  // ignored clientId and listId entirely, so a "saved" quick search landed nowhere it said.
+  await assertOwned(icps, body.icpId, oid, "ICP");
+  await assertOwned(lists, body.listId, oid, "List");
+  let icpId = body.icpId;
+  if (body.clientId) {
+    const { requireClient } = await import("../services/clients.js");
+    const client = await requireClient(oid, body.clientId);
+    if (client.status === "archived") throw badRequest("That client is archived. Reactivate it before running searches for it.");
+    icpId = icpId ?? client.icpId ?? undefined;
+  }
   await consume(db, oid, "searches", 1);
   const providerBudget = await remainingPremiumBudget(db, oid);
-  const results = await runLeadPipeline(body, { ai: createAiProvider(), verify: verifyOpts(), country: body.country, maxProviderLeads: providerBudget });
+  const results = await runLeadPipeline(body, { ai: aiFor(c.get("auth")), verify: verifyOpts(), country: body.country, maxProviderLeads: providerBudget });
+  let saved: { leadId: string; created: boolean }[] | undefined;
+  let skipped: string | undefined;
+  let stopped: string | undefined;
   if (body.save) {
-    const { upsertLead, pipelineLeadToInput } = await import("../services/leads.js");
+    const { upsertLead, pipelineLeadToInput, findExistingLead } = await import("../services/leads.js");
+    saved = [];
     for (const r of results) {
-      await consumeLead(db, oid, r.source).catch(() => null);
-      await upsertLead(oid, pipelineLeadToInput(r, { icpId: body.icpId ?? null }));
+      const input = pipelineLeadToInput(r, { icpId: icpId ?? null });
+      // Charged only for a lead this creates, and BEFORE creating it, so the limit actually
+      // stops the save. It used to charge every result (duplicates included) and swallow the
+      // quota error, which saved over-limit leads anyway.
+      const isNew = !(await findExistingLead(oid, input));
+      if (isNew) {
+        try {
+          await consumeLead(db, oid, r.source);
+        } catch (e) {
+          if (!(e instanceof QuotaExceededError)) throw e;
+          skipped = "quota";
+          stopped = `Saved ${saved.length} of ${results.length}: ${e.message}`;
+          break;
+        }
+      }
+      const { lead, created } = await upsertLead(oid, input, { fillOnly: true });
+      saved.push({ leadId: lead.id, created });
+    }
+    const ids = saved.map((x) => x.leadId);
+    if (ids.length && body.listId) await db.insert(listLeads).values(ids.map((leadId) => ({ listId: body.listId!, leadId }))).onConflictDoNothing();
+    if (ids.length && body.clientId) {
+      const { assignLeads } = await import("../services/clients.js");
+      await assignLeads(oid, body.clientId, ids);
     }
   }
-  return c.json({ results });
+  return c.json({
+    results,
+    saved,
+    skipped,
+    stopped,
+    note: !body.save && (body.listId || body.clientId) ? "listId and clientId apply only with save: true; nothing was saved." : undefined,
+  });
 });
 
 /** Parse a natural-language prospecting query into filters (AI-backed). */
 searchRoutes.post("/parse", zValidator("json", z.object({ query: z.string().min(3).max(500) })), async (c) => {
-  return c.json(await parseQuery(createAiProvider(), { query: c.req.valid("json").query }));
+  const { db } = getDb();
+  // One AI call, metered like every other. Over quota the rule-based parser answers instead,
+  // and the response says so.
+  const charge = await tryConsume(db, orgId(c), "aiMessages", 1);
+  const parsed = await parseQuery(charge.ok ? aiFor(c.get("auth")) : NO_AI, { query: c.req.valid("json").query });
+  return c.json(charge.ok ? parsed : { ...parsed, skipped: charge.reason === "quota" ? "quota" : "error" });
 });
 
 /** Find people at a specific company. */

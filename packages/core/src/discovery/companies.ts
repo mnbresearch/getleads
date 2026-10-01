@@ -1,5 +1,6 @@
 import type { CompanyCandidate, SearchResult } from "../types.js";
-import { webSearch, type SearchProvider, type WebSearchOptions } from "../search/index.js";
+import { webSearch, type SearchProvider, type WebSearchOptions, type WebSearchOutcome } from "../search/index.js";
+import { traceFromOutcomes, type DiscoverySearchTrace } from "./people.js";
 import { extractDomain, isSocialOrAggregator, normalizeLinkedinUrl } from "../util/domain.js";
 
 export interface CompanySearchInput {
@@ -49,6 +50,20 @@ export function extractCompaniesFromResults(results: SearchResult[]): CompanyCan
   return out;
 }
 
+/** findCompanies, plus what its web searches did. */
+export async function findCompaniesDetailed(input: CompanySearchInput, searchOpts: WebSearchOptions = {}): Promise<{ companies: CompanyCandidate[] } & DiscoverySearchTrace> {
+  const outcomes: WebSearchOutcome[] = [];
+  const outer = searchOpts.onOutcome;
+  const companies = await findCompanies(input, {
+    ...searchOpts,
+    onOutcome: (o, q) => {
+      outcomes.push(o);
+      outer?.(o, q);
+    },
+  });
+  return { companies, ...traceFromOutcomes(outcomes) };
+}
+
 export async function findCompanies(input: CompanySearchInput, searchOpts: WebSearchOptions = {}): Promise<CompanyCandidate[]> {
   const limit = input.limit ?? 20;
   const queries = buildCompanyQueries(input);
@@ -91,8 +106,8 @@ export interface DomainResolution {
  * Corroboration means one of: the domain contains a distinctive word from the name, or the
  * result's title or snippet names the company. Rank alone is not evidence.
  */
-export async function resolveCompanyDomainDetailed(name: string, hint?: string, opts: { providers?: SearchProvider[] } = {}): Promise<DomainResolution> {
-  const results = await webSearch(`"${name}" ${hint ?? ""} official website`.trim(), { count: 10, providers: opts.providers });
+export async function resolveCompanyDomainDetailed(name: string, hint?: string, opts: { providers?: SearchProvider[]; onOutcome?: WebSearchOptions["onOutcome"] } = {}): Promise<DomainResolution> {
+  const results = await webSearch(`"${name}" ${hint ?? ""} official website`.trim(), { count: 10, providers: opts.providers, onOutcome: opts.onOutcome });
   if (!results.length) return { domain: null, confidence: 0, reason: "search returned nothing - provider failure or no match, not a company without a website" };
 
   const lower = name.toLowerCase();
@@ -136,6 +151,6 @@ export async function resolveCompanyDomainDetailed(name: string, hint?: string, 
 }
 
 /** Resolve a company name to its most likely website domain, or null if nothing corroborates it. */
-export async function resolveCompanyDomain(name: string, hint?: string, opts: { providers?: SearchProvider[] } = {}): Promise<string | null> {
+export async function resolveCompanyDomain(name: string, hint?: string, opts: { providers?: SearchProvider[]; onOutcome?: WebSearchOptions["onOutcome"] } = {}): Promise<string | null> {
   return (await resolveCompanyDomainDetailed(name, hint, opts)).domain;
 }

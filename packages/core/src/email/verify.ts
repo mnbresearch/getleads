@@ -3,7 +3,7 @@ import net from "node:net";
 import type { EmailStatus, EmailVerification } from "../types.js";
 import { fetchJson } from "../util/http.js";
 import { meter } from "../util/meter.js";
-import { reportProviderCall } from "../providers/health.js";
+import { looksLikeOutOfCredit, providerRecentlyRejected, reportProviderCall } from "../providers/health.js";
 
 const FREE_PROVIDERS = new Set([
   "gmail.com", "yahoo.com", "yahoo.co.in", "hotmail.com", "outlook.com", "live.com", "icloud.com", "aol.com", "protonmail.com", "proton.me", "rediffmail.com", "zoho.com", "mail.com", "gmx.com", "yandex.com",
@@ -140,7 +140,7 @@ export async function smtpProbe(email: string, mxHost: string, opts: { timeoutMs
 
 async function smtpProbeRaw(email: string, mxHost: string, opts: { timeoutMs?: number; heloDomain?: string; from?: string } = {}): Promise<SmtpProbeResult> {
   const timeoutMs = opts.timeoutMs ?? 5000;
-  const helo = opts.heloDomain ?? "mail.prospex.dev";
+  const helo = opts.heloDomain ?? "scout.mnbresearch.com";
   const from = opts.from ?? `verify@${helo}`;
   return new Promise((resolve) => {
     const socket = net.createConnection({ host: mxHost, port: 25 });
@@ -220,16 +220,36 @@ export interface VerifyOptions {
   millionVerifierApiKey?: string;
 }
 
+/** True when a verification came from a dedicated verifier rather than a local check. */
+export function isVerifierVerdict(v: Pick<EmailVerification, "verifiedBy">): boolean {
+  return /^(reoon|millionverifier|hunter|abstract):/.test(v.verifiedBy ?? "");
+}
+
+/** Is any verification service configured? (SMTP is not a service.) */
+export function hasVerifierConfigured(opts: VerifyOptions): boolean {
+  return !!(opts.reoonApiKey || opts.millionVerifierApiKey || opts.hunterApiKey || opts.abstractApiKey);
+}
+
 export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): Promise<EmailVerification> {
   const email = emailRaw.trim().toLowerCase();
   const [local, domain] = email.split("@");
   const checks: EmailVerification["checks"] = { syntax: false, disposable: false, roleAccount: false, freeProvider: false, mx: null, smtp: "skipped" };
-  const result = (status: EmailStatus, confidence: number, reason?: string, mxHost?: string): EmailVerification => ({ email, status, confidence, checks, reason, mxHost });
+  const verifierAttempts: { verifier: string; result: string }[] = [];
+  const result = (status: EmailStatus, confidence: number, reason: string | undefined, mxHost: string | undefined, verifiedBy: string): EmailVerification => ({
+    email,
+    status,
+    confidence,
+    checks,
+    reason,
+    mxHost,
+    verifiedBy,
+    verifierAttempts,
+  });
 
   checks.syntax = EMAIL_SYNTAX.test(email) && local.length <= 64 && !local.startsWith(".") && !local.endsWith(".") && !local.includes("..");
-  if (!checks.syntax) return result("invalid", 0.99, "bad syntax");
+  if (!checks.syntax) return result("invalid", 0.99, "bad syntax", undefined, "syntax");
   checks.disposable = DISPOSABLE.has(domain);
-  if (checks.disposable) return result("invalid", 0.95, "disposable domain");
+  if (checks.disposable) return result("invalid", 0.95, "disposable domain", undefined, "disposable");
   checks.roleAccount = ROLE_LOCALS.has(local);
   checks.freeProvider = FREE_PROVIDERS.has(domain);
 
@@ -238,8 +258,8 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
   if (!mx) {
     // The resolver never answered, so we know nothing about this address. Saying "invalid"
     // here used to write a 0.95-confidence false negative off a transient DNS failure.
-    if (!dnsAnswered) return result("unknown", 0, "could not resolve DNS for this domain - not checked, rather than bad");
-    return result("invalid", 0.95, "no MX / A record");
+    if (!dnsAnswered) return result("unknown", 0, "could not resolve DNS for this domain - not checked, rather than bad", undefined, "dns");
+    return result("invalid", 0.95, "no MX / A record", undefined, "dns");
   }
   const mxHost = mx[0].exchange;
 
@@ -253,14 +273,14 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
   // Each verifier only answers when it has a real verdict. "unknown", an error body, an
   // exhausted balance or a timeout all fall through to the next one, so running out of
   // credits with one provider degrades to the next rather than to a wrong answer.
-  if (opts.reoonApiKey) {
+  if (opts.reoonApiKey && !providerRecentlyRejected("reoon")) {
     meter("reoon");
-    // Health is reported here, from the BODY, rather than by fetchJson from the status code:
+    // Health is reported here, from the BODY, as well as by fetchJson from the status code:
     // these providers answer a bad key or an empty balance with HTTP 200 and an error in
-    // the JSON, which a status-code check would record as a healthy call.
+    // the JSON, which a status-code check alone would record as a healthy call.
     const r = await fetchJson<{ status?: string; reason?: string; overall_score?: number }>(
       `https://emailverifier.reoon.com/api/v1/verify?email=${encodeURIComponent(email)}&key=${encodeURIComponent(opts.reoonApiKey)}&mode=power`,
-      { timeoutMs: 30_000 },
+      { timeoutMs: 30_000, provider: "reoon" },
     );
     const map: Record<string, EmailStatus> = {
       safe: "valid",
@@ -274,9 +294,10 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
       inbox_full: "risky",
     };
     const status = r?.status ? map[r.status] : undefined;
-    if (!r) reportProviderCall({ provider: "reoon", outcome: "network", detail: "no usable response" });
-    else if (r.status === "error") reportProviderCall({ provider: "reoon", outcome: /credit|balance|limit/i.test(r.reason ?? "") ? "rate_limit" : "auth", detail: (r.reason ?? "error").slice(0, 160) });
-    else reportProviderCall({ provider: "reoon", outcome: "ok" });
+    if (r?.status === "error") {
+      const reason = (r.reason ?? "error").slice(0, 160);
+      reportProviderCall({ provider: "reoon", outcome: looksLikeOutOfCredit(reason) || /credit|balance|limit/i.test(reason) ? "out_of_credit" : "auth", detail: reason });
+    }
     if (status) {
       checks.smtp = status === "valid" ? "accepted" : status === "invalid" ? "rejected" : status === "catch_all" ? "catch_all" : "error";
       // overall_score is a DELIVERABILITY score: high means likely to deliver. It is a fair
@@ -284,60 +305,76 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
       // used to produce a near-zero confidence in a verdict Reoon was sure of.
       const score = typeof r?.overall_score === "number" ? Math.max(0, Math.min(1, r.overall_score / 100)) : null;
       const conf = status === "valid" ? score ?? 0.95 : status === "invalid" ? 0.95 : 0.6;
-      return result(status, conf, `reoon:${r!.status}`, mxHost);
+      return result(status, conf, `reoon:${r!.status}`, mxHost, `reoon:${r!.status}`);
     }
-  }
-  if (opts.millionVerifierApiKey) {
+    verifierAttempts.push({ verifier: "reoon", result: !r ? "no usable response" : r.status === "error" ? `error: ${(r.reason ?? "").slice(0, 120)}` : `no verdict (${r.status ?? "empty"})` });
+  } else if (opts.reoonApiKey) verifierAttempts.push({ verifier: "reoon", result: "skipped: cooling off after a rejection" });
+
+  if (opts.millionVerifierApiKey && !providerRecentlyRejected("millionverifier")) {
     meter("millionverifier");
     const m = await fetchJson<{ result?: string; error?: string; role?: boolean; quality?: string }>(
       `https://api.millionverifier.com/api/v3/?api=${encodeURIComponent(opts.millionVerifierApiKey)}&email=${encodeURIComponent(email)}&timeout=20`,
-      { timeoutMs: 25_000 },
+      { timeoutMs: 25_000, provider: "millionverifier" },
     );
-    if (!m) reportProviderCall({ provider: "millionverifier", outcome: "network", detail: "no usable response" });
-    else if (m.error) reportProviderCall({ provider: "millionverifier", outcome: /credit/i.test(m.error) ? "rate_limit" : "auth", detail: m.error.slice(0, 160) });
-    else reportProviderCall({ provider: "millionverifier", outcome: "ok" });
+    if (m?.error) reportProviderCall({ provider: "millionverifier", outcome: looksLikeOutOfCredit(m.error) || /credit/i.test(m.error) ? "out_of_credit" : "auth", detail: m.error.slice(0, 160) });
     // MillionVerifier answers HTTP 200 with an `error` field for a bad key or an empty
     // balance. That is not a verdict about the address and must not be read as one.
+    let answered = false;
     if (m && !m.error && m.result) {
       const map: Record<string, EmailStatus> = { ok: "valid", catch_all: "catch_all", invalid: "invalid", disposable: "invalid" };
       const status = map[m.result];
       if (status) {
+        answered = true;
         const finalStatus: EmailStatus = status === "valid" && m.role ? "risky" : status;
         checks.smtp = finalStatus === "valid" ? "accepted" : finalStatus === "invalid" ? "rejected" : finalStatus === "catch_all" ? "catch_all" : "error";
-        return result(finalStatus, finalStatus === "valid" ? 0.95 : finalStatus === "invalid" ? 0.95 : 0.6, `millionverifier:${m.result}`, mxHost);
+        return result(finalStatus, finalStatus === "valid" ? 0.95 : finalStatus === "invalid" ? 0.95 : 0.6, `millionverifier:${m.result}`, mxHost, `millionverifier:${m.result}`);
       }
     }
-  }
+    if (!answered) verifierAttempts.push({ verifier: "millionverifier", result: !m ? "no usable response" : m.error ? `error: ${m.error.slice(0, 120)}` : `no verdict (${m.result || "empty"})` });
+  } else if (opts.millionVerifierApiKey) verifierAttempts.push({ verifier: "millionverifier", result: "skipped: cooling off after a rejection" });
 
   // Optional external verifiers (free tiers) take precedence when configured
-  if (opts.hunterApiKey) {
+  if (opts.hunterApiKey && !providerRecentlyRejected("hunter")) {
     meter("hunter");
+    // provider: "hunter" so a rejected key or an exhausted plan reaches the health table;
+    // it used to be invisible here while the same key failed loudly in domain search.
     const h = await fetchJson<{ data?: { status: string; score: number } }>(
-      `https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${opts.hunterApiKey}`,
+      `https://api.hunter.io/v2/email-verifier?email=${encodeURIComponent(email)}&api_key=${encodeURIComponent(opts.hunterApiKey)}`,
+      { provider: "hunter" },
     );
-    if (h?.data) {
-      const map: Record<string, EmailStatus> = { valid: "valid", invalid: "invalid", accept_all: "catch_all", webmail: "valid", disposable: "invalid", unknown: "unknown" };
-      checks.smtp = h.data.status === "valid" ? "accepted" : h.data.status === "invalid" ? "rejected" : h.data.status === "accept_all" ? "catch_all" : "error";
-      return result(map[h.data.status] ?? "unknown", (h.data.score ?? 50) / 100, `hunter:${h.data.status}`, mxHost);
+    const map: Record<string, EmailStatus> = { valid: "valid", invalid: "invalid", accept_all: "catch_all", webmail: "valid", disposable: "invalid" };
+    const status = h?.data?.status ? map[h.data.status] : undefined;
+    // "unknown" is Hunter not knowing. It used to be returned as the final verdict, which
+    // stopped Abstract and the SMTP probe from ever being asked.
+    if (status) {
+      checks.smtp = h!.data!.status === "valid" ? "accepted" : h!.data!.status === "invalid" ? "rejected" : h!.data!.status === "accept_all" ? "catch_all" : "error";
+      return result(status, (h!.data!.score ?? 50) / 100, `hunter:${h!.data!.status}`, mxHost, `hunter:${h!.data!.status}`);
     }
-  }
-  if (opts.abstractApiKey) {
+    verifierAttempts.push({ verifier: "hunter", result: !h ? "no usable response" : `no verdict (${h.data?.status ?? "empty"})` });
+  } else if (opts.hunterApiKey) verifierAttempts.push({ verifier: "hunter", result: "skipped: cooling off after a rejection" });
+
+  if (opts.abstractApiKey && !providerRecentlyRejected("abstract_email")) {
     meter("abstract_email");
     const a = await fetchJson<{ deliverability?: string; is_catchall_email?: { value: boolean }; quality_score?: string }>(
-      `https://emailvalidation.abstractapi.com/v1/?api_key=${opts.abstractApiKey}&email=${encodeURIComponent(email)}`,
+      `https://emailvalidation.abstractapi.com/v1/?api_key=${encodeURIComponent(opts.abstractApiKey)}&email=${encodeURIComponent(email)}`,
+      { provider: "abstract_email" },
     );
-    if (a?.deliverability) {
+    // Abstract's "UNKNOWN" is the same as Hunter's: no verdict, so the chain continues.
+    if (a?.deliverability === "DELIVERABLE" || a?.deliverability === "UNDELIVERABLE" || a?.deliverability === "RISKY") {
       const catchAll = a.is_catchall_email?.value;
       checks.smtp = a.deliverability === "DELIVERABLE" ? (catchAll ? "catch_all" : "accepted") : a.deliverability === "UNDELIVERABLE" ? "rejected" : "error";
       const status: EmailStatus = a.deliverability === "DELIVERABLE" ? (catchAll ? "catch_all" : "valid") : a.deliverability === "UNDELIVERABLE" ? "invalid" : "risky";
-      return result(status, Number(a.quality_score ?? 0.5), `abstract:${a.deliverability}`, mxHost);
+      return result(status, Number(a.quality_score ?? 0.5), `abstract:${a.deliverability}`, mxHost, `abstract:${a.deliverability}`);
     }
-  }
+    verifierAttempts.push({ verifier: "abstract", result: !a ? "no usable response" : `no verdict (${a.deliverability ?? "empty"})` });
+  } else if (opts.abstractApiKey) verifierAttempts.push({ verifier: "abstract", result: "skipped: cooling off after a rejection" });
 
   const smtpEnabled = opts.smtp ?? process.env.SMTP_PROBE_ENABLED !== "false";
   if (!smtpEnabled) {
     checks.smtp = "skipped";
-    return result(checks.roleAccount ? "risky" : "risky", 0.55, "MX ok, SMTP probe disabled", mxHost);
+    // reason stays as it always read (the UI shows it); which verifiers declined and why is in
+    // verifierAttempts, so "nobody checked" and "every checker failed" stay distinguishable.
+    return result("risky", 0.55, "MX ok, SMTP probe disabled", mxHost, "mx-only");
   }
 
   const probe = await smtpProbe(email, mxHost);
@@ -352,14 +389,14 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
     const ca = await isCatchAll(domain, mxHost);
     if (ca === true) {
       checks.smtp = "catch_all";
-      return result("catch_all", 0.6, "domain accepts all addresses", mxHost);
+      return result("catch_all", 0.6, "domain accepts all addresses", mxHost, "smtp");
     }
     if (ca === null) {
       checks.smtp = "catch_all";
-      return result("risky", 0.5, "SMTP accepted, but the catch-all check could not complete - this may accept every address", mxHost);
+      return result("risky", 0.5, "SMTP accepted, but the catch-all check could not complete - this may accept every address", mxHost, "smtp");
     }
-    return result(checks.roleAccount ? "risky" : "valid", checks.roleAccount ? 0.7 : 0.93, "SMTP accepted", mxHost);
+    return result(checks.roleAccount ? "risky" : "valid", checks.roleAccount ? 0.7 : 0.93, "SMTP accepted", mxHost, "smtp");
   }
-  if (probe.result === "rejected") return result("invalid", 0.9, `SMTP rejected: ${probe.detail?.slice(0, 80)}`, mxHost);
-  return result("risky", 0.5, `SMTP ${probe.result}: ${probe.detail?.slice(0, 80) ?? ""}`, mxHost);
+  if (probe.result === "rejected") return result("invalid", 0.9, `SMTP rejected: ${probe.detail?.slice(0, 80)}`, mxHost, "smtp");
+  return result("risky", 0.5, `SMTP ${probe.result}: ${probe.detail?.slice(0, 80) ?? ""}`, mxHost, "smtp");
 }

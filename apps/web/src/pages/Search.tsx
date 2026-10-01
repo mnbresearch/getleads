@@ -1,7 +1,12 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
-import { Page, Spinner, TagInput, useToast } from "../components/ui";
+import { LoadError, Page, Spinner, TagInput, useToast } from "../components/ui";
+
+/** The API's caps on a search (routes/search.ts searchInput). Checked here so the user gets a sentence, not a 400. */
+const MAX_TAGS = 10;
+const MAX_DOMAINS = 50;
+const MAX_LIMIT = 200;
 
 interface Search { id: string; status: string; resultCount: number; query: Record<string, unknown>; createdAt: string; error: string | null; jobId: string | null; clientId?: string | null; clientClaim?: { claimed: number; ownedByAnotherClient: number; skipped?: string; error?: string } | null }
 
@@ -21,6 +26,10 @@ export function SearchPage() {
   const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
   const [clientId, setClientId] = useState(params.get("clientId") ?? "");
   const [searches, setSearches] = useState<Search[]>([]);
+  // null until the first answer: "No searches yet" must only show after we have looked.
+  const [loaded, setLoaded] = useState(false);
+  const [listErr, setListErr] = useState<string | null>(null);
+  const [icpErr, setIcpErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [parsing, setParsing] = useState(false);
   const { toast, Toast } = useToast();
@@ -36,8 +45,18 @@ export function SearchPage() {
   const [progress, setProgress] = useState<Record<string, number>>({});
 
   const load = async () => {
-    const r = await apiFetch<{ searches: Search[] }>("GET", "/v1/search");
+    // Polled every 4s: without a catch every failed poll was an unhandled rejection and the
+    // table read "No searches yet" as though the history were empty.
+    let r: { searches: Search[] };
+    try {
+      r = await apiFetch<{ searches: Search[] }>("GET", "/v1/search");
+    } catch (e) {
+      setListErr((e as Error).message);
+      return;
+    }
     setSearches(r.searches);
+    setLoaded(true);
+    setListErr(null);
 
     const running = r.searches.filter((s) => (s.status === "running" || s.status === "queued") && s.jobId);
     if (running.length === 0) { setProgress({}); return; }
@@ -56,11 +75,44 @@ export function SearchPage() {
 
   useEffect(() => {
     load();
-    apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcps(r.icps));
+    loadIcps();
     apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClients(r.clients)).catch(() => setClients([]));
     const t = setInterval(() => { void load(); }, 4000);
     return () => clearInterval(t);
   }, []);
+
+  const loadIcps = () => {
+    apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps")
+      .then((r) => { setIcps(r.icps); setIcpErr(null); })
+      .catch((e) => setIcpErr((e as Error).message));
+  };
+
+  /** Why this search can't be sent as-is, in words - or null. */
+  const invalid = (): string | null => {
+    if (titles.length > MAX_TAGS) return `Use at most ${MAX_TAGS} job titles (you have ${titles.length}).`;
+    if (industries.length > MAX_TAGS) return `Use at most ${MAX_TAGS} industries (you have ${industries.length}).`;
+    if (locations.length > MAX_TAGS) return `Use at most ${MAX_TAGS} locations (you have ${locations.length}).`;
+    if (domains.length > MAX_DOMAINS) return `Use at most ${MAX_DOMAINS} company domains (you have ${domains.length}).`;
+    if (!Number.isFinite(limit) || limit < 1 || limit > MAX_LIMIT) return `Max leads must be between 1 and ${MAX_LIMIT}.`;
+    return null;
+  };
+  const problem = invalid();
+
+  const searchBody = () => ({ query: query || undefined, titles: titles.length ? titles : undefined, industries: industries.length ? industries : undefined, locations: locations.length ? locations : undefined, companyDomains: domains.length ? domains : undefined, limit, findEmails, icpId: icpId || undefined });
+
+  const saveSearch = async () => {
+    if (problem) return toast(problem, "err");
+    const name = prompt("Name this saved search", query || titles.join(", "));
+    if (!name) return;
+    const alert = confirm("Email me when new leads appear (daily)?");
+    try {
+      const me = alert ? await apiFetch<{ user: { email: string } | null }>("GET", "/v1/auth/me") : null;
+      await apiFetch("POST", "/v1/tools/saved-searches", { name, query: searchBody(), alert, alertEmail: alert ? me?.user?.email : undefined, clientId: clientId || undefined });
+      toast("Saved - see Autopilot page");
+    } catch (e) {
+      toast(`Couldn't save the search: ${(e as Error).message}`, "err");
+    }
+  };
 
   const parse = async () => {
     if (!query) return;
@@ -78,9 +130,10 @@ export function SearchPage() {
   };
 
   const run = async () => {
+    if (problem) return toast(problem, "err");
     setBusy(true);
     try {
-      await apiFetch("POST", "/v1/search", { query: query || undefined, titles: titles.length ? titles : undefined, industries: industries.length ? industries : undefined, locations: locations.length ? locations : undefined, companyDomains: domains.length ? domains : undefined, limit, findEmails, icpId: icpId || undefined, clientId: clientId || undefined });
+      await apiFetch("POST", "/v1/search", { ...searchBody(), clientId: clientId || undefined });
       const forClient = clients.find((c) => c.id === clientId);
       toast(forClient ? `Search started for ${forClient.name} - new leads are delivered to them as they are found` : "Search started - results appear in Leads as they are found");
       load();
@@ -110,9 +163,10 @@ export function SearchPage() {
             <div><label className="label">Specific company domains (optional)</label><TagInput value={domains} onChange={setDomains} placeholder="razorpay.com, zerodha.com…" /></div>
           </div>
           <div className="flex flex-wrap items-end gap-4">
-            <div><label className="label">Max leads</label><input type="number" className="input w-24" min={1} max={200} value={limit} onChange={(e) => setLimit(Number(e.target.value))} /></div>
+            <div><label className="label">Max leads</label><input type="number" className="input w-24" min={1} max={MAX_LIMIT} value={Number.isFinite(limit) ? limit : ""} onChange={(e) => setLimit(e.target.value === "" ? NaN : Number(e.target.value))} /></div>
             <div><label className="label">Score against ICP</label>
               <select className="input w-56" value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">(search filters only)</option>{icps.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</select>
+              {icpErr && <div className="mt-1 text-xs text-red-600">Couldn&apos;t load ICPs. <button className="underline" onClick={loadIcps}>Retry</button></div>}
             </div>
             {clients.length > 0 && (
               <div><label className="label">Deliver to client</label>
@@ -123,9 +177,10 @@ export function SearchPage() {
               </div>
             )}
             <label className="mb-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={findEmails} onChange={(e) => setFindEmails(e.target.checked)} /> Find + verify emails</label>
-            <button className="btn-secondary ml-auto" disabled={!query && !titles.length && !domains.length} onClick={async () => { const name = prompt("Name this saved search", query || titles.join(", ")); if (!name) return; const alert = confirm("Email me when new leads appear (daily)?"); const me = await apiFetch<{ user: { email: string } | null }>("GET", "/v1/auth/me"); await apiFetch("POST", "/v1/tools/saved-searches", { name, query: { query: query || undefined, titles: titles.length ? titles : undefined, industries: industries.length ? industries : undefined, locations: locations.length ? locations : undefined, companyDomains: domains.length ? domains : undefined, limit, findEmails, icpId: icpId || undefined }, alert, alertEmail: alert ? me.user?.email : undefined }); toast("Saved - see Autopilot page"); }}>Save search</button>
-            <button className="btn-primary" onClick={run} disabled={busy || (!query && !titles.length && !domains.length)}>{busy ? "Starting…" : "Run search"}</button>
+            <button className="btn-secondary ml-auto" disabled={!query && !titles.length && !domains.length} onClick={saveSearch}>Save search</button>
+            <button className="btn-primary" onClick={run} disabled={busy || !!problem || (!query && !titles.length && !domains.length)}>{busy ? "Starting…" : "Run search"}</button>
           </div>
+          {problem && <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">{problem}</div>}
         </div>
         <div className="card p-5 text-sm text-ink-300">
           <div className="mb-2 font-medium text-ink-50">How it works</div>
@@ -139,7 +194,21 @@ export function SearchPage() {
         </div>
       </div>
 
+      {(() => {
+        // The newest search finished with nothing and a reason: say so above the table, not
+        // in 11px under a "0", because "0 results" alone reads as "nobody matches".
+        const last = searches[0];
+        if (!last || last.resultCount > 0 || !last.error || (last.status !== "done" && last.status !== "failed")) return null;
+        return (
+          <div className="mt-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-800" role="alert">
+            <div className="font-medium">Your last search returned no leads - and it was not because nobody matched.</div>
+            <div className="mt-1">{last.error}</div>
+          </div>
+        );
+      })()}
+      {listErr && !loaded ? <div className="mt-6"><LoadError message={listErr} onRetry={() => { void load(); }} /></div> : (
       <div className="card mt-6 overflow-x-auto">
+        {listErr && <div className="border-b border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">Couldn&apos;t refresh search history ({listErr}). Showing the last loaded results; retrying.</div>}
         <table className="w-full">
           <thead className="border-b border-black/10 bg-cream"><tr><th className="th">When</th><th className="th">Query</th><th className="th">Status</th><th className="th">Results</th><th className="th"></th></tr></thead>
           <tbody className="divide-y divide-slate-100">
@@ -183,10 +252,12 @@ export function SearchPage() {
                 <td className="td text-right">{s.status === "done" && s.resultCount > 0 && <Link className="text-brand-600 hover:underline" to={`/leads?tag=search:${s.id.slice(0, 8)}`}>View leads →</Link>}</td>
               </tr>
             ))}
-            {searches.length === 0 && <tr><td className="td py-8 text-center text-ink-400" colSpan={5}>No searches yet.</td></tr>}
+            {loaded && searches.length === 0 && <tr><td className="td py-8 text-center text-ink-400" colSpan={5}>No searches yet.</td></tr>}
+            {!loaded && <tr><td className="td py-8" colSpan={5}><Spinner label="Loading searches…" /></td></tr>}
           </tbody>
         </table>
       </div>
+      )}
     </Page>
   );
 }

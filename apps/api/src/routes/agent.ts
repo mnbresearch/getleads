@@ -1,11 +1,12 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { QuotaExceededError, consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
-import { createAiProvider, generateOutreach, runLeadPipeline } from "@prospex/core";
+import { generateOutreach, runLeadPipeline } from "@prospex/core";
+import { aiFor } from "../lib/ai.js";
 import { env } from "../env.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
-import { pipelineLeadToInput, upsertLead } from "../services/leads.js";
+import { findExistingLead, pipelineLeadToInput, upsertLead } from "../services/leads.js";
 import { tryConsume } from "../lib/quota.js";
 
 /**
@@ -35,7 +36,7 @@ agentRoutes.post(
     const b = c.req.valid("json");
     const { db } = getDb();
     await consume(db, oid, "searches", 1);
-    const ai = createAiProvider();
+    const ai = aiFor(c.get("auth"));
     const providerBudget = await remainingPremiumBudget(db, oid);
     const results = await runLeadPipeline({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey }, country: b.country, maxProviderLeads: providerBudget });
     const out = [];
@@ -49,8 +50,10 @@ agentRoutes.post(
         // fault; telling an agent it is out of quota when the database blipped sends it
         // off to ask the customer to upgrade.
         try {
-          await consumeLead(db, oid, r.source);
-          leadId = (await upsertLead(oid, pipelineLeadToInput(r, { tags: ["agent"] }))).lead.id;
+          const input = pipelineLeadToInput(r, { tags: ["agent"] });
+          // A lead the org already has is an update, not a new lead to bill.
+          if (!(await findExistingLead(oid, input))) await consumeLead(db, oid, r.source);
+          leadId = (await upsertLead(oid, input, { fillOnly: true })).lead.id;
         } catch (e) {
           if (!saveSkipped) saveSkipped = e instanceof QuotaExceededError ? e.message : `could not record usage: ${(e as Error).message}`;
         }
@@ -97,7 +100,7 @@ agentRoutes.post(
 /** Capability discovery for agents. */
 agentRoutes.get("/capabilities", (c) =>
   c.json({
-    name: "Prospex",
+    name: "Scout",
     version: "1.0.0",
     capabilities: ["prospect", "find_people", "find_companies", "enrich_company", "find_email", "verify_email", "score_icp", "generate_email", "run_sequence", "crm_sync", "webhooks"],
     openapi: `${env.apiUrl}/openapi.json`,

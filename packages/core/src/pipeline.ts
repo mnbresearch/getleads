@@ -12,6 +12,7 @@ import { verifyEmail, type VerifyOptions } from "./email/verify.js";
 import { scoreLeadRules, type IcpCriteria } from "./icp/score.js";
 import { inferDepartment, inferSeniority } from "./util/names.js";
 import { pMap } from "./util/http.js";
+import { summarizeWebSearchFailures, type WebSearchOutcome } from "./search/index.js";
 import { searchProvidersDetailed, peopleProviders, type ProviderPerson } from "./providers/people.js";
 
 export interface PipelineLead extends PersonCandidate {
@@ -24,6 +25,8 @@ export interface PipelineLead extends PersonCandidate {
   company?: Partial<CompanyProfile>;
   score?: number;
   scoreReasons?: string[];
+  /** Which verifier vouched for `email` ("reoon:safe", "smtp", ...); undefined for a guess. */
+  emailVerifiedBy?: string;
 }
 
 export interface PipelineOptions {
@@ -45,26 +48,42 @@ export interface PipelineOptions {
 
 /** Turn a natural-language query into structured filters using AI (or heuristics if unavailable). */
 export async function parseQuery(ai: AiProvider | undefined, q: LeadSearchQuery): Promise<LeadSearchQuery> {
-  if (!q.query || (q.titles?.length && q.industries?.length)) return q;
+  return (await parseQueryDetailed(ai, q)).query;
+}
+
+/**
+ * parseQuery, plus a note when the AI could not be used.
+ *
+ * A Groq 429 here used to throw out of the pipeline and fail the entire search - over the
+ * step with the cheapest possible fallback. The heuristic parser is worse, not wrong, so it
+ * takes over and the note says it did.
+ */
+export async function parseQueryDetailed(ai: AiProvider | undefined, q: LeadSearchQuery): Promise<{ query: LeadSearchQuery; note: string | null }> {
+  if (!q.query || (q.titles?.length && q.industries?.length)) return { query: q, note: null };
+  let note: string | null = null;
   if (ai && hasAi(ai)) {
     const res = await completeJson<{ titles: string[]; industries: string[]; locations: string[]; keywords: string[]; companySizes: string[] }>(ai, [
       { role: "system", content: 'Extract B2B lead search filters from text. JSON {"titles":[], "industries":[], "locations":[], "keywords":[], "companySizes":[]}. Titles are job titles to search on LinkedIn (max 4). Keep arrays short.' },
       { role: "user", content: q.query },
-    ], { maxTokens: 300, temperature: 0 });
+    ], { maxTokens: 300, temperature: 0 }).catch((e) => {
+      note = `AI query parsing failed (${((e as Error).message ?? String(e)).slice(0, 160)}); used the keyword parser instead`;
+      return null;
+    });
     if (res) {
-      return {
+      return { note: null, query: {
         ...q,
         titles: q.titles?.length ? q.titles : res.titles ?? [],
         industries: q.industries?.length ? q.industries : res.industries ?? [],
         locations: q.locations?.length ? q.locations : res.locations ?? [],
         keywords: q.keywords?.length ? q.keywords : res.keywords ?? [],
         companySizes: q.companySizes?.length ? q.companySizes : res.companySizes ?? [],
-      };
+      } };
     }
+    note ??= "AI query parsing returned nothing usable; used the keyword parser instead";
   }
   // Heuristic: "X at Y in Z"
   const m = q.query.match(/^(.*?)(?:\s+(?:at|in|for)\s+(.*?))?(?:\s+in\s+(.*))?$/i);
-  return { ...q, titles: q.titles ?? (m?.[1] ? [m[1].trim()] : []), industries: q.industries ?? (m?.[2] ? [m[2].trim()] : []), locations: q.locations ?? (m?.[3] ? [m[3].trim()] : []) };
+  return { note, query: { ...q, titles: q.titles ?? (m?.[1] ? [m[1].trim()] : []), industries: q.industries ?? (m?.[2] ? [m[2].trim()] : []), locations: q.locations ?? (m?.[3] ? [m[3].trim()] : []) } };
 }
 
 export interface PipelineOutcome {
@@ -77,6 +96,14 @@ export interface PipelineOutcome {
    * the first. When this array is non-empty and no leads came back, it is the second.
    */
   providerFailures: { provider: string; message: string }[];
+  /**
+   * Things that degraded the run without failing it: the AI parser falling back to keywords,
+   * email lookups that threw, company sites that could not be crawled. Present so a thin
+   * result can be explained; not a failure on its own.
+   */
+  notes: string[];
+  /** Web searches fired and how many of them no provider answered. */
+  webSearch: { searches: number; failed: number };
 }
 
 /** The pipeline, with what went wrong alongside what came back. */
@@ -86,7 +113,15 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
   const limit = query.limit ?? 25;
 
   progress(5, "parsing query");
-  const q = await parseQuery(opts.ai, query);
+  const notes: string[] = [];
+  const parsed = await parseQueryDetailed(opts.ai, query);
+  const q = parsed.query;
+  if (parsed.note) notes.push(parsed.note);
+
+  // Every web search this run fires reports here, so "no provider answered" can be told
+  // apart from "nobody matched" once discovery is done.
+  const searchOutcomes: WebSearchOutcome[] = [];
+  const searchOpts = { onOutcome: (o: WebSearchOutcome) => void searchOutcomes.push(o) };
 
   // 0) External data providers first (Apollo / Hunter / PDL) when configured AND the org still
   // has premium-lead budget left this period - database-quality rows, but they cost real money,
@@ -116,49 +151,63 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
   } else if (q.companyDomains?.length) {
     for (const d of q.companyDomains) {
       const prof = await getCompany(d, cache);
-      const byName = await findPeople({ titles: q.titles, companyName: prof.name ?? d, locations: q.locations, limit: Math.ceil(limit / q.companyDomains.length), country: opts.country });
+      const byName = await findPeople({ titles: q.titles, companyName: prof.name ?? d, locations: q.locations, limit: Math.ceil(limit / q.companyDomains.length), country: opts.country }, searchOpts);
       people.push(...byName.map((p) => ({ ...p, companyName: p.companyName ?? prof.name, companyDomainHint: d })));
       people.push(...prof.peopleFound.filter((p) => !q.titles?.length || q.titles.some((t) => p.title?.toLowerCase().includes(t.toLowerCase()))).map((p) => ({ ...p, companyDomainHint: d })));
     }
   } else {
-    people.push(...(await findPeople({ titles: q.titles, industries: q.industries, locations: q.locations, keywords: q.keywords, limit: limit * 2, country: opts.country })));
+    people.push(...(await findPeople({ titles: q.titles, industries: q.industries, locations: q.locations, keywords: q.keywords, limit: limit * 2, country: opts.country }, searchOpts)));
   }
   // Fallback: find companies first, then people at each
   if (people.length < Math.min(5, limit) && !q.companyDomains?.length) {
     progress(25, "searching companies");
-    const companies = await findCompanies({ query: q.query, industries: q.industries, locations: q.locations, keywords: q.keywords, limit: 10, country: opts.country });
+    const companies = await findCompanies({ query: q.query, industries: q.industries, locations: q.locations, keywords: q.keywords, limit: 10, country: opts.country }, searchOpts);
     for (const c of companies.slice(0, 8)) {
-      const domain = c.domain || (c.name ? await resolveCompanyDomain(c.name) : null);
+      const domain = c.domain || (c.name ? await resolveCompanyDomain(c.name, undefined, searchOpts) : null);
       if (!domain) continue;
-      const ppl = await findPeople({ titles: q.titles, companyName: c.name ?? domain, limit: 3, country: opts.country });
+      const ppl = await findPeople({ titles: q.titles, companyName: c.name ?? domain, limit: 3, country: opts.country }, searchOpts);
       people.push(...ppl.map((p) => ({ ...p, companyName: p.companyName ?? c.name, companyDomainHint: domain })));
       if (people.length >= limit * 2) break;
     }
   }
   people = dedupePeople(people).slice(0, limit);
+  // Web discovery where no search provider ever answered is an outage, not an empty market.
+  // Carried in providerFailures because that is what callers already turn into a search
+  // error when the run comes back empty.
+  const webFailure = summarizeWebSearchFailures(searchOutcomes);
+  if (webFailure) providerFailures.push({ provider: "web_search", message: webFailure });
   progress(40, `found ${people.length} people`);
 
   // 2) Company resolution + enrichment
+  const enrichErrors: string[] = [];
   const leads: PipelineLead[] = await pMap(
     people,
     async (p) => {
       const pp = p as ProviderPerson;
       const lead: PipelineLead = { ...p, seniority: pp.seniority ?? inferSeniority(p.title), department: inferDepartment(p.title), email: pp.email, emailStatus: pp.emailStatus, emailConfidence: pp.emailStatus === "valid" ? 0.95 : undefined };
       const hint = (p as PersonCandidate & { companyDomainHint?: string }).companyDomainHint ?? pp.companyDomain;
-      const domain = hint ?? (p.companyName ? await resolveCompanyDomain(p.companyName, p.location).catch(() => null) : null);
+      const domain = hint ?? (p.companyName ? await resolveCompanyDomain(p.companyName, p.location).catch((e) => {
+            enrichErrors.push(`domain for ${p.companyName}: ${(e as Error).message}`);
+            return null;
+          }) : null);
       if (domain) {
         lead.companyDomain = domain;
-        const prof = await getCompany(domain, cache).catch(() => null);
+        const prof = await getCompany(domain, cache).catch((e) => {
+          enrichErrors.push(`crawl ${domain}: ${(e as Error).message}`);
+          return null;
+        });
         if (prof) lead.company = prof;
       }
       return lead;
     },
     4,
   );
+  if (enrichErrors.length) notes.push(`${enrichErrors.length} company lookup(s) failed: ${enrichErrors.slice(0, 3).join("; ").slice(0, 300)}`);
   progress(65, "enriched companies");
 
   // 3) Email find + verify
   if (query.findEmails !== false) {
+    const emailErrors: string[] = [];
     await pMap(
       leads,
       async (lead) => {
@@ -167,11 +216,15 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
         const r = await findEmail(
           { firstName: lead.firstName, lastName: lead.lastName, domain: lead.companyDomain, knownPattern: prof?.emailPattern, knownEmails: prof?.emailsFound },
           opts.verify,
-        ).catch(() => null);
+        ).catch((e) => {
+          emailErrors.push((e as Error).message ?? String(e));
+          return null;
+        });
         if (r?.email) {
           lead.email = r.email;
           lead.emailStatus = r.status;
           lead.emailConfidence = r.confidence;
+          lead.emailVerifiedBy = r.verifiedBy;
           if (prof && r.pattern && !prof.emailPattern) prof.emailPattern = r.pattern;
         } else if (r) {
           lead.emailStatus = r.status;
@@ -180,6 +233,7 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
       },
       3,
     );
+    if (emailErrors.length) notes.push(`email lookup failed for ${emailErrors.length} lead(s): ${emailErrors[0].slice(0, 200)}`);
     progress(90, "verified emails");
   }
 
@@ -195,7 +249,7 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
   }
   leads.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   progress(100, "done");
-  return { leads, providerFailures };
+  return { leads, providerFailures, notes, webSearch: { searches: searchOutcomes.length, failed: searchOutcomes.filter((o) => o.everyProviderFailed).length } };
 }
 
 /** Back-compatible shape: the leads alone, for callers that do not need the detail. */

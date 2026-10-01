@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, fmtNum } from "../lib/api";
-import { Page, Spinner, Stat } from "../components/ui";
+import { LoadError, Page, Spinner, Stat } from "../components/ui";
 
 interface Overview {
   leads: { total: number; withEmail: number; verified: number; last7d: number; avgScore: number };
@@ -23,11 +23,18 @@ export function Dashboard() {
   const [d, setD] = useState<Overview | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [hot, setHot] = useState<HotLead[] | null>(null);
-  useEffect(() => {
-    apiFetch<Overview>("GET", "/v1/analytics/overview").then(setD).catch((e) => setErr(e.message));
-    apiFetch<{ leads: HotLead[] }>("GET", "/v1/leads/hot/list?limit=6").then((r) => setHot(r.leads)).catch(() => setHot([]));
+  const [hotErr, setHotErr] = useState<string | null>(null);
+  const loadHot = useCallback(() => {
+    setHotErr(null);
+    apiFetch<{ leads: HotLead[] }>("GET", "/v1/leads/hot/list?limit=6").then((r) => setHot(r.leads)).catch((e) => setHotErr((e as Error).message));
   }, []);
-  if (err) return <Page title="Overview"><div className="text-red-600">{err}</div></Page>;
+  const load = useCallback(() => {
+    setErr(null);
+    apiFetch<Overview>("GET", "/v1/analytics/overview").then(setD).catch((e) => setErr((e as Error).message));
+    loadHot();
+  }, [loadHot]);
+  useEffect(() => { load(); }, [load]);
+  if (err) return <Page title="Overview"><LoadError message={err} onRetry={load} /></Page>;
   if (!d) return <Page title="Overview"><Spinner label="Loading…" /></Page>;
   const max = Math.max(1, ...d.daily.map((x) => Math.max(x.leads, x.sent)));
   return (
@@ -39,6 +46,13 @@ export function Dashboard() {
         <Stat label="Active campaigns" value={fmtNum(d.campaigns.active)} hint={`${fmtNum(d.companies)} companies tracked`} />
       </div>
 
+      {/* The hot list failing used to hide the card, which reads as "nobody to contact today". */}
+      {hotErr && (
+        <div className="card mt-6 flex flex-wrap items-center justify-between gap-3 p-4 text-sm" role="alert">
+          <span className="text-ink-300">Couldn&apos;t load today&apos;s leads to contact ({hotErr}).</span>
+          <button className="btn-secondary" onClick={loadHot}>Try again</button>
+        </div>
+      )}
       {hot && hot.length > 0 && (
         <div className="card mt-6 p-4">
           <div className="mb-3 flex items-center justify-between">
@@ -84,7 +98,7 @@ export function Dashboard() {
           <div className="space-y-3">
             {Object.entries(d.usage.usage).map(([k, v]) => (
               <div key={k}>
-                <div className="flex justify-between text-xs"><span className="capitalize text-ink-300">{k.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums text-ink-400">{fmtNum(v.used)} / {fmtNum(v.limit)}</span></div>
+                <div className="flex justify-between text-xs"><span className="capitalize text-ink-300">{k.replace(/([A-Z])/g, " $1")}</span><span className="tabular-nums text-ink-400">{fmtNum(v.used)} / {limitLabel(k, v.limit)}</span></div>
                 <div className="mt-1 h-1.5 rounded-full bg-black/[0.05]"><div className={`h-1.5 rounded-full ${v.limit && v.used / v.limit > 0.9 ? "bg-red-500" : "bg-brand-500"}`} style={{ width: `${v.limit ? Math.min(100, (v.used / v.limit) * 100) : 0}%` }} /></div>
               </div>
             ))}
@@ -114,4 +128,14 @@ export function Dashboard() {
       </div>
     </Page>
   );
+}
+
+/**
+ * The plan-limit side of "used / limit". A limit of 0 (or less) means unlimited for every
+ * metric except provider-sourced leads, where it means the plan includes none
+ * (packages/db usage.ts). Printing "12 / 0" for an unlimited plan read as over quota.
+ */
+function limitLabel(metric: string, limit: number): string {
+  if (limit > 0) return fmtNum(limit);
+  return metric === "premiumLeads" ? "0 (not on this plan)" : "unlimited";
 }

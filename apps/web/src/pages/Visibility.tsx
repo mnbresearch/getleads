@@ -30,6 +30,8 @@ export function VisibilityPage() {
   const { toast, Toast } = useToast();
 
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  // A failed prompts fetch used to render "No questions tracked yet" over a live set.
+  const [promptsErr, setPromptsErr] = useState<string | null>(null);
 
   const [answersFor, setAnswersFor] = useState<Prompt | null>(null);
 
@@ -52,7 +54,7 @@ export function VisibilityPage() {
     // before {Toast} ever rendered, so a failure showed a spinner that span forever with no
     // message at all. The error now has somewhere to live that the user can actually see.
     apiFetch<Overview>("GET", "/v1/visibility/overview").then(setD).catch((e) => setLoadErr((e as Error).message));
-    apiFetch<{ prompts: Prompt[] }>("GET", "/v1/visibility/prompts").then((r) => setPrompts(r.prompts)).catch(() => setPrompts([]));
+    apiFetch<{ prompts: Prompt[] }>("GET", "/v1/visibility/prompts").then((r) => { setPrompts(r.prompts); setPromptsErr(null); }).catch((e) => setPromptsErr((e as Error).message));
     apiFetch<{ engines: typeof engines }>("GET", "/v1/visibility/engines").then((r) => setEngines(r.engines ?? [])).catch(() => setEngines([]));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
@@ -195,7 +197,9 @@ export function VisibilityPage() {
             </div>
           )}
         </div>
-        {prompts.length === 0 ? (
+        {promptsErr && prompts.length === 0 ? (
+          <LoadError message={promptsErr} onRetry={load} />
+        ) : prompts.length === 0 ? (
           <Empty
             title="No questions tracked yet"
             hint="Scout can write the set for you from your brand, your rivals and your ICP, so you are not guessing in a keyword tool."
@@ -227,7 +231,7 @@ export function VisibilityPage() {
                     aria-label={`Samples per day for "${p.text}"`}
                     onChange={(e) => patch(p, { samplesPerRun: Number(e.target.value) })}
                   >
-                    {[1, 2, 3, 5, 10].map((n) => <option key={n} value={n}>{n}/day</option>)}
+                    {Array.from({ length: 10 }, (_, i) => i + 1).map((n) => <option key={n} value={n}>{n}/day</option>)}
                   </select>
                   <button className="btn-secondary py-1 text-xs" onClick={() => patch(p, { active: p.active === false })}>
                     {p.active === false ? "Resume" : "Pause"}
@@ -236,7 +240,7 @@ export function VisibilityPage() {
                   <button className="btn-secondary" disabled={busy === p.id} onClick={() => run(p)}>{busy === p.id ? "Sampling…" : "Sample now"}</button>
                   <DeleteButton
                     what={`the tracked question "${p.text.slice(0, 60)}${p.text.length > 60 ? "…" : ""}"`}
-                    consequence="Answers already recorded for it stay in your history, but it stops being sampled. Pause it instead if you only want to stop for now."
+                    consequence="Every answer recorded for it is deleted too, and it disappears from your visibility history. Pause it instead if you want to stop sampling but keep the history."
                     onDelete={() => remove(p)}
                     onError={(m) => toast(m, "err")}
                     label="Remove"
@@ -272,12 +276,17 @@ function ConfigModal({ open, onClose, onSaved, toast }: { open: boolean; onClose
   const [brand, setBrand] = useState({ name: "", aliases: [] as string[], domain: "" });
   const [rivals, setRivals] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
+  // Saving a form that never loaded would overwrite the real brand and rival list with
+  // blanks, so a failed load blocks Save and says why.
+  const [cfgErr, setCfgErr] = useState<string | null>(null);
+  const [cfgTry, setCfgTry] = useState(0);
   useEffect(() => {
     if (!open) return;
+    setCfgErr(null);
     apiFetch<{ brand: { name: string; aliases?: string[]; domain?: string | null }; competitors: { name: string }[] }>("GET", "/v1/visibility/config")
       .then((c) => { setBrand({ name: c.brand.name, aliases: c.brand.aliases ?? [], domain: c.brand.domain ?? "" }); setRivals(c.competitors.map((x) => x.name)); })
-      .catch(() => {});
-  }, [open]);
+      .catch((e) => setCfgErr((e as Error).message));
+  }, [open, cfgTry]);
   const save = async () => {
     setBusy(true);
     try {
@@ -297,7 +306,8 @@ function ConfigModal({ open, onClose, onSaved, toast }: { open: boolean; onClose
         <div><label className="label">Your domain (to detect citations)</label><input className="input" value={brand.domain} onChange={(e) => setBrand({ ...brand, domain: e.target.value })} placeholder="scout.mnbresearch.com" /></div>
         <div><label className="label">Competitors to track</label><TagInput value={rivals} onChange={setRivals} placeholder="Apollo" /></div>
         <p className="text-xs text-ink-400">Rivals you do not list are still detected once they appear in answers, so an unknown competitor cannot hide.</p>
-        <button className="btn-primary w-full justify-center" disabled={busy || !brand.name} onClick={save}>{busy ? "Saving…" : "Save"}</button>
+        {cfgErr && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-700" role="alert">Your current settings could not be loaded ({cfgErr}). <button className="underline" onClick={() => setCfgTry((n) => n + 1)}>Try again</button></div>}
+        <button className="btn-primary w-full justify-center" disabled={busy || !brand.name || !!cfgErr} onClick={save}>{busy ? "Saving…" : "Save"}</button>
       </div>
     </Modal>
   );

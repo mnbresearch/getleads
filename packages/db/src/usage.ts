@@ -37,8 +37,20 @@ export class QuotaExceededError extends Error {
   }
 }
 
-/** Increment usage; throws QuotaExceededError if over plan limit. */
-export async function consume(db: Db, orgId: string, metric: Metric, amount = 1) {
+export interface ConsumeOptions {
+  /**
+   * Keep the increment even when it takes the org over its limit, and do not throw.
+   *
+   * For work that has ALREADY happened and must be recorded - a model call that was made, a
+   * provider lead that was returned. The default rolls the increment back and throws, and
+   * callers wrapped that in `.catch(() => {})`, so usage past the limit was simply never
+   * written while comments claimed "the overage is recorded".
+   */
+  allowOverage?: boolean;
+}
+
+/** Increment usage; throws QuotaExceededError if over plan limit (unless `allowOverage`). */
+export async function consume(db: Db, orgId: string, metric: Metric, amount = 1, opts: ConsumeOptions = {}) {
   const period = currentPeriod();
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId) });
   const limits = { ...limitsFor(org?.plan ?? "free"), ...(org?.planLimits ?? {}) };
@@ -51,7 +63,7 @@ export async function consume(db: Db, orgId: string, metric: Metric, amount = 1)
       set: { count: sql`${usage.count} + ${amount}` },
     })
     .returning();
-  if (limit > 0 && row.count > limit) {
+  if (limit > 0 && row.count > limit && !opts.allowOverage) {
     // roll back the increment so the org isn't stuck over-limit
     await db.update(usage).set({ count: sql`${usage.count} - ${amount}` }).where(eq(usage.id, row.id));
     throw new QuotaExceededError(metric, row.count - amount, limit);
@@ -89,9 +101,28 @@ export async function remainingPremiumBudget(db: Db, orgId: string): Promise<num
 export async function consumeLead(db: Db, orgId: string, source?: string) {
   const count = await consume(db, orgId, "leads", 1);
   if (source?.startsWith("provider:")) {
-    // Best-effort: gating already happened via remainingPremiumBudget() before the provider
-    // call was made, so this should essentially never throw in practice.
-    await consume(db, orgId, "premiumLeads", 1).catch(() => {});
+    // Recorded even past the limit. Gating happened before the provider call (via
+    // remainingPremiumBudget); this is the ledger of what was actually spent, and the old
+    // `.catch(() => {})` around a rolling-back consume() meant any lead past the cap was
+    // simply never written down.
+    await consume(db, orgId, "premiumLeads", 1, { allowOverage: true });
   }
   return count;
+}
+
+/**
+ * Charge a quota and answer yes/no, never throwing for a plan limit.
+ *
+ * A database fault still throws: "you are out of quota" and "we could not record usage"
+ * are different answers, and only the first is the customer's. Callers that need the
+ * distinction as data use `tryConsume` in apps/api/src/lib/quota.ts.
+ */
+export async function tryConsumeQuota(db: Db, orgId: string, metric: Metric, amount = 1): Promise<boolean> {
+  try {
+    await consume(db, orgId, metric, amount);
+    return true;
+  } catch (e) {
+    if (e instanceof QuotaExceededError) return false;
+    throw e;
+  }
 }

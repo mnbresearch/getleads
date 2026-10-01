@@ -11,7 +11,21 @@ interface JobChange {
   companyName: string | null;
   confidence: number;
   createdAt: string;
-  raw: { leadId?: string; kind?: string; sameEmployer?: boolean; from?: { company?: string | null; title?: string | null }; to?: { company?: string | null; title?: string | null } } | null;
+  raw: { leadId?: string; leadName?: string | null; leadEmail?: string | null; kind?: string; sameEmployer?: boolean; from?: { company?: string | null; title?: string | null }; to?: { company?: string | null; title?: string | null } } | null;
+}
+
+/**
+ * What to search the Leads page for to find this person. Searching by their NEW company
+ * found everyone at that company except them - the lead row still carries the old one.
+ * Prefers an email/name on the signal; otherwise the name the title was written from
+ * ("<name> moved to ..." / "<name> was promoted to ...").
+ */
+function leadSearchTerm(ch: JobChange): string | null {
+  if (ch.raw?.leadEmail) return ch.raw.leadEmail;
+  if (ch.raw?.leadName) return ch.raw.leadName;
+  const m = /^(.*?) (?:was promoted to|moved to) /.exec(ch.title);
+  const name = m?.[1]?.trim();
+  return name && name !== "A tracked lead" ? name : null;
 }
 
 export function AutomationPage() {
@@ -39,8 +53,9 @@ export function AutomationPage() {
     setBusy(preview ? "preview" : "run");
     try {
       const r = await apiFetch<{ found: number; created: number; duplicates: number; note?: string }>("POST", "/v1/automation/discover", { query, count: 25, preview });
-      toast(preview ? `Would store ${r.found} leads` : `Found ${r.found}, stored ${r.created} new, ${r.duplicates} already known`);
-      if (r.note) toast(r.note);
+      // One toast: a second call replaced the first before anyone could read the counts.
+      const summary = preview ? `Would store ${r.found} leads` : `Found ${r.found}, stored ${r.created} new, ${r.duplicates} already known`;
+      toast(r.note ? `${summary}. ${r.note}` : summary);
       load();
     } catch (e) {
       // The 502 case carries the real explanation: every provider refused us. Showing the
@@ -65,7 +80,7 @@ export function AutomationPage() {
               <button className="btn-primary" disabled={!!busy || query.trim().length < 3} onClick={() => discover(false)}>{busy === "run" ? "Searching…" : "Run"}</button>
             </div>
             <p className="mt-2 text-xs text-ink-400">
-              Preview reports what would be stored without storing it or spending lead quota. A scheduled run does the same thing daily - see <code>.github/workflows/discovery-daily.yml</code>.
+              Preview reports what would be stored without storing it or spending lead quota. To run discovery on a schedule, set up <Link className="text-brand-600 hover:underline" to="/autopilot">Autopilot</Link>, which runs daily.
             </p>
           </div>
 
@@ -97,7 +112,7 @@ export function AutomationPage() {
                       </span>
                       {/* Shown because a name-only match can also be a rebrand or an acquisition. */}
                       <span className="text-ink-400" title="How sure we are this is a real change and not a data artefact">{Math.round(ch.confidence * 100)}%</span>
-                      {ch.raw?.leadId && <Link className="text-brand-600 hover:underline" to={`/leads?q=${encodeURIComponent(ch.raw.to?.company ?? "")}`}>Open</Link>}
+                      {ch.raw?.leadId && leadSearchTerm(ch) && <Link className="text-brand-600 hover:underline" to={`/leads?q=${encodeURIComponent(leadSearchTerm(ch)!)}`}>Open</Link>}
                       <span className="text-ink-500">{fmtDate(ch.createdAt)}</span>
                     </div>
                   </li>

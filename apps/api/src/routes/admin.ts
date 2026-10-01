@@ -1,8 +1,9 @@
 import { Hono } from "hono";
-import { zValidator } from "@hono/zod-validator";
+import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, currentPeriod, desc, eq, getDb, getToolsSummary, ilike, inArray, limitsFor, or, organizations, PLANS, recordProviderHealth, sql, updateToolLimit, upgradeRequests, usage, users } from "@prospex/db";
 import { checkAllBalances, checkAllProviders } from "@prospex/core";
+import { createHash, timingSafeEqual } from "node:crypto";
 import { env } from "../env.js";
 import { issueAdminJwt } from "../lib/auth.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -18,7 +19,11 @@ adminRoutes.post(
   async (c) => {
     const { email, password } = c.req.valid("json");
     if (!env.adminEmail || !env.adminPassword) throw badRequest("Admin login is not configured (set ADMIN_EMAIL and ADMIN_PASSWORD)");
-    if (email.toLowerCase() !== env.adminEmail || password !== env.adminPassword) throw badRequest("Invalid admin credentials");
+    // Compared as fixed-length hashes in constant time: `!==` on the raw password returns as
+    // soon as a character differs, which leaks how much of a guess was right.
+    const same = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
+    const ok = same(email.toLowerCase(), env.adminEmail) && same(password, env.adminPassword);
+    if (!ok) throw badRequest("Invalid admin credentials");
     return c.json({ token: await issueAdminJwt() });
   },
 );

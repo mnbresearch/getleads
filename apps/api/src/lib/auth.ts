@@ -14,7 +14,26 @@ export interface AuthContext {
 export async function hashPassword(p: string) {
   return bcrypt.hash(p, 10);
 }
+
+/**
+ * Prefix on the password hash of an account that has never chosen a password (created by
+ * "Sign in with Google"). Never a valid bcrypt hash, so it can never match a password; it
+ * lets password change know there is no current password to ask for. Accounts created by
+ * Google before this marker existed hold a random bcrypt hash instead - they set one
+ * through "forgot password", which works for every account.
+ */
+export const NO_PASSWORD_PREFIX = "!nopassword:";
+
+export async function unusablePasswordHash(seed: string) {
+  return `${NO_PASSWORD_PREFIX}${await bcrypt.hash(`${seed}:${randomToken(32)}`, 10)}`;
+}
+
+export function hasUsablePassword(hash: string) {
+  return !hash.startsWith(NO_PASSWORD_PREFIX);
+}
+
 export async function checkPassword(p: string, hash: string) {
+  if (!hasUsablePassword(hash)) return false;
   return bcrypt.compare(p, hash);
 }
 

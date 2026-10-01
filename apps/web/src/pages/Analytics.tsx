@@ -3,11 +3,23 @@ import { apiFetch } from "../lib/api";
 import { Empty, LoadError, Page, Spinner, useToast } from "../components/ui";
 
 interface Stage { stage: string; label: string; count: number; conversionFromPrevious: number | null; conversionFromStart: number | null; currentlyHere: number }
-interface Funnel { days: number; totalInWindow: number; windowNote?: string; entered: number; lost: number; other: number; otherNote?: string; stages: Stage[]; biggestDropOff: { from: string; to: string; lostShare: number } | null; sufficient: boolean; note?: string }
+interface Funnel { days: number; totalInWindow: number; windowNote?: string; entered: number; lost: number; lostNote?: string; other: number; otherNote?: string; stages: Stage[]; biggestDropOff: { from: string; to: string; lostShare: number } | null; sufficient: boolean; note?: string }
 interface SourceRow { source: string; leads: number; withEmail: number; verified: number; contacted: number; replied: number; qualified: number; customers: number; avgScore: number | null; replyRate: number | null; qualifiedRate: number | null; sufficient: boolean }
 interface Sources { days: number; sources: SourceRow[]; note: string }
 interface CampaignRow { campaignId: string; campaign: string; sent: number; opened: number; replied: number; qualifiedLeads: number; replyRate: number | null; openRate: number | null; sufficient: boolean; bestStep: number | null; steps: { stepNo: number | null; sent: number; opened: number; replied: number; replyRate: number | null }[] }
 interface Attribution { days: number; campaigns: CampaignRow[]; model: string }
+
+/**
+ * Plain-English versions of the methodology notes. The API's notes are written for API
+ * readers and name response fields in backticks (`sufficient`, `qualifiedLeads`), which on
+ * this page read as developer jargon. Same meaning, in the words used on screen.
+ */
+const SOURCES_NOTE =
+  "Reply rate is per lead contacted, not per lead found: a source that produced 500 leads of which 10 were emailed has a contact problem, not a reply problem. Rates marked \"thin\" have too few contacted leads behind them to mean anything yet.";
+const ATTRIBUTION_NOTE =
+  "Replies are credited to the message they reply to. \"Qualified\" counts every lead this campaign messaged that is now qualified or a customer, so a lead worked by two campaigns counts for both and the numbers do not add up to your qualified total - only a lead's current status is stored, not when it changed.";
+/** Fallback for any other note: strip the backticks the API uses for field names. */
+const plain = (t: string | undefined) => (t ?? "").replace(/`([^`]+)`/g, "$1");
 
 const pct = (n: number | null | undefined) => (n === null || n === undefined ? "-" : `${Math.round(n * 100)}%`);
 
@@ -73,7 +85,7 @@ export function AnalyticsPage() {
           {/* ---- Funnel ---- */}
           <div className="card p-5">
             <div className="mb-1 font-medium">Pipeline</div>
-            {funnel && !funnel.sufficient && <div className="mb-3 text-sm text-amber-700">{funnel.note}</div>}
+            {funnel && !funnel.sufficient && <div className="mb-3 text-sm text-amber-700">{plain(funnel.note)}</div>}
             {funnel && funnel.entered === 0 ? (
               <Empty title="No leads in this window" hint="Run a search, or widen the time range." />
             ) : (
@@ -96,13 +108,17 @@ export function AnalyticsPage() {
                   })}
                 </div>
                 <div className="mt-3 flex flex-wrap items-center gap-4 text-xs text-ink-400">
-                  <span title={funnel?.windowNote}>{funnel?.entered} entered</span>
-                  {!!funnel?.lost && <span>{funnel.lost} marked lost</span>}
+                  <span title={plain(funnel?.windowNote) || undefined}>{funnel?.entered} entered</span>
+                  {!!funnel?.lost && (
+                    <span title={plain(funnel.lostNote) || undefined} className={funnel.lostNote ? "cursor-help underline decoration-dotted" : undefined}>
+                      {funnel.lost} marked lost
+                    </span>
+                  )}
                   {/* Named rather than quietly dropped, so the buckets reconcile to the
                       leads created in this window instead of leaving a gap with nothing on
                       screen to explain it. */}
                   {!!funnel?.other && (
-                    <span title={funnel.otherNote} className="text-ink-500">
+                    <span title={plain(funnel.otherNote) || undefined} className="text-ink-500">
                       {funnel.other} outside the funnel
                     </span>
                   )}
@@ -119,7 +135,7 @@ export function AnalyticsPage() {
           {/* ---- Sources ---- */}
           <div className="card p-5">
             <div className="mb-1 font-medium">Where your leads come from</div>
-            <p className="mb-3 text-xs text-ink-400">{sources?.note}</p>
+            <p className="mb-3 text-xs text-ink-400">{sources ? SOURCES_NOTE : ""}</p>
             {sources && sources.sources.length === 0 ? (
               <Empty title="Nothing to compare yet" hint="Once leads arrive from more than one source, this shows which is worth the effort." />
             ) : (
@@ -153,7 +169,7 @@ export function AnalyticsPage() {
           {/* ---- Attribution ---- */}
           <div className="card p-5">
             <div className="mb-1 font-medium">What produced the reply</div>
-            <p className="mb-3 text-xs text-ink-400">{attribution?.model}</p>
+            <p className="mb-3 text-xs text-ink-400">{attribution ? ATTRIBUTION_NOTE : ""}</p>
             {attribution && attribution.campaigns.length === 0 ? (
               <Empty title="No campaign sends in this window" hint="Attribution appears once a campaign has sent something." />
             ) : (

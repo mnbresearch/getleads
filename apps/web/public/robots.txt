@@ -1,0 +1,8 @@
+# Scout - scout.mnbresearch.com
+User-agent: *
+Allow: /
+# Shared client pipeline reports and the admin console are private.
+Disallow: /r/
+Disallow: /admin
+
+Sitemap: https://scout.mnbresearch.com/sitemap.xml
