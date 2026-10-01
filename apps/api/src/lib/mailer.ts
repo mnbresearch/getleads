@@ -65,10 +65,16 @@ export async function sendMail(cfg: MailerConfig | null, input: SendInput): Prom
   }
 }
 
-export async function testMailer(cfg: MailerConfig): Promise<{ ok: boolean; error?: string }> {
+export async function testMailer(cfg: MailerConfig): Promise<{ ok: boolean; error?: string; unreachable?: boolean }> {
   if (cfg.provider === "resend") {
-    const res = await fetch("https://api.resend.com/domains", { headers: { authorization: `Bearer ${cfg.resendApiKey}` } });
-    return res.ok ? { ok: true } : { ok: false, error: `Resend HTTP ${res.status}` };
+    // A network failure must come back as a failed test, not a thrown error: the account row
+    // is already saved when this runs, and a throw turned that into a 500 with a saved sender.
+    try {
+      const res = await fetch("https://api.resend.com/domains", { headers: { authorization: `Bearer ${cfg.resendApiKey}` }, signal: AbortSignal.timeout(15_000) });
+      return res.ok ? { ok: true } : { ok: false, error: `Resend HTTP ${res.status}` };
+    } catch (e) {
+      return { ok: false, unreachable: true, error: `could not reach Resend: ${(e as Error).message}` };
+    }
   }
   try {
     const t = nodemailer.createTransport({ host: cfg.smtp!.host, port: cfg.smtp!.port, secure: cfg.smtp!.secure ?? cfg.smtp!.port === 465, auth: cfg.smtp!.user ? { user: cfg.smtp!.user, pass: cfg.smtp!.pass } : undefined });

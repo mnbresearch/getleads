@@ -105,3 +105,30 @@ describe("a null MX is not a mail setup", () => {
     expect(r.recommendations.join(" ")).toMatch(/Add MX records/);
   });
 });
+
+describe("a revoked DKIM key is not a DKIM setup", () => {
+  it("does not count a selector whose key is empty (p=) as working", async () => {
+    resolveMx.mockResolvedValue([{ exchange: "mx.acme.com", priority: 10 }]);
+    resolveTxt.mockImplementation(async (d: string) => {
+      if (d === "acme.com") return [["v=spf1 include:_spf.google.com -all"]];
+      if (d === "_dmarc.acme.com") return [["v=DMARC1; p=reject"]];
+      // Revoked per RFC 6376 3.6.1: the selector exists and must NOT verify.
+      if (d === "google._domainkey.acme.com") return [["v=DKIM1; p="]];
+      if (d === "default._domainkey.acme.com") return [["v=DKIM1; k=rsa; p=;"]];
+      throw err("ENODATA");
+    });
+    const r = await checkDomainHealth("acme.com");
+    expect(r.dkim.ok).toBe(false);
+    expect(r.dkim.selectorsFound).toEqual([]);
+  });
+
+  it("still counts a selector with a real key", async () => {
+    resolveMx.mockResolvedValue([{ exchange: "mx.acme.com", priority: 10 }]);
+    resolveTxt.mockImplementation(async (d: string) => {
+      if (d === "google._domainkey.acme.com") return [["v=DKIM1; k=rsa; p=MIGfMA0GCSqGSIb3"]];
+      throw err("ENODATA");
+    });
+    const r = await checkDomainHealth("acme.com");
+    expect(r.dkim.selectorsFound).toEqual(["google"]);
+  });
+});

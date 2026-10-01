@@ -75,7 +75,10 @@ export async function checkDomainHealth(domain: string): Promise<DomainHealth> {
     // One selector answering is enough to know the resolver is reachable; absent selectors
     // are the normal case and say nothing on their own.
     if (r.answered) dkimAnswered = true;
-    if (r.records.some((t) => /v=DKIM1|k=rsa|p=/i.test(t))) selectorsFound.push(sel);
+    // A record with an empty key ("p=;" or "p=" at the end) is a revoked key (RFC 6376 3.6.1):
+    // it publishes that this selector must NOT verify, so it is not a working DKIM setup.
+    const live = r.records.filter((t) => /v=DKIM1|k=rsa|p=/i.test(t) && !/(^|;)\s*p=\s*(;|$)/i.test(t));
+    if (live.length) selectorsFound.push(sel);
   }));
 
   const dmarc = await txt(`_dmarc.${domain}`);

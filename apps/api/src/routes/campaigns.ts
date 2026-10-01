@@ -70,7 +70,17 @@ campaignRoutes.post("/email-accounts", zValidator("json", accountInput), async (
   // "auth failed", which is a port-state oracle. Logged in full here; the caller gets a
   // message that says what to check without describing the network.
   if (!raw.ok) console.warn(`[campaigns] email account ${row.id} test failed: ${raw.error}`);
-  const test = raw.ok ? raw : { ok: false, error: b.provider === "smtp" ? "Could not connect and sign in to the SMTP server. Check the host, port, security setting, username and password." : "The email provider rejected the API key. Check that it is correct and active." };
+  const test = raw.ok
+    ? raw
+    : {
+        ok: false,
+        error:
+          b.provider === "smtp"
+            ? "Could not connect and sign in to the SMTP server. Check the host, port, security setting, username and password."
+            : "unreachable" in raw && raw.unreachable
+              ? "Could not reach the email provider to check this key. The sender was saved; remove and re-add it to test again."
+              : "The email provider rejected the API key. Check that it is correct and active.",
+      };
   if (!test.ok) await db.update(emailAccounts).set({ status: "error" }).where(eq(emailAccounts.id, row.id));
   const { configEncrypted: _c, ...pub } = row;
   return c.json({ emailAccount: { ...pub, status: test.ok ? "active" : "error" }, test }, 201);

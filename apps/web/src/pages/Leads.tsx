@@ -559,8 +559,10 @@ function ImportModal({ open, onClose, onDone, toast }: { open: boolean; onClose:
   const submit = async () => {
     setBusy(true);
     try {
-      const r = await apiFetch<{ created: number; updated: number; errors: unknown[] }>("POST", "/v1/leads/import", undefined, { contentType: "text/csv", body: text });
-      toast(`Imported: ${r.created} new, ${r.updated} updated${r.errors.length ? `, ${r.errors.length} errors` : ""}`);
+      const r = await apiFetch<{ created: number; updated: number; errors: unknown[]; skipped?: number; skippedRows?: { row: number; reason: string }[] }>("POST", "/v1/leads/import", undefined, { contentType: "text/csv", body: text });
+      const skippedN = r.skipped ?? r.skippedRows?.length ?? 0;
+      const firstSkip = r.skippedRows?.[0];
+      toast(`Imported: ${r.created} new, ${r.updated} updated${skippedN ? `, ${skippedN} row${skippedN === 1 ? "" : "s"} skipped${firstSkip ? ` (row ${firstSkip.row}: ${firstSkip.reason})` : ""}` : ""}${r.errors.length ? `, ${r.errors.length} errors` : ""}`, r.created + r.updated === 0 && (skippedN || r.errors.length) ? "err" : "ok");
       onDone();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
