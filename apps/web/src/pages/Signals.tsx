@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 import { ExtLink } from "../components/ExtLink";
+import { plural } from "../lib/plural";
 
 interface Signal { id: string; type: string; companyName: string | null; companyDomain: string | null; title: string; summary: string | null; url: string; source: string | null; amountUsd: number | null; round: string | null; confidence: number; occurredAt: string | null; createdAt: string; match: { status: string; leadsCreated: number } | null }
 interface Sub { id: string; name: string; types: string[]; keywords: string[]; industries: string[]; locations: string[]; targetTitles: string[]; autoCreateLeads: boolean; active: boolean; lastRunAt: string | null; stats: Record<string, number> }
@@ -39,8 +40,8 @@ const UNSUBSCRIBABLE = new Set(["news"]);
 
 /** Plain-English result of a subscription run, instead of the raw JSON it used to print. */
 function describeSubRun(r: { parsed?: number; stored?: number; matched?: number; leadsCreated?: number; skipped?: string; stopped?: string; note?: string }): string {
-  const parts = [`Scanned ${r.parsed ?? 0} headlines (${r.stored ?? 0} new)`, `${r.matched ?? 0} matched this subscription`];
-  if (r.leadsCreated !== undefined) parts.push(`${r.leadsCreated} leads created`);
+  const parts = [`Scanned ${plural(r.parsed ?? 0, "headline")} (${r.stored ?? 0} new)`, `${r.matched ?? 0} matched this subscription`];
+  if (r.leadsCreated !== undefined) parts.push(`${plural(r.leadsCreated, "lead")} created`);
   const tail = [r.stopped, r.skipped, r.note].filter(Boolean).join(" ");
   return `${parts.join(", ")}.${tail ? ` ${tail}` : ""}`;
 }
@@ -95,7 +96,7 @@ export function SignalsPage() {
       const locations = [...new Set(icps.flatMap((i) => [...(i.criteria?.locations ?? []), ...(i.criteria?.countries ?? [])]).map((x) => x.trim()).filter(Boolean))].slice(0, 4);
       const r = await apiFetch<{ parsed: number; stored: number; skipped?: string; stopped?: string; note?: string }>("POST", "/v1/signals/scan", { types: ["funding", "acquisition", "leadership", "hiring"], locations, days: 7 });
       const extra = [r.stopped, r.skipped, r.note].filter(Boolean).join(" ");
-      toast(`Scanned news${locations.length ? ` (${locations.join(", ")})` : ""}: ${r.parsed} signals, ${r.stored} new.${extra ? ` ${extra}` : ""}`);
+      toast(`Scanned news${locations.length ? ` (${locations.join(", ")})` : ""}: ${plural(r.parsed, "signal")}, ${r.stored} new.${extra ? ` ${extra}` : ""}`);
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setScanning(false); }
   };
@@ -122,7 +123,7 @@ export function SignalsPage() {
                       source article - its `url` is an internal identity string - and an
                       anchor with a non-http href renders as a link that goes nowhere. */}
                   <ExtLink className="text-sm text-ink-300 hover:underline" href={s.url} fallback={<div className="text-sm text-ink-300">{s.title}</div>}>{s.title}</ExtLink>
-                  <div className="text-xs text-ink-500">{s.source} · {fmtDate(s.occurredAt ?? s.createdAt)} {s.match && <span className="ml-2 badge bg-brand-50 text-brand-700">matched{s.match.leadsCreated ? ` · ${s.match.leadsCreated} leads` : ""}</span>}</div>
+                  <div className="text-xs text-ink-500">{s.source} · {fmtDate(s.occurredAt ?? s.createdAt)} {s.match && <span className="ml-2 badge bg-brand-50 text-brand-700">matched{s.match.leadsCreated ? ` · ${plural(s.match.leadsCreated, "lead")}` : ""}</span>}</div>
                 </div>
                 {s.companyName && <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ people: { leadId?: string }[]; skipped?: string; saveStopped?: string }>("POST", "/v1/tools/decision-makers", { companyName: s.companyName, companyDomain: s.companyDomain ?? undefined, limit: 4 }).then((r) => toast(dmSummary(r))).catch((e) => toast((e as Error).message, "err"))}>Find decision makers</button>}
               </div>
@@ -165,13 +166,13 @@ export function SignalsPage() {
           {mons.map((m) => (
             <div key={m.id} className="flex flex-wrap items-center gap-3 p-3">
               <span className="badge bg-black/[0.05] text-ink-200">{m.type.replace("_", " ")}</span>
-              <div className="min-w-0 flex-1"><div className="font-medium">{m.name}{m.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}</div><div className="truncate text-xs text-ink-400">{m.target} · every {m.intervalMinutes >= 60 ? `${Math.round(m.intervalMinutes / 60)}h` : `${m.intervalMinutes}m`} · {m.resultsCount} results · last {fmtDate(m.lastRunAt)}{m.lastResult && "openRoles" in m.lastResult ? ` · ${m.lastResult.openRoles} open roles` : ""}{m.lastResult && typeof m.lastResult.error === "string" ? "" : m.lastResult && "publicPage" in m.lastResult && !m.lastResult.publicPage ? " · post not public" : ""}</div>{m.lastResult && typeof m.lastResult.error === "string" && <div className="mt-0.5 text-xs text-red-700 [overflow-wrap:anywhere]">{m.lastResult.error}</div>}</div>
+              <div className="min-w-0 flex-1"><div className="font-medium">{m.name}{m.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}</div><div className="truncate text-xs text-ink-400">{m.target} · every {m.intervalMinutes >= 60 ? `${Math.round(m.intervalMinutes / 60)}h` : `${m.intervalMinutes}m`} · {plural(m.resultsCount, "result")} · last {fmtDate(m.lastRunAt)}{m.lastResult && "openRoles" in m.lastResult ? ` · ${m.lastResult.openRoles} open roles` : ""}{m.lastResult && typeof m.lastResult.error === "string" ? "" : m.lastResult && "publicPage" in m.lastResult && !m.lastResult.publicPage ? " · post not public" : ""}</div>{m.lastResult && typeof m.lastResult.error === "string" && <div className="mt-0.5 text-xs text-red-700 [overflow-wrap:anywhere]">{m.lastResult.error}</div>}</div>
               <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ results: Result[] }>("GET", `/v1/signals/monitors/${m.id}/results`).then((r) => setResults({ m, rows: r.results })).catch((e) => toast(`Could not load results: ${(e as Error).message}`, "err"))}>Results</button>
               <button className="btn-secondary py-1 text-xs" disabled={busyId === m.id} onClick={() => { setBusyId(m.id); apiFetch<{ added: number; skipped?: string; stopped?: string; note?: string }>("POST", `/v1/signals/monitors/${m.id}/run`).then((r) => { const extra = [r.stopped, r.skipped, r.note].filter(Boolean).join(" "); toast(`Added ${r.added} new result${r.added === 1 ? "" : "s"}.${extra ? ` ${extra}` : ""}`); load(); }).catch((e) => toast((e as Error).message, "err")).finally(() => setBusyId(null)); }}>{busyId === m.id ? "Running…" : "Run"}</button>
               <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("PATCH", `/v1/signals/monitors/${m.id}`, { active: m.active === false }).then(load).catch((e) => toast((e as Error).message, "err"))}>{m.active === false ? "Resume" : "Pause"}</button>
               <DeleteButton
                 what={`the monitor "${m.name}"`}
-                consequence={`${m.resultsCount} recorded results go with it. Pause it instead if you only want it to stop checking.`}
+                consequence={`${plural(m.resultsCount, "recorded result")} ${m.resultsCount === 1 ? "goes" : "go"} with it. Pause it instead if you only want it to stop checking.`}
                 className="text-xs"
                 onDelete={async () => { await apiFetch("DELETE", `/v1/signals/monitors/${m.id}`); load(); }}
                 onError={(msg) => toast(msg, "err")}

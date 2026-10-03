@@ -14,7 +14,7 @@
  *
  * The subject is the lowercased email as typed, whether or not an account exists for it, so a
  * lock does not reveal which addresses are customers. The admin dashboard login uses the
- * single subject "admin".
+ * single subject "admin" and its own thresholds (ADMIN_LOCK_POLICY below).
  *
  * A lock anyone can trigger is also a way to shut the real owner out: five wrong guesses from
  * a stranger, repeated every fifteen minutes, and the customer (or the operator, on the admin
@@ -31,7 +31,10 @@
  *
  * An address can only become "known" by presenting the right password (or completing an
  * emailed reset, which needs the mailbox). Nothing an attacker can do without one of those
- * writes a success row, so they cannot promote themselves out of the account-wide lock.
+ * writes a success row, so they cannot promote themselves out of the account-wide lock. And
+ * "known" does not outlive the credential that earned it: when the account is claimed through
+ * Google, or its password is reset or changed, every other address is forgotten
+ * (forgetOtherKnownAddresses).
  *
  * "Address" is what clientIp() reports, so it is as trustworthy as TRUSTED_PROXY is correct:
  * behind Cloudflare (Render) or a real reverse proxy the client cannot choose it. If the
@@ -98,19 +101,48 @@ export async function isKnownIp(subject: string, ip: string | null | undefined):
   return !!row;
 }
 
-export async function lockState(subject: string, ip?: string | null): Promise<LockState> {
+/**
+ * How a subject is locked.
+ *
+ * `accountWide`: failures from ALL addresses (within the window, not since cleared) at which
+ * the account is locked for every address that is not known for it.
+ * `perAddress`: when set, failures from ONE address at which that address is locked, whether
+ * or not it is known - and the only thing a known address is judged on.
+ */
+export interface LockPolicy {
+  accountWide: number;
+  perAddress?: number;
+}
+
+/** Customer accounts: five failures from anywhere; a known address is judged on its own five. */
+export const CUSTOMER_LOCK_POLICY: LockPolicy = { accountWide: LOCK_THRESHOLD };
+
+/**
+ * The admin sign-in.
+ *
+ * It has ONE subject ("admin") for the whole platform, so the customer rule made the operator
+ * lockable by anyone: five anonymous wrong guesses and the operator, arriving from an address
+ * that had not signed in before (a new office, a phone, the first sign-in after a deploy), was
+ * shut out - repeatable every fifteen minutes, for ever. Here each address gets its own five
+ * attempts, and the account as a whole is only locked (for addresses not already known) after
+ * fifty failures in the window, which is what a spread-out guessing run looks like. Fifty
+ * guesses per fifteen minutes against a long random password is no meaningful attack; fifty
+ * is also far beyond what an operator mistyping could produce.
+ */
+export const ADMIN_LOCK_THRESHOLD = 50;
+export const ADMIN_LOCK_POLICY: LockPolicy = { accountWide: ADMIN_LOCK_THRESHOLD, perAddress: LOCK_THRESHOLD };
+
+/** The counted failures for a subject (optionally one address), newest first, at most `limit`. */
+async function countedFailures(subject: string, limit: number, address?: string) {
   const { db } = getDb();
-  const key = ipKey(ip);
-  // A known address is judged on its own failures; anything else on the account's.
-  const own = await isKnownIp(subject, ip);
-  const rows = await db
+  return db
     .select({ at: loginAttempts.createdAt })
     .from(loginAttempts)
     .where(
       and(
         eq(loginAttempts.subject, subject),
         eq(loginAttempts.succeeded, false),
-        own ? eq(loginAttempts.ip, key!) : undefined,
+        address !== undefined ? eq(loginAttempts.ip, address) : undefined,
         sql`${loginAttempts.createdAt} > now() - ${LOCK_WINDOW_SQL}`,
         // Still counts unless something cleared it: a later success from the same address, or
         // a later reset marker (success row with no address). Never a success from elsewhere.
@@ -118,12 +150,30 @@ export async function lockState(subject: string, ip?: string | null): Promise<Lo
       ),
     )
     .orderBy(desc(loginAttempts.createdAt))
-    .limit(LOCK_THRESHOLD);
-  if (rows.length < LOCK_THRESHOLD) return { locked: false, retryAfterSeconds: 0, failures: rows.length };
+    .limit(limit);
+}
+
+function lockFrom(rows: { at: Date }[], threshold: number): LockState {
+  if (rows.length < threshold) return { locked: false, retryAfterSeconds: 0, failures: rows.length };
   // The lock lifts when the oldest of the counted failures leaves the window.
   const oldest = rows[rows.length - 1].at.getTime();
   const retryAfterSeconds = Math.min(LOCK_WINDOW_MS / 1000, Math.max(1, Math.ceil((oldest + LOCK_WINDOW_MS - Date.now()) / 1000)));
   return { locked: true, retryAfterSeconds, failures: rows.length };
+}
+
+export async function lockState(subject: string, ip?: string | null, policy: LockPolicy = CUSTOMER_LOCK_POLICY): Promise<LockState> {
+  const key = ipKey(ip);
+  const known = await isKnownIp(subject, ip);
+  if (policy.perAddress !== undefined) {
+    // This address's own failures first. An attempt with no usable address is stored as
+    // "unknown" (see recordAttempt), so all such attempts share one allowance.
+    const own = lockFrom(await countedFailures(subject, policy.perAddress, key ?? "unknown"), policy.perAddress);
+    if (own.locked || known) return own;
+    const all = lockFrom(await countedFailures(subject, policy.accountWide), policy.accountWide);
+    return all.locked ? all : own;
+  }
+  // A known address is judged on its own failures; anything else on the account's.
+  return lockFrom(await countedFailures(subject, policy.accountWide, known ? key! : undefined), policy.accountWide);
 }
 
 /**
@@ -157,11 +207,35 @@ export async function clearLock(subject: string, ip: string | null = null): Prom
 }
 
 /**
+ * Forget which addresses are "known" for an account, except the one acting now.
+ *
+ * An address becomes known by signing in with the account's password, and a known address
+ * keeps its own private allowance of guesses whatever the rest of the world does. That is
+ * right while the credential it proved is still the credential. It is wrong after the
+ * credential changes hands: someone who registered a victim's address stayed "known" for the
+ * victim's account after the victim claimed it through Google, reset the password or changed
+ * it - five guesses every fifteen minutes that no account-wide lock could ever touch.
+ *
+ * Called when an unverified account is claimed by Google, when a password reset completes and
+ * when a password is changed. Reset markers (rows with no address) are kept: they are what
+ * clears old failures.
+ */
+export async function forgetOtherKnownAddresses(subject: string, actorIp: string | null | undefined): Promise<void> {
+  const { db } = getDb();
+  const actor = ipKey(actorIp);
+  await db
+    .delete(loginAttempts)
+    .where(and(eq(loginAttempts.subject, subject), eq(loginAttempts.succeeded, true), sql`${loginAttempts.ip} IS NOT NULL`, actor ? sql`${loginAttempts.ip} <> ${actor}` : undefined));
+}
+
+/**
  * The queue an attempt waits in (see `serialised`). An address known for the account is
  * judged on its own failures, so it queues on its own: a stranger flooding the account's
- * queue cannot make the owner's attempt bounce off a full one.
+ * queue cannot make the owner's attempt bounce off a full one. With `perAddress` (the admin
+ * sign-in, where every address has its own allowance) every address queues on its own.
  */
-export async function attemptQueue(prefix: string, subject: string, ip: string | null | undefined): Promise<string> {
+export async function attemptQueue(prefix: string, subject: string, ip: string | null | undefined, opts: { perAddress?: boolean } = {}): Promise<string> {
+  if (opts.perAddress) return `${prefix}:${subject}|${ipKey(ip) ?? "unknown"}`;
   return (await isKnownIp(subject, ip)) ? `${prefix}:${subject}|${ipKey(ip)}` : `${prefix}:${subject}`;
 }
 

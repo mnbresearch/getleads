@@ -1,6 +1,6 @@
 import bcrypt from "bcryptjs";
 import { sign, verify } from "hono/jwt";
-import { apiKeys, eq, getDb, organizations, users, type ApiKey, type Organization, type User } from "@prospex/db";
+import { apiKeys, eq, getDb, organizations, sql, users, type ApiKey, type Organization, type User } from "@prospex/db";
 import { env } from "../env.js";
 import { randomToken, sha256 } from "./crypto.js";
 
@@ -58,23 +58,92 @@ export async function issueJwt(user: Pick<User, "id" | "orgId"> & { tokenVersion
 /** Admin dashboard session - a single shared super-admin account (ADMIN_EMAIL/ADMIN_PASSWORD),
  * not tied to any org or customer user. Separate audience ("admin"), separate shape (role:
  * "admin", no sub/org) and, when ADMIN_JWT_SECRET is set, a separate signing secret, so it can
- * never be confused with a customer JWT even if someone tries to replay one as the other. */
+ * never be confused with a customer JWT even if someone tries to replay one as the other.
+ *
+ * `jti` is the token's own id: POST /v1/admin/logout records it as revoked, and the token
+ * stops working then rather than twelve hours later. */
 export async function issueAdminJwt(ttlSeconds = 60 * 60 * 12) {
   const now = Math.floor(Date.now() / 1000);
-  return sign({ role: "admin", aud: "admin" satisfies TokenAudience, iat: now, exp: now + ttlSeconds }, env.adminJwtSecret);
+  return sign({ role: "admin", aud: "admin" satisfies TokenAudience, jti: randomToken(16), iat: now, exp: now + ttlSeconds }, env.adminJwtSecret);
 }
 
-export async function verifyAdminJwt(token: string): Promise<boolean> {
+interface AdminClaims {
+  /** What a revocation is recorded under: the token's jti, or a hash of the token itself for one issued before jti existed. */
+  revocationKey: string;
+  /** Expiry, seconds since the epoch. */
+  exp: number;
+}
+
+/** The claims of a well-formed, unexpired admin token (revoked or not), or null. */
+async function readAdminJwt(token: string): Promise<AdminClaims | null> {
   try {
-    const payload = (await verify(token, env.adminJwtSecret, "HS256")) as { role?: string; aud?: unknown; sub?: unknown };
-    if (payload.role !== "admin") return false;
+    const payload = (await verify(token, env.adminJwtSecret, "HS256")) as { role?: string; aud?: unknown; sub?: unknown; jti?: unknown; exp?: unknown };
+    if (payload.role !== "admin") return null;
     // Tokens issued before `aud` existed carry none; they live 12 hours at most. Anything
     // that names another audience is refused outright.
-    if (payload.aud !== undefined && payload.aud !== "admin") return false;
-    return true;
+    if (payload.aud !== undefined && payload.aud !== "admin") return null;
+    const exp = typeof payload.exp === "number" ? payload.exp : Math.floor(Date.now() / 1000) + 60 * 60 * 12;
+    // A token from before this release has no jti. It stays valid until it expires (the
+    // deploy signs nobody out) and can still be signed out: it is revoked by its own hash.
+    const revocationKey = typeof payload.jti === "string" && payload.jti ? `jti:${payload.jti.slice(0, 200)}` : `tok:${sha256(token)}`;
+    return { revocationKey, exp };
   } catch {
-    return false;
+    return null;
   }
+}
+
+/** Postgres "relation does not exist": the release migration that creates the table has not run. */
+function isMissingTable(err: unknown): boolean {
+  for (let e: unknown = err, depth = 0; e && depth < 5; e = (e as { cause?: unknown }).cause, depth++) {
+    if ((e as { code?: unknown }).code === "42P01") return true;
+  }
+  return false;
+}
+let warnedMissingTable = false;
+
+/**
+ * Is this a valid admin session token that has not been signed out?
+ *
+ * A database error here is thrown, not swallowed: answering "not valid" would sign the
+ * operator out of the dashboard on a connection blip, and answering "valid" would let a
+ * revoked token through. The one exception is the revocation table not existing yet (a
+ * deploy with AUTO_MIGRATE=false that has not been migrated): no token can have been revoked
+ * without the table, so the session is honoured and the gap is logged.
+ */
+export async function verifyAdminJwt(token: string): Promise<boolean> {
+  const claims = await readAdminJwt(token);
+  if (!claims) return false;
+  const { db } = getDb();
+  try {
+    const rows = (await db.execute(sql`SELECT 1 AS revoked FROM admin_revoked_tokens WHERE jti = ${claims.revocationKey} LIMIT 1`)) as unknown as unknown[];
+    return rows.length === 0;
+  } catch (e) {
+    if (!isMissingTable(e)) throw e;
+    if (!warnedMissingTable) console.warn("[auth] admin_revoked_tokens does not exist yet (run the database migrations); admin sign-out cannot revoke sessions until it does.");
+    warnedMissingTable = true;
+    return true;
+  }
+}
+
+/**
+ * Sign an admin session out: the token is refused from now on, on every instance.
+ *
+ * "invalid" when the token is not a valid admin token (nothing to revoke); "unavailable" when
+ * the revocation table does not exist yet. The row only has to outlive the token, so rows for
+ * tokens that have expired anyway are removed here.
+ */
+export async function revokeAdminJwt(token: string): Promise<"revoked" | "invalid" | "unavailable"> {
+  const claims = await readAdminJwt(token);
+  if (!claims) return "invalid";
+  const { db } = getDb();
+  try {
+    await db.execute(sql`INSERT INTO admin_revoked_tokens (jti, expires_at) VALUES (${claims.revocationKey}, to_timestamp(${claims.exp})) ON CONFLICT (jti) DO NOTHING`);
+  } catch (e) {
+    if (isMissingTable(e)) return "unavailable";
+    throw e;
+  }
+  await db.execute(sql`DELETE FROM admin_revoked_tokens WHERE expires_at < now() - interval '1 hour'`).catch(() => {});
+  return "revoked";
 }
 
 /**

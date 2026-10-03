@@ -6,6 +6,7 @@ import { BUCKET_COPY, type ClientAttention } from "../lib/clients";
 import { ExtLink } from "../components/ExtLink";
 import { useMe } from "../lib/me";
 import { safeHref } from "../lib/safeHref";
+import { plural } from "../lib/plural";
 
 interface Company { id: string; domain: string; name: string | null; industry: string | null; size: string | null; description: string | null; techStack: string[]; location: string | null; linkedinUrl: string | null; emailPattern: string | null }
 interface Lead { id: string; status: string; fullName: string | null; firstName: string | null; lastName: string | null; title: string | null; seniority: string | null; email: string | null; emailStatus: string; emailConfidence: number; linkedinUrl: string | null; phone: string | null; location: string | null; score: number; scoreReasons: string[]; tags: string[]; source: string; createdAt: string; company: Company | null; custom: Record<string, unknown>; clientId?: string | null }
@@ -159,9 +160,9 @@ export function LeadsPage() {
       if (action === "enrich") {
         const r = await apiFetch<{ queued?: number; requested?: number; notFound?: number }>("POST", "/v1/leads/bulk/enrich", { ids });
         const queued = r?.queued ?? ids.length - (r?.notFound ?? 0);
-        toast(`Enrichment queued for ${queued} lead${queued === 1 ? "" : "s"}${r?.notFound ? `, ${r.notFound} not found (deleted?)` : ""}`);
+        toast(`Enrichment queued for ${plural(queued, "lead")}${r?.notFound ? `, ${r.notFound} not found (deleted?)` : ""}`);
       }
-      if (action === "delete") { if (!confirm(`Delete ${ids.length} leads?`)) return; await apiFetch("POST", "/v1/leads/bulk/delete", { ids }); toast("Deleted"); }
+      if (action === "delete") { if (!confirm(`Delete ${plural(ids.length, "lead")}?`)) return; await apiFetch("POST", "/v1/leads/bulk/delete", { ids }); toast("Deleted"); }
       if (action.startsWith("list:")) {
         const r = await apiFetch<AddToListResult>("POST", `/v1/leads/lists/${action.slice(5)}/leads`, { ids });
         toast(addToListMessage(r, ids.length));
@@ -179,18 +180,18 @@ export function LeadsPage() {
       if (action.startsWith("sync:")) {
         const provider = action.slice(5);
         const r = await apiFetch<{ queued: number }>("POST", `/v1/integrations/${provider}/sync`, { leadIds: ids });
-        toast(`Queued ${r.queued} lead${r.queued === 1 ? "" : "s"} to ${provider} - they appear there within a minute or two`);
+        toast(`Queued ${plural(r.queued, "lead")} to ${provider} - they appear there within a minute or two`);
       }
       if (action === "client:none") {
         const r = await apiFetch<{ returnedToPool: number; alreadyInPool: number }>("POST", "/v1/clients/unassign", { leadIds: ids });
-        toast(`${r.returnedToPool} returned to the pool${r.alreadyInPool ? `, ${r.alreadyInPool} were already there` : ""}`);
+        toast(`${r.returnedToPool} returned to the pool${r.alreadyInPool ? `, ${r.alreadyInPool} ${r.alreadyInPool === 1 ? "was" : "were"} already there` : ""}`);
       } else if (action.startsWith("client:")) {
         const clientId = action.slice(7);
         const name = clientById.get(clientId)?.name ?? "client";
         let r = await apiFetch<{ assigned: number; alreadyThisClient: number; ownedByAnotherClient: number; notFound: number }>("POST", `/v1/clients/${clientId}/assign`, { leadIds: ids });
         // Leads another client owns are never taken silently. Ask, once, for the lot.
         let stopped = 0;
-        if (r.ownedByAnotherClient > 0 && confirm(`${r.ownedByAnotherClient} of these already belong to another client. Move them to ${name} too? Any sequence the other client is running for them will stop.`)) {
+        if (r.ownedByAnotherClient > 0 && confirm(`${r.ownedByAnotherClient} of these already ${r.ownedByAnotherClient === 1 ? "belongs" : "belong"} to another client. Move ${r.ownedByAnotherClient === 1 ? "it" : "them"} to ${name} too? Any sequence the other client is running for them will stop.`)) {
           const moved = await apiFetch<typeof r & { stoppedSequences?: number }>("POST", `/v1/clients/${clientId}/assign`, { leadIds: ids, move: true });
           // The second call sees the first call's leads as "already this client's", so its
           // own counts cannot be added naively: only its `assigned` is new.
@@ -200,7 +201,7 @@ export function LeadsPage() {
         const parts = [`${r.assigned} assigned to ${name}`];
         if (r.alreadyThisClient) parts.push(`${r.alreadyThisClient} already were`);
         if (r.ownedByAnotherClient) parts.push(`${r.ownedByAnotherClient} left with their current client`);
-        if (stopped) parts.push(`${stopped} sequence${stopped === 1 ? "" : "s"} stopped for the previous client`);
+        if (stopped) parts.push(`${plural(stopped, "sequence")} stopped for the previous client`);
         toast(parts.join(", "));
       }
       if (action.startsWith("stage:")) {
@@ -224,7 +225,7 @@ export function LeadsPage() {
           }
         }
         if (failure) toast(`Moved ${moved} of ${ids.length} to ${status}, then stopped: ${failure}`, "err");
-        else toast(`Moved ${moved} lead${moved === 1 ? "" : "s"} to ${status}`);
+        else toast(`Moved ${plural(moved, "lead")} to ${status}`);
       }
       setSel(new Set());
       load();
@@ -272,7 +273,7 @@ export function LeadsPage() {
   };
 
   return (
-    <Page title="Leads" subtitle={`${total.toLocaleString()} leads`} actions={<><button className="btn-secondary" onClick={() => setSuppressOpen(true)}>Do-not-contact</button><button className="btn-secondary" onClick={() => setImportOpen(true)}>Import CSV</button><button className="btn-secondary" onClick={exportCsv}>Export CSV</button><button className="btn-primary" onClick={() => setAddOpen(true)}>Add lead</button></>}>
+    <Page title="Leads" subtitle={plural(total, "lead")} actions={<><button className="btn-secondary" onClick={() => setSuppressOpen(true)}>Do-not-contact</button><button className="btn-secondary" onClick={() => setImportOpen(true)}>Import CSV</button><button className="btn-secondary" onClick={exportCsv}>Export CSV</button><button className="btn-primary" onClick={() => setAddOpen(true)}>Add lead</button></>}>
       {Toast}
       <div className="card mb-4 flex flex-wrap items-center gap-2 p-3">
         {/* Keyed on the URL value: an uncontrolled input otherwise keeps showing the old text after the URL changes (back button, a chip cleared). */}
@@ -547,7 +548,7 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
         }))}>{busy === "verify" ? "…" : "Verify email"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>
         <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string; ai?: boolean; note?: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
-        {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast("No AI provider configured", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
+        {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast("AI briefs aren't switched on for this workspace yet - contact support.", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
         <DeleteButton
           className="btn-danger ml-auto"
           what={lead.fullName ?? lead.email ?? "this lead"}
@@ -575,8 +576,9 @@ function AddLeadModal({ open, onClose, onDone, toast }: { open: boolean; onClose
   const blank = { fullName: "", title: "", email: "", linkedinUrl: "", companyName: "", companyDomain: "", location: "" };
   const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
-  // Fresh form each time it opens; it used to reopen holding the last lead's details.
-  useEffect(() => { if (open) setF(blank); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  // Fresh form each time it opens. Cleared when it CLOSES, not when it opens: resetting on
+  // open ran after the first paint, so the previous lead's details showed for a frame.
+  useEffect(() => { if (!open) setF(blank); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   const submit = async () => {
     setBusy(true);
     try {
@@ -597,24 +599,46 @@ function AddLeadModal({ open, onClose, onDone, toast }: { open: boolean; onClose
   );
 }
 
+/** The server's ceiling for POST /v1/leads/import. */
+const MAX_IMPORT_BYTES = 10 * 1024 * 1024;
+const IMPORT_TOO_LARGE = "This file is larger than 10 MB. Split it and import in parts.";
+/**
+ * Size as it will be sent (UTF-8), not the character count - names and notes are not all
+ * ASCII. A character is at most 3 bytes, so text well under the limit is not measured at all.
+ */
+const csvBytes = (t: string) => (t.length * 3 < MAX_IMPORT_BYTES ? 0 : new Blob([t]).size);
+
 function ImportModal({ open, onClose, onDone, toast }: { open: boolean; onClose: () => void; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
+  // Said here, before anything is uploaded: the server refuses a CSV over 10 MB, and sending
+  // one only to be told so costs the user the whole upload.
+  const [sizeErr, setSizeErr] = useState<string | null>(null);
+  const tooLarge = () => csvBytes(text) > MAX_IMPORT_BYTES;
+  const pick = (f: File | undefined) => {
+    if (!f) return;
+    if (f.size > MAX_IMPORT_BYTES) { setSizeErr(IMPORT_TOO_LARGE); return; }
+    setSizeErr(null);
+    f.text().then(setText).catch(() => setSizeErr("That file could not be read. Check it is a CSV saved as text and try again."));
+  };
   const submit = async () => {
+    if (tooLarge()) { setSizeErr(IMPORT_TOO_LARGE); return; }
+    setSizeErr(null);
     setBusy(true);
     try {
       const r = await apiFetch<{ created: number; updated: number; errors: unknown[]; skipped?: number; skippedRows?: { row: number; reason: string }[]; stopped?: string; notProcessed?: number }>("POST", "/v1/leads/import", undefined, { contentType: "text/csv", body: text });
       const skippedN = r.skipped ?? r.skippedRows?.length ?? 0;
       const firstSkip = r.skippedRows?.[0];
-      toast(`Imported: ${r.created} new, ${r.updated} updated${skippedN ? `, ${skippedN} row${skippedN === 1 ? "" : "s"} skipped${firstSkip ? ` (row ${firstSkip.row}: ${firstSkip.reason})` : ""}` : ""}${r.errors.length ? `, ${r.errors.length} errors` : ""}${r.stopped ? `. ${r.stopped}${r.notProcessed ? ` - ${r.notProcessed} row${r.notProcessed === 1 ? " was" : "s were"} not processed` : ""}` : ""}`, r.stopped || (r.created + r.updated === 0 && (skippedN || r.errors.length)) ? "err" : "ok");
+      toast(`Imported: ${r.created} new, ${r.updated} updated${skippedN ? `, ${plural(skippedN, "row")} skipped${firstSkip ? ` (row ${firstSkip.row}: ${firstSkip.reason})` : ""}` : ""}${r.errors.length ? `, ${plural(r.errors.length, "error")}` : ""}${r.stopped ? `. ${r.stopped}${r.notProcessed ? ` - ${plural(r.notProcessed, "row")} ${r.notProcessed === 1 ? "was" : "were"} not processed` : ""}` : ""}`, r.stopped || (r.created + r.updated === 0 && (skippedN || r.errors.length)) ? "err" : "ok");
       onDone();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
   return (
     <Modal open={open} onClose={onClose} title="Import CSV" wide>
       <p className="mb-2 text-sm text-ink-300">Paste CSV or choose a file. Recognized headers: name / first name / last name, title, email, company, website / domain, linkedin, phone, location. Extra columns are kept as custom fields. Duplicates (by email or LinkedIn) are merged.</p>
-      <input type="file" accept=".csv,text/csv" className="mb-2 text-sm" onChange={(e) => { const f = e.target.files?.[0]; if (f) f.text().then(setText); }} />
-      <textarea className="input h-48 font-mono text-xs" value={text} onChange={(e) => setText(e.target.value)} placeholder={"Name,Title,Company,Website,Email\nJane Doe,VP Sales,Acme,acme.com,jane@acme.com"} />
+      <input type="file" accept=".csv,text/csv" className="mb-2 text-sm" onChange={(e) => pick(e.target.files?.[0])} />
+      {sizeErr && <div className="mb-2 rounded-lg border border-red-300 bg-red-50 p-2 text-sm text-red-800" role="alert">{sizeErr}</div>}
+      <textarea className="input h-48 font-mono text-xs" value={text} onChange={(e) => { setText(e.target.value); if (sizeErr) setSizeErr(null); }} placeholder={"Name,Title,Company,Website,Email\nJane Doe,VP Sales,Acme,acme.com,jane@acme.com"} />
       <button className="btn-primary mt-3 w-full justify-center" disabled={busy || !text.trim()} onClick={submit}>{busy ? "Importing…" : "Import"}</button>
     </Modal>
   );
@@ -649,7 +673,7 @@ function SuppressionsModal({ open, onClose, toast }: { open: boolean; onClose: (
     setBusy(true);
     try {
       await apiFetch("POST", "/v1/leads/suppressions", { emails, reason: "added by hand" });
-      toast(`${emails.length} address${emails.length === 1 ? "" : "es"} will never be contacted`);
+      toast(`${plural(emails.length, "address")} will never be contacted`);
       setInput("");
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
@@ -687,7 +711,7 @@ type AddToListResult = { requested?: number; added?: number; alreadyInList?: num
 
 /** What actually happened, not "Added to list": counts say what was NOT done too. */
 function addToListMessage(r: AddToListResult | null | undefined, sent: number): string {
-  if (!r || typeof r.added !== "number") return `Added ${sent} lead${sent === 1 ? "" : "s"} to the list`;
+  if (!r || typeof r.added !== "number") return `Added ${plural(sent, "lead")} to the list`;
   const parts = [`${r.added} added to the list`];
   if (r.alreadyInList) parts.push(`${r.alreadyInList} already in it`);
   if (r.notFound) parts.push(`${r.notFound} not found`);

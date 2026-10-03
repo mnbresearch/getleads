@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { API_URL, errorCode, errorMessage } from "./api";
+import { API_URL, errorCode, errorMessage, networkErrorMessage } from "./api";
 
 const TOKEN_KEY = "gl.admin.token";
 const listeners = new Set<() => void>();
@@ -35,6 +35,60 @@ export function useAdminToken(): string | null {
   return useSyncExternalStore(adminAuth.subscribe, () => adminAuth.token);
 }
 
+/**
+ * "Your admin session expired", handed to the login page.
+ *
+ * A rejected token used to drop the admin on a bare sign-in form mid-task with no word of
+ * why - indistinguishable from having been signed out by someone else, or from a bug.
+ * sessionStorage for the same reason as the customer app: the hop to /admin/login may be a
+ * full reload.
+ */
+const EXPIRED_KEY = "gl.admin.sessionExpired";
+
+function markAdminSessionExpired() {
+  try {
+    sessionStorage.setItem(EXPIRED_KEY, "1");
+  } catch {}
+}
+
+/** The notice for the admin login page, once. Reading it clears it. */
+export function adminSessionExpiredNotice(): string | null {
+  try {
+    if (sessionStorage.getItem(EXPIRED_KEY)) {
+      sessionStorage.removeItem(EXPIRED_KEY);
+      return "Your admin session expired - sign in again.";
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * The server said this admin token is no longer good: drop it and say so on the login page.
+ * Does nothing unless `sentToken` is still the stored one (a slow 401 for an old token must
+ * not wipe a newer sign-in).
+ */
+export function endAdminSession(sentToken: string | null) {
+  if (!sentToken || adminAuth.token !== sentToken) return;
+  markAdminSessionExpired();
+  adminAuth.set(null);
+}
+
+/**
+ * Sign out: tell the server to retire the token, and forget it here whatever the answer.
+ *
+ * The local sign-out never waits on, or depends on, the request - an API that is down or
+ * that has no logout route yet (older server) must not keep an admin signed in on a shared
+ * machine. keepalive lets the request outlive the navigation that follows.
+ */
+export function adminLogout() {
+  const token = adminAuth.token;
+  adminAuth.set(null);
+  if (!token) return;
+  try {
+    void fetch(`${API_URL}/v1/admin/logout`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: "{}", keepalive: true }).catch(() => {});
+  } catch {}
+}
+
 export class AdminApiError extends Error {
   constructor(public status: number, message: string, public code: string = "http_error") {
     super(message);
@@ -61,7 +115,7 @@ export async function adminFetch<T = unknown>(method: string, path: string, body
     text = await res.text();
   } catch (e) {
     if ((e as Error)?.name === "AbortError") throw new AdminApiError(0, `The server did not respond within ${ADMIN_TIMEOUT_MS / 1000} seconds.`, "timeout");
-    throw new AdminApiError(0, "Could not reach the server. Check your connection and try again.", "network_error");
+    throw new AdminApiError(0, networkErrorMessage(body === undefined ? 0 : JSON.stringify(body).length), "network_error");
   } finally {
     clearTimeout(timer);
   }
@@ -72,7 +126,8 @@ export async function adminFetch<T = unknown>(method: string, path: string, body
   if (!res.ok) {
     // A rejected admin token is dropped at once rather than left in storage. Only if it is
     // still the stored one: a slow 401 for an old token must not wipe a newer sign-in.
-    if (res.status === 401 && adminAuth.token === sentToken) adminAuth.set(null);
+    // The login request itself is excluded: a wrong password is not an expired session.
+    if (res.status === 401 && path !== "/v1/admin/login") endAdminSession(sentToken);
     throw new AdminApiError(res.status, errorMessage(data, res.status), errorCode(data));
   }
   return data as T;

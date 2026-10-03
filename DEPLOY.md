@@ -95,7 +95,7 @@ You can start in Stripe **test mode** (test-mode keys, e.g. `sk_test_...`) to ve
 | `ENCRYPTION_KEY` | Stored SMTP passwords, CRM tokens, webhook secrets | Set it. Without it those are encrypted under `JWT_SECRET`. To rotate: put the new value in `ENCRYPTION_KEY` and the old one in `ENCRYPTION_KEYS_OLD` (comma-separated, newest first). Reads try every listed key; new writes use `ENCRYPTION_KEY`. Dropping the old value without listing it makes every saved sender and integration unreadable. |
 | `INTERNAL_TOKEN` | `/internal/jobs/run` only (the serverless job runner) | Sent in the `x-internal-token` header, never in the URL. It is **not** an admin credential. The Render deployment (embedded worker) does not call this endpoint at all. |
 | `ADMIN_API_TOKEN` | Server-to-server calls to `/v1/admin/*` (header `x-admin-token`) | Separate from `INTERNAL_TOKEN`. Leave it unset and the header path is off; the admin dashboard's password login still works. |
-| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | The admin dashboard login | Use a long random password. Five wrong attempts in 15 minutes lock the login form for up to 15 minutes. |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | The admin dashboard login | Use a long random password. Five wrong attempts from one address lock that address for up to 15 minutes; fifty wrong attempts in 15 minutes lock the form for every address that has not signed in before. An address you have signed in from keeps working either way. "Sign out" in the dashboard revokes the session on the server. |
 | `ADMIN_JWT_SECRET` (optional) | Signs the admin dashboard session | Falls back to `JWT_SECRET`. Setting it means a leak of `JWT_SECRET` alone cannot mint an admin session. |
 
 **If `INTERNAL_TOKEN` was ever put in a URL** (the old cron instructions said `?token=`), treat it as leaked - URLs are written to access logs and cron dashboards - and rotate it: Render → the API service → Environment → `INTERNAL_TOKEN` → generate a new value → save. Nothing else needs to change on Render.
@@ -120,7 +120,7 @@ git remote add origin git@github.com:<you>/prospex.git && git push -u origin mai
 ```
 
 ### B2. Database
-Paste the Neon pooled connection string into `DATABASE_URL`. Migrations run automatically on API boot (`AUTO_MIGRATE=true` by default). Two migrations: `0001_init.sql`, `0002_v2.sql`. (Using Supabase instead works identically - just note its free project pauses after 7 days idle and needs a manual unpause click.)
+Paste the Neon pooled connection string into `DATABASE_URL`. Migrations run automatically on API boot (`AUTO_MIGRATE=true` by default). Every file in `packages/db/migrations` is applied once, in order, and recorded in the `_migrations` table. (Using Supabase instead works identically - just note its free project pauses after 7 days idle and needs a manual unpause click.)
 
 ### B3. API + worker
 
@@ -169,10 +169,49 @@ CNAME `prospex.<yourdomain>` → Vercel; `api.prospex.<yourdomain>` → Render. 
 9. Settings → Billing → click "Upgrade" on Starter with Stripe in **test mode** first → complete test checkout (card `4242 4242 4242 4242`, any future date/CVC) → confirm the org's plan flips to `starter` and the premium-leads quota shows 150 in Settings → Usage. Only then switch Stripe to live keys.
 
 ### B7. Operating
-- Admin: `GET /v1/admin/orgs`, `PATCH /v1/admin/orgs/:id/plan {plan, overrides}` with header `x-admin-token: $ADMIN_API_TOKEN` (not `INTERNAL_TOKEN`, which only runs the job queue). Every admin change is written to the security log of the workspace it touched (Settings → Security log; table `audit_log`), with the value before and after.
+- Admin: `GET /v1/admin/orgs`, `PATCH /v1/admin/orgs/:id/plan {plan, overrides}` with header `x-admin-token: $ADMIN_API_TOKEN` (not `INTERNAL_TOKEN`, which only runs the job queue). `plan` must be a real plan id; `overrides` is a strict partial of the plan limits (whole numbers from 0, or true/false for the switches) and anything else is refused with a message naming the field. A workspace keeps its overrides when only its plan changes; send `"overrides": {}` to clear them. Every admin change is written to the security log of the workspace it touched (Settings → Security log; table `audit_log`), with the value before and after; a request that changes nothing answers `changed: false` and is not logged. Customers see what the operator changed in their security log, never the address it was changed from.
 - Free-tier budget for 100 orgs: Google CSE 3k queries/month (100/day) + SerpAPI 100/month ≈ 3,000-3,500 searches/month total, no Brave spend if you skip 9b. If usage is high, lower `searchesPerMonth` in `packages/db/src/plans.ts` (pilot) or add Brave/Apollo paid keys.
 - Scaling past free: Neon Launch ~$19/mo (removes the idle-suspend behavior entirely), Render Starter $7 (always-on, no cold start), Google CSE $5/1k queries past the free 100/day. No code changes needed for infra scaling. For scaling the *business* (paid customers, not just infra), see docs/PRICING.md for provider-tier upgrades and plan restructuring - the pilot plan limits in `plans.ts` are not safe to sell at paid-provider cost. Optionally split the worker into its own process (`npm run start:worker`, set `EMBED_WORKER=false` on the web service).
 - Logs: Render dashboard. Job failures live in the `jobs` table with `error` and retry with backoff.
+
+### B8. Deploying this release (admin fixes, Google sign-in, migration 0018)
+
+Do it in this order, in one sitting:
+
+1. **Deploy the API first.** On boot it applies migration `0018_grandfather_existing_users.sql` (unless `AUTO_MIGRATE=false`, in which case run `npm run db:migrate` before starting the new code). Check `curl https://<api>/health` answers `{"ok":true,"db":"up"}`.
+2. **Deploy the web app immediately after.** In the minutes between the two, the old web app talking to the new API shows an error when someone clicks "Sign in with Google" and asks them to reload. It never signs anyone in unsafely, and password sign-in is unaffected. Reloading after the web deploy fixes it.
+3. **Rotate `INTERNAL_TOKEN`** if it was ever sent as `?token=` in a URL (section A8). On Render nothing calls the job runner, so there is nothing else to update; on a serverless deploy, update the header in the cron service.
+4. Sign in to `/admin`, open "Tools & limits" and press "Test all keys". The summary now says how many keys were tested and names any provider that holds a key but cannot be tested for free.
+
+What migration 0018 does:
+
+- **Existing accounts keep everything on their first Google sign-in.** "Sign in with Google" takes over a password account whose address was never proved: the password is turned off, sessions are signed out and, for a single-user workspace, API keys are revoked. Before this release nothing recorded that an address was proved, so every existing password account would have been treated that way. The migration marks every account that exists at deploy time as owning its address, so those accounts are simply linked to Google. Accounts created after the deploy are unproved until a password reset or a Google sign-in proves them, and the takeover rule applies to those.
+- Adds the `admin_revoked_tokens` table, which is what makes admin "Sign out" real.
+- Adds the Reoon and MillionVerifier rows to "Tools & limits".
+
+It is idempotent and only adds things; it can be re-run safely.
+
+**Rolling back.** The previous release runs on the upgraded database, so rolling back is "redeploy the previous build" and nothing needs to be undone in the database. Three things made on the new code do not work on the old code, so check them if you roll back:
+
+- **Webhooks created or rotated on the new code** sign with v2 and keep their secret encrypted. The old code cannot read that secret, so those webhooks stop delivering until you roll forward again (webhooks that were never rotated keep working).
+- **Sender and integration credentials saved on the new code** are stored in the new encrypted format, which the old code cannot decrypt. Those senders and integrations show as needing to be reconnected on the old code. Do not reconnect them there; roll forward instead and they work again.
+- **Job-change signals** cannot be inserted by the old code (it writes against the old index), so the daily job-change scan logs errors and records nothing until you roll forward. Nothing already stored is lost.
+
+Admin sessions issued by the new code keep working on the old code, but the old code ignores sign-outs: a signed-out admin session works again until it expires (12 hours at most). Rotate `ADMIN_JWT_SECRET` (or `JWT_SECRET` if that is not set) if that matters.
+
+Optional settings that this release reads (all have safe defaults, none is required):
+
+| Variable | What it does | Default |
+|---|---|---|
+| `ADMIN_JWT_SECRET` | Signs the admin session with its own key | falls back to `JWT_SECRET` |
+| `ENCRYPTION_KEYS_OLD` | Previous `ENCRYPTION_KEY` values, so rotating the key does not make saved credentials unreadable | none |
+| `TRUSTED_PROXY` | Which proxy header carries the visitor's address (`cloudflare`, `xff`, `none`) | `cloudflare` on Render, `xff` elsewhere |
+| `CORS_EXTRA_ORIGINS`, `CORS_ALLOW_REGEX` | Extra browser origins allowed to call the API | `APP_URL`, localhost and `https://*.vercel.app` |
+| `LEAD_NOTIFY_EMAIL` | Where upgrade requests are emailed | `ADMIN_EMAIL` |
+| `OUTBOUND_SENDING_ENABLED` | `false` pauses every campaign send platform-wide; nothing is lost, sends resume when it is `true` again | `true` |
+| `ORG_DAILY_SEND_CEILING` | The most one workspace may send per day across all its senders | 2000 |
+| `SYSTEM_SENDER_DAILY_CAP` | The most one workspace may send per day through the shared platform sender | 50, or 1/20 of the plan's monthly emails |
+| `AUTO_MIGRATE` | `false` stops the API applying migrations on boot (you then run `npm run db:migrate` yourself before each deploy) | `true` |
 
 ---
 

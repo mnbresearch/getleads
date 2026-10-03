@@ -11,7 +11,9 @@ const migrationsDir = join(here, "..", "migrations");
 
 export async function runMigrations(url = process.env.DATABASE_URL) {
   if (!url) throw new Error("DATABASE_URL is not set");
-  const sql = postgres(url, { max: 1, ssl: url.includes("localhost") ? false : "prefer" });
+  // NOTICEs ("relation already exists, skipping") are expected from IF NOT EXISTS and were
+  // printed as raw objects on every boot.
+  const sql = postgres(url, { max: 1, ssl: url.includes("localhost") ? false : "prefer", onnotice: () => {} });
   try {
     // Two processes starting at once (API + a worker, or a redeploy overlap) must not both
     // apply the same migration. Each migration takes a transaction-scoped advisory lock and

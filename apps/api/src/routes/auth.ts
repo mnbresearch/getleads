@@ -2,7 +2,7 @@ import { Hono, type Context, type MiddlewareHandler } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, apiKeys, desc, eq, getDb, isNull, limitsFor, oauthExchangeCodes, organizations, passwordResetTokens, sql, users } from "@prospex/db";
+import { and, apiKeys, desc, effectiveLimits, eq, getDb, isNull, limitsFor, oauthExchangeCodes, organizations, passwordResetTokens, sql, users } from "@prospex/db";
 import { env } from "../env.js";
 import { burnPasswordCheck, checkPassword, generateApiKey, hashPassword, hasUsablePassword, issueJwt, passwordProblem, unusablePasswordHash } from "../lib/auth.js";
 import {
@@ -27,7 +27,7 @@ import { randomToken, safeEqual, sha256 } from "../lib/crypto.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
-import { attemptQueue, clearLock, humanWait, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
+import { attemptQueue, clearLock, forgetOtherKnownAddresses, humanWait, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
 
 export const authRoutes = new Hono<Env>();
 
@@ -91,6 +91,10 @@ authRoutes.post(
     if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
     const plan = env.defaultPlan;
     const [org] = await db.insert(organizations).values({ name: orgName, slug, plan, planLimits: limitsFor(plan) }).returning();
+    // `emailVerifiedAt` is deliberately NOT set: typing an address into this form proves
+    // nothing about who owns it. It is set by a completed password reset or a Google sign-in.
+    // (Accounts that existed before migration 0018 were marked verified by that migration;
+    // that is a one-off for the existing customer base, not something signup does.)
     const [user] = await db.insert(users).values({ orgId: org.id, email, passwordHash: await hashPassword(body.password), name: body.name ?? "", role: "owner", lastLoginAt: new Date() }).returning();
     const key = generateApiKey();
     await db.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash });
@@ -241,6 +245,10 @@ authRoutes.post("/password/reset", rateLimit({ perMinute: 10, name: "password-re
   if (!user) throw invalid();
   // Any other outstanding link for this account dies with this one.
   await db.update(passwordResetTokens).set({ usedAt: new Date() }).where(and(eq(passwordResetTokens.userId, user.id), isNull(passwordResetTokens.usedAt)));
+  // The old password is gone, and so is the standing of every address that proved it: an
+  // address that was "known" for this account (it signed in with the old password) must not
+  // keep its own allowance of guesses at the new one. Only this address stays known.
+  await forgetOtherKnownAddresses(user.email, clientIp(c)).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a password reset: ${(e as Error).message}`));
   await clearLock(user.email, clientIp(c));
   await audit(c, "auth.password_reset", { orgId: user.orgId, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, data: { email: user.email, sessionsRevoked: true } });
   // `user` is the updated row, so the token issued here carries the new version.
@@ -294,6 +302,9 @@ authRoutes.post("/password/change", requireAuth, requireUser, rateLimit({ perMin
   // Outstanding reset links were issued for the old password; they should not outlive it.
   await db.update(passwordResetTokens).set({ usedAt: new Date() }).where(and(eq(passwordResetTokens.userId, user.id), isNull(passwordResetTokens.usedAt)));
   await audit(c, "auth.password_changed", { targetType: "user", targetId: user.id, data: { hadPassword, sessionsRevoked: true } });
+  // Same as a reset: addresses that were known for the OLD password are forgotten, whether or
+  // not there was a password before (an account claimed through Google sets its first one here).
+  await forgetOtherKnownAddresses(user.email, clientIp(c)).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a password change: ${(e as Error).message}`));
   if (hadPassword) {
     // They proved the old password. Earlier wrong guesses - here or on the login form - were
     // at a password that no longer exists, and this address has earned being known.
@@ -395,7 +406,7 @@ authRoutes.get("/google/callback", rateLimit({ perMinute: 30 }), async (c) => {
   const { db } = getDb();
   let resolved: GoogleResolution;
   try {
-    resolved = await resolveGoogleUser(identity);
+    resolved = await resolveGoogleUser(identity, { ip: clientIp(c) });
   } catch (e) {
     await audit(c, "auth.google_login", { orgId: null, actorType: "anonymous", result: "denied", data: { email: identity.email, reason: e instanceof ApiError ? e.code : "error" } });
     return fail(e instanceof ApiError ? e.message : "Sign-in failed");
@@ -557,5 +568,6 @@ export function publicUser(u: typeof users.$inferSelect) {
   return { id: u.id, email: u.email, name: u.name, role: u.role, createdAt: u.createdAt, hasPassword: hasUsablePassword(u.passwordHash), emailVerified: !!u.emailVerifiedAt, hasGoogle: !!u.googleSub };
 }
 export function publicOrg(o: typeof organizations.$inferSelect) {
-  return { id: o.id, name: o.name, slug: o.slug, plan: o.plan, limits: { ...limitsFor(o.plan), ...o.planLimits }, settings: o.settings, createdAt: o.createdAt };
+  // effectiveLimits: the plan's defaults with the usable stored overrides, never a junk value.
+  return { id: o.id, name: o.name, slug: o.slug, plan: o.plan, limits: effectiveLimits(o), settings: o.settings, createdAt: o.createdAt };
 }

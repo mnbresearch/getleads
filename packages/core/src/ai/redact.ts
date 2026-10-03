@@ -42,7 +42,10 @@ export function redact(text: unknown, opts: RedactOptions = {}): string {
   const env = opts.env ?? (typeof process !== "undefined" ? process.env : {});
   // Our own configured secrets first, by value: whatever shape they have, they are known.
   for (const [k, v] of Object.entries(env)) {
-    if (v && v.length >= 8 && SECRET_ENV.test(k) && out.includes(v)) out = out.split(v).join(`[${k}]`);
+    // Replaced by a neutral marker, not by the variable's NAME: this text is stored where
+    // customers read it (a search's error, a contact's last error), and "[SERPER_API_KEY]"
+    // tells them about the server's configuration and nothing they can use.
+    if (v && v.length >= 8 && SECRET_ENV.test(k) && out.includes(v)) out = out.split(v).join("[redacted-key]");
   }
   out = out
     // ?api_key=..., &token=..., &password=...

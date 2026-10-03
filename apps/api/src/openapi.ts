@@ -51,10 +51,151 @@ export function openapi(apiUrl: string) {
       "/v1/auth/google/status": { get: { tags: ["Auth"], security: [], summary: "Whether Sign in with Google is available", responses: ok(obj({ enabled: bool })) } },
       "/v1/auth/google/start": { get: { tags: ["Auth"], security: [], summary: "Browser redirect to Google. `cv` is base64url(SHA-256(verifier)) for a random verifier the web app keeps; `next` is a path in the app", parameters: [{ name: "cv", in: "query", required: true, schema: str }, { name: "next", in: "query", schema: str }], responses: { "302": { description: "Redirect to Google" } } } },
       "/v1/auth/google/exchange": { post: { tags: ["Auth"], security: [], summary: "Trade the one-time code from the Google callback (60 seconds, single use) plus the verifier for a session; same body as /v1/auth/login", requestBody: j(obj({ code: str, verifier: str }, ["code", "verifier"])), responses: ok() } },
-      "/v1/audit-log": { get: { tags: ["Account"], summary: "Security log for the workspace, newest first (owner/admin session only): sign-ins, password changes, API keys, admin changes", security: [{ bearerAuth: [] }], parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 50, maximum: 200 } }, { name: "before", in: "query", schema: str, description: "nextBefore from the previous page" }], responses: ok(obj({ entries: arr(obj({ id: str, action: str, actorType: str, actorEmail: str, targetType: str, targetId: str, result: { ...str, enum: ["ok", "denied", "failed"] }, ip: str, createdAt: str, data: { type: "object" } })), hasMore: bool, nextBefore: str })) } },
+      "/v1/audit-log": { get: { tags: ["Account"], summary: "Security log for the workspace, newest first (owner/admin session only): sign-ins, password changes, API keys, admin changes. `ip` is null on rows made by the platform operator (actorType \"admin\")", security: [{ bearerAuth: [] }], parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 50, maximum: 200 } }, { name: "before", in: "query", schema: str, description: "nextBefore from the previous page" }], responses: ok(obj({ entries: arr(obj({ id: str, action: str, actorType: str, actorEmail: str, targetType: str, targetId: str, result: { ...str, enum: ["ok", "denied", "failed"] }, ip: str, createdAt: str, data: { type: "object" } })), hasMore: bool, nextBefore: str })) } },
       "/v1/tools/team/invites/{id}": { delete: { tags: ["Team"], summary: "Revoke a pending invite (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/tools/team/invites/{id}/resend": { post: { tags: ["Team"], summary: "Re-send a pending invite and renew its 14-day expiry (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/webhooks/{id}/test": { post: { tags: ["Webhooks"], summary: "Deliver a webhook.test event to this webhook only, regardless of its event filter", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
+      "/v1/webhooks/{id}/rotate-secret": {
+        post: {
+          tags: ["Webhooks"],
+          summary: "Issue a new signing secret for this webhook (owner/admin). The new secret is returned once and the old one stops working at once. The webhook moves to signature v2 (HMAC-SHA256, sent as `v2=<hex>`), so update the receiver's verification together with the secret",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          responses: ok(obj({ id: str, secret: { ...str, description: "Shown once; store it now" }, signatureVersion: { type: "integer", enum: [2] } })),
+        },
+      },
+      "/v1/campaigns/email-accounts/{id}/retest": {
+        post: {
+          tags: ["Outreach"],
+          summary: "Test a sender account's connection again (owner/admin). Sets its status to \"active\" when the test passes and \"error\" when it does not; the result is in `test`",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          responses: ok(obj({ emailAccount: { type: "object", description: "The sender account's public fields, including its new `status`" }, test: obj({ ok: bool, error: str }, ["ok"]) })),
+        },
+      },
+      // ── Platform admin (operator only). Authenticate with the admin session token from
+      // /v1/admin/login as a Bearer token, or the server-to-server `x-admin-token` header. A
+      // customer session or API key is never accepted here. Every mutation answers
+      // `changed: false` (and writes nothing to the audit log) when it leaves things as they were. ──
+      "/v1/admin/login": {
+        post: {
+          tags: ["Admin"],
+          security: [],
+          summary: "Admin sign-in; returns a 12-hour session token. Five failed attempts from one address lock that address for 15 minutes; fifty failed attempts in 15 minutes lock the form for every address that has not signed in before (429 too_many_attempts with Retry-After)",
+          requestBody: j(obj({ email: str, password: str }, ["email", "password"])),
+          responses: ok(obj({ token: str })),
+        },
+      },
+      "/v1/admin/logout": {
+        post: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Sign the admin session out: the presented token is revoked and refused from the next request on. With the server-to-server token header (not a session) nothing is revoked and `revoked` is false",
+          responses: ok(obj({ ok: bool, revoked: bool, note: str }, ["ok", "revoked"])),
+        },
+      },
+      "/v1/admin/orgs": { get: { tags: ["Admin"], security: [{ bearerAuth: [] }], summary: "Workspaces, newest first. `q` matches the name, slug or a member's email as literal text (% and _ are not wildcards)", parameters: [{ name: "q", in: "query", schema: { ...str, maxLength: 200 } }], responses: ok(obj({ orgs: arr({ type: "object" }) })) } },
+      "/v1/admin/orgs/{id}": {
+        get: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "One workspace: its users, this month's usage, its effective limits and its overrides",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          responses: ok(obj({ org: { type: "object", description: "Includes `limits` (plan defaults with overrides applied) and `overrides`" }, overrides: { type: "object", description: "The workspace's limits that differ from its plan's defaults; empty when it simply has the plan's limits" }, users: arr({ type: "object" }), usage: { type: "object" }, period: str })),
+        },
+      },
+      "/v1/admin/orgs/{id}/plan": {
+        patch: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Change a workspace's plan and/or its limit overrides. `plan` must be one of the plan ids from /v1/admin/plans. Existing overrides are kept when `overrides` is omitted; pass `overrides` to replace them, or `{}` to clear them. Unknown override keys and values of the wrong kind are a 400",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          requestBody: j(
+            obj(
+              {
+                plan: { ...str, enum: ["free", "pilot", "starter", "growth", "scale", "enterprise"] },
+                overrides: {
+                  type: "object",
+                  additionalProperties: false,
+                  description: "Strict partial of the plan limits. Counts are whole numbers from 0 (0 = no limit for the monthly metrics; for premiumLeadsPerMonth 0 means none)",
+                  properties: Object.fromEntries([
+                    ...["leadsPerMonth", "premiumLeadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth", "campaigns", "seats"].map((k) => [k, { type: "integer", minimum: 0, maximum: 1000000000 }]),
+                    ["apiAccess", bool],
+                    ["integrations", bool],
+                    ["emailsPerDay", { type: "integer", minimum: 1, maximum: 1000000000, description: "Daily sending ceiling for this workspace" }],
+                  ]),
+                },
+              },
+              ["plan"],
+            ),
+          ),
+          responses: ok(obj({ id: str, plan: str, limits: { type: "object" }, overrides: { type: "object" }, changed: bool, note: str }, ["id", "plan", "limits", "overrides", "changed"])),
+        },
+      },
+      "/v1/admin/orgs/{id}/status": {
+        patch: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Activate, deactivate or revoke a workspace",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          requestBody: j(obj({ status: { ...str, enum: ["active", "deactivated", "revoked"] } }, ["status"])),
+          responses: ok(obj({ id: str, status: str, changed: bool }, ["id", "status", "changed"])),
+        },
+      },
+      "/v1/admin/orgs/{id}/credits": {
+        patch: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Adjust this month's used-count for one metric. `grant` gives usage back (a negative amount adds usage); `set` pins the used-count. The result never goes below 0, and `note` says so when the request asked for more than could be done. Granting does not raise the plan's allowance - use a plan override for that",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          requestBody: j(
+            obj(
+              {
+                metric: { ...str, enum: ["leads", "premiumLeads", "searches", "verifications", "aiMessages", "emails"] },
+                action: { ...str, enum: ["grant", "set"], description: "Also accepted as `mode`" },
+                amount: { type: "integer", minimum: -1000000, maximum: 1000000 },
+              },
+              ["metric", "action", "amount"],
+            ),
+          ),
+          responses: ok(obj({ metric: str, period: str, used: { type: "integer" }, limit: { type: ["integer", "null"], description: "The allowance this is measured against; null when the plan has no limit for this metric" }, changed: bool, note: str }, ["metric", "period", "used", "limit", "changed"])),
+        },
+      },
+      "/v1/admin/upgrade-requests": {
+        get: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Upgrade requests from the pricing page, newest first. `orgId` and `orgName` are the workspace the request came from, or null when the person was not signed in",
+          parameters: [{ name: "status", in: "query", schema: { ...str, enum: ["new", "contacted", "converted", "dismissed"] } }],
+          responses: ok(obj({ requests: arr(obj({ id: str, orgId: { type: ["string", "null"] }, orgName: { type: ["string", "null"] }, name: str, email: str, mobile: str, country: str, planId: str, message: { type: ["string", "null"] }, status: str, createdAt: str })) })),
+        },
+      },
+      "/v1/admin/upgrade-requests/{id}": {
+        patch: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Set an upgrade request's status",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          requestBody: j(obj({ status: { ...str, enum: ["new", "contacted", "converted", "dismissed"] } }, ["status"])),
+          responses: ok({ type: "object", description: "The request, plus `changed`" }),
+        },
+      },
+      "/v1/admin/tools/check": {
+        post: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Test every configured provider key with one free or minimal call. `summary` says how many were tested and passed; `notTested` lists providers that hold a key but have no free test call, with the reason. With no key configured the summary is \"No provider keys are configured, so nothing was tested.\"",
+          responses: ok(obj({ results: arr({ type: "object" }), checkedAt: str, retired: arr(), tested: { type: "integer" }, passed: { type: "integer" }, notTested: arr(obj({ provider: str, label: str, reason: str })), summary: str })),
+        },
+      },
+      "/v1/admin/tools/{provider}": {
+        patch: {
+          tags: ["Admin"],
+          security: [{ bearerAuth: [] }],
+          summary: "Set a provider's usage limit, period, alert threshold or notes",
+          parameters: [{ name: "provider", in: "path", required: true, schema: str }],
+          requestBody: j(obj({ usageLimit: { type: ["integer", "null"], minimum: 0, maximum: 1000000000 }, period: { ...str, enum: ["day", "month"] }, alertThresholdPct: { type: "integer", minimum: 1, maximum: 100 }, notes: { type: ["string", "null"], maxLength: 2000 } })),
+          responses: ok({ type: "object", description: "The provider's row, plus `changed`" }),
+        },
+      },
       "/v1/auth/me": { get: { tags: ["Auth"], summary: "Current identity + plan limits", responses: ok() } },
       "/v1/auth/api-keys": { get: { tags: ["Auth"], summary: "List API keys", responses: ok() }, post: { tags: ["Auth"], summary: "Create API key", requestBody: j(obj({ name: str }, ["name"])), responses: ok() } },
       "/v1/search": {
@@ -101,7 +242,7 @@ export function openapi(apiUrl: string) {
       "/v1/campaigns/generate": { post: { tags: ["Outreach"], summary: "Generate an AI-personalized email for a lead (no campaign needed)", requestBody: j(obj({ leadId: str, lead: { type: "object" }, sender: obj({ name: str, company: str, title: str, valueProp: str, signature: str, tone: str }, ["name", "company", "valueProp"]), instructions: str, stepNo: num, language: str }, ["sender"])), responses: ok(obj({ subject: str, body: str, personalized: bool })) } },
       "/v1/campaigns/inbound": { post: { tags: ["Outreach"], summary: "Ingest an inbound reply (stops sequence, classifies intent)", requestBody: j(obj({ from: str, text: str, subject: str }, ["from"])), responses: ok() } },
       "/v1/campaigns/email-accounts": { get: { tags: ["Outreach"], summary: "List sender accounts", responses: ok() }, post: { tags: ["Outreach"], summary: "Add sender (Resend / SMTP / system)", requestBody: j(obj({ provider: { ...str, enum: ["resend", "smtp", "system"] }, fromName: str, fromEmail: str, replyTo: str, signature: str, dailyLimit: num, config: { type: "object" } }, ["provider", "fromName", "fromEmail"])), responses: ok() } },
-      "/v1/campaigns/{id}/enroll": { post: { tags: ["Outreach"], summary: "Enroll leads", parameters: [{ name: "id", in: "path", required: true, schema: str }], requestBody: j(obj({ leadIds: arr(), fromList: bool, minScore: num })), responses: ok() } },
+      "/v1/campaigns/{id}/enroll": { post: { tags: ["Outreach"], summary: "Enroll leads", parameters: [{ name: "id", in: "path", required: true, schema: str }], requestBody: j(obj({ leadIds: arr(), fromList: bool, minScore: num })), responses: ok({ type: "object", description: "Enrollment counts. `skippedInvalidEmail` is the number of leads left out because their stored email is not one valid address", properties: { skippedInvalidEmail: { type: "integer" } } }) } },
       "/v1/campaigns/{id}/start": { post: { tags: ["Outreach"], summary: "Start campaign", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/campaigns/{id}/pause": { post: { tags: ["Outreach"], summary: "Pause campaign", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/campaigns/{id}/preview": { post: { tags: ["Outreach"], summary: "Preview personalized copy for a lead", parameters: [{ name: "id", in: "path", required: true, schema: str }], requestBody: j(obj({ leadId: str, stepNo: num }, ["leadId"])), responses: ok() } },

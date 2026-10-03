@@ -1,13 +1,26 @@
-import { useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { Navigate, useNavigate } from "react-router-dom";
 import { Logo } from "../components/Logo";
-import { adminAuth, adminFetch } from "../lib/adminApi";
+import { adminAuth, adminFetch, adminSessionExpiredNotice, useAdminToken } from "../lib/adminApi";
 
 export function AdminLoginPage() {
   const [form, setForm] = useState({ email: "", password: "" });
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
   const navigate = useNavigate();
+  const token = useAdminToken();
+
+  useEffect(() => {
+    // Why the admin is looking at a sign-in form mid-task. Only set here, never cleared:
+    // StrictMode runs this twice and the second read is already empty.
+    const n = adminSessionExpiredNotice();
+    if (n) setNotice(n);
+  }, []);
+
+  // Already signed in: the form has nothing to offer. (A token the server no longer accepts
+  // is dropped by the dashboard's own session check, which lands back here with the notice.)
+  if (token) return <Navigate to="/admin" replace />;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -16,7 +29,7 @@ export function AdminLoginPage() {
     try {
       const r = await adminFetch<{ token: string }>("POST", "/v1/admin/login", form);
       adminAuth.set(r.token);
-      navigate("/admin");
+      navigate("/admin", { replace: true });
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -34,7 +47,8 @@ export function AdminLoginPage() {
         <h1 className="text-lg font-semibold text-ink-50">Sign in</h1>
         <div><label className="label" htmlFor="admin-email">Admin email</label><input id="admin-email" className="input" autoComplete="email" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
         <div><label className="label" htmlFor="admin-password">Password</label><input id="admin-password" className="input" autoComplete="current-password" type="password" required value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></div>
-        {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600">{err}</div>}
+        {notice && !err && <div className="rounded-lg bg-amber-50 p-2 text-sm text-amber-800" role="status">{notice}</div>}
+        {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600" role="alert">{err}</div>}
         <button className="btn-primary w-full justify-center" disabled={busy}>{busy ? "…" : "Sign in"}</button>
       </form>
     </div>

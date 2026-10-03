@@ -18,7 +18,20 @@ export interface SendResult {
   providerMessageId?: string;
   provider: string;
   error?: string;
+  /**
+   * The customer's SMTP settings were refused before any connection was made (a port that
+   * is not a mail port, a host that is not public). `error` is then a sentence written for
+   * the customer - safe to show as it is, and the only failure text that is.
+   */
+  refused?: boolean;
 }
+
+/**
+ * What a failed send says when the PLATFORM has no mail provider set up. It reaches
+ * customers (an invite that could not be emailed, a send's failure reason), so it names no
+ * server setting; which settings are missing goes to the log.
+ */
+export const NO_PLATFORM_MAILER = "Email sending is not set up on our side";
 
 export interface MailerConfig {
   provider: "resend" | "smtp" | "system";
@@ -127,7 +140,8 @@ export async function sendMail(cfg: MailerConfig | null, input: SendInput): Prom
       console.log(`[mailer:dev] to=${input.to} subject=${input.subject}\n${input.text}\n`);
       return { ok: true, provider: "console", providerMessageId: `dev-${Date.now()}` };
     }
-    return { ok: false, provider: "none", error: "No email provider configured (set RESEND_API_KEY or SMTP_*)" };
+    console.warn("[mailer] no email provider configured (set RESEND_API_KEY or SMTP_*); nothing was sent");
+    return { ok: false, provider: "none", error: NO_PLATFORM_MAILER };
   }
   try {
     if (c.provider === "resend") {
@@ -154,6 +168,9 @@ export async function sendMail(cfg: MailerConfig | null, input: SendInput): Prom
     const info = await transport.sendMail({ from: input.from, to: input.to, subject: input.subject, text: input.text, html: input.html, replyTo: input.replyTo, headers: input.headers });
     return { ok: true, provider: "smtp", providerMessageId: info.messageId };
   } catch (e) {
+    // A setting we would not connect to, as opposed to a server that turned us away: the
+    // message is ours and says what to change, so callers may show it (see `refused`).
+    if (e instanceof SmtpTargetRefused) return { ok: false, provider: c.provider, error: e.message, refused: true };
     return { ok: false, provider: c.provider, error: (e as Error).message };
   }
 }

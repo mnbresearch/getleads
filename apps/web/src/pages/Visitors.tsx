@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
+import { plural, pluralWord } from "../lib/plural";
 
 interface Pixel { id: string; key: string; name: string; snippet: string; active: boolean; createdAt: string }
 interface VC { id: string; domain: string; name: string | null; firstSeenAt: string; lastSeenAt: string; visits: number; sessions: number; pages: Record<string, number>; intentScore: number; status: string; leadsFound: number; company: { name: string | null; industry: string | null; description: string | null; location: string | null; techStack: string[]; openRoles: number | null } | null }
@@ -43,7 +44,7 @@ export function VisitorsPage() {
     try {
       const r = await apiFetch<{ people: unknown[]; savedLeadIds: string[]; stopped?: string }>("POST", `/v1/visitors/${vc.domain}/decision-makers`, {});
       // A quota stop is said out loud: a short list must not read as "that is all there was".
-      toast(`${r.people.length} decision makers found, ${r.savedLeadIds.length} saved as leads${r.stopped ? `. ${r.stopped}` : ""}`, r.stopped ? "err" : "ok");
+      toast(`${plural(r.people.length, "decision maker")} found, ${r.savedLeadIds.length} saved as ${pluralWord(r.savedLeadIds.length, "lead")}${r.stopped ? `. ${r.stopped}` : ""}`, r.stopped ? "err" : "ok");
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
@@ -100,7 +101,7 @@ export function VisitorsPage() {
         {/* The day filter picks which companies are listed (seen in the window); the per-company
             visits, sessions and pages are running totals since first seen. Said here so a
             "last 7 days" view with 400 visits isn't read as 400 visits this week. */}
-        <span className="self-center text-xs text-ink-400">Companies seen in the last {days} days. Visits, sessions and pages per company are all-time totals.</span>
+        <span className="self-center text-xs text-ink-400">Companies seen in the last {plural(days, "day")}. Visits, sessions and pages per company are all-time totals.</span>
       </div>
       {loading ? <Spinner /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No identified companies yet" hint="Once the pixel is installed, business visitors appear here within seconds of their visit. Consumer ISPs and cloud/hosting IPs are filtered out." /> : (
         <div className="card overflow-x-auto">
@@ -119,10 +120,10 @@ export function VisitorsPage() {
                   ><div className="font-medium">{v.company?.name ?? v.name ?? v.domain}</div><div className="text-xs text-ink-400">{v.domain}{v.company?.industry ? ` · ${v.company.industry}` : ""}{v.company?.location ? ` · ${v.company.location}` : ""}</div></td>
                   <td className="td"><ScoreBar score={v.intentScore} /></td>
                   <td className="td text-xs text-ink-300">{Object.entries(v.pages).sort((a, b) => b[1] - a[1]).slice(0, 3).map(([p, n]) => <div key={p}>{p} <span className="text-ink-500">×{n}</span></div>)}</td>
-                  <td className="td tabular-nums">{v.visits} <span className="text-xs text-ink-500">/ {v.sessions} sessions</span></td>
+                  <td className="td tabular-nums">{v.visits} <span className="text-xs text-ink-500">/ {plural(v.sessions, "session")}</span></td>
                   <td className="td text-xs text-ink-400">{fmtDate(v.lastSeenAt)}</td>
                   <td className="td"><select className="input py-1 text-xs" value={v.status} onChange={(e) => setStat(v, e.target.value)}>{["new", "reviewed", "contacted", "ignored"].map((s) => <option key={s}>{s}</option>)}</select></td>
-                  <td className="td text-right"><button className="btn-primary py-1" disabled={busy} onClick={() => findPeople(v)}>{v.leadsFound ? `+${v.leadsFound} leads · more` : "Find decision makers"}</button></td>
+                  <td className="td text-right"><button className="btn-primary py-1" disabled={busy} onClick={() => findPeople(v)}>{v.leadsFound ? `+${plural(v.leadsFound, "lead")} · more` : "Find decision makers"}</button></td>
                 </tr>
               ))}
             </tbody>

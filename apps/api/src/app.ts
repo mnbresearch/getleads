@@ -213,8 +213,12 @@ export function createApp(opts: AppOptions = {}) {
     const p = c.req.path;
     if ((p.startsWith("/v1/auth/") || p.startsWith("/v1/admin/") || p.startsWith("/internal/")) && !c.res.headers.has("cache-control")) c.res.headers.set("cache-control", "no-store");
   });
-  // Before anything reads a body.
-  app.use("*", requestBodyLimit());
+  // CORS comes BEFORE the body limit (and before every route). The limiter answers 413 itself
+  // without calling the rest of the chain, so with CORS registered after it that 413 carried no
+  // Access-Control-Allow-Origin: the browser refused to show it to the web app, and a person
+  // uploading a file that was too large was told "Could not reach the server" instead of the
+  // size limit. Registered first, the headers are already on the response whatever answers -
+  // the limiter, a route, the error handler or the 404 handler.
   app.use("/px/*", cors({ origin: "*", allowMethods: ["POST", "GET", "OPTIONS"], allowHeaders: ["content-type"] }));
   app.use(
     "/v1/*",
@@ -231,6 +235,8 @@ export function createApp(opts: AppOptions = {}) {
       maxAge: 86400,
     }),
   );
+  // Before anything reads a body.
+  app.use("*", requestBodyLimit());
 
   app.get("/", (c) => c.json({ name: "Scout API", version: "1.0.0", docs: `${env.apiUrl}/docs`, openapi: `${env.apiUrl}/openapi.json`, health: `${env.apiUrl}/health` }));
   app.get("/health", async (c) => {

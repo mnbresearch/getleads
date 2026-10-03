@@ -3,6 +3,7 @@ import { Link } from "react-router-dom";
 import { apiFetch, fmtNum } from "../lib/api";
 import { metricLabel } from "../lib/metrics";
 import { LoadError, Page, Spinner, Stat } from "../components/ui";
+import { plural } from "../lib/plural";
 
 interface Overview {
   leads: { total: number; withEmail: number; verified: number; last7d: number; avgScore: number };
@@ -44,7 +45,7 @@ export function Dashboard() {
         <Stat label="Leads" value={fmtNum(d.leads.total)} hint={`${fmtNum(d.leads.last7d)} in last 7 days`} />
         <Stat label="Verified emails" value={fmtNum(d.leads.verified)} hint={`${fmtNum(d.leads.withEmail)} with any email`} />
         <Stat label="Emails sent" value={fmtNum(d.messages.sent)} hint={`${d.messages.sent ? Math.round((d.messages.opened / d.messages.sent) * 100) : 0}% opened · ${d.messages.sent ? Math.round((d.messages.replied / d.messages.sent) * 100) : 0}% replied`} />
-        <Stat label="Active campaigns" value={fmtNum(d.campaigns.active)} hint={`${fmtNum(d.companies)} companies tracked`} />
+        <Stat label="Active campaigns" value={fmtNum(d.campaigns.active)} hint={`${plural(d.companies, "company")} tracked`} />
       </div>
 
       {/* The hot list failing used to hide the card, which reads as "nobody to contact today". */}
@@ -90,7 +91,7 @@ export function Dashboard() {
           ) : (
           <div className="flex h-40 items-end gap-[3px]">
             {d.daily.map((x) => (
-              <div key={x.day} className="group relative flex flex-1 items-end gap-px" title={`${x.day}: ${x.leads} leads, ${x.sent} sent, ${x.replied} replied`}>
+              <div key={x.day} className="group relative flex flex-1 items-end gap-px" title={`${x.day}: ${plural(x.leads, "lead")}, ${x.sent} sent, ${x.replied} replied`}>
                 <div className="flex-1 rounded-t bg-brand-400" style={{ height: `${(x.leads / max) * 100}%` }} />
                 <div className="flex-1 rounded-t bg-emerald-400" style={{ height: `${(x.sent / max) * 100}%` }} />
                 <div className="flex-1 rounded-t bg-amber-400" style={{ height: `${(x.replied / max) * 100}%` }} />

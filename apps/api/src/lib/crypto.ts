@@ -29,7 +29,8 @@ const V2 = "v2";
 /** Thrown by decryptJsonStrict / decrypt when a stored blob exists but cannot be read. */
 export class CredentialUnreadableError extends Error {
   readonly code = "ECREDUNREADABLE";
-  constructor(message = "A stored credential could not be decrypted. It was encrypted with a key this server no longer has (ENCRYPTION_KEY / JWT_SECRET changed) or the stored value is damaged. Re-enter the credential, or restore the previous key in ENCRYPTION_KEYS_OLD.") {
+  // The default message can reach a job error a customer can read, so it names no server setting.
+  constructor(message = "A saved credential could not be read. Reconnect that sender or integration in Settings.") {
     super(message);
     this.name = "CredentialUnreadableError";
   }

@@ -4,6 +4,7 @@ import { z } from "zod";
 import { QuotaExceededError, consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
 import { generateOutreach, runLeadPipelineDetailed } from "@prospex/core";
 import { aiFor } from "../lib/ai.js";
+import { blockedByProvidersNote } from "../services/notes.js";
 import { env } from "../env.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { findExistingLead, pipelineLeadToInput, upsertLead } from "../services/leads.js";
@@ -96,7 +97,7 @@ agentRoutes.post(
       providerFailures: providerFailures.length ? providerFailures : undefined,
       note:
         out.length === 0 && providerFailures.length
-          ? `No leads came back because ${providerFailures.length === 1 ? "a data source" : `${providerFailures.length} data sources`} could not answer: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nobody matching.`
+          ? blockedByProvidersNote(providerFailures, "This is not the same as nobody matching.")
           : undefined,
       notes: notes?.length ? notes : undefined,
       next: "Use POST /v1/campaigns to sequence these leads, or POST /v1/integrations/{provider}/sync to push to a CRM.",

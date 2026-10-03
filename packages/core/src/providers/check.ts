@@ -349,6 +349,64 @@ export async function checkResend(raw = process.env.RESEND_API_KEY): Promise<Pro
   return r;
 }
 
+/**
+ * Groq: the model list. A free, read-only call that needs a valid key and spends no tokens.
+ */
+export async function checkGroq(raw = process.env.GROQ_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
+  if (!apiKey) return notConfigured("groq", "GROQ_API_KEY");
+  return run("groq", "GET /openai/v1/models", () =>
+    fetchWithTimeout("https://api.groq.com/openai/v1/models", { timeoutMs: TIMEOUT, headers: { authorization: `Bearer ${apiKey}` } }),
+    shape,
+  );
+}
+
+/**
+ * Gemini: the model list (one row). Free and read-only. Google answers a bad key with 400
+ * "API key not valid", which classifyHttp reads as a rejected key rather than a bad request.
+ */
+export async function checkGemini(raw = process.env.GEMINI_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
+  if (!apiKey) return notConfigured("gemini", "GEMINI_API_KEY");
+  return run("gemini", "GET /v1beta/models", () =>
+    // The key goes in a header, not the URL, so it cannot end up in a proxy or error log.
+    fetchWithTimeout("https://generativelanguage.googleapis.com/v1beta/models?pageSize=1", { timeoutMs: TIMEOUT, headers: { "x-goog-api-key": apiKey } }),
+    shape,
+  );
+}
+
+/** Anthropic: the model list. Free and read-only; no tokens are generated. */
+export async function checkAnthropic(raw = process.env.ANTHROPIC_API_KEY): Promise<ProviderCheck> {
+  const { value: apiKey, shape } = readSecret(raw);
+  if (!apiKey) return notConfigured("anthropic", "ANTHROPIC_API_KEY");
+  return run("anthropic", "GET /v1/models", () =>
+    fetchWithTimeout("https://api.anthropic.com/v1/models?limit=1", { timeoutMs: TIMEOUT, headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" } }),
+    shape,
+  );
+}
+
+/** ipinfo: the account endpoint, which does not count as a lookup. */
+export async function checkIpinfo(raw = process.env.IPINFO_TOKEN): Promise<ProviderCheck> {
+  const { value: token, shape } = readSecret(raw);
+  if (!token) return notConfigured("ipinfo", "IPINFO_TOKEN");
+  return run("ipinfo", "GET /me", () =>
+    // Same call the "Credits left" page already makes for this provider.
+    fetchWithTimeout(`https://ipinfo.io/me?token=${encodeURIComponent(token)}`, { timeoutMs: TIMEOUT, headers: { accept: "application/json" } }),
+    shape,
+  );
+}
+
+/**
+ * Providers that hold a key but are deliberately NOT part of "Test all keys", with the reason
+ * an operator is shown. A check is only added where the provider offers a free call with no
+ * side effects; for these, the only way to prove the key is to spend quota or send something.
+ * Listed so the summary can say what it did not test instead of implying it tested everything.
+ */
+export const UNTESTED_PROVIDERS: Record<string, { envVar: string; reason: string }> = {
+  abstract_email: { envVar: "ABSTRACT_EMAIL_API_KEY", reason: "Abstract has no free account endpoint: every call validates an address and uses one of the monthly validations." },
+  whatsapp_cloud: { envVar: "WHATSAPP_ACCESS_TOKEN", reason: "The WhatsApp Cloud API has no read-only call that proves the token without the phone number it sends from; it is only exercised by sending a message." },
+};
+
 export const PROVIDER_CHECKS: { provider: string; label: string; run: () => Promise<ProviderCheck> }[] = [
   { provider: "apollo", label: "Apollo (people search)", run: () => checkApollo() },
   { provider: "apollo-enrich", label: "Apollo (people match)", run: () => checkApolloEnrich() },
@@ -361,6 +419,10 @@ export const PROVIDER_CHECKS: { provider: string; label: string; run: () => Prom
   { provider: "resend", label: "Resend", run: () => checkResend() },
   { provider: "reoon", label: "Reoon (verification)", run: () => checkReoon() },
   { provider: "millionverifier", label: "MillionVerifier (verification)", run: () => checkMillionVerifier() },
+  { provider: "groq", label: "Groq (AI)", run: () => checkGroq() },
+  { provider: "gemini", label: "Google Gemini (AI)", run: () => checkGemini() },
+  { provider: "anthropic", label: "Anthropic Claude (AI)", run: () => checkAnthropic() },
+  { provider: "ipinfo", label: "ipinfo.io", run: () => checkIpinfo() },
 ];
 
 /**

@@ -5,6 +5,7 @@ import { BUCKET_COPY, type ClientAttention, type ClientRow, type ClientStats, ty
 import { ClientDot, ClientFormModal, StatusPill, TargetBar, type ClientFormValue, toClientPayload } from "../components/ClientBits";
 import { EmailStatusBadge, LoadError, Page, ScoreBar, Spinner, Stat, useFlash, useToast } from "../components/ui";
 import { useMe } from "../lib/me";
+import { plural } from "../lib/plural";
 
 interface Detail {
   client: Omit<ClientRow, "stats" | "attention" | "target"> & { shareToken: string | null };
@@ -65,7 +66,7 @@ export function ClientDetailPage() {
       const more = r.remainingInBucket ? ` ${r.remainingInBucket} more remain - run it again after these finish.` : "";
       const quota = r.skippedForQuota ? ` ${r.skippedForQuota} not queued: your plan has no verifications left this month.` : "";
       if (r.note) toast(r.note + quota, r.skippedForQuota ? "err" : "ok");
-      else if (copy.action === "list") toast(`${r.added} added to "${r.listName}"${r.alreadyOnList ? `, ${r.alreadyOnList} were already on it` : ""}. Point a campaign at that list.${more}`);
+      else if (copy.action === "list") toast(`${r.added} added to "${r.listName}"${r.alreadyOnList ? `, ${r.alreadyOnList} ${r.alreadyOnList === 1 ? "was" : "were"} already on it` : ""}. Point a campaign at that list.${more}`);
       else toast(`${r.queued} queued - results land over the next few minutes.${quota}${more}`);
       setTimeout(load, 1500);
     } catch (e) {
@@ -98,11 +99,11 @@ export function ClientDetailPage() {
   };
 
   const remove = async () => {
-    if (!confirm(`Delete ${c.name}? Its ${d.stats.leads} leads go back to the pool - nothing about them is lost.`)) return;
+    if (!confirm(`Delete ${c.name}? Its ${plural(d.stats.leads, "lead")} ${d.stats.leads === 1 ? "goes" : "go"} back to the pool - nothing about them is lost.`)) return;
     try {
       const r = await apiFetch<{ leadsReturnedToPool: number }>("DELETE", `/v1/clients/${id}`);
       // This page unmounts on navigate, taking its toast with it; /clients shows the message.
-      navigate("/clients", { state: { flash: `Deleted ${c.name}. ${r.leadsReturnedToPool} leads returned to the pool.` } });
+      navigate("/clients", { state: { flash: `Deleted ${c.name}. ${plural(r.leadsReturnedToPool, "lead")} returned to the pool.` } });
     } catch (e) {
       toast((e as Error).message, "err");
     }
@@ -209,7 +210,7 @@ export function ClientDetailPage() {
               {d.campaigns.map((k) => (
                 <li key={k.id} className="flex items-center justify-between py-2 text-sm">
                   <Link to={`/campaigns/${k.id}`} className="font-medium text-ink-50 hover:text-brand-700">{k.name}</Link>
-                  <span className="text-xs text-ink-400">{k.status} · {k.contacts} contacts{k.stats.replied ? ` · ${k.stats.replied} replied` : ""}</span>
+                  <span className="text-xs text-ink-400">{k.status} · {plural(k.contacts, "contact")}{k.stats.replied ? ` · ${k.stats.replied} replied` : ""}</span>
                 </li>
               ))}
             </ul>

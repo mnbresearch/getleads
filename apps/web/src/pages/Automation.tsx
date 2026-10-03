@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ProspexError, apiFetch, fmtDate } from "../lib/api";
 import { Empty, LoadError, Page, Spinner, useToast } from "../components/ui";
+import { plural } from "../lib/plural";
 
 interface AgentRun { id: string; agentType: string; status: string; rowsCreated: number | null; error: string | null; startedAt: string; completedAt: string | null }
 interface JobChange {
@@ -56,7 +57,7 @@ export function AutomationPage() {
     try {
       const r = await apiFetch<{ found: number; created: number; duplicates: number; note?: string }>("POST", "/v1/automation/discover", { query, count: 25, preview });
       // One toast: a second call replaced the first before anyone could read the counts.
-      const summary = preview ? `Would store ${r.found} leads` : `Found ${r.found}, stored ${r.created} new, ${r.duplicates} already known`;
+      const summary = preview ? `Would store ${plural(r.found, "lead")}` : `Found ${r.found}, stored ${r.created} new, ${r.duplicates} already known`;
       toast(r.note ? `${summary}. ${r.note}` : summary);
       load();
     } catch (e) {

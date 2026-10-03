@@ -6,6 +6,7 @@ import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertLead } from
 import { enrollEligibleLeads } from "./campaigns.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
+import { blockedByProvidersNote } from "./notes.js";
 
 /**
  * Autopilot: an autonomous prospecting agent. Every day it finds N fresh leads for a saved query,
@@ -79,14 +80,12 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
       // The same filters as the enroll route: a usable address, and the campaign's client.
       const r = await enrollEligibleLeads(cp, ids);
       enrolled = r.enrolled;
-      enrollNote = { skippedNoEmail: r.skippedNoEmail, skippedOtherClient: r.skippedOtherClient };
+      enrollNote = { skippedNoEmail: r.skippedNoEmail, skippedInvalidEmail: r.skippedInvalidEmail, skippedOtherClient: r.skippedOtherClient };
     }
   }
   // Found nothing because the sources could not answer is not "nothing matched today".
   const blocked = results.length === 0 && providerFailures.length > 0;
-  const note = blocked
-    ? `No leads were returned, and ${providerFailures.length} data source(s) could not answer: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nobody matching.`
-    : stoppedBecause;
+  const note = blocked ? blockedByProvidersNote(providerFailures, "This is not the same as nobody matching.") : stoppedBecause;
   await recordRun(ap, { found: results.length, saved, enrolled, note });
   await emitEvent(ap.orgId, "autopilot.ran", { autopilotId: ap.id, found: results.length, saved, enrolled, note, providerFailures }, { type: "autopilot", id: ap.id });
   return { found: results.length, qualified: qualified.length, saved, enrolled, ...enrollNote, providerFailures, note };

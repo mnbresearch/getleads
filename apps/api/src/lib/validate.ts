@@ -1,6 +1,6 @@
 import { zValidator as baseValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
-import { z, type ZodError, type ZodTypeAny } from "zod";
+import { z, type ZodError, type ZodIssue, type ZodTypeAny } from "zod";
 import { stripNulDeep } from "./sanitize.js";
 
 /** Path segments that only group fields; naming them adds nothing ("Settings daily limit"). */
@@ -43,16 +43,120 @@ export function humanizePath(path: (string | number)[], fallback = "body"): stri
   return out.join(" ");
 }
 
+const n = (v: unknown) => (typeof v === "bigint" ? v.toString() : typeof v === "number" ? v.toLocaleString("en-US") : String(v));
+const TYPE_WORDS: Record<string, string> = {
+  string: "text",
+  number: "a number",
+  integer: "a whole number",
+  float: "a number",
+  bigint: "a whole number",
+  boolean: "true or false",
+  array: "a list",
+  object: "an object",
+  date: "a date",
+};
+
 /**
- * Turn zod issues into one readable sentence: "Email: Invalid email; Body template: Required".
+ * One zod issue as a sentence a person can act on, or null when zod's own wording is not
+ * one of the ones translated here.
+ *
+ * Zod's defaults are written for a developer reading a stack trace: "String must contain at
+ * most 300 character(s)", "Expected number, received nan". They reached customers verbatim -
+ * in a toast after saving a form, and as the reason a CSV row was skipped.
+ */
+function plainIssue(field: string, issue: ZodIssue): string | null {
+  switch (issue.code) {
+    case "too_big": {
+      const max = n(issue.maximum);
+      if (issue.type === "string") return issue.exact ? `${field} must be exactly ${max} character${issue.maximum === 1 ? "" : "s"} long` : `${field} is too long (${max} character${issue.maximum === 1 ? "" : "s"} at most)`;
+      if (issue.type === "number" || issue.type === "bigint") return issue.inclusive ? `${field} must be ${max} or less` : `${field} must be less than ${max}`;
+      if (issue.type === "array" || issue.type === "set") return `${field} has too many items (${max} at most)`;
+      return null;
+    }
+    case "too_small": {
+      const min = n(issue.minimum);
+      if (issue.type === "string") {
+        if (issue.exact) return `${field} must be exactly ${min} character${issue.minimum === 1 ? "" : "s"} long`;
+        // "At least 1 character" is an empty box: say that.
+        return issue.minimum === 1 ? `${field} is required` : `${field} is too short (at least ${min} characters)`;
+      }
+      if (issue.type === "number" || issue.type === "bigint") return issue.inclusive ? `${field} must be ${min} or more` : `${field} must be more than ${min}`;
+      if (issue.type === "array" || issue.type === "set") return `${field} needs at least ${min} item${issue.minimum === 1 ? "" : "s"}`;
+      return null;
+    }
+    case "invalid_type": {
+      if (issue.received === "undefined" || issue.received === "null") return `${field} is required`;
+      if (issue.received === "nan" || issue.expected === "number" || issue.expected === "float") return `${field} must be a number`;
+      const want = TYPE_WORDS[issue.expected];
+      return want ? `${field} must be ${want}` : null;
+    }
+    case "invalid_enum_value":
+      return `${field} must be one of: ${issue.options.slice(0, 20).map(String).join(", ")}`;
+    case "invalid_literal":
+      return `${field} must be ${JSON.stringify(issue.expected)}`;
+    case "invalid_string": {
+      if (issue.validation === "email") return `${field} is not a valid email address`;
+      if (issue.validation === "url") return `${field} is not a valid web address`;
+      if (issue.validation === "uuid") return `${field} is not a valid id`;
+      if (issue.validation === "datetime") return `${field} is not a valid date and time`;
+      if (issue.validation === "date") return `${field} is not a valid date`;
+      if (issue.validation === "regex") return `${field} is not in the expected format`;
+      return null;
+    }
+    case "invalid_date":
+      return `${field} is not a valid date`;
+    case "not_multiple_of":
+      return `${field} must be a multiple of ${n(issue.multipleOf)}`;
+    case "not_finite":
+      return `${field} must be a number`;
+    case "invalid_union":
+    case "invalid_union_discriminator":
+      return `${field} is not valid`;
+    case "unrecognized_keys":
+      return `${field} has ${issue.keys.length === 1 ? "a field" : "fields"} that ${issue.keys.length === 1 ? "is" : "are"} not accepted: ${issue.keys.slice(0, 10).join(", ")}`;
+    default:
+      return null;
+  }
+}
+
+/** Messages our own schemas write that are zod-flavoured shorthand; the same plain wording. */
+const OWN_SHORTHAND: Record<string, (field: string) => string> = {
+  "Invalid email": (f) => `${f} is not a valid email address`,
+  Required: (f) => `${f} is required`,
+};
+
+/**
+ * One issue as the customer reads it.
+ *
+ * A message a schema wrote ITSELF (`.regex(HHMM, "Use 24-hour HH:MM, e.g. 09:00")`) is
+ * already written for a person and is kept, after the field's name: "Send window start: Use
+ * 24-hour HH:MM, e.g. 09:00". Only zod's built-in wording is replaced.
+ */
+export function describeIssue(issue: ZodIssue, fallbackPath = "body"): string {
+  const field = humanizePath(issue.path, fallbackPath);
+  let builtIn: string | undefined;
+  try {
+    builtIn = z.defaultErrorMap(issue as Parameters<typeof z.defaultErrorMap>[0], { defaultError: "Invalid input", data: undefined }).message;
+  } catch {
+    builtIn = undefined;
+  }
+  if (builtIn !== undefined && issue.message === builtIn) return plainIssue(field, issue) ?? `${field}: ${issue.message}`;
+  const own = OWN_SHORTHAND[issue.message];
+  return own ? own(field) : `${field}: ${issue.message}`;
+}
+
+/**
+ * Turn zod issues into one readable sentence: "Email is not a valid email address; Body
+ * template is required".
  *
  * The field name is what makes it actionable. "Invalid input" says something is wrong; the
- * name says which box on the form to look at. The raw paths stay in `issues` for code.
+ * name says which box on the form to look at. The raw paths (and zod's own messages) stay
+ * in `issues` for code.
  */
 export function describeIssues(error: ZodError, fallbackPath = "body"): string {
   return error.issues
     .slice(0, 10)
-    .map((i) => `${humanizePath(i.path, fallbackPath)}: ${i.message}`)
+    .map((i) => describeIssue(i, fallbackPath))
     .join("; ");
 }
 

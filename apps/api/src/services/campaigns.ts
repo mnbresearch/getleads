@@ -1,11 +1,11 @@
 import { and, asc, inArray, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, events, getDb, integrations, leads, limitsFor, lte, messages, organizations, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount, type Organization } from "@prospex/db";
 import { allocateVariant, coerceIntent, createAiProviderForPlan, domainOfEmail, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, redact, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type GuardContext, type SendingHealth } from "@prospex/core";
 import { decryptJson as decryptCfg } from "../lib/crypto.js";
-import { consume } from "@prospex/db";
+import { consume, effectiveLimits } from "@prospex/db";
 import { env } from "../env.js";
 import { addressOf } from "../lib/sanitize.js";
 import { decryptJsonStrict, randomToken } from "../lib/crypto.js";
-import { sendMail, type MailerConfig } from "../lib/mailer.js";
+import { NO_PLATFORM_MAILER, sendMail, type MailerConfig } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
 import { canonicalEmail } from "./leads.js";
@@ -46,7 +46,8 @@ function positiveIntEnv(name: string): number | null {
 }
 
 function monthlyEmailLimit(org: Pick<Organization, "plan" | "planLimits">): number {
-  const limits = { ...limitsFor(org.plan ?? "free"), ...(org.planLimits ?? {}) } as Record<string, unknown>;
+  // effectiveLimits: a junk override stored on the workspace must not switch a limit off.
+  const limits = effectiveLimits(org) as unknown as Record<string, unknown>;
   const n = Number(limits.emailsPerMonth);
   return Number.isFinite(n) && n > 0 ? n : 0;
 }
@@ -167,12 +168,59 @@ export function nextLocalDay(tz: string, now = new Date()): Date {
   return new Date(now.getTime() + (86_400_000 - elapsed) + 60_000);
 }
 
-/** Enroll all leads in the campaign's list (or explicit ids). */
+/**
+ * Of these lead ids, the ones a campaign can email: this workspace's own, with an address
+ * that is ONE valid address and is not known to be bad.
+ *
+ * `skippedNoEmail` is what it always was (no address, a known-invalid one, or not this
+ * workspace's lead). `skippedInvalidEmail` is new: a stored value that is not a single
+ * address - "Name <a@b>", "a@x, b@x", rows written before imports were validated. Those were
+ * enrolled like any other lead and only failed, one by one, when their first email came due.
+ */
+export async function leadsWithUsableEmail(db: ReturnType<typeof getDb>["db"], orgIdValue: string, leadIds: string[]): Promise<{ ids: string[]; skippedNoEmail: number; skippedInvalidEmail: number }> {
+  const ids = [...new Set(leadIds)];
+  const usable: string[] = [];
+  let withAddress = 0;
+  // In batches: one statement takes at most 65,535 parameters, and a list can be larger.
+  for (let i = 0; i < ids.length; i += 5000) {
+    const rows = await db
+      .select({ id: leads.id, email: leads.email })
+      .from(leads)
+      .where(and(eq(leads.orgId, orgIdValue), inArray(leads.id, ids.slice(i, i + 5000)), sql`${leads.email} IS NOT NULL`, sql`${leads.emailStatus} <> 'invalid'`));
+    withAddress += rows.length;
+    for (const r of rows) if (canonicalEmail(r.email)) usable.push(r.id);
+  }
+  return { ids: usable, skippedNoEmail: ids.length - withAddress, skippedInvalidEmail: withAddress - usable.length };
+}
+
+/** Lead ids whose stored email is present but is not one valid address. */
+async function leadsWithMalformedEmail(db: ReturnType<typeof getDb>["db"], orgIdValue: string, leadIds: string[]): Promise<Set<string>> {
+  const bad = new Set<string>();
+  for (let i = 0; i < leadIds.length; i += 5000) {
+    const rows = await db
+      .select({ id: leads.id, email: leads.email })
+      .from(leads)
+      .where(and(eq(leads.orgId, orgIdValue), inArray(leads.id, leadIds.slice(i, i + 5000)), sql`${leads.email} IS NOT NULL`));
+    for (const r of rows) if (!canonicalEmail(r.email)) bad.add(r.id);
+  }
+  return bad;
+}
+
+/**
+ * Enroll all leads in the campaign's list (or explicit ids).
+ *
+ * A lead whose stored email is not a single valid address is never enrolled, whoever calls
+ * this: sendStep would stop it at its first send anyway ("Lead email is not a single valid
+ * address"), after it had sat in the campaign looking queued. Callers that want the count
+ * use leadsWithUsableEmail first (the enroll route, enrollEligibleLeads).
+ */
 export async function enrollLeads(campaign: Campaign, leadIds: string[]) {
   const { db } = getDb();
   let n = 0;
   let i = 0;
+  const malformed = leadIds.length ? await leadsWithMalformedEmail(db, campaign.orgId, leadIds) : new Set<string>();
   for (const leadId of leadIds) {
+    if (malformed.has(leadId)) continue;
     const r = await db
       .insert(campaignContacts)
       .values({ campaignId: campaign.id, leadId, status: "queued", currentStep: 0, nextSendAt: new Date(), variant: i++ })
@@ -194,12 +242,9 @@ export async function enrollLeads(campaign: Campaign, leadIds: string[]) {
 export async function enrollEligibleLeads(campaign: Campaign, leadIds: string[]) {
   const { db } = getDb();
   const ids = [...new Set(leadIds)];
-  if (!ids.length) return { enrolled: 0, skippedNoEmail: 0, skippedOtherClient: 0, claimedForClient: 0 };
-  const valid = await db
-    .select({ id: leads.id })
-    .from(leads)
-    .where(and(eq(leads.orgId, campaign.orgId), inArray(leads.id, ids), sql`${leads.email} IS NOT NULL`, sql`${leads.emailStatus} <> 'invalid'`));
-  let toEnroll = valid.map((v) => v.id);
+  if (!ids.length) return { enrolled: 0, skippedNoEmail: 0, skippedInvalidEmail: 0, skippedOtherClient: 0, claimedForClient: 0 };
+  const usable = await leadsWithUsableEmail(db, campaign.orgId, ids);
+  let toEnroll = usable.ids;
   let skippedOtherClient = 0;
   let claimedForClient = 0;
   if (campaign.clientId) {
@@ -210,7 +255,7 @@ export async function enrollEligibleLeads(campaign: Campaign, leadIds: string[])
     claimedForClient = p.claimed;
   }
   const enrolled = await enrollLeads(campaign, toEnroll);
-  return { enrolled, skippedNoEmail: ids.length - valid.length, skippedOtherClient, claimedForClient };
+  return { enrolled, skippedNoEmail: usable.skippedNoEmail, skippedInvalidEmail: usable.skippedInvalidEmail, skippedOtherClient, claimedForClient };
 }
 
 /** Rolling window used to judge deliverability. Long enough to be stable, short enough to react. */
@@ -391,7 +436,9 @@ export async function tickCampaign(campaignId: string) {
   if (!org || org.status !== "active") return { sent: 0, reason: "organization not active" };
   if (!outboundSendingEnabled()) {
     await noteOutboundPaused(campaign).catch(() => {});
-    return { sent: 0, reason: "sending is paused platform-wide (OUTBOUND_SENDING_ENABLED is off)", outboundPaused: true };
+    // The reason is returned to the customer by POST /:id/start: it says who paused sending,
+    // not which server setting did it.
+    return { sent: 0, reason: "sending is paused platform-wide by the operator", outboundPaused: true };
   }
   const requeued = await requeueStrandedContacts(campaign.id).catch(() => 0);
   const s = settingsOf(campaign);
@@ -762,19 +809,35 @@ function oneLineSubject(subject: string): string {
  * What a tenant is told about a failed send. A category, never the upstream text: provider
  * errors echo credentials and account ids, and this lands in a field tenants read over the API.
  */
-export function sendFailureCategory(error: string | null | undefined): string {
-  const e = String(error ?? "");
+export function sendFailureCategory(failure: string | null | undefined | { error?: string | null; refused?: boolean }): string {
+  const result = failure !== null && typeof failure === "object" ? failure : null;
+  const e = String((result ? result.error : failure) ?? "");
+  // A setting WE refused before connecting (a port that is not a mail port, a host that is
+  // not a public mail server). That sentence is written by us for the customer, carries no
+  // upstream text, and says exactly what to change - "the provider rejected the message"
+  // said the opposite of what happened and gave them nothing to act on.
+  if (result?.refused && e) return e.replace(/\s+/g, " ").trim().slice(0, 300);
   // An SMTP reply code (421, 450-455, 500-559) - not a port number that happens to be in the text.
   const code = /\b(421|45[0-5]|5[0-5]\d)\b/.exec(e)?.[1];
   if (code && /^5/.test(code) && isHardBounce(e)) return `Recipient address rejected (SMTP ${code})`;
   if (/\b(?:535|534|401|403)\b|auth\w* (?:failed|failure|required|error|unsuccessful)|invalid (?:login|credentials?|api[ _-]?key)|unauthori[sz]ed|forbidden|api[ _-]?key/i.test(e)) return "Sender rejected our credentials - reconnect the sender";
-  if (/timed? ?out|ETIMEDOUT|ESOCKETTIMEDOUT/i.test(e)) return "The sending server timed out";
-  if (/ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket|network|getaddrinfo/i.test(e)) return "Could not reach the sending server";
+  // Nobody answered: that is not a rejection, and saying "rejected" sends the customer to
+  // look at the recipient or the content when the thing to check is the server or the network.
+  if (/timed? ?out|ETIMEDOUT|ESOCKETTIMEDOUT|TimeoutError|greeting never received/i.test(e)) return SEND_UNREACHABLE_TIMEOUT;
+  if (/ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|EHOSTUNREACH|ENETUNREACH|EPIPE|UND_ERR|fetch failed|socket|network|getaddrinfo|connection closed|could not be found/i.test(e)) return SEND_UNREACHABLE;
   if (/\brate.?limit|too many|\b429\b|quota|daily (?:sending )?limit/i.test(e)) return "Sending provider rate limit reached";
-  if (/No email provider configured/i.test(e)) return "No email provider is configured on the server";
+  // The platform's own mailer is not set up. Which settings are missing is in the server log.
+  if (e.includes(NO_PLATFORM_MAILER) || /No email provider configured/i.test(e)) return "Email sending is not set up on our side yet - contact support";
   if (code) return `Sender rejected the message (SMTP ${code})`;
-  return "The sending provider rejected the message";
+  return SEND_REJECTED;
 }
+
+/** The sending server never answered (DNS, connection refused, a dropped socket). */
+export const SEND_UNREACHABLE = "The sending server could not be reached";
+/** The same, when what happened was a timeout. */
+export const SEND_UNREACHABLE_TIMEOUT = "The sending server could not be reached (it timed out)";
+/** The catch-all: the provider answered and said no, without a code we can name. */
+export const SEND_REJECTED = "The sending provider rejected the message";
 
 /**
  * What an AI draft for this send may link to and mention: the tenant's own domains (the
@@ -782,7 +845,7 @@ export function sendFailureCategory(error: string | null | undefined): string {
  * that belong in the conversation. generateOutreach adds every host and address already in
  * the step's own template and the sender's own text.
  */
-function outreachGuardContext(org: Organization, account: EmailAccount | null, to: string | null, leadDomain: string | null): GuardContext {
+function outreachGuardContext(org: Organization, account: EmailAccount | null, to: string | null, leadDomain: string | null, leadCompany: string | null = null): GuardContext {
   const st = (org.settings ?? {}) as Record<string, unknown>;
   const hosts: string[] = [];
   for (const d of [domainOfEmail(account?.fromEmail), domainOfEmail(account?.replyTo)]) if (d) hosts.push(d);
@@ -795,7 +858,9 @@ function outreachGuardContext(org: Organization, account: EmailAccount | null, t
       // not a URL; nothing to allow
     }
   }
-  return { allowedHosts: hosts, allowedEmails: [account?.fromEmail, account?.replyTo, to], leadDomain };
+  // The company's name goes along with its domain: a prospect whose company is called
+  // "Booking.com" can be named in the draft without that reading as a link.
+  return { allowedHosts: hosts, allowedEmails: [account?.fromEmail, account?.replyTo, to], leadDomain, leadCompany };
 }
 
 /** One phone number, or nothing: digits (after the usual punctuation) and nothing else. */
@@ -1149,7 +1214,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
         // sender's domains, the workspace website, and (inside generateOutreach) every host
         // and address already in the step's template and the sender's own text.
         guard: "enforce",
-        guardContext: outreachGuardContext(org, account, to, company?.domain ?? null),
+        guardContext: outreachGuardContext(org, account, to, company?.domain ?? null, company?.name ?? null),
       }).catch((e) => {
         // The tenant gets a category. What the provider actually said - which can echo the
         // platform's key and account id - goes to the operator's log, redacted.
@@ -1245,14 +1310,16 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     // What the provider said is kept for operators only (the log, redacted). Everything a
     // tenant can read back - the message row, the contact's lastError, this job's result -
     // carries a category: provider error text echoes API keys and account identifiers.
-    const category = sendFailureCategory(res.error);
+    const category = sendFailureCategory(res);
     console.warn(`[campaigns] send failed for contact ${cc.id} via ${account.provider}: ${redact(res.error ?? "unknown error", { max: 300 })}`);
     await db.update(messages).set({ status: "failed", error: category }).where(eq(messages.id, msg.id));
     await releaseDailySlot(account.id, today);
     await refundQuota();
     settled = true;
     await bumpStat(campaign.id, "failed");
-    if (isHardBounce(res.error)) {
+    // (Never for a setting we refused ourselves: that text lists port numbers, and a port
+    // number is not an SMTP reply code about the recipient.)
+    if (!res.refused && isHardBounce(res.error)) {
       // The receiving server refused the address permanently. Never again, anywhere.
       await recordBounce(campaign.orgId, { email: to, messageId: msg.id, kind: "bounce", detail: category });
       return { failed: true, bounced: true, error: category };
@@ -1358,7 +1425,7 @@ export async function createStepTask(campaign: Campaign, contactId: string, lead
       // output guard applies; these channels have no subject line. A rejected draft leaves
       // the rendered template in place.
       guard: "enforce",
-      guardContext: { ...(org ? outreachGuardContext(org, null, canonicalEmail(lead.email), company?.domain ?? null) : {}), requireSubject: false },
+      guardContext: { ...(org ? outreachGuardContext(org, null, canonicalEmail(lead.email), company?.domain ?? null, company?.name ?? null) : {}), requireSubject: false },
     }).catch(() => null);
     if (out?.body) body = out.body;
   }
@@ -1493,7 +1560,10 @@ export async function whatsappSender(
   try {
     cfg = decryptCfg<{ phoneNumberId: string; accessToken: string; templateName?: string; templateLanguage?: string }>(integ.configEncrypted);
   } catch (e) {
-    return { ok: false, error: `WhatsApp config could not be read: ${(e as Error).message}` };
+    // The reason it could not be read (a rotated key, a damaged value) is the operator's to
+    // see, in the log; this sentence ends up on a task a customer reads.
+    console.warn(`[campaigns] WhatsApp config for org ${orgId} could not be read: ${(e as Error)?.name ?? "Error"}`);
+    return { ok: false, error: "WhatsApp connection could not be read - reconnect it under Settings, Integrations" };
   }
   if (!cfg?.phoneNumberId || !cfg.accessToken) return { ok: false, error: "WhatsApp config incomplete" };
   const config = cfg;

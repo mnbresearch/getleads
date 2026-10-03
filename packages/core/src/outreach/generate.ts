@@ -119,6 +119,8 @@ function guardContextFor(input: OutreachInput): GuardContext {
     allowedHosts: [...hostsIn(...tenantText), ...(extra.allowedHosts ?? [])],
     allowedEmails: [...emailsIn(...tenantText), input.lead.email, ...(extra.allowedEmails ?? [])],
     leadDomain: extra.leadDomain ?? input.lead.company?.domain ?? domainOfEmail(input.lead.email),
+    // "Booking.com" as the prospect's company NAME is a name, not a link to somewhere else.
+    leadCompany: extra.leadCompany ?? input.lead.company?.name ?? null,
   };
 }
 
@@ -283,6 +285,7 @@ export async function draftReplyToInbound(
     allowedHosts: [...hostsIn(...tenantText), ...(extra.allowedHosts ?? [])],
     allowedEmails: [...emailsIn(...tenantText), input.lead.email, ...(extra.allowedEmails ?? [])],
     leadDomain: extra.leadDomain ?? input.lead.company?.domain ?? domainOfEmail(input.lead.email),
+    leadCompany: extra.leadCompany ?? input.lead.company?.name ?? null,
   });
   if (!verdict.ok) {
     // No draft is better than a draft a reviewer might send without reading closely.

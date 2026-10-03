@@ -12,6 +12,9 @@ import { rateLimit, requireAuth, requireRole, requireUser, type Env } from "../m
  * addresses and the IP addresses they signed in from, which an API key (a credential that
  * lives in scripts and CI) has no business reading.
  *
+ * Rows written by the platform operator (actorType "admin": a plan change, a suspension) are
+ * shown with `ip: null`. The address stays in the database for the operator's own records.
+ *
  * Scoped to the caller's workspace by `org_id`. Rows with no workspace (a failed sign-in for
  * an address that has no account) belong to nobody and are never returned here.
  *
@@ -72,7 +75,9 @@ auditRoutes.get(
         targetType: r.targetType ?? null,
         targetId: r.targetId ?? null,
         result: r.result,
-        ip: r.ip ?? null,
+        // An admin row is the platform operator acting on this workspace. What they did is the
+        // customer's business; the address they did it from is not, and it was being shown.
+        ip: r.actorType === "admin" ? null : r.ip ?? null,
         createdAt: r.createdAt,
         data: r.data ?? {},
       })),

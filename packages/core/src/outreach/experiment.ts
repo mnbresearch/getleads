@@ -88,7 +88,7 @@ export function pickVariantWinner(stats: VariantStats[], opts: ExperimentOptions
   if (underpowered) {
     const thinnest = Math.min(...ranked.map((v) => v.sent));
     const need: string[] = [];
-    if (thinnest < minSentPerVariant) need.push(`${minSentPerVariant - thinnest} more sends on the thinnest variant`);
+    if (thinnest < minSentPerVariant) need.push(`${minSentPerVariant - thinnest} more ${minSentPerVariant - thinnest === 1 ? "send" : "sends"} on the thinnest variant`);
     if (totalPositives < minTotalPositives) need.push(`${minTotalPositives - totalPositives} more repl${minTotalPositives - totalPositives === 1 ? "y" : "ies"}`);
     return {
       winner: null,
@@ -110,7 +110,7 @@ export function pickVariantWinner(stats: VariantStats[], opts: ExperimentOptions
       ranked,
       totalSent,
       allocation: evenSplit(),
-      summary: `No clear winner yet across ${totalSent} sends. Variant ${lead.variant} leads at ${pct(lead.rate)} but the difference is still within noise.`,
+      summary: `No clear winner yet across ${totalSent} ${totalSent === 1 ? "send" : "sends"}. Variant ${lead.variant} leads at ${pct(lead.rate)} but the difference is still within noise.`,
       requirements,
     };
   }

@@ -2,6 +2,7 @@ import type { Context } from "hono";
 import { HTTPException } from "hono/http-exception";
 import { QuotaExceededError } from "@prospex/db";
 import { ZodError } from "zod";
+import { describeIssues } from "./validate.js";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string, public code = "error", public details?: unknown) {
@@ -113,7 +114,9 @@ const UNIQUE_MESSAGES: Record<string, string> = {
 export function errorHandler(err: Error, c: Context) {
   if (err instanceof ApiError) return c.json({ error: { code: err.code, message: err.message, details: err.details } }, err.status as 400);
   if (err instanceof QuotaExceededError) return c.json({ error: { code: "quota_exceeded", message: err.message, metric: err.metric, used: err.used, limit: err.limit } }, 402);
-  if (err instanceof ZodError) return c.json({ error: { code: "validation_error", message: "Invalid input", details: err.flatten() } }, 400);
+  // A ZodError thrown from inside a handler (a schema parsed by hand) gets the same readable
+  // sentence as one caught by the request validator, instead of a bare "Invalid input".
+  if (err instanceof ZodError) return c.json({ error: { code: "validation_error", message: describeIssues(err) || "Invalid input", details: err.flatten(), issues: err.issues } }, 400);
   if (err instanceof HTTPException) return c.json({ error: { code: "http_error", message: err.message } }, err.status);
   // Saved credentials that can no longer be decrypted (key rotated, row damaged). Matched by
   // code so this file does not import the crypto module.

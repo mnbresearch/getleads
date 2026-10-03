@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { resetSearchCache, serperProvider, summarizeWebSearchFailures, webSearchDetailed, NO_WEB_SEARCH_CONFIGURED, type SearchProvider } from "./index.js";
+import { resetSearchCache, serperProvider, summarizeWebSearchFailures, webSearchDetailed, isNoWebSearchConfigured, NO_WEB_SEARCH_CONFIGURED, NO_WEB_SEARCH_CONFIGURED_OPERATOR, type SearchProvider } from "./index.js";
 import { ProviderUnavailableError, reportProviderCall, resetProviderSkips } from "../providers/health.js";
 import { findPeopleDetailed } from "../discovery/people.js";
 
@@ -52,6 +52,21 @@ describe("webSearchDetailed", () => {
     const o = await webSearchDetailed("q", { providers: [failing("duckduckgo"), failing("bing_html")] });
     expect(o.nothingConfigured).toBe(true);
     expect(summarizeWebSearchFailures([o])).toContain(NO_WEB_SEARCH_CONFIGURED);
+  });
+
+  it("what a customer is told about it names no server setting; the operator's version goes to the log", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const o = await webSearchDetailed("q2", { providers: [failing("duckduckgo"), failing("bing_html")] });
+    const said = summarizeWebSearchFailures([o])!;
+    // Exactly the customer sentence: no env var names, no provider error text appended.
+    expect(said).toBe(NO_WEB_SEARCH_CONFIGURED);
+    expect(said).not.toMatch(/_API_KEY|SMTP_|\.env\b|duckduckgo|bing/i);
+    expect(said).toMatch(/not a result about your market/);
+    expect(isNoWebSearchConfigured(said)).toBe(true);
+    expect(isNoWebSearchConfigured("Every web search provider failed across 1 search: serper: HTTP 402")).toBe(false);
+    // The settings to change are still findable - by whoever reads the server log.
+    expect(NO_WEB_SEARCH_CONFIGURED_OPERATOR).toMatch(/SERPER_API_KEY or BRAVE_SEARCH_API_KEY/);
+    void warn;
   });
 
   it("records a cooling-off provider as skipped instead of calling it", async () => {

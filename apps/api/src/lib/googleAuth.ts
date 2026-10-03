@@ -45,6 +45,7 @@ import { env } from "../env.js";
 import { ApiError } from "./errors.js";
 import { hasUsablePassword, unusablePasswordHash } from "./auth.js";
 import { randomToken, safeEqual } from "./crypto.js";
+import { forgetOtherKnownAddresses } from "./loginGuard.js";
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -271,8 +272,14 @@ async function createdByGoogle(user: User): Promise<boolean> {
  * later clicks "Sign in with Google" loses their password (they can set a new one from
  * Settings) and, if they work alone, their API keys. That is the price of not being able to
  * tell them from a squatter; the audit log records it and the caller emails them.
+ *
+ * Who this applies to: accounts created AFTER migration 0018. That migration marked every
+ * account that already existed as owning its address (the operator knows that customer
+ * base), so an existing customer's first Google sign-in LINKS and costs them nothing.
+ * Password signup still leaves `email_verified_at` empty, so a new account stays unproved
+ * until a password reset or a Google sign-in proves it.
  */
-export async function resolveGoogleUser(identity: GoogleIdentity): Promise<GoogleResolution> {
+export async function resolveGoogleUser(identity: GoogleIdentity, opts: { ip?: string | null } = {}): Promise<GoogleResolution> {
   if (!identity.emailVerified) throw new ApiError(400, "Your Google email address is not verified", "oauth_email_unverified");
   if (!identity.sub) throw new ApiError(502, "Google did not return an account identifier", "oauth_bad_token");
   const { db } = getDb();
@@ -316,6 +323,11 @@ export async function resolveGoogleUser(identity: GoogleIdentity): Promise<Googl
     .where(and(eq(users.id, byEmail.id), isNull(users.googleSub)))
     .returning();
   if (!u) throw new ApiError(409, "This sign-in could not be completed. Please try again.", "oauth_account_mismatch");
+  // Whoever held the old password also left "known address" rows behind (signup and every
+  // password sign-in write one). Left in place, that address kept a private allowance of
+  // guesses at the account it no longer owns, exempt from the account-wide lock. They go
+  // with the password; only the address completing this Google sign-in is kept.
+  await forgetOtherKnownAddresses(u.email, opts.ip ?? null).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a Google claim: ${(e as Error).message}`));
   let apiKeysRevoked = 0;
   if (soleUser) {
     const gone = await db.update(apiKeys).set({ revokedAt: now }).where(and(eq(apiKeys.orgId, u.orgId), isNull(apiKeys.revokedAt))).returning({ id: apiKeys.id });

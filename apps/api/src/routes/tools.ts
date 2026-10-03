@@ -5,8 +5,9 @@
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
+import { effectiveLimits } from "@prospex/db";
 import { and, autopilots, campaignContacts, campaigns, clients, companies, consume, desc, enqueue, eq, getDb, icps, inArray, invites, leads, limitsFor, listLeads, lists, remainingPremiumBudget, savedSearches, sql, tasks, users, organizations, type Invite } from "@prospex/db";
-import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
+import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, redact, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
 import { env } from "../env.js";
 import { hashPassword, issueJwt, passwordProblem } from "../lib/auth.js";
 import { randomToken } from "../lib/crypto.js";
@@ -44,6 +45,30 @@ const PERSONAS: Record<string, string[]> = {
   "Procurement": ["Head of Procurement", "Procurement Manager", "Purchasing Manager"],
 };
 toolRoutes.get("/personas", (c) => c.json({ personas: PERSONAS }));
+
+/**
+ * Fields that explain HOW an answer was reached, for whoever is debugging a lookup: which
+ * verifiers were tried, the name guessed from a URL slug, where a name came from, a
+ * provider's raw payload. They were part of every tool response, and the Tools page prints
+ * a row's keys as column headers - so customers saw VERIFIERATTEMPTS and GUESSEDNAME columns
+ * full of `[]` and `null`. Left out unless the caller asks with `?debug=1`.
+ */
+const DIAGNOSTIC_FIELDS = new Set(["verifierAttempts", "guessedName", "nameSource", "raw"]);
+const wantsDebug = (c: import("hono").Context<Env>) => ["1", "true"].includes(String(c.req.query("debug") ?? "").toLowerCase());
+
+/** `value` without its diagnostic fields, on the row itself and one object level down (a row's `person`, `company`). */
+function withoutDiagnostics<T>(value: T, depth = 0): T {
+  if (Array.isArray(value)) return value.map((v) => withoutDiagnostics(v, depth)) as unknown as T;
+  if (!value || typeof value !== "object" || value instanceof Date) return value;
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+    if (DIAGNOSTIC_FIELDS.has(k)) continue;
+    out[k] = depth < 1 && v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date) ? withoutDiagnostics(v, depth + 1) : v;
+  }
+  return out as T;
+}
+/** A tool's result rows as the caller should see them. */
+const shown = <T>(c: import("hono").Context<Env>, rows: T): T => (wantsDebug(c) ? rows : withoutDiagnostics(rows));
 
 /** LinkedIn URL(s) → person + work email. */
 toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ urls: z.array(z.string().max(500)).min(1).max(25), save: z.boolean().default(false) })), async (c) => {
@@ -111,7 +136,7 @@ toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("
     return { url, found: true, person: { ...p, companyDomain: domain }, nameSource: slugOnly ? (providerName ? "provider" : "url") : "profile", email, emailStatus: status, confidence, leadId, ...(saveSkipped ? { saveSkipped } : {}) };
   }, 3);
   const found = results.filter((r) => r.found).length;
-  return c.json({ results, saveStopped, skipped: saveStopped ? "quota" : undefined, counts: { requested: b.urls.length, found, notFound: b.urls.length - found, saved, skipped } });
+  return c.json({ results: shown(c, results), saveStopped, skipped: saveStopped ? "quota" : undefined, counts: { requested: b.urls.length, found, notFound: b.urls.length - found, saved, skipped } });
 });
 
 /** "Jane van Doe" -> first "Jane", last "van Doe". */
@@ -148,7 +173,7 @@ toolRoutes.post("/email-to-linkedin", rateLimit({ perMinute: 30 }), zValidator("
     const p = await resolveLinkedinUrl(r.url).catch(() => null);
     return { email, linkedinUrl: r.url, fullName: p?.fullName, title: p?.title, company: p?.companyName ?? company, confidence: r.confidence };
   }, 3);
-  return c.json({ results });
+  return c.json({ results: shown(c, results) });
 });
 
 /** Colleagues of a lead (same company, optional titles). */
@@ -182,7 +207,7 @@ toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", 
       break;
     }
   }
-  return c.json({ company: { name, domain }, people, savedLeadIds: saved, stopped });
+  return c.json({ company: { name, domain }, people: shown(c, people), savedLeadIds: saved, stopped });
 });
 
 /** Decision makers at a company by persona. */
@@ -235,7 +260,7 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
   // first, the fact that SAVING also stopped was discarded - so people came back with no
   // leadId and no explanation anywhere, which is the exact silence this field exists to
   // break.
-  return c.json({ company: { name, domain }, people: out, skipped: skipped ?? undefined, saveStopped: saveStopped ?? undefined });
+  return c.json({ company: { name, domain }, people: shown(c, out), skipped: skipped ?? undefined, saveStopped: saveStopped ?? undefined });
 });
 
 /** Company intelligence: hiring + recent news signals + firmographics, persisted. */
@@ -286,9 +311,14 @@ toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json
 
   // orgId is internal bookkeeping, not something a tool result should show; the company's
   // own id stays (it is how /v1/companies/:id addresses it).
-  const { orgId: _org, ...publicCompany } = company;
+  const { orgId: _org, raw: companyRaw, ...publicCompany } = company;
+  // `raw` is everything the crawl kept (page text fragments, every address it saw). The one
+  // part of it the result view shows is the company's social links, so that is what goes
+  // out by default; the whole object is there with `?debug=1`.
+  const socials = (companyRaw as { socials?: unknown } | null | undefined)?.socials;
+  const rawShown = wantsDebug(c) ? companyRaw : socials && typeof socials === "object" ? { socials } : undefined;
   return c.json({
-    company: { ...publicCompany, openRoles: hiringOk ? hiring!.openRoles : company.openRoles, intentScore: scoreIsReal ? intent : company.intentScore },
+    company: { ...publicCompany, ...(rawShown !== undefined ? { raw: rawShown } : {}), openRoles: hiringOk ? hiring!.openRoles : company.openRoles, intentScore: scoreIsReal ? intent : company.intentScore },
     hiring,
     news: items.slice(0, 20),
     // Say which inputs were actually gathered, so a caller is never left reading a stale
@@ -340,7 +370,7 @@ toolRoutes.post("/verify-batch", zValidator("json", z.object({ emails: z.array(z
   await consume(db, oid, "verifications", b.emails.length);
   const results = await pMap(b.emails, (e) => verifyEmail(e, verifyOpts()), 6);
   const summary = results.reduce<Record<string, number>>((acc, r) => ((acc[r.status] = (acc[r.status] ?? 0) + 1), acc), {});
-  return c.json({ results, summary });
+  return c.json({ results: shown(c, results), summary });
 });
 
 // ── Saved searches ──
@@ -462,6 +492,14 @@ async function seatUsage(orgIdValue: string) {
   return { members: m, pending: p };
 }
 
+/**
+ * What the inviter is told when the invite email did not go. The reason it did not is ours
+ * (the platform's mail provider, or its configuration) and is logged; the provider's own
+ * text - or a line naming server settings - is nothing a customer can act on, and the link
+ * is right there to share by hand.
+ */
+const INVITE_EMAIL_NOT_SENT = "The email could not be sent from our side - copy the link below and share it yourself.";
+
 /** Send (or re-send) an invite email. Reports whether it actually went, rather than assuming. */
 async function sendInviteEmail(a: { orgName: string; inviter: string }, email: string, token: string) {
   const link = `${env.appUrl}/join?token=${token}`;
@@ -476,7 +514,8 @@ async function sendInviteEmail(a: { orgName: string; inviter: string }, email: s
     subject: `${inviter} invited you to ${orgName} on Scout`,
     text: `${inviter} invited you to join ${orgName} on Scout.\n\nAccept the invite: ${link}\n\nThis link expires in 14 days.`,
   }).catch((e) => ({ ok: false, error: (e as Error).message }));
-  return { link, emailed: r.ok, emailError: r.ok ? undefined : r.error };
+  if (!r.ok) console.warn(`[team] invite email could not be sent: ${redact(String(r.error ?? "unknown error"), { max: 300, maskEmails: true })}`);
+  return { link, emailed: r.ok, emailError: r.ok ? undefined : INVITE_EMAIL_NOT_SENT };
 }
 
 /**
@@ -505,7 +544,7 @@ toolRoutes.get("/team", requireUser, async (c) => {
   // Revoked and accepted invites are history; expired ones are still listed (marked) so they
   // can be re-sent rather than silently vanishing.
   const pending = await db.select().from(invites).where(and(eq(invites.orgId, oid), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`)).orderBy(desc(invites.createdAt));
-  const limits = { ...limitsFor(c.get("auth").org.plan), ...c.get("auth").org.planLimits };
+  const limits = effectiveLimits(c.get("auth").org);
   const now = Date.now();
   const shaped = pending.map(({ token: _t, ...i }) => ({ ...i, expiresAt: inviteExpiry(i), expired: inviteExpiry(i).getTime() <= now }));
   return c.json({ members, invites: shaped, seats: { used: members.length, pending: shaped.filter((i) => !i.expired).length, limit: limits.seats } });
@@ -522,10 +561,10 @@ toolRoutes.post("/team/invite", requireUser, roleGate("team.invited", "owner", "
   }
   const dupe = await db.query.invites.findFirst({ where: and(eq(invites.orgId, a.org.id), eq(invites.email, email), ACTIVE_INVITE) });
   if (dupe) throw new ApiError(409, `${email} already has a pending invite. Re-send it from the team list instead.`, "already_invited");
-  const limits = { ...limitsFor(a.org.plan), ...a.org.planLimits };
+  const limits = effectiveLimits(a.org);
   const seats = await seatUsage(a.org.id);
   if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) {
-    throw badRequest(`Seat limit reached (${limits.seats}: ${seats.members} member(s) and ${seats.pending} pending invite(s)). Revoke a pending invite or upgrade the plan to add more.`);
+    throw badRequest(`Seat limit reached (${limits.seats}: ${seats.members} ${seats.members === 1 ? "member" : "members"} and ${seats.pending} pending ${seats.pending === 1 ? "invite" : "invites"}). Revoke a pending invite or upgrade the plan to add more.`);
   }
   // Checked last, so only an invite that is actually about to be sent uses the allowance.
   limitInviteMail(a.org.id, email);
@@ -560,7 +599,7 @@ async function resendInvite(c: import("hono").Context<Env>) {
   if (!inv) throw notFound("Pending invite");
   // An expired invite no longer holds a seat, so renewing one has to fit under the limit.
   if (inviteExpiry(inv).getTime() <= Date.now()) {
-    const limits = { ...limitsFor(a.org.plan), ...a.org.planLimits };
+    const limits = effectiveLimits(a.org);
     const seats = await seatUsage(a.org.id);
     if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) throw badRequest(`Seat limit reached (${limits.seats}). Revoke another invite or upgrade the plan first.`);
   }
@@ -675,7 +714,7 @@ joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.obje
   // among the pending ones, so it is the members alone that must still leave room for it.
   const weak = passwordProblem(b.password, { email: inv.email, name: b.name });
   if (weak) return c.json({ error: { code: "weak_password", message: weak } }, 400);
-  const limits = { ...limitsFor(org.plan), ...org.planLimits };
+  const limits = effectiveLimits(org);
   const [{ m }] = await db.select({ m: sql<number>`count(*)::int` }).from(users).where(eq(users.orgId, org.id));
   if (limits.seats > 0 && m >= limits.seats) return c.json({ error: { code: "seat_limit", message: `${org.name} has no free seats (${limits.seats}). Ask an owner to upgrade or free a seat.` } }, 400);
   const [user] = await db.insert(users).values({ orgId: inv.orgId, email: inv.email, passwordHash: await hashPassword(b.password), name: b.name ?? "", role: inv.role, lastLoginAt: new Date() }).returning();

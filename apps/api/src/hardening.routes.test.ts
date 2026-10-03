@@ -375,7 +375,7 @@ suite("route hardening", () => {
     const r = await req("POST", "/v1/icps", A.token, { nope: true });
     expect(r.status).toBe(400);
     expect(r.body.error.code).toBe("validation_error");
-    expect(r.body.error.message).toMatch(/^Name: /);
+    expect(r.body.error.message).toMatch(/^Name is required/);
     expect(r.body.error.issues[0].path).toEqual(["name"]);
     expect(Array.isArray(r.body.error.issues)).toBe(true);
     expect(r.body.success).toBeUndefined();
@@ -761,11 +761,13 @@ suite("route hardening", () => {
       const r = await req("POST", `/v1/visibility/prompts/${prompt.id}/run`, A.token, {});
       expect(r.status).toBe(503);
       expect(r.body.error.code).toBe("ai_not_configured");
-      expect(r.body.error.message).toMatch(/GROQ_API_KEY or GEMINI_API_KEY/);
+      // In the customer's words: no server environment variable is named.
+      expect(r.body.error.message).toMatch(/AI drafting isn't switched on for this workspace yet/);
+      expect(r.body.error.message).not.toMatch(/_API_KEY|SMTP_|\.env\b/);
       const { handlers } = await import("./jobs.js");
       const out = await handlers["visibility.run"]({ id: randomUUID(), type: "visibility.run", payload: { promptId: prompt.id }, attempts: 1, maxAttempts: 3 } as never, { db, log: () => {}, progress: async () => {} } as never);
       expect(out).toMatchObject({ skipped: true });
-      expect(String((out as any).note)).toMatch(/No AI engine/);
+      expect(String((out as any).note)).toMatch(/AI drafting isn't switched on/);
     });
 
     it("refuses to save an integration with an empty or whitespace token", async () => {
@@ -787,7 +789,7 @@ suite("route hardening", () => {
       expect(r.body.subject).toBeTruthy();
       expect(r.body.body).toBeTruthy();
       expect(r.body.ai).toBe(false);
-      expect(r.body.note).toMatch(/No AI engine configured/);
+      expect(r.body.note).toMatch(/AI drafting isn't switched on for this workspace yet, so this is a template/);
       const after = (await db.select().from(S.usage).where(S.and(S.eq(S.usage.orgId, A.orgId), S.eq(S.usage.metric, "aiMessages"))))[0]?.count ?? 0;
       expect(after).toBe(before);
     });
@@ -840,7 +842,7 @@ suite("route hardening", () => {
     it("validation messages name fields the way a person would", async () => {
       const r = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { dailyLimit: 0 } });
       expect(r.status).toBe(400);
-      expect(r.body.error.message).toMatch(/^Daily limit: /);
+      expect(r.body.error.message).toMatch(/^Daily limit must be 1 or more/);
       expect(r.body.error.issues[0].path).toEqual(["settings", "dailyLimit"]);
     });
 

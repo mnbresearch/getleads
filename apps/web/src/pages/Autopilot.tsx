@@ -1,9 +1,43 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
 import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
+import { plural } from "../lib/plural";
 
 interface AP { id: string; name: string; query: { query?: string }; icpId: string | null; listId: string | null; campaignId: string | null; dailyLeads: number; minScore: number; requireValidEmail: boolean; autoEnroll: boolean; active: boolean; runHourUtc: number; lastRunAt: string | null; stats: Record<string, number> }
 interface SS { id: string; name: string; query: Record<string, unknown>; alert: boolean; alertEmail: string | null; lastRunAt: string | null; lastNewCount: number }
+
+const QUERY_CHIPS: [string, string][] = [["titles", "Title"], ["industries", "Industry"], ["locations", "Location"], ["companySizes", "Company size"], ["keywords", "Keyword"], ["companyDomains", "Company"]];
+
+/**
+ * A stored search, in words.
+ *
+ * The row used to print the query as it is stored - {"limit":25,"query":"…","findEmails":true}
+ * cut off at 100 characters. The same facts, readable: what is being looked for, the filters
+ * as chips, and how many leads a run asks for. Keys this build does not know are left out
+ * rather than dumped (ids of an ICP, list or client mean nothing on screen).
+ */
+function QuerySummary({ query }: { query: Record<string, unknown> | null | undefined }) {
+  const q = query && typeof query === "object" ? query : {};
+  const text = typeof q.query === "string" && q.query.trim() ? q.query.trim() : null;
+  const chips = QUERY_CHIPS.flatMap(([key, label]) => (Array.isArray(q[key]) ? (q[key] as unknown[]).filter((v): v is string => typeof v === "string" && !!v.trim()).map((v) => ({ key: `${key}:${v}`, label, value: v })) : []));
+  const facts = [
+    typeof q.limit === "number" ? `up to ${plural(q.limit, "lead")} per run` : null,
+    typeof q.country === "string" && q.country ? `country ${q.country.toUpperCase()}` : null,
+    q.findEmails === false ? "without finding emails" : q.findEmails === true ? "finds emails" : null,
+  ].filter(Boolean);
+  if (!text && chips.length === 0 && facts.length === 0) return <span className="text-ink-400">No search criteria saved.</span>;
+  return (
+    <span className="[overflow-wrap:anywhere]">
+      {text && <span className="text-ink-200">"{text}"</span>}
+      {chips.length > 0 && (
+        <span className={`${text ? "ml-2 " : ""}inline-flex flex-wrap gap-1 align-middle`}>
+          {chips.map((c) => <span key={c.key} className="badge bg-black/[0.05] text-ink-300" title={c.label}>{c.value}</span>)}
+        </span>
+      )}
+      {facts.length > 0 && <span className="text-ink-400">{text || chips.length ? " · " : ""}{facts.join(" · ")}</span>}
+    </span>
+  );
+}
 
 export function AutopilotPage() {
   const [aps, setAps] = useState<AP[]>([]);
@@ -61,7 +95,7 @@ export function AutopilotPage() {
         <div className="grid gap-3 md:grid-cols-2">
           {aps.map((a) => (
             <div key={a.id} className="card p-4">
-              <div className="flex items-start justify-between gap-2"><div><div className="font-semibold">{a.name}</div><div className="text-sm text-ink-300">{a.query.query ?? JSON.stringify(a.query)}</div></div><span className={`badge ${a.active ? "bg-emerald-50 text-emerald-700" : "bg-black/[0.05] text-ink-300"}`}>{a.active ? "active" : "paused"}</span></div>
+              <div className="flex items-start justify-between gap-2"><div><div className="font-semibold">{a.name}</div><div className="text-sm text-ink-300">{a.query?.query ? a.query.query : <QuerySummary query={a.query as Record<string, unknown>} />}</div></div><span className={`badge ${a.active ? "bg-emerald-50 text-emerald-700" : "bg-black/[0.05] text-ink-300"}`}>{a.active ? "active" : "paused"}</span></div>
               <div className="mt-2 text-xs text-ink-400">{a.dailyLeads}/day · score ≥ {a.minScore} · {a.requireValidEmail ? "verified email only" : "any email"} · {a.autoEnroll ? "auto-enrolls" : "saves only"} · runs {String(a.runHourUtc).padStart(2, "0")}:00 UTC</div>
               <div className="mt-2 grid grid-cols-4 gap-2 text-center text-xs">{[["runs", a.stats.runs], ["found", a.stats.found], ["saved", a.stats.saved], ["enrolled", a.stats.enrolled]].map(([l, v]) => <div key={String(l)} className="rounded-lg bg-cream p-2"><div className="text-ink-400">{l}</div><div className="text-base font-semibold">{v ?? 0}</div></div>)}</div>
               <div className="mt-2 flex items-center gap-2 text-xs"><span className="text-ink-500">last run {fmtDate(a.lastRunAt)}</span><button className="btn-secondary ml-auto py-1" disabled={running.has(a.id)} onClick={() => runNow(a)}>{running.has(a.id) ? "Running…" : "Run now"}</button><button className="btn-secondary py-1" onClick={() => setEditing(a)}>Edit</button><button className="btn-secondary py-1" onClick={() => apiFetch("PATCH", `/v1/tools/autopilots/${a.id}`, { active: !a.active }).then(load).catch((e) => toast((e as Error).message, "err"))}>{a.active ? "Pause" : "Resume"}</button><button className="text-red-600" onClick={() => { if (!confirm(`Delete the autopilot "${a.name}"? This cannot be undone.`)) return; apiFetch("DELETE", `/v1/tools/autopilots/${a.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>
@@ -72,7 +106,7 @@ export function AutopilotPage() {
       <div className="mt-8">
         <div className="mb-2 font-medium">Saved searches & alerts</div>
         {savedErr && !savedLoaded ? <LoadError message={savedErr} onRetry={load} /> : !savedLoaded ? <Spinner /> : saved.length === 0 ? <div className="text-sm text-ink-400">Save a search from the Find leads page to re-run it daily and get an email when new matches appear.</div> : (
-          <div className="card divide-y divide-slate-100">{saved.map((s) => <div key={s.id} className="flex flex-wrap items-center gap-3 p-3 text-sm"><div className="flex-1"><div className="font-medium">{s.name}</div><div className="text-xs text-ink-400">{JSON.stringify(s.query).slice(0, 100)} · {s.alert ? `alerts → ${s.alertEmail}` : "no alerts"} · last run {fmtDate(s.lastRunAt)} · {s.lastNewCount} new</div></div><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/tools/saved-searches/${s.id}/run`).then(() => toast("Queued")).catch((e) => toast((e as Error).message, "err"))}>Run</button><button className="text-xs text-red-600" onClick={() => { if (!confirm(`Delete the saved search "${s.name}"?`)) return; apiFetch("DELETE", `/v1/tools/saved-searches/${s.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>)}</div>
+          <div className="card divide-y divide-slate-100">{saved.map((s) => <div key={s.id} className="flex flex-wrap items-center gap-3 p-3 text-sm"><div className="min-w-0 flex-1"><div className="font-medium [overflow-wrap:anywhere]">{s.name}</div><div className="text-xs text-ink-300"><QuerySummary query={s.query} /></div><div className="mt-0.5 text-xs text-ink-400">{s.alert ? `alerts → ${s.alertEmail ?? "your email"}` : "no alerts"} · last run {s.lastRunAt ? fmtDate(s.lastRunAt) : "never"} · {s.lastNewCount ?? 0} new</div></div><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/tools/saved-searches/${s.id}/run`).then(() => toast("Queued")).catch((e) => toast((e as Error).message, "err"))}>Run</button><button className="text-xs text-red-600" onClick={() => { if (!confirm(`Delete the saved search "${s.name}"?`)) return; apiFetch("DELETE", `/v1/tools/saved-searches/${s.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>)}</div>
         )}
       </div>
       <Modal open={open} onClose={() => setOpen(false)} title="New autopilot" wide>

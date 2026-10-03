@@ -69,7 +69,8 @@ function AddTaskModal({ open, onClose, onDone, toast }: { open: boolean; onClose
   const [dueAt, setDueAt] = useState("");
   const [busy, setBusy] = useState(false);
 
-  useEffect(() => { if (open) { setTitle(""); setBody(""); setType("task"); setDueAt(""); } }, [open]);
+  // Cleared on close rather than on open, so the previous task never shows for a frame.
+  useEffect(() => { if (!open) { setTitle(""); setBody(""); setType("task"); setDueAt(""); } }, [open]);
 
   const save = async () => {
     if (!title.trim() || busy) return;

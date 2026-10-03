@@ -132,7 +132,7 @@ export async function leadFunnel(orgId: string, days: number) {
      * have not had time to become customers.
      */
     totalInWindow: totalRows,
-    windowNote: `Counts leads created in the last ${days} days, not every lead in the workspace.`,
+    windowNote: `Counts leads created in the last ${days === 1 ? "day" : `${days} days`}, not every lead in the workspace.`,
     entered,
     lost,
     other,
@@ -150,7 +150,7 @@ export async function leadFunnel(orgId: string, days: number) {
     // Below this, stage-to-stage rates swing wildly on single leads and reporting one as a
     // finding would be the same overclaim the visibility module refuses to make.
     sufficient: entered >= 20,
-    note: entered >= 20 ? undefined : `Only ${entered} leads in this window - too few for stage conversion rates to mean anything yet.`,
+    note: entered >= 20 ? undefined : `Only ${entered} ${entered === 1 ? "lead" : "leads"} in this window - too few for stage conversion rates to mean anything yet.`,
   };
 }
 

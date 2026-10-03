@@ -24,16 +24,29 @@ import {
 } from "@prospex/core";
 import { ApiError } from "../lib/errors.js";
 
+/** What a customer is told when the platform has no AI engine switched on. Names no server setting. */
+export const AI_NOT_SWITCHED_ON = "AI drafting isn't switched on for this workspace yet. Contact support to enable it.";
+
 /**
  * No AI engine is configured on this server at all. A 503 with its own code rather than a
  * generic 500: it is a setup problem the operator can fix, and the scheduled job skips on it
  * instead of failing every run.
+ *
+ * The message is read by customers (the visibility page shows it), so it says what they can
+ * do. Which server settings turn an engine on is for the operator: the log, and the admin
+ * Tools page.
  */
 export class AiNotConfiguredError extends ApiError {
   constructor() {
-    super(503, "No AI engine is configured on this server, so visibility can't be sampled. Add GROQ_API_KEY or GEMINI_API_KEY.", "ai_not_configured");
+    super(503, `AI visibility can't be sampled: ${AI_NOT_SWITCHED_ON}`, "ai_not_configured");
+    // At most once every ten minutes: the hourly scheduler raises this once per prompt.
+    if (Date.now() - lastAiNotConfiguredLogAt > 600_000) {
+      lastAiNotConfiguredLogAt = Date.now();
+      console.warn("[visibility] no AI engine is configured on this server (add GROQ_API_KEY or GEMINI_API_KEY); sampling skipped");
+    }
   }
 }
+let lastAiNotConfiguredLogAt = 0;
 
 /**
  * AI visibility execution and reporting.
@@ -169,7 +182,7 @@ export async function sampleAcrossEngines(
   const wanted = (prompt.engines ?? []).filter(Boolean);
   const providers = wanted.length ? all.filter((p) => wanted.includes(p.name)) : all;
   if (all.length === 0) throw new AiNotConfiguredError();
-  if (providers.length === 0) throw new ApiError(503, `None of this prompt's engines (${wanted.join(", ")}) is available on this server or plan.`, "ai_not_configured");
+  if (providers.length === 0) throw new ApiError(503, `None of this prompt's engines (${wanted.join(", ")}) is available on your plan right now. Choose another engine for this prompt, or contact support.`, "ai_not_configured");
 
   const samples = opts.samples ?? prompt.samplesPerRun ?? 3;
 
@@ -421,7 +434,7 @@ export async function suggestPrompts(
       prompts: starter.kept,
       rejected: starter.rejected,
       coverage: intentCoverage(starter.kept),
-      note: "No AI provider is configured, so these are the deterministic starter questions.",
+      note: `These are the standard starter questions, not ones written for your business: ${AI_NOT_SWITCHED_ON}`,
     };
   }
 
@@ -456,7 +469,7 @@ export async function suggestPrompts(
       coverage: intentCoverage(starter.kept),
       note: failure
         ? `The model call failed (${failure}), so these are the deterministic starter questions.`
-        : `The model returned ${checked.kept.length} usable question(s), too few to be a set, so these are the deterministic starter questions.`,
+        : `The model returned ${checked.kept.length} usable ${checked.kept.length === 1 ? "question" : "questions"}, too few to be a set, so these are the deterministic starter questions.`,
     };
   }
 

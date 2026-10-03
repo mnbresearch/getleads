@@ -173,7 +173,22 @@ function describeAttempts(attempts: WebSearchAttempt[]): string {
   return attempts.map((a) => (a.ok ? `${a.provider}=${a.count}${a.ms !== undefined ? ` (${a.ms}ms)` : ""}` : `${a.provider}=${a.outcome === "skipped" ? "skipped" : "threw"}:${(a.error ?? "").slice(0, 80)}`)).join(", ");
 }
 
-export const NO_WEB_SEARCH_CONFIGURED = "No web search provider is configured (set SERPER_API_KEY or BRAVE_SEARCH_API_KEY)";
+/**
+ * What a CUSTOMER is told when no web search provider is set up on the platform.
+ *
+ * This sentence travels: it becomes a search's error, an autopilot's note, a saved search's
+ * alert. It used to name the server's environment variables ("set SERPER_API_KEY or
+ * BRAVE_SEARCH_API_KEY"), which a customer can do nothing with - and it must still say that
+ * an empty result here is our problem, not a finding about their market.
+ */
+export const NO_WEB_SEARCH_CONFIGURED =
+  "Lead search isn't available right now because no search source is connected on our side. This is not a result about your market - contact support.";
+/** The same fact for whoever runs the server: which settings turn web search on. Logs and admin screens only. */
+export const NO_WEB_SEARCH_CONFIGURED_OPERATOR = "No web search provider is configured (set SERPER_API_KEY or BRAVE_SEARCH_API_KEY)";
+/** Is this the "nothing is connected on our side" failure, as opposed to a provider that refused us? */
+export const isNoWebSearchConfigured = (message: string | null | undefined): boolean => String(message ?? "").startsWith(NO_WEB_SEARCH_CONFIGURED);
+
+let lastNoSearchLogAt = 0;
 
 /**
  * One sentence for a run of searches in which no provider ever answered, or null when at
@@ -190,7 +205,14 @@ export function summarizeWebSearchFailures(outcomes: WebSearchOutcome[]): string
   const detail = [...last].map(([p, e]) => `${p}: ${e}`).join("; ");
   const n = outcomes.length;
   if (outcomes.every((o) => o.nothingConfigured)) {
-    return detail ? `${NO_WEB_SEARCH_CONFIGURED}; the keyless fallbacks also failed (${detail})` : NO_WEB_SEARCH_CONFIGURED;
+    // The operator's version - which settings are missing, and what the keyless fallbacks
+    // said - goes to the server log (at most once a minute; a pipeline asks many times).
+    // The returned sentence is shown to customers and carries neither.
+    if (Date.now() - lastNoSearchLogAt > 60_000) {
+      lastNoSearchLogAt = Date.now();
+      console.warn(`[search] ${NO_WEB_SEARCH_CONFIGURED_OPERATOR}${detail ? `; the keyless fallbacks also failed (${detail.slice(0, 300)})` : ""}`);
+    }
+    return NO_WEB_SEARCH_CONFIGURED;
   }
   return `Every web search provider failed across ${n} search${n === 1 ? "" : "es"}${detail ? `: ${detail}` : " (no provider was eligible)"}`;
 }

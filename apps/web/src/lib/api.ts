@@ -94,11 +94,12 @@ export async function apiFetch<T = unknown>(
 
   let res: Response;
   let text: string;
+  const sentBody = raw ? raw.body : body === undefined ? undefined : JSON.stringify(body);
   try {
     res = await fetch(`${API_URL}${path}`, {
       method,
       headers: { ...(raw ? { "content-type": raw.contentType } : { "content-type": "application/json" }), ...(sentToken ? { authorization: `Bearer ${sentToken}` } : {}) },
-      body: raw ? raw.body : body === undefined ? undefined : JSON.stringify(body),
+      body: sentBody,
       signal: ctrl.signal,
     });
     // Reading the body is inside the timer too: a server that sends headers and then stalls
@@ -110,7 +111,10 @@ export async function apiFetch<T = unknown>(
     if ((e as Error)?.name === "AbortError") {
       throw new ProspexError(0, TIMEOUT_CODE, `The server did not respond within ${Math.round(timeoutMs / 1000)} seconds.`, null);
     }
-    throw new ProspexError(0, "network_error", "Could not reach the server. Check your connection and try again.", null);
+    // A server (or the proxy in front of it) that refuses an oversized upload usually just
+    // closes the connection mid-send. The browser reports that exactly like being offline, so
+    // "check your connection" sent people looking in the wrong place.
+    throw new ProspexError(0, "network_error", networkErrorMessage(sentBody?.length ?? 0), null);
   } finally {
     clearTimeout(timer);
   }
@@ -135,16 +139,26 @@ export async function apiFetch<T = unknown>(
   return data as T;
 }
 
-/**
- * The human sentence in an error body, whichever shape the server used.
- *
- * Three shapes are in the wild: {error:{code,message,issues}} (current), the validator's
- * {success:false, error:{issues:[{path,message}]}} (older servers), and {error:"...", note}
- * (a few hand-written routes). Reading only error.message turned the last two into a bare
- * "HTTP 400", and a toast handed the error object itself crashed React.
- */
-export function errorMessage(data: unknown, status: number): string {
-  const d = (data ?? {}) as { error?: unknown; note?: unknown; message?: unknown };
+/** What a gateway error, a rate limit and an oversized upload are called when the server gave no sentence of its own. */
+export const UNAVAILABLE_MESSAGE = "The server is temporarily unavailable. Try again in a minute.";
+export const RATE_LIMITED_MESSAGE = "Too many requests. Wait a moment and try again.";
+export const TOO_LARGE_MESSAGE = "That is larger than the server accepts. Split it into smaller parts and try again.";
+
+/** A request body big enough that "the connection dropped" may really mean "too large". */
+const LARGE_BODY_CHARS = 1_000_000;
+
+/** The words for a request that never got an answer, given how much was being sent. */
+export function networkErrorMessage(sentChars: number): string {
+  if (sentChars >= LARGE_BODY_CHARS) {
+    return "The upload did not get through. It may be larger than the server accepts - split it into smaller parts and try again. If it keeps failing, check your connection.";
+  }
+  return "Could not reach the server. Check your connection and try again.";
+}
+
+/** The sentence the server itself sent, or null when the body carried none. */
+function serverSentence(data: unknown): string | null {
+  if (!data || typeof data !== "object") return null;
+  const d = data as { error?: unknown; note?: unknown; message?: unknown };
   const e = d.error;
   if (typeof e === "string" && e) return typeof d.note === "string" && d.note ? `${e} - ${d.note}` : e;
   if (e && typeof e === "object") {
@@ -161,6 +175,31 @@ export function errorMessage(data: unknown, status: number): string {
   }
   if (typeof d.note === "string" && d.note) return d.note;
   if (typeof d.message === "string" && d.message) return d.message;
+  return null;
+}
+
+/**
+ * The human sentence in an error body, whichever shape the server used.
+ *
+ * Three shapes are in the wild: {error:{code,message,issues}} (current), the validator's
+ * {success:false, error:{issues:[{path,message}]}} (older servers), and {error:"...", note}
+ * (a few hand-written routes). Reading only error.message turned the last two into a bare
+ * "HTTP 400", and a toast handed the error object itself crashed React.
+ *
+ * And a fourth that is not ours at all: the hosting platform's own error page. A deploy in
+ * progress or a sleeping instance answers 502/503/504 with HTML, which used to reach the
+ * screen as "HTTP 502" - true, and no use to anyone. The server's own sentence always wins;
+ * these words are only for an answer that had none.
+ */
+export function errorMessage(data: unknown, status: number): string {
+  const said = serverSentence(data);
+  if (said) return said;
+  const html = typeof data === "string" && /^\s*<(!doctype|html|head|body|\?xml)/i.test(data);
+  if (status === 429) return RATE_LIMITED_MESSAGE;
+  if (status === 413) return TOO_LARGE_MESSAGE;
+  if (status === 502 || status === 503 || status === 504 || (html && status >= 500)) return UNAVAILABLE_MESSAGE;
+  if (html) return `The server gave an answer this app could not read (HTTP ${status}). Try again in a minute.`;
+  if (status >= 500) return `The server hit an error (HTTP ${status}). Try again in a minute.`;
   return `HTTP ${status}`;
 }
 

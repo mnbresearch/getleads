@@ -429,6 +429,148 @@ suite("security: jobs, sending, AI output", () => {
       expect(seen[0].redirect).toBe("manual");
     });
 
+    // ── final round: redirects that ARE the endpoint, and redirects that are not retried ──
+
+    const hookRow = (id: string) => db.query.webhooks.findFirst({ where: eq(schema.webhooks.id, id) });
+    /** A fetch stub that answers per request, recording each one. */
+    function routeFetch(respond: (r: { url: string; method: string }) => Response | Promise<Response>) {
+      const seen: { url: string; method: string; headers: Headers; body: string }[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (u: any, init: any) => {
+          const r = { url: String(u), method: String(init?.method ?? "GET"), headers: new Headers(init?.headers), body: String(init?.body ?? "") };
+          seen.push(r);
+          return respond(r);
+        }),
+      );
+      return seen;
+    }
+    const APPS_SCRIPT = "https://script.google.com/macros/s/AKfycbx-DEPLOYMENT/exec";
+
+    it("Google Apps Script's 302 is a delivery: the script has run, the event is sent once, and the hook is not counted against", async () => {
+      const { org, hook, ev } = await hookAndEvent({ url: APPS_SCRIPT, failures: 3 });
+      const seen = routeFetch((r) =>
+        r.method === "POST"
+          ? new Response(null, { status: 302, headers: { location: "https://script.googleusercontent.com/macros/echo?user_content_key=abc&lib=xyz" } })
+          : new Response('{"ok":true}', { status: 200 }),
+      );
+      const j = job(org.id, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { attempts: 1, maxAttempts: 5 });
+      const r = await handlers["webhook.deliver"](j, ctx());
+      expect(r).toMatchObject({ status: 302 });
+      expect(r.via).toMatch(/apps script \(output HTTP 200\)/);
+      // ONE POST carrying the event; then one GET for the output, with no payload and no signature.
+      expect(seen.map((x) => `${x.method} ${new URL(x.url).hostname}`)).toEqual(["POST script.google.com", "GET script.googleusercontent.com"]);
+      expect(JSON.parse(seen[0].body)).toMatchObject({ id: ev.id, type: "lead.created" });
+      expect(seen[1].body).toBe("");
+      expect(seen[1].headers.get("x-prospex-signature")).toBeNull();
+      // A success: the consecutive-failure count is cleared, the hook stays on.
+      expect(await hookRow(hook.id)).toMatchObject({ failures: 0, active: true });
+    });
+
+    it("an Apps Script delivery is not repeated when fetching its output fails: the script already ran", async () => {
+      const { org, hook, ev } = await hookAndEvent({ url: APPS_SCRIPT });
+      const seen = routeFetch((r) => {
+        if (r.method === "POST") return new Response(null, { status: 302, headers: { location: "https://script.googleusercontent.com/macros/echo?user_content_key=abc" } });
+        throw new Error("socket hang up");
+      });
+      const r = await handlers["webhook.deliver"](job(org.id, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { attempts: 1, maxAttempts: 5 }), ctx());
+      expect(r).toMatchObject({ status: 302 });
+      expect(seen.filter((x) => x.method === "POST")).toHaveLength(1);
+      expect((await hookRow(hook.id)).failures).toBe(0);
+    });
+
+    it("only that exact shape counts: script.google.com redirecting anywhere else (a sign-in page) is a failed delivery", async () => {
+      for (const [url, location] of [
+        [APPS_SCRIPT, "https://accounts.google.com/ServiceLogin?continue=x"],
+        [APPS_SCRIPT, "http://script.googleusercontent.com/macros/echo"],
+        ["https://script.google.com.evil.example/macros/s/x/exec", "https://script.googleusercontent.com/macros/echo"],
+        ["https://hooks.customer-site.com/in", "https://script.googleusercontent.com/macros/echo"],
+      ]) {
+        const { org, hook, ev } = await hookAndEvent({ url });
+        const seen = routeFetch(() => new Response(null, { status: 302, headers: { location } }));
+        await expect(handlers["webhook.deliver"](job(org.id, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { attempts: 1, maxAttempts: 5 }), ctx()), `${url} -> ${location}`).rejects.toThrow(/redirects are not followed/);
+        expect(seen, `${url} -> ${location}`).toHaveLength(1);
+      }
+    });
+
+    it("a 307/308 to the same hostname (http -> https, a trailing slash) replays the POST once, signed identically", async () => {
+      for (const [status, from, location, to] of [
+        [308, "http://hooks.customer-site.com/in", "https://hooks.customer-site.com/in", "https://hooks.customer-site.com/in"],
+        [307, "https://hooks.customer-site.com/in", "/in/", "https://hooks.customer-site.com/in/"],
+        [308, "https://user:s3cret@hooks.customer-site.com/in", "/in/", "https://hooks.customer-site.com/in/"],
+      ] as const) {
+        const { org, hook, ev } = await hookAndEvent({ url: from, failures: 2 });
+        let n = 0;
+        const seen = routeFetch(() => (++n === 1 ? new Response(null, { status, headers: { location } }) : new Response("ok", { status: 200 })));
+        const r = await handlers["webhook.deliver"](job(org.id, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { attempts: 1, maxAttempts: 5 }), ctx());
+        expect(r, from).toMatchObject({ status: 200, via: `HTTP ${status} to the same host` });
+        expect(seen, from).toHaveLength(2);
+        expect(seen.map((x) => x.method)).toEqual(["POST", "POST"]);
+        expect(seen[1].url).toBe(to);
+        // The same event, timestamp and signature: a receiver verifies it exactly as before.
+        expect(seen[1].body).toBe(seen[0].body);
+        expect(seen[1].headers.get("x-prospex-signature")).toBe(seen[0].headers.get("x-prospex-signature"));
+        expect(seen[1].headers.get("x-prospex-timestamp")).toBe(seen[0].headers.get("x-prospex-timestamp"));
+        // Basic-auth credentials in the configured URL go along to the same host.
+        if (from.includes("user:")) expect(seen[1].headers.get("authorization")).toBe(seen[0].headers.get("authorization"));
+        expect((await hookRow(hook.id)).failures).toBe(0);
+      }
+    });
+
+    it("any other redirect is not followed: another host, another port, a downgrade, a 301/302, or a second redirect", async () => {
+      for (const [status, from, location] of [
+        [308, "https://hooks.customer-site.com/in", "https://collector.attacker.example/in"],
+        [307, "https://hooks.customer-site.com/in", "https://hooks.customer-site.com:8443/in"],
+        [308, "https://hooks.customer-site.com/in", "http://hooks.customer-site.com/in"],
+        [308, "https://hooks.customer-site.com/in", "http://127.0.0.1:37777/in"],
+        [301, "http://hooks.customer-site.com/in", "https://hooks.customer-site.com/in"],
+        [302, "https://hooks.customer-site.com/in", "/in/"],
+      ] as const) {
+        const { org, hook, ev } = await hookAndEvent({ url: from });
+        const seen = routeFetch(() => new Response(null, { status, headers: { location } }));
+        const j = job(org.id, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { attempts: 1, maxAttempts: 5 });
+        await expect(handlers["webhook.deliver"](j, ctx()), `${status} ${location}`).rejects.toThrow(/redirects are not followed - set the webhook to the final address of your endpoint/);
+        expect(seen, `${status} ${location}`).toHaveLength(1);
+        expect((await hookRow(hook.id)).failures).toBe(1);
+      }
+      // A same-host 308 whose target redirects again: replayed once, then stopped.
+      const { org, hook, ev } = await hookAndEvent({ url: "http://hooks.customer-site.com/in" });
+      const seen = routeFetch(() => new Response(null, { status: 308, headers: { location: "https://hooks.customer-site.com/in" } }));
+      await expect(handlers["webhook.deliver"](job(org.id, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { attempts: 1, maxAttempts: 5 }), ctx())).rejects.toThrow(/redirected twice/);
+      expect(seen).toHaveLength(2);
+    });
+
+    it("a redirect failure is final on the first attempt: one request, one failed job, one count against the hook - not five", async () => {
+      const { org, hook, ev } = await hookAndEvent();
+      const seen = routeFetch(() => new Response(null, { status: 302, headers: { location: "https://elsewhere.customer-site.com/in" } }));
+      // Through the real queue, with the five attempts every event delivery is given. (Under
+      // a type of its own, so another test file draining the shared queue cannot claim it.)
+      const type = `webhook.deliver.${uid()}`;
+      const only = { [type]: handlers["webhook.deliver"] };
+      const queued = await schema.enqueue(db, type, { webhookId: hook.id, eventId: ev.id }, { orgId: org.id, maxAttempts: 5 });
+      expect(await schema.runJobById(db, only, queued.id)).toBe(true);
+      const after = await db.query.jobs.findFirst({ where: eq(schema.jobs.id, queued.id) });
+      expect(after.status).toBe("failed");
+      expect(after.attempts).toBe(1);
+      expect(after.error).toMatch(/302 redirects are not followed/);
+      // Not back in the queue: there is nothing left to run.
+      expect(await schema.runJobById(db, only, queued.id)).toBe(false);
+      expect(seen).toHaveLength(1);
+      expect((await hookRow(hook.id)).failures).toBe(1);
+
+      // An ordinary failure (the endpoint is down) is still retried, and still only counts
+      // against the hook once its attempts are used up.
+      const down = await hookAndEvent();
+      const seenDown = routeFetch(() => new Response("no", { status: 503 }));
+      const q2 = await schema.enqueue(db, type, { webhookId: down.hook.id, eventId: down.ev.id }, { orgId: down.org.id, maxAttempts: 5 });
+      expect(await schema.runJobById(db, only, q2.id)).toBe(true);
+      const afterDown = await db.query.jobs.findFirst({ where: eq(schema.jobs.id, q2.id) });
+      expect([afterDown.status, afterDown.attempts]).toEqual(["queued", 1]);
+      expect(seenDown).toHaveLength(1);
+      expect((await hookRow(down.hook.id)).failures).toBe(0);
+      await db.update(schema.jobs).set({ status: "done" }).where(eq(schema.jobs.id, q2.id));
+    });
+
     it("refuses a private target without connecting, and counts it against the hook", async () => {
       for (const url of ["http://127.0.0.1:37777/hook", "http://169.254.169.254/latest/meta-data/", "http://10.0.0.5/x", "http://[::1]:8080/x", "http://localhost/x"]) {
         const { org, hook, ev } = await hookAndEvent({ url });
@@ -965,8 +1107,56 @@ suite("security: jobs, sending, AI output", () => {
       expect(r.error).toBe("Sender rejected the message (SMTP 451)");
       expect((await contact(cc.id)).lastError).toBe("Send failed: Sender rejected the message (SMTP 451)");
       expect(svc.sendFailureCategory("550 5.1.1 user unknown")).toBe("Recipient address rejected (SMTP 550)");
-      expect(svc.sendFailureCategory("connect ETIMEDOUT 10.0.0.4:587")).toBe("The sending server timed out");
-      expect(svc.sendFailureCategory("getaddrinfo ENOTFOUND smtp.internal")).toBe("Could not reach the sending server");
+      expect(svc.sendFailureCategory("connect ETIMEDOUT 10.0.0.4:587")).toBe("The sending server could not be reached (it timed out)");
+      expect(svc.sendFailureCategory("getaddrinfo ENOTFOUND smtp.internal")).toBe("The sending server could not be reached");
+    });
+
+    it("a server that never answered is 'could not be reached', never 'rejected the message'", async () => {
+      for (const upstream of [
+        "getaddrinfo ENOTFOUND smtp.tenantco.example",
+        "connect ECONNREFUSED 203.0.113.9:587",
+        "read ECONNRESET",
+        "connect EHOSTUNREACH 203.0.113.9:465",
+        "fetch failed",
+        "TypeError: fetch failed (UND_ERR_CONNECT_TIMEOUT)",
+        "Connection closed unexpectedly",
+      ]) {
+        expect(svc.sendFailureCategory(upstream), upstream).toMatch(/^The sending server could not be reached/);
+      }
+      for (const upstream of ["connect ETIMEDOUT 203.0.113.9:587", "Connection timeout", "The operation was aborted due to timeout", "Greeting never received"]) {
+        expect(svc.sendFailureCategory(upstream), upstream).toBe("The sending server could not be reached (it timed out)");
+      }
+      // The same through a real send: the contact and the message row say so.
+      const { org, campaign, step } = await setup();
+      const { cc } = await newContact(org.id, campaign.id);
+      mail.impl = async () => ({ ok: false, provider: "resend", error: "fetch failed" });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const r = await svc.sendStep(campaign.id, cc.id, step.id);
+      expect(r.error).toBe("The sending server could not be reached");
+      expect((await contact(cc.id)).lastError).toBe("Send failed: The sending server could not be reached");
+      expect((await messagesOf(campaign.id))[0].error).toBe("The sending server could not be reached");
+      // Unchanged: a provider that answered and said no is still a rejection.
+      expect(svc.sendFailureCategory("message refused by policy")).toBe("The sending provider rejected the message");
+    });
+
+    it("a sender setting we refused ourselves says what to change, word for word - and is not a bounce", async () => {
+      const refusal = "That SMTP port is not allowed. Use one of the standard mail ports: 25, 26, 465, 550, 587, 2465, 2525, 2587.";
+      // Marked as ours (`refused`): passed through. The same text from anywhere else is not.
+      expect(svc.sendFailureCategory({ error: refusal, refused: true })).toBe(refusal);
+      expect(svc.sendFailureCategory({ error: refusal })).not.toBe(refusal);
+      expect(svc.sendFailureCategory(refusal)).not.toBe(refusal);
+      const { org, campaign, step } = await setup({ accountPatch: { provider: "smtp", fromEmail: `asha-${uid()}@tenantco.example`, configEncrypted: crypto.encryptJson({ host: "smtp.tenantco.example", port: 2526 }) } });
+      const { lead, cc } = await newContact(org.id, campaign.id);
+      mail.impl = async () => ({ ok: false, provider: "smtp", error: refusal, refused: true });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const r = await svc.sendStep(campaign.id, cc.id, step.id);
+      expect(r).toMatchObject({ failed: true, error: refusal });
+      // "550" in the list of ports is a port, not an SMTP reply about the recipient.
+      expect(r.bounced).toBeUndefined();
+      expect((await contact(cc.id)).lastError).toBe(`Send failed: ${refusal}`);
+      expect((await leadRow(lead.id)).emailStatus).toBe("valid");
+      expect(await db.select().from(schema.suppressions).where(eq(schema.suppressions.orgId, org.id))).toHaveLength(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
     });
 
     it("a failed job stores a redacted error", async () => {
@@ -1220,6 +1410,88 @@ suite("security: jobs, sending, AI output", () => {
       expect(await usageOf(org.id, "emails")).toBe(1);
     });
 
+    // ── final round ──
+
+    it("a sender whose connection test failed is refused before anything is attempted or reserved, in words that say what to do", async () => {
+      const { token, org, acct, inbound } = await replySetup({ accountPatch: { status: "error" } });
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toBe(`The sender ${acct.fromEmail} failed its connection test, so the reply was not sent. Use "Test again" on that sender under Campaigns (or attach another sender to the campaign), then send the reply.`);
+      expect(r.body.error.message).not.toMatch(/rejected the message/);
+      expect(mail.calls).toHaveLength(0);
+      expect(await outboundOf(org.id)).toHaveLength(0);
+      expect((await account(acct.id)).sentToday).toBe(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      // The draft is still there, and once the sender works again the same reply goes out.
+      await db.update(schema.emailAccounts).set({ status: "active" }).where(eq(schema.emailAccounts.id, acct.id));
+      expect((await sendReply(token, inbound.id)).status).toBe(200);
+      expect(mail.calls).toHaveLength(1);
+    });
+
+    it("with no sender at all it says to add one - not 'no account configured for this org'", async () => {
+      const { token, org } = await signup("reply-nosender");
+      const { inbound } = await newInbound(org.id, null);
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toBe("No sender is set up yet. Add a sender under Campaigns, then send the reply.");
+      expect(mail.calls).toHaveLength(0);
+    });
+
+    it("a reply outside a campaign goes through the workspace's working sender, not a newer one that is in error", async () => {
+      const { token, org } = await signup("reply-pick");
+      const working = await newAccount(org.id);
+      const broken = await newAccount(org.id, { status: "error" });
+      await db.execute(schema.sql`UPDATE email_accounts SET created_at = now() + interval '1 minute' WHERE id = ${broken.id}`);
+      const { inbound } = await newInbound(org.id, null);
+      expect((await sendReply(token, inbound.id)).status).toBe(200);
+      expect((await account(working.id)).sentToday).toBe(1);
+      expect((await account(broken.id)).sentToday).toBe(0);
+    });
+
+    it("a send that THROWS gives back the slot and the monthly unit, and is reported as a failed send", async () => {
+      const { token, org, acct, inbound } = await replySetup();
+      mail.impl = async () => {
+        throw new Error("connect ECONNREFUSED 10.4.2.9:587 (relay smtp-internal-7.platform.local, key re_PLATFORMKEY0123456789abcd)");
+      };
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(502);
+      expect(r.body.error.code).toBe("send_failed");
+      expect(r.body.error.message).toBe("Send failed: The sending server could not be reached. Nothing was sent and nothing was counted against your limits - try again.");
+      // What used to be kept: the sender's daily slot and one email of the month's allowance.
+      expect((await account(acct.id)).sentToday).toBe(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      const [msg] = await outboundOf(org.id);
+      expect([msg.status, msg.error]).toEqual(["failed", "The sending server could not be reached"]);
+      // Nothing of what the driver said reaches the customer or the log.
+      const everything = JSON.stringify([r.body, msg, warn.mock.calls]);
+      expect(everything).not.toContain("10.4.2.9");
+      expect(everything).not.toContain("platform.local");
+      expect(everything).not.toContain("re_PLATFORMKEY0123456789abcd");
+      // The slot it gave back is usable.
+      mail.impl = null;
+      expect((await sendReply(token, inbound.id)).status).toBe(200);
+      expect((await account(acct.id)).sentToday).toBe(1);
+      expect(await usageOf(org.id, "emails")).toBe(1);
+    });
+
+    it("a refused SMTP setting (a port that is not a mail port) reaches the customer as written, not as 'the provider rejected the message'", async () => {
+      const refusal = "That SMTP port is not allowed. Use one of the standard mail ports: 25, 26, 465, 587, 2465, 2525, 2587.";
+      const { token, org, acct, inbound } = await replySetup({ accountPatch: { provider: "smtp", configEncrypted: crypto.encryptJson({ host: "smtp.tenantco.example", port: 2526 }) } });
+      mail.impl = async () => ({ ok: false, provider: "smtp", error: refusal, refused: true });
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toBe(`Send failed: ${refusal}`);
+      const [msg] = await outboundOf(org.id);
+      expect([msg.status, msg.error]).toEqual(["failed", refusal]);
+      expect((await account(acct.id)).sentToday).toBe(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      // An unreachable provider says so too.
+      mail.impl = async () => ({ ok: false, provider: "smtp", error: "getaddrinfo ENOTFOUND smtp.tenantco.example" });
+      expect((await sendReply(token, inbound.id)).body.error.message).toBe("Send failed: The sending server could not be reached");
+    });
+
     it("15 parallel replies against a cap of 7 never send more than 7", async () => {
       for (const kind of ["shared sender cap", "own sender daily limit"] as const) {
         mail.calls = [];
@@ -1240,6 +1512,228 @@ suite("security: jobs, sending, AI output", () => {
         expect(await usageOf(org.id, "emails"), kind).toBe(sent);
         expect((await outboundOf(org.id)).filter((m: any) => m.status === "sent"), kind).toHaveLength(sent);
       }
+    });
+  });
+
+  // ── final round: a sender can be tested again ──
+
+  describe("POST /v1/campaigns/email-accounts/:id/retest", () => {
+    const retest = (token: string, id: string) => req("POST", `/v1/campaigns/email-accounts/${id}/retest`, token, {});
+    const account = (id: string) => db.query.emailAccounts.findFirst({ where: eq(schema.emailAccounts.id, id) });
+    const auditOf = (orgId: string, action: string) => db.select().from(schema.auditLog).where(schema.and(eq(schema.auditLog.orgId, orgId), eq(schema.auditLog.action, action)));
+    /** The Resend key check, answered by the test. */
+    function stubResend(respond: () => Response) {
+      const seen: string[] = [];
+      vi.stubGlobal(
+        "fetch",
+        vi.fn(async (u: any) => {
+          const url = String(u);
+          if (!url.startsWith("https://api.resend.com/")) throw new Error(`unexpected fetch in test: ${url}`);
+          seen.push(url);
+          return respond();
+        }),
+      );
+      return seen;
+    }
+    const RESEND_KEY = "re_TENANTKEY0123456789abcdefgh";
+    const resendAccount = (orgId: string, patch: Record<string, unknown> = {}) => newAccount(orgId, { provider: "resend", configEncrypted: crypto.encryptJson({ apiKey: RESEND_KEY }), ...patch });
+    async function memberOf(orgId: string) {
+      const { issueJwt, hashPassword } = await import("./lib/auth.js");
+      const [member] = await db.insert(schema.users).values({ orgId, email: `member-${uid()}@example.com`, passwordHash: await hashPassword("whatever-123"), role: "member" }).returning();
+      return issueJwt(member);
+    }
+
+    it("a sender that failed its test becomes active again when the test passes, and a campaign can then start through it", async () => {
+      const { token, org } = await signup("retest");
+      const acct = await resendAccount(org.id, { status: "error" });
+      const { campaign } = await newCampaign(org.id, acct.id, {}, { status: "draft" });
+      // Before: the campaign refuses to start, and says how to fix it.
+      const refused = await req("POST", `/v1/campaigns/${campaign.id}/start`, token, {});
+      expect(refused.status).toBe(400);
+      expect(refused.body.error.message).toMatch(/failed its connection test.*Use "Test again" on that sender/);
+
+      const seen = stubResend(() => new Response("[]", { status: 200 }));
+      const r = await retest(token, acct.id);
+      expect(r.status).toBe(200);
+      expect(r.body.test).toEqual({ ok: true });
+      expect(r.body.emailAccount).toMatchObject({ id: acct.id, provider: "resend", fromEmail: acct.fromEmail, status: "active" });
+      expect(seen).toEqual(["https://api.resend.com/domains"]);
+      expect((await account(acct.id)).status).toBe("active");
+      // Never the credentials, in any form.
+      expect(r.text).not.toContain(RESEND_KEY);
+      expect(r.text).not.toContain("configEncrypted");
+      expect(r.text).not.toContain(acct.configEncrypted);
+      // On the audit trail, without them.
+      const rows = await auditOf(org.id, "sender.retested");
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ result: "ok", targetId: acct.id });
+      expect(rows[0].data).toMatchObject({ provider: "resend", testOk: true, previousStatus: "error", status: "active" });
+      expect(JSON.stringify(rows[0])).not.toContain(RESEND_KEY);
+
+      vi.unstubAllGlobals();
+      expect((await req("POST", `/v1/campaigns/${campaign.id}/start`, token, {})).status).toBe(200);
+    });
+
+    it("an active sender whose key stopped working is marked in error, with the reason in words", async () => {
+      const { token, org } = await signup("retest-bad");
+      const acct = await resendAccount(org.id);
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      stubResend(() => new Response('{"message":"API key is invalid"}', { status: 401 }));
+      const bad = await retest(token, acct.id);
+      expect(bad.status).toBe(200);
+      expect(bad.body.test).toEqual({ ok: false, error: "The email provider rejected the API key. Check that it is correct and active." });
+      expect(bad.body.emailAccount.status).toBe("error");
+      expect((await account(acct.id)).status).toBe("error");
+      // The provider being unreachable is a failed test too (not a 500), and says to try again.
+      vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
+      const down = await retest(token, acct.id);
+      expect(down.status).toBe(200);
+      expect(down.body.test.ok).toBe(false);
+      expect(down.body.test.error).toMatch(/Could not reach the email provider.*"Test again"/);
+      expect((await account(acct.id)).status).toBe("error");
+      // And back.
+      stubResend(() => new Response("[]", { status: 200 }));
+      expect((await retest(token, acct.id)).body.emailAccount.status).toBe("active");
+      expect(await auditOf(org.id, "sender.retested")).toHaveLength(3);
+    });
+
+    it("SMTP: the host and port rules are checked again, and a refused setting is explained as written", async () => {
+      const { token, org } = await signup("retest-smtp");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const net = vi.fn(async () => { throw new Error("no network call is expected for a refused setting"); });
+      vi.stubGlobal("fetch", net);
+      // A sender saved before ports were restricted: 2526 is not a mail port.
+      const badPort = await newAccount(org.id, { provider: "smtp", configEncrypted: crypto.encryptJson({ host: "smtp.tenantco.example", port: 2526, user: "u", pass: "SMTP-PASSWORD-123" }) });
+      const r = await retest(token, badPort.id);
+      expect(r.status).toBe(200);
+      expect(r.body.test.ok).toBe(false);
+      expect(r.body.test.error).toMatch(/^That SMTP port is not allowed\. Use one of the standard mail ports: 25, 26, 465, 587/);
+      expect(r.body.emailAccount.status).toBe("error");
+      expect(r.text).not.toContain("SMTP-PASSWORD-123");
+      // A host on our own network is not connected to.
+      for (const host of ["127.0.0.1", "10.0.0.5", "169.254.169.254", "localhost"]) {
+        const priv = await newAccount(org.id, { provider: "smtp", configEncrypted: crypto.encryptJson({ host, port: 587 }) });
+        const p = await retest(token, priv.id);
+        expect(p.body.test, host).toMatchObject({ ok: false });
+        expect(p.body.test.error, host).toMatch(/must be a public mail server address/);
+        expect((await account(priv.id)).status).toBe("error");
+      }
+      expect(net).not.toHaveBeenCalled();
+    });
+
+    it("the platform sender has nothing of the customer's to test: it is active", async () => {
+      const { token, org } = await signup("retest-system");
+      const acct = await newAccount(org.id, { status: "error" });
+      const r = await retest(token, acct.id);
+      expect(r.status).toBe(200);
+      expect(r.body.test).toEqual({ ok: true });
+      expect(r.body.emailAccount.status).toBe("active");
+      expect((await account(acct.id)).status).toBe("active");
+    });
+
+    it("credentials that can no longer be read are a readable 409, not a test and not a 500", async () => {
+      const { token, org } = await signup("retest-unreadable");
+      for (const configEncrypted of ["not-a-ciphertext", crypto.encryptJson({ user: "only-a-user" })]) {
+        const acct = await newAccount(org.id, { provider: "smtp", configEncrypted });
+        const r = await retest(token, acct.id);
+        expect(r.status).toBe(409);
+        expect(r.body.error.code).toBe("credential_unreadable");
+        expect(r.body.error.message).toMatch(/saved settings can no longer be read.*Remove the sender and add it again/);
+        expect((await account(acct.id)).status).toBe("error");
+      }
+      const rows = await auditOf(org.id, "sender.retested");
+      expect(rows.map((x: any) => x.result)).toEqual(["failed", "failed"]);
+    });
+
+    it("owner or admin only, and only the workspace's own senders", async () => {
+      const { token, org } = await signup("retest-roles");
+      const acct = await newAccount(org.id, { status: "error" });
+      const member = await memberOf(org.id);
+      const denied = await retest(member, acct.id);
+      expect(denied.status).toBe(403);
+      expect(denied.body.error.code).toBe("forbidden_role");
+      expect((await account(acct.id)).status).toBe("error");
+      expect((await auditOf(org.id, "sender.retested")).map((x: any) => x.result)).toEqual(["denied"]);
+      // Another workspace's owner: the sender does not exist for them.
+      const other = await signup("retest-other");
+      expect((await retest(other.token, acct.id)).status).toBe(404);
+      expect((await account(acct.id)).status).toBe("error");
+      // No session at all.
+      expect((await req("POST", `/v1/campaigns/email-accounts/${acct.id}/retest`, undefined, {})).status).toBe(401);
+      expect((await retest(token, acct.id)).status).toBe(200);
+    });
+  });
+
+  // ── final round: a lead whose stored email is not one address is not enrolled ──
+
+  describe("enrolment skips leads whose stored email is not a single address", () => {
+    async function leadsFor(orgId: string) {
+      const mk = async (patch: Record<string, unknown>) => (await db.insert(schema.leads).values({ orgId, fullName: "Pat Prospect", firstName: "Pat", emailStatus: "unknown", ...patch }).returning())[0];
+      return {
+        good: await mk({ email: `ok-${uid()}@example.com`, emailStatus: "valid" }),
+        noEmail: await mk({ email: null }),
+        knownBad: await mk({ email: `bad-${uid()}@example.com`, emailStatus: "invalid" }),
+        // Legacy rows, written before every writer validated the address.
+        named: await mk({ email: `Pat Prospect <pat-${uid()}@example.com>` }),
+        several: await mk({ email: `a-${uid()}@example.com, b-${uid()}@example.com`, emailStatus: "valid" }),
+      };
+    }
+    const contactsOf = (campaignId: string) => db.select().from(schema.campaignContacts).where(eq(schema.campaignContacts.campaignId, campaignId));
+
+    it("POST /v1/campaigns/:id/enroll leaves them out and counts them as skippedInvalidEmail", async () => {
+      const { token, org } = await signup("enrol");
+      const acct = await newAccount(org.id);
+      const { campaign } = await newCampaign(org.id, acct.id);
+      const L = await leadsFor(org.id);
+      const r = await req("POST", `/v1/campaigns/${campaign.id}/enroll`, token, { leadIds: Object.values(L).map((l: any) => l.id) });
+      expect(r.status).toBe(200);
+      // skippedNoEmail keeps its meaning (no address, or a known-invalid one); the new count is separate.
+      expect(r.body).toMatchObject({ enrolled: 1, skippedNoEmail: 2, skippedInvalidEmail: 2 });
+      expect((await contactsOf(campaign.id)).map((c: any) => c.leadId)).toEqual([L.good.id]);
+      // With nothing malformed the field is still there, as 0.
+      const again = await req("POST", `/v1/campaigns/${campaign.id}/enroll`, token, { leadIds: [L.good.id] });
+      expect(again.body).toMatchObject({ enrolled: 0, skippedNoEmail: 0, skippedInvalidEmail: 0 });
+    });
+
+    it("enrollEligibleLeads (autopilots, signal subscriptions) and enrollLeads itself do the same", async () => {
+      const org = await newOrg("enrol-svc");
+      const acct = await newAccount(org.id);
+      const { campaign } = await newCampaign(org.id, acct.id);
+      const L = await leadsFor(org.id);
+      const ids = Object.values(L).map((l: any) => l.id);
+      expect(await svc.enrollEligibleLeads(campaign, ids)).toEqual({ enrolled: 1, skippedNoEmail: 2, skippedInvalidEmail: 2, skippedOtherClient: 0, claimedForClient: 0 });
+      expect(await svc.leadsWithUsableEmail(db, org.id, ids)).toEqual({ ids: [L.good.id], skippedNoEmail: 2, skippedInvalidEmail: 2 });
+      // Called directly with a malformed lead, the raw enrol does not enrol it either.
+      const second = await newCampaign(org.id, acct.id);
+      expect(await svc.enrollLeads(second.campaign, [L.named.id, L.several.id, L.good.id])).toBe(1);
+      expect((await contactsOf(second.campaign.id)).map((c: any) => c.leadId)).toEqual([L.good.id]);
+      // Another workspace's lead is not this workspace's to enrol, whatever its email.
+      const other = await newOrg("enrol-other");
+      const [foreign] = await db.insert(schema.leads).values({ orgId: other.id, email: `x-${uid()}@example.com`, emailStatus: "valid" }).returning();
+      expect(await svc.leadsWithUsableEmail(db, org.id, [foreign.id])).toEqual({ ids: [], skippedNoEmail: 1, skippedInvalidEmail: 0 });
+    });
+
+    it("they show up where the customer can fix them: the 'known-bad address' bucket, on the dashboard count, the list and the action", async () => {
+      const { token, org } = await signup("enrol-attn");
+      const L = await leadsFor(org.id);
+      const clients = await import("./services/clients.js");
+      const bad = await clients.attentionLeadIds(org.id, null, "badEmail");
+      expect(new Set(bad.ids)).toEqual(new Set([L.knownBad.id, L.named.id, L.several.id]));
+      expect(bad.total).toBe(3);
+      // Not double-listed as merely unverified.
+      expect((await clients.attentionLeadIds(org.id, null, "unverified")).ids).toEqual([]);
+      expect((await clients.attentionLeadIds(org.id, null, "noEmail")).ids).toEqual([L.noEmail.id]);
+      // The Leads page filter behind the "View" link returns the same set...
+      const list = await req("GET", "/v1/leads?attention=badEmail&limit=50", token);
+      expect(list.status).toBe(200);
+      expect(new Set(list.body.leads.map((l: any) => l.id))).toEqual(new Set(bad.ids));
+      // ...and the number on the card agrees with it.
+      const overview = await req("GET", "/v1/clients", token);
+      expect(overview.status).toBe(200);
+      expect(JSON.stringify(overview.body)).toContain('"badEmail":3');
+      // A lost lead is nobody's problem any more.
+      await db.update(schema.leads).set({ status: "lost" }).where(eq(schema.leads.id, L.named.id));
+      expect((await clients.attentionLeadIds(org.id, null, "badEmail")).total).toBe(2);
     });
   });
 

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
+import { plural } from "../lib/plural";
 
 interface Rate { value: number; ci: { lower: number; upper: number }; n: number; positives: number }
 interface Prompt { id: string; text: string; topic: string | null; samplesPerRun: number; active: boolean; lastRunAt: string | null }
@@ -89,7 +90,7 @@ export function VisibilityPage() {
       <div className="card p-4">
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <div className="font-medium">{d.brand.name}</div>
-          <div className="text-xs text-ink-400">Last {d.windowDays} days · {d.metrics.runs} usable answers{d.excludedRuns > 0 ? ` · ${d.excludedRuns} excluded (refusals/errors)` : ""}</div>
+          <div className="text-xs text-ink-400">Last {plural(d.windowDays, "day")} · {plural(d.metrics.runs, "usable answer")}{d.excludedRuns > 0 ? ` · ${d.excludedRuns} excluded (refusals/errors)` : ""}</div>
         </div>
         <p className="mt-2 text-sm text-ink-300">{d.metrics.summary}</p>
         {d.metrics.sufficient && (
@@ -221,7 +222,7 @@ export function VisibilityPage() {
                     {p.text}
                     {p.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}
                   </div>
-                  <div className="text-xs text-ink-400">{p.samplesPerRun} samples/day{p.topic ? ` · ${p.topic}` : ""}{p.lastRunAt ? ` · last ${new Date(p.lastRunAt).toLocaleDateString()}` : " · never run"}</div>
+                  <div className="text-xs text-ink-400">{plural(p.samplesPerRun, "sample")}/day{p.topic ? ` · ${p.topic}` : ""}{p.lastRunAt ? ` · last ${new Date(p.lastRunAt).toLocaleDateString()}` : " · never run"}</div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   {/* "Suggest more" installs up to ten of these in one click, so every one of
@@ -380,7 +381,7 @@ function SuggestModal({ open, onClose, onSaved, toast }: { open: boolean; onClos
       const r = await apiFetch<{ created: unknown[]; skipped: number }>("POST", "/v1/visibility/prompts/bulk", {
         prompts: chosen.map((c) => ({ text: c.text, topic: c.topic })),
       });
-      toast(`Tracking ${r.created.length} new question${r.created.length === 1 ? "" : "s"}${r.skipped ? `, ${r.skipped} already tracked` : ""}`);
+      toast(`Tracking ${plural(r.created.length, "new question")}${r.skipped ? `, ${r.skipped} already tracked` : ""}`);
       setItems(null);
       onSaved();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }

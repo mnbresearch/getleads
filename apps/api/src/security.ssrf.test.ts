@@ -405,6 +405,38 @@ describe("F6: tenant SMTP transports", () => {
     }
   });
 
+  it("a setting we refused is marked as ours on the SEND path too, and its message reaches the customer as written", async () => {
+    // The upgrade rehearsal: a sender saved on port 2526 before ports were restricted. Every
+    // send through it failed with "The sending provider rejected the message" - nothing was
+    // rejected by any provider; we refused the port, and the customer was not told which.
+    const { mailer, transports } = await load();
+    const { sendFailureCategory } = await import("./services/campaigns.js");
+    stubDns({ "smtp.acme.example": [{ address: "142.250.1.109", family: 4 }], "smtp.rebound.example": [{ address: "10.0.0.5", family: 4 }] });
+    const port = await mailer.sendMail({ provider: "smtp", smtp: { host: "smtp.acme.example", port: 2526 } }, input);
+    expect(port).toMatchObject({ ok: false, refused: true });
+    expect(port.error).toMatch(/^That SMTP port is not allowed\. Use one of the standard mail ports: 25, 26, 465, 587, 2465, 2525, 2587\.$/);
+    expect(sendFailureCategory(port)).toBe(port.error);
+    // A host that is not public, and one that does not exist: also ours, also passed through.
+    const priv = await mailer.sendMail({ provider: "smtp", smtp: { host: "smtp.rebound.example", port: 587 } }, input);
+    expect(priv).toMatchObject({ ok: false, refused: true });
+    expect(sendFailureCategory(priv)).toMatch(/^SMTP host must be a public mail server address/);
+    const gone = await mailer.sendMail({ provider: "smtp", smtp: { host: "no-such-host.example", port: 587 } }, input);
+    expect(gone).toMatchObject({ ok: false, refused: true });
+    expect(sendFailureCategory(gone)).toBe("The SMTP host could not be found. Check the spelling.");
+    expect(transports).toEqual([]);
+    // What a SERVER said is still never passed through: it gets a category.
+    const nodemailer = (await import("nodemailer")).default;
+    vi.mocked(nodemailer.createTransport).mockImplementation((() => ({
+      sendMail: async () => {
+        throw new Error("connect ECONNREFUSED 142.250.1.109:587 (relay mx-internal-3)");
+      },
+    })) as never);
+    const down = await mailer.sendMail({ provider: "smtp", smtp: { host: "smtp.acme.example", port: 587 } }, input);
+    expect(down.ok).toBe(false);
+    expect(down.refused).toBeUndefined();
+    expect(sendFailureCategory(down)).toBe("The sending server could not be reached");
+  });
+
   it("the platform's own mailer is trusted configuration and is not blocked", async () => {
     const { mailer, transports } = await load();
     const { env } = await import("./env.js");

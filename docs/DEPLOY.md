@@ -60,6 +60,18 @@ Inbound replies: point a Resend inbound webhook (or a Gmail → Zapier/Make forw
 - Resend: resend.com → API keys + Domains
 - Hunter: hunter.io → API
 
+## Deploying this release
+
+1. Deploy the API first. It applies migration `0018_grandfather_existing_users.sql` on boot (with `AUTO_MIGRATE=false`, run `npm run db:migrate` first). Check `/health`.
+2. Deploy the web app immediately after. In between, "Sign in with Google" shows an error asking for a reload; it never signs anyone in unsafely, and password sign-in keeps working.
+3. Rotate `INTERNAL_TOKEN` if it was ever used in a URL.
+
+The migration marks every account that exists at deploy time as owning its email address, so an existing customer's first Google sign-in links their account and they keep their password, sessions and API keys. Accounts created after the deploy are unproved until a password reset or a Google sign-in proves them. It also adds the table that makes admin "Sign out" revoke the session, and two missing rows in "Tools & limits".
+
+Rollback: redeploy the previous build; the old code runs on the upgraded database. Three things made on the new code do not work on the old code until you roll forward again: webhooks created or rotated on the new code (v2 signatures), sender and integration credentials saved on the new code (new encrypted format), and job-change signals (the old code cannot insert them). Admin sign-outs are not honoured by the old code.
+
+Optional settings and the full notes are in DEPLOY.md section B8.
+
 ## Operating
 
 - Admin: the dashboard at `/admin` (sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`), or `GET /v1/admin/orgs` and `PATCH /v1/admin/orgs/:id/plan` with header `x-admin-token: $ADMIN_API_TOKEN` to list orgs and change plans/limits. `INTERNAL_TOKEN` is only the job runner's token and does not open the admin API. Every admin change is recorded in the workspace's security log.

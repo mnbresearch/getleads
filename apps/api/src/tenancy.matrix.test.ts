@@ -390,6 +390,7 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     // ── admin (must refuse every customer credential) ──
     "POST /v1/admin/login": pub("admin credential endpoint; covered by security.auth.test.ts"),
     "GET /v1/admin/session": { cls: "admin", cases: [X("customer credential", "/v1/admin/session")] },
+    "POST /v1/admin/logout": { cls: "admin", cases: [X("customer credential", "/v1/admin/logout", {})] },
     "GET /v1/admin/orgs": { cls: "admin", cases: [X("customer credential", `/v1/admin/orgs?q=${A.tag}`)] },
     "GET /v1/admin/orgs/:id": { cls: "admin", cases: [X("customer credential", `/v1/admin/orgs/${a.org}`)] },
     "PATCH /v1/admin/orgs/:id/plan": { cls: "admin", cases: [X("self-upgrade", `/v1/admin/orgs/${b.org}/plan`, { plan: "enterprise" }), X("downgrade A", `/v1/admin/orgs/${a.org}/plan`, { plan: "free" })] },
@@ -499,6 +500,7 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     // ── campaigns ──
     "GET /v1/campaigns/email-accounts": list("/v1/campaigns/email-accounts"),
     "POST /v1/campaigns/email-accounts": noref("creates a sender for the caller's org and opens an SMTP connection (SSRF surface: security.ssrf.test.ts)"),
+    "POST /v1/campaigns/email-accounts/:id/retest": E("path :id", X("retest A's sender", `/v1/campaigns/email-accounts/${a.emailAccount}/retest`, {})),
     "DELETE /v1/campaigns/email-accounts/:id": E("path :id", X("delete A's sender", `/v1/campaigns/email-accounts/${a.emailAccount}`)),
     "GET /v1/campaigns": list("/v1/campaigns"),
     "POST /v1/campaigns": E(

@@ -208,6 +208,34 @@ function crmMessage(v: unknown): string | undefined {
 const APPS_SCRIPT_HOSTS = new Set(["script.google.com", "script.googleusercontent.com"]);
 
 /**
+ * Is this response Google Apps Script saying "your POST ran the script; its output is over
+ * there"? Returns where the output is, or null for any other response.
+ *
+ * Only this exact shape counts: an https POST to script.google.com answered 302/303 with an
+ * https Location on one of Google's two script hosts. By the time this arrives the script
+ * (the customer's doPost) HAS run, so the POST is delivered whatever happens next.
+ *
+ * One definition, used by the CRM/Sheets sync below and by webhook delivery (jobs.ts).
+ */
+export function appsScriptOutputUrl(posted: URL, status: number, location: string | null): URL | null {
+  if (posted.protocol !== "https:" || posted.hostname !== "script.google.com") return null;
+  if (status !== 302 && status !== 303) return null;
+  if (!location) return null;
+  let next: URL | null;
+  try {
+    next = parseHttpUrl(new URL(location, `${posted.origin}${posted.pathname}`).toString());
+  } catch {
+    return null;
+  }
+  return next && next.protocol === "https:" && APPS_SCRIPT_HOSTS.has(next.hostname) ? next : null;
+}
+
+/** Fetch an Apps Script web app's output: a GET with no payload that may only stay on Google's script hosts. */
+export function fetchAppsScriptOutput(next: URL, timeoutMs = TIMEOUT_MS): Promise<Response | null> {
+  return fetchPublic(next.href, { method: "GET", maxRedirects: 3, hostAllow: (h) => APPS_SCRIPT_HOSTS.has(h), timeoutMs, maxBytes: MAX_RESPONSE_BYTES, noDefaultHeaders: true });
+}
+
+/**
  * POST a JSON payload to a URL a customer typed (generic webhook, Cortex, Apps Script).
  *
  * - Public addresses only, checked on the literal and again on what the name resolves to
@@ -247,11 +275,9 @@ export async function postJsonToTenantUrl(rawUrl: string, init: { body: string; 
     });
     if (!res) return { ok: false, status: 0, error: `${shown} does not resolve to a public address, so nothing was sent to it` };
     if (res.status >= 300 && res.status < 400) {
-      const location = res.headers.get("location");
-      const next = location ? parseHttpUrl(new URL(location, u).toString()) : null;
-      const appsScript = u.protocol === "https:" && u.hostname === "script.google.com" && (res.status === 302 || res.status === 303) && next?.protocol === "https:" && APPS_SCRIPT_HOSTS.has(next.hostname);
-      if (appsScript && next) {
-        const out = await fetchPublic(next.href, { method: "GET", maxRedirects: 3, hostAllow: (h) => APPS_SCRIPT_HOSTS.has(h), timeoutMs, maxBytes: MAX_RESPONSE_BYTES, noDefaultHeaders: true });
+      const next = appsScriptOutputUrl(u, res.status, res.headers.get("location"));
+      if (next) {
+        const out = await fetchAppsScriptOutput(next, timeoutMs);
         if (!out) return { ok: false, status: res.status, error: "the Apps Script web app redirected somewhere unexpected" };
         return done(out);
       }

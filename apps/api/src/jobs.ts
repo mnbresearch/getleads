@@ -1,5 +1,5 @@
 import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, inArray, integrations, jobs, leads, lists, monitors, ne, organizations, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, visits, webhooks } from "@prospex/db";
-import { buildIcpWithAi, clampLeadQuery, crawlCompanyWebsite, createAiProviderForPlan, fetchPublic, findEmail, redact, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
+import { buildIcpWithAi, clampLeadQuery, crawlCompanyWebsite, createAiProviderForPlan, fetchPublic, findEmail, parseHttpUrl, redact, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { orgMemberEmail } from "./lib/members.js";
 import { safeHeaderText } from "./lib/sanitize.js";
@@ -9,7 +9,7 @@ import { webhookSecret } from "./lib/webhookSecret.js";
 import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead, verifierOf } from "./services/leads.js";
 import { AiNotConfiguredError, knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { sendStep, tickCampaign } from "./services/campaigns.js";
-import { syncLead } from "./services/integrations.js";
+import { appsScriptOutputUrl, fetchAppsScriptOutput, syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
 import { tryConsume, type QuotaOutcome } from "./lib/quota.js";
 import { scanJobChanges } from "./services/jobChanges.js";
@@ -17,6 +17,7 @@ import { identifyVisit } from "./services/visitors.js";
 import { refreshCompanySignals, runSubscription } from "./services/signals.js";
 import { runMonitor } from "./services/monitors.js";
 import { runAutopilot } from "./services/autopilot.js";
+import { blockedByProvidersNote, plural } from "./services/notes.js";
 import { sendMail } from "./lib/mailer.js";
 
 /** Org's plan, for the plan-gated AI factory. A missing org is treated as free. */
@@ -254,6 +255,46 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
 /** Consecutive finally-failed deliveries after which a webhook is switched off. */
 export const WEBHOOK_DISABLE_AFTER = 10;
 
+/**
+ * Make this attempt the job's last. The queue retries a thrown job while
+ * `attempts < maxAttempts`, reading both off the job object the handler was given - so a
+ * failure that retrying cannot change (the endpoint answers every POST with the same
+ * redirect) is thrown once, recorded as failed, and not repeated four more times.
+ */
+function noMoreAttempts(job: Pick<Job, "attempts" | "maxAttempts">) {
+  job.attempts = Math.max(job.attempts, job.maxAttempts);
+}
+
+/**
+ * Where a 307/308 from a webhook endpoint may be followed to, or null.
+ *
+ * 307 and 308 mean "repeat this exact request there". They are followed ONCE and only when
+ * "there" is the address the customer typed in all but spelling: the same hostname, and
+ * either the same origin (a trailing slash, a canonical path) or the plain-http address
+ * upgraded to https on the default ports. Another host, another port, or a downgrade from
+ * https is somewhere the customer did not address, and the event is not sent to it.
+ */
+function sameEndpointRedirect(posted: URL, status: number, location: string | null): URL | null {
+  if (status !== 307 && status !== 308) return null;
+  if (!location) return null;
+  let next: URL | null;
+  try {
+    // Resolved against the address without its credentials: a relative Location would
+    // otherwise inherit them, and a URL carrying credentials is refused by the parser.
+    next = parseHttpUrl(new URL(location, `${posted.origin}${posted.pathname}${posted.search}`).toString());
+  } catch {
+    return null;
+  }
+  if (!next || next.hostname !== posted.hostname) return null;
+  const sameOrigin = next.protocol === posted.protocol && next.port === posted.port;
+  const upgraded = posted.protocol === "http:" && next.protocol === "https:" && posted.port === "" && next.port === "";
+  if (!sameOrigin && !upgraded) return null;
+  // Basic-auth credentials in the configured URL belong to this endpoint: they go along.
+  next.username = posted.username;
+  next.password = posted.password;
+  return next;
+}
+
 export const handlers: Record<string, JobHandler> = {
   /** Run a lead search end-to-end and persist results. payload: { searchId, query, icpId?, listId? } */
   "search.run": async (job, ctx) => {
@@ -340,9 +381,7 @@ export const handlers: Record<string, JobHandler> = {
       // leads match your ICP", which is a claim about the customer's market made out of a
       // billing or credential problem on our side.
       const blockedByProviders = ids.length === 0 && providerFailures.length > 0;
-      const providerNote = blockedByProviders
-        ? `No leads were returned, and ${providerFailures.length === 1 ? "the data source we tried could not answer" : `${providerFailures.length} data sources could not answer`}: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nobody matching your criteria.`
-        : null;
+      const providerNote = blockedByProviders ? blockedByProvidersNote(providerFailures, "This is not the same as nobody matching your criteria.") : null;
 
       await db
         .update(searches)
@@ -351,8 +390,8 @@ export const handlers: Record<string, JobHandler> = {
           resultCount: ids.length,
           error: truncated
             ? quotaStopped !== null
-              ? `Stopped at your plan's limit: ${results.length - ids.length} more matching leads were found but not saved. ${quotaStopped}`
-              : `Stopped early: ${results.length - ids.length} more matching leads were found but not saved, because usage could not be recorded (${chargeError}). This is a fault on our side, not your plan limit.`
+              ? `Stopped at your plan's limit: ${plural(results.length - ids.length, "more matching lead was", "more matching leads were")} found but not saved. ${quotaStopped}`
+              : `Stopped early: ${plural(results.length - ids.length, "more matching lead was", "more matching leads were")} found but not saved, because usage could not be recorded (${chargeError}). This is a fault on our side, not your plan limit.`
             : providerNote,
           clientClaim: clientClaim ?? undefined,
           completedAt: new Date(),
@@ -502,6 +541,10 @@ export const handlers: Record<string, JobHandler> = {
 
     let outcome: { ok: boolean; status: number; statusText: string };
     let refused = false;
+    /** A redirect we will not follow: the same answer every time, so it is not retried. */
+    let redirected = false;
+    /** Set when the delivery counted as made through a redirect, for the job result. */
+    let via: string | undefined;
     try {
       // The hook's own secret and scheme. A hook with no usable secret cannot be signed, and
       // an unsigned (or empty-key) delivery is worse than a failed one.
@@ -511,24 +554,72 @@ export const handlers: Record<string, JobHandler> = {
       // fetchPublic refuses a private address both by name and at connect time (so a public
       // name that resolves to 10.x is refused too), and with maxRedirects: 0 a 3xx is handed
       // back instead of followed - the payload is never re-sent to wherever a redirect points.
-      const res = await fetchPublic(hook.url, {
-        method: "POST",
-        headers: { "content-type": "application/json", "x-prospex-signature": signature, "x-prospex-timestamp": ts, "x-prospex-event": ev.type },
-        body,
-        timeoutMs: 10_000,
-        maxRedirects: 0,
-        maxBytes: WEBHOOK_MAX_RESPONSE_BYTES,
-        allowUserinfo: true,
-        noDefaultHeaders: true,
-      });
+      const post = (url: string) =>
+        fetchPublic(url, {
+          method: "POST",
+          headers: { "content-type": "application/json", "x-prospex-signature": signature, "x-prospex-timestamp": ts, "x-prospex-event": ev.type },
+          body,
+          timeoutMs: 10_000,
+          maxRedirects: 0,
+          maxBytes: WEBHOOK_MAX_RESPONSE_BYTES,
+          allowUserinfo: true,
+          noDefaultHeaders: true,
+        });
+      const NOT_FOLLOWED = "redirects are not followed - set the webhook to the final address of your endpoint";
+      const res = await post(hook.url);
       if (!res) {
         refused = true;
         outcome = { ok: false, status: 0, statusText: "not a public address" };
       } else {
         // The response body is never needed; it is dropped rather than buffered.
         await res.body?.cancel().catch(() => {});
-        if (res.status >= 300 && res.status < 400) outcome = { ok: false, status: res.status, statusText: "redirects are not followed" };
-        else outcome = { ok: res.ok, status: res.status, statusText: res.statusText };
+        if (res.status >= 300 && res.status < 400) {
+          /**
+           * A redirect is not followed with the event - with two exceptions, each of which
+           * is still the endpoint the customer typed:
+           *
+           *  - Google Apps Script. Its web apps answer EVERY successful POST with a 302 to
+           *    script.googleusercontent.com: the script has already run. Treating that as a
+           *    failure retried it five times - five rows in the customer's sheet per event -
+           *    and then switched their webhook off. The POST is delivered; the output is
+           *    fetched with one payload-free GET confined to Google's script hosts (the same
+           *    step the Sheets integration takes), and whatever that GET does, the event is
+           *    not sent again.
+           *  - 307/308 to the same hostname (http -> https, a trailing slash): "repeat this
+           *    request there". The POST is replayed once, through the same guarded fetch.
+           *
+           * Anything else stays a failed delivery, and is not retried: the endpoint will
+           * give the same answer every time.
+           */
+          const posted = parseHttpUrl(hook.url, { allowUserinfo: true });
+          const location = res.headers.get("location");
+          const scriptOutput = posted ? appsScriptOutputUrl(posted, res.status, location) : null;
+          const replayAt = posted ? sameEndpointRedirect(posted, res.status, location) : null;
+          if (scriptOutput) {
+            const out = await fetchAppsScriptOutput(scriptOutput, 10_000).catch(() => null);
+            await out?.body?.cancel().catch(() => {});
+            via = `apps script (${out ? `output HTTP ${out.status}` : "output not fetched"})`;
+            outcome = { ok: true, status: res.status, statusText: "delivered to Google Apps Script" };
+          } else if (replayAt) {
+            const again = await post(replayAt.toString());
+            if (!again) {
+              redirected = true;
+              outcome = { ok: false, status: res.status, statusText: `redirected (HTTP ${res.status}) to an address that is not public; ${NOT_FOLLOWED}` };
+            } else {
+              await again.body?.cancel().catch(() => {});
+              if (again.status >= 300 && again.status < 400) {
+                redirected = true;
+                outcome = { ok: false, status: again.status, statusText: `redirected twice; ${NOT_FOLLOWED}` };
+              } else {
+                via = `HTTP ${res.status} to the same host`;
+                outcome = { ok: again.ok, status: again.status, statusText: again.statusText };
+              }
+            }
+          } else {
+            redirected = true;
+            outcome = { ok: false, status: res.status, statusText: NOT_FOLLOWED };
+          }
+        } else outcome = { ok: res.ok, status: res.status, statusText: res.statusText };
       }
     } catch (e) {
       outcome = { ok: false, status: 0, statusText: redact((e as Error).message, { max: 200 }) };
@@ -540,6 +631,14 @@ export const handlers: Record<string, JobHandler> = {
       await countFailure("the URL does not point at a public address");
       return { skipped: `${safeUrl} is not a public address` };
     }
+    if (redirected) {
+      // Deterministic: the endpoint answers this way every time, so four more attempts would
+      // only be four more requests. Counted against the hook once and failed for good, with
+      // a message that says what to change.
+      await countFailure(`${outcome.status} ${outcome.statusText}`);
+      noMoreAttempts(job);
+      throw new Error(`webhook ${safeUrl} → ${outcome.status} ${outcome.statusText}`);
+    }
     if (!outcome.ok) {
       // Only a delivery that has used up its retries counts against the hook. Counting
       // every attempt meant four events during one short outage (5 attempts each) disabled
@@ -549,7 +648,7 @@ export const handlers: Record<string, JobHandler> = {
       throw new Error(`webhook ${safeUrl} → ${outcome.status} ${outcome.statusText}`);
     }
     if (hook.failures) await db.update(webhooks).set({ failures: 0 }).where(eq(webhooks.id, hook.id));
-    return { status: outcome.status };
+    return { status: outcome.status, ...(via ? { via } : {}) };
   },
 
   /** Push a lead to a CRM integration. payload: { integrationId, leadId } */
@@ -906,9 +1005,7 @@ export const handlers: Record<string, JobHandler> = {
     // search row has no note column, so the reason goes in the job result (shown by the
     // admin job view) and the digest says it instead of staying silent.
     const blocked = results.length === 0 && providerFailures.length > 0;
-    const note = blocked
-      ? `No leads were returned, and ${providerFailures.length} data source(s) could not answer: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}. This is not the same as nothing new matching.`
-      : stoppedBecause;
+    const note = blocked ? blockedByProvidersNote(providerFailures, "This is not the same as nothing new matching.") : stoppedBecause;
     // A saved search made for a client delivers its new leads to that client, the same way a
     // one-off search does - otherwise every daily re-run would pile leads into the pool.
     // claimSearchLeads re-checks the client (deleted/archived) and never steals another
@@ -928,7 +1025,7 @@ export const handlers: Record<string, JobHandler> = {
     // can still carry an outside address; those are not mailed.
     const alertTo = ss.alert && ss.alertEmail ? await orgMemberEmail(ss.orgId, ss.alertEmail) : null;
     const ssName = safeHeaderText(ss.name, 80, "your saved search");
-    if (ss.alert && fresh > 0 && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `${fresh} new leads for "${ssName}"`, text: `Scout found ${fresh} new leads matching "${ssName}":\n\n${names.join("\n")}${stoppedBecause ? `\n\n${stoppedBecause}` : ""}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
+    if (ss.alert && fresh > 0 && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `${plural(fresh, "new lead")} for "${ssName}"`, text: `Scout found ${plural(fresh, "new lead")} matching "${ssName}":\n\n${names.join("\n")}${stoppedBecause ? `\n\n${stoppedBecause}` : ""}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
     else if (ss.alert && blocked && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `Could not check "${ssName}" today`, text: `${note}\n\nThe search will run again tomorrow.` });
     return { results: results.length, fresh, providerFailures, note, clientClaim };
   },

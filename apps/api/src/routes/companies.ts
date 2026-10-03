@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { AI_NOT_SWITCHED_ON } from "../services/visibility.js";
 import { and, companies, consume, count, desc, eq, getDb, isNull, leads, or, signals } from "@prospex/db";
 import { generateAccountBrief, hasAi } from "@prospex/core";
 import { aiFor } from "../lib/ai.js";
@@ -37,7 +38,7 @@ companyRoutes.post("/:id/brief", async (c) => {
   if (cached && !refresh) return c.json({ brief: cached, cached: true, generatedAt: company.aiBriefAt });
 
   const ai = aiFor(c.get("auth"));
-  if (!hasAi(ai)) return c.json({ brief: null, cached: false, error: "No AI provider configured" }, 200);
+  if (!hasAi(ai)) return c.json({ brief: null, cached: false, error: AI_NOT_SWITCHED_ON }, 200);
   // Refuse before the AI call when the plan has no room; charge after it succeeds. Charging
   // only after meant an over-quota org got the brief (the paid part) and then a 402.
   await assertQuotaAvailable(db, oid, "aiMessages", 1);
@@ -68,7 +69,7 @@ companyRoutes.post("/:id/brief", async (c) => {
     },
     companySignals.map((s) => ({ type: s.type, title: s.title, summary: s.summary, occurredAt: s.occurredAt })),
   );
-  if (!brief) return c.json({ brief: null, cached: false, error: "No AI provider configured" }, 200);
+  if (!brief) return c.json({ brief: null, cached: false, error: AI_NOT_SWITCHED_ON }, 200);
 
   await consume(db, oid, "aiMessages", 1);
   await db.update(companies).set({ aiBrief: brief, aiBriefAt: new Date() }).where(eq(companies.id, company.id));

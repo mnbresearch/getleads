@@ -5,6 +5,7 @@ import { limitLabel, metricLabel } from "../lib/metrics";
 import { rememberMe, useMe } from "../lib/me";
 import { EXTERNAL_REL } from "../lib/safeHref";
 import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/ui";
+import { plural, pluralWord } from "../lib/plural";
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
 function MembersNote({ what }: { what: string }) {
@@ -443,7 +444,7 @@ function Billing() {
       </div>
       <div className="grid gap-3 md:grid-cols-4">{/* "pilot" is an internal plan, hidden here exactly as on the landing page - unless it
           is the plan this workspace is on, so the current plan never vanishes. */}
-        {plans.plans.filter((p) => p.id !== "pilot" || p.id === u.plan).map((p) => <div key={p.id} className={`card p-4 ${p.id === u.plan ? "ring-2 ring-brand-500/50" : ""}`}><div className="font-semibold">{p.name}</div><div className="text-2xl font-semibold">${p.priceUsd}<span className="text-sm font-normal text-ink-400">/mo</span></div><ul className="mt-2 space-y-0.5 text-xs text-ink-300"><li>{Number(p.limits.leadsPerMonth).toLocaleString()} leads/mo</li><li>{Number(p.limits.verificationsPerMonth).toLocaleString()} verifications</li><li>{Number(p.limits.aiMessagesPerMonth).toLocaleString()} AI messages</li><li>{Number(p.limits.emailsPerMonth).toLocaleString()} emails</li><li>{p.limits.campaigns as number} campaigns</li></ul>{p.priceUsd > 0 && p.id !== u.plan && <Link to={`/upgrade?plan=${p.id}`} className="btn-primary mt-3 w-full justify-center">Upgrade</Link>}</div>)}</div>
+        {plans.plans.filter((p) => p.id !== "pilot" || p.id === u.plan).map((p) => <div key={p.id} className={`card p-4 ${p.id === u.plan ? "ring-2 ring-brand-500/50" : ""}`}><div className="font-semibold">{p.name}</div><div className="text-2xl font-semibold">${p.priceUsd}<span className="text-sm font-normal text-ink-400">/mo</span></div><ul className="mt-2 space-y-0.5 text-xs text-ink-300"><li>{Number(p.limits.leadsPerMonth).toLocaleString()} leads/mo</li><li>{Number(p.limits.verificationsPerMonth).toLocaleString()} verifications</li><li>{Number(p.limits.aiMessagesPerMonth).toLocaleString()} AI messages</li><li>{Number(p.limits.emailsPerMonth).toLocaleString()} emails</li><li>{plural(p.limits.campaigns as number, "campaign")}</li></ul>{p.priceUsd > 0 && p.id !== u.plan && <Link to={`/upgrade?plan=${p.id}`} className="btn-primary mt-3 w-full justify-center">Upgrade</Link>}</div>)}</div>
     </div>
   );
 }
@@ -510,7 +511,7 @@ function Team() {
     <div className="space-y-4">
       {Toast}
       <div className="card p-5">
-        <div className="mb-3 flex items-center justify-between"><div className="font-medium">Members <span className="text-sm text-ink-400">{d.seats.used}{pending ? ` + ${pending} invited` : ""} / {d.seats.limit} seats</span></div></div>
+        <div className="mb-3 flex items-center justify-between"><div className="font-medium">Members <span className="text-sm text-ink-400">{d.seats.used}{pending ? ` + ${pending} invited` : ""} / {d.seats.limit} {pluralWord(d.seats.limit, "seat")}</span></div></div>
         <ul className="divide-y divide-slate-100 text-sm">{d.members.map((m) => (
           <li key={m.id} className="flex flex-wrap items-center justify-between gap-3 py-2">
             <div>{m.name || m.email} <span className="text-ink-400">{m.email}</span> <span className="badge ml-2 bg-black/[0.05] text-ink-300">{m.role}</span></div>
@@ -542,7 +543,7 @@ function Team() {
           <div className={`mt-3 rounded-lg border p-3 text-xs ${sent.emailed === false ? "border-amber-300 bg-amber-50 text-amber-900" : "border-black/10 bg-cream text-ink-300"}`} role="status">
             <div className="mb-1">
               {sent.emailed === false
-                ? <>Invite email to {sent.email} could not be sent{sent.emailError ? ` (${sent.emailError})` : ""} - copy this link and send it to them yourself:</>
+                ? <>The invite email to {sent.email} could not be sent from our side - copy this link and send it to them yourself:</>
                 : sent.emailed
                   ? <>Emailed to {sent.email}. You can also share the link directly:</>
                   : <>Invite link for {sent.email}:</>}
@@ -625,6 +626,7 @@ const AUDIT_WORDS: Record<string, string> = {
   "integration.synced": "Leads pushed to an integration",
   "sender.created": "Sender account added",
   "sender.deleted": "Sender account removed",
+  "sender.retested": "Sender account tested again",
   // People
   "team.invited": "Teammate invited",
   "team.invite.resent": "Invite resent",
@@ -642,6 +644,7 @@ const AUDIT_WORDS: Record<string, string> = {
   "client.share.enabled": "Client report link created",
   "client.share.disabled": "Client report link turned off",
   "client.share.rotated": "Client report link replaced",
+  "client.report.settings.changed": "Client report settings changed",
   "campaign.started": "Campaign started",
   "campaign.paused": "Campaign paused",
   "campaign.deleted": "Campaign deleted",
@@ -654,6 +657,7 @@ const AUDIT_WORDS: Record<string, string> = {
   "billing.checkout": "Plan checkout started",
   // Scout staff
   "admin.login": "Scout admin sign-in",
+  "admin.logout": "Scout admin sign-out",
   "admin.plan.changed": "Plan changed by Scout admin",
   "admin.status.changed": "Workspace suspended or restored by Scout admin",
   "admin.credits.changed": "Credits adjusted by Scout admin",
@@ -807,7 +811,7 @@ function SecurityLog() {
                 {reason && !label.toLowerCase().includes(reason.toLowerCase()) && <div className={`text-xs ${e.result === "denied" ? "text-amber-800" : "text-red-700"}`}>{reason}</div>}
                 <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-ink-400">
                   <span className="min-w-0 [overflow-wrap:anywhere]">{auditWho(e)}</span>
-                  <span className="min-w-0 font-mono [overflow-wrap:anywhere]">{e.ip || "address not recorded"}</span>
+                  <span className="min-w-0 font-mono [overflow-wrap:anywhere]">{e.ip || (e.actorType === "admin" ? "Scout staff - address not shown" : "address not recorded")}</span>
                   <time dateTime={e.createdAt}>{fmtDate(e.createdAt)}</time>
                 </div>
                 </div>

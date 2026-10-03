@@ -167,25 +167,56 @@ export function Spinner({ label }: { label?: string }) {
   );
 }
 
+/**
+ * How long a toast stays up: 3.5 s, plus a second for every ~60 characters, to 12 s at most.
+ *
+ * Every toast used to get 3.5 s. That is right for "Saved" and far too short for the ones
+ * that matter most - "Enrolled 12 leads (3 skipped: their email is not a single valid
+ * address - fix it on the lead; 2 skipped: they belong to another client)" was gone before
+ * the second clause.
+ */
+export function toastDuration(text: string): number {
+  const len = typeof text === "string" ? text.length : 0;
+  return Math.min(12_000, 3_500 + Math.floor(len / 60) * 1_000);
+}
+
 export function useToast() {
   const [msg, setMsg] = useState<{ text: string; kind: "ok" | "err" } | null>(null);
+  // Reading it stops the clock: the pointer resting on a toast (or keyboard focus inside it)
+  // holds it open, and the full time starts again when the pointer leaves.
+  const [held, setHeld] = useState(false);
   useEffect(() => {
-    if (!msg) return;
-    const t = setTimeout(() => setMsg(null), 3500);
+    if (!msg || held) return;
+    const t = setTimeout(() => setMsg(null), toastDuration(msg.text));
     return () => clearTimeout(t);
-  }, [msg]);
+  }, [msg, held]);
   const Toast = msg ? (
     // role/aria-live so the app's primary feedback channel is not invisible to a screen
     // reader. "assertive" for errors because a failed send or a failed save must interrupt.
     <div
       role={msg.kind === "err" ? "alert" : "status"}
       aria-live={msg.kind === "err" ? "assertive" : "polite"}
-      className={`fixed bottom-4 right-4 z-50 rounded-lg px-4 py-2 text-sm shadow-lg ${msg.kind === "ok" ? "bg-black text-white" : "bg-red-600 text-white"}`}
+      data-toast={msg.kind}
+      onMouseEnter={() => setHeld(true)}
+      onMouseLeave={() => setHeld(false)}
+      onFocus={() => setHeld(true)}
+      onBlur={() => setHeld(false)}
+      className={`fixed bottom-4 right-4 z-50 flex max-w-[min(32rem,calc(100vw-2rem))] items-start gap-3 rounded-lg px-4 py-2 text-sm shadow-lg ${msg.kind === "ok" ? "bg-black text-white" : "bg-red-600 text-white"}`}
     >
-      {msg.text}
+      <span className="min-w-0 [overflow-wrap:anywhere]">{msg.text}</span>
+      {/* Dismissible by hand as well: an error is worth keeping until it has been read, and
+          worth being able to clear once it has. */}
+      <button type="button" className="-mr-1 shrink-0 rounded px-1 leading-5 text-white/80 hover:text-white" aria-label="Dismiss" onClick={() => { setHeld(false); setMsg(null); }}>✕</button>
     </div>
   ) : null;
-  return { toast: (text: string, kind: "ok" | "err" = "ok") => setMsg({ text, kind }), Toast };
+  const toast = (text: string, kind: "ok" | "err" = "ok") => {
+    setHeld(false);
+    // Always a string on screen: a caller handing over an Error (or nothing) must not crash
+    // the page that was trying to report a problem.
+    const shown = typeof text === "string" ? text : String((text as { message?: unknown } | null | undefined)?.message ?? text ?? "");
+    setMsg({ text: shown, kind });
+  };
+  return { toast, Toast };
 }
 
 export function TagInput({ value, onChange, placeholder }: { value: string[]; onChange: (v: string[]) => void; placeholder?: string }) {

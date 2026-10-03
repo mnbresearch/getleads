@@ -717,3 +717,223 @@ describe("every scanner is bounded on adversarial input", () => {
     expect(usr.content.length).toBeLessThan(12_000);
   });
 });
+
+/**
+ * Second re-test of the output guard.
+ *
+ * NEW-1: four link shapes the patterns did not see (a host split by an invisible character,
+ * a non-ASCII host with a path, an IPv4 address written as one number).
+ * NEW-2: three of thirty ordinary sales drafts were rejected for NAMING a company whose name
+ * is a domain ("Booking.com"), which silently cost the customer the personalised draft.
+ * The two corpora below are the re-test's own, verbatim.
+ */
+describe("guard re-test: disguised links are caught, brand names are not links", () => {
+  const ctx = { allowedHosts: ["tenantco.com", "yahoo.com", "zoho.com", "docs.google.com"], allowedEmails: ["asha@tenantco.com", "pat@acme.io"], leadDomain: "acme.io" };
+  const draft = (x: string) => ({ subject: "Quick idea for Acme", body: `Hi Pat,\n\n${x}\n\nAsha, TenantCo` });
+  const verdict = (x: string, c: Parameters<typeof guardOutreach>[1] = ctx) => guardOutreach(draft(x), c);
+  const reasons = (x: string, c: Parameters<typeof guardOutreach>[1] = ctx) => {
+    const r = verdict(x, c);
+    return r.ok ? [] : r.reasons;
+  };
+
+  const MUST_BLOCK: [string, string][] = [
+    ["shared host subdomain (yahoo redirect)", "https://r.search.yahoo.com/RV/RU=https%3a%2f%2fevil.example/"],
+    ["shared host docs.google", "https://docs.google.com/document/d/EVIL/edit"],
+    ["shared host zoho form", "https://forms.zoho.com/attacker/form/Pay"],
+    ["shared host bit.ly", "bit.ly/3evil"],
+    ["shared host bare yahoo", "visit yahoo.com/evilpath"],
+    ["ipv4 literal with path", "http://203.0.113.9/pay"],
+    ["ipv4 bare with port", "203.0.113.9:8080/x"],
+    ["ipv4 bare with path", "203.0.113.9/login"],
+    ["decimal IP with path", "2130706433/x"],
+    ["ipv6 literal link", "http://[2606:4700::1111]/x"],
+    ["ipv6 loopback link", "http://[::1]/x"],
+    ["name.tld/path on unlisted TLD (.zip)", "open invoice.zip/pay"],
+    ["name.tld/path on .tk", "billing-acme.tk/i/77"],
+    ["name.tld/path on .cfd", "acme.cfd/login"],
+    ["trailing dot host", "https://evil.example./pay"],
+    ["uppercase host", "https://EVIL.EXAMPLE/PAY"],
+    ["IDN bare with path", "мойсайт.com/pay"],
+    ["backslash scheme", "http:\\\\evil.example/x"],
+    ["zero-width split host", "evil​.example/pay"],
+    ["soft hyphen split host", "evil­.example/pay"],
+    ["markdown link", "[pay now](https://evil.example/pay)"],
+    ["angle-bracket autolink", "<https://evil.example/pay>"],
+    ["prefix trick", "https://tenantco.com.evil.example/x"],
+    ["userinfo trick", "https://tenantco.com@evil.example/x"],
+  ];
+  for (const [name, text] of MUST_BLOCK) {
+    it(`must block: ${name}`, () => {
+      expect(verdict(text).ok).toBe(false);
+    });
+  }
+
+  it("the four vectors the re-test got through are blocked for the right reason", () => {
+    expect(reasons("2130706433/x")).toContain("link_host_not_allowed:ip-address");
+    expect(reasons("Portal: 0x7f000001/admin")).toContain("link_host_not_allowed:ip-address");
+    expect(reasons("2130706433:8080 is the port")).toContain("link_host_not_allowed:ip-address");
+    expect(reasons("мойсайт.com/pay")).toContain("link_host_not_allowed:мойсайт.com");
+    expect(reasons("Счёт: мойсайт.рф/оплата")).toContain("link_host_not_allowed:мойсайт.рф");
+    for (const invisible of ["​", "‌", "‍", "­", "⁠", "﻿", "‮", "⁦", "‎"]) {
+      const r = reasons(`evil${invisible}.example/pay`);
+      expect(r, `U+${invisible.codePointAt(0)!.toString(16)}`).toContain("invisible_characters_in_link");
+      // With the character gone it is also seen as the link it displays as.
+      expect(r).toContain("link_host_not_allowed:evil.example");
+    }
+    // Wherever in the address it hides.
+    expect(reasons("ev​il.example/pay")).toContain("invisible_characters_in_link");
+    expect(reasons("https://tenantco.com​.evil.example/x")).toContain("invisible_characters_in_link");
+    expect(reasons("pay⁠@evil.example")).toContain("invisible_characters_in_link");
+    // In the subject as well.
+    const s = guardOutreach({ subject: "Invoice at evil​.example/pay", body: draft("Thanks for your time last week.").body }, ctx);
+    expect(s.ok ? [] : s.reasons).toContain("invisible_characters_in_link");
+  });
+
+  it("invisible characters outside a link do not reject a draft; they are dropped from what is sent, joiners kept", () => {
+    // A soft hyphen in a word, a zero-width space between words, a bidi mark.
+    const r = verdict("We re­duce on​boarding time by 40% for teams like yours.‎ Worth a chat?");
+    expect(r.ok).toBe(true);
+    expect(r.ok && r.body).toContain("We reduce onboarding time by 40% for teams like yours. Worth a chat?");
+    // ZWJ / ZWNJ shape real text (Devanagari conjuncts, emoji sequences) and are kept.
+    const hindi = verdict("नमस्ते, हम आपकी टीम के लिए ऑनबोर्डिंग का समय कम करते हैं। क्‍ष और \u{1F468}‍\u{1F4BB} ठीक है।");
+    expect(hindi.ok).toBe(true);
+    expect(hindi.ok && hindi.body).toContain("क्‍ष");
+    expect(hindi.ok && hindi.body).toContain("\u{1F468}‍\u{1F4BB}");
+    // Padding a draft with invisible characters does not get it past the length limit.
+    expect(reasons(`Thanks for your time.${"‍".repeat(2500)}`)).toContain("body_length");
+  });
+
+  const REALISTIC: [string, string][] = [
+    ["Node.js mention", "We help teams running Node.js ship faster."],
+    ["Booking.com name", "Companies like Booking.com rely on us."],
+    ["Monday.com name", "We integrate with Monday.com and Asana."],
+    ["Notion.so name", "Your team already uses Notion.so, so onboarding is instant."],
+    ["price $4.99/mo", "Plans start at $4.99/mo, cancel anytime."],
+    ["time 10.30am", "Could we talk at 10.30am on Tuesday?"],
+    ["file report.pdf", "I attached report.pdf with the numbers."],
+    ["version 3.11.2", "This works with Python 3.11.2 and up."],
+    ["ratio 99.9% uptime", "We guarantee 99.9% uptime."],
+    ["e.g. abbreviation", "Several tools, e.g. the ones you already run, plug in."],
+    ["i.e. abbreviation", "The core plan, i.e. everything you need, is enough."],
+    ["decimal 2.5x ROI", "Customers see 2.5x ROI in the first quarter."],
+    ["domain-as-company A.B", "We worked with teams at Stripe and with folks at 37signals."],
+    ["sentence ending site", "Learn more on our site. Thanks for reading."],
+    ["U.S. and U.K.", "We serve the U.S. and U.K. markets."],
+    ["acronym S.M.A.R.T.", "We set S.M.A.R.T. goals together."],
+    ["colon list", "Three things: speed, cost, support."],
+    ["Mr. honorific", "Nice to meet you, Mr. Lee."],
+    ["No. abbreviation", "You are our No. 1 priority."],
+    ["vs. abbreviation", "Us vs. the status quo: we win."],
+    ["a.m./p.m.", "Mornings (9 a.m.) or afternoons (2 p.m.)?"],
+    ["Ph.D. credential", "Our lead data scientist holds a Ph.D."],
+    ["range 10-20%", "Expect a 10-20% lift in reply rates."],
+    ["Inc. suffix", "We partner with Acme Inc. on this."],
+    ["ellipsis", "So... worth a quick chat next week?"],
+    ["own domain link OK", "Details at tenantco.com/demo"],
+    ["own subdomain link OK", "Book at calendar.tenantco.com/asha"],
+    ["lead domain named OK", "I saw acme.io and thought of you."],
+    ["sender email OK", "Reach me at asha@tenantco.com anytime."],
+    ["number.number plain", "Section 2.3 of your report stood out."],
+  ];
+  it("none of the 30 realistic sales drafts is rejected", () => {
+    expect(REALISTIC).toHaveLength(30);
+    const rejected = REALISTIC.map(([name, text]) => [name, reasons(text)] as const).filter(([, r]) => r.length);
+    expect(rejected).toEqual([]);
+  });
+
+  it("a company named after its domain is prose only while nothing sends the reader there", () => {
+    // Named in a sentence: allowed, with or without a question mark or brackets after it.
+    for (const ok of [
+      "Companies like Booking.com rely on us.",
+      "Have you compared us with Monday.com?",
+      "Teams that moved from Notion.so (and from Monday.com) onboard in a day.",
+      "Booking.com, Monday.com and Asana are all customers.",
+    ]) {
+      expect(reasons(ok), ok).toEqual([]);
+    }
+    // A call to visit just before it.
+    for (const cta of ["Visit", "Go to", "Click", "Open", "See", "Sign in at", "Log in at", "Download it from the link", "Pay at", "Details here -"]) {
+      expect(reasons(`${cta} evil-portal.com to continue.`), cta).toContain("link_host_not_allowed:evil-portal.com");
+    }
+    // After a colon or an arrow, or alone on its line.
+    expect(reasons("Your account portal: evil-portal.com")).toContain("link_host_not_allowed:evil-portal.com");
+    expect(reasons("Your account portal -> evil-portal.com")).toContain("link_host_not_allowed:evil-portal.com");
+    expect(reasons("Your invoice is ready.\nevil-portal.com\nThanks")).toContain("link_host_not_allowed:evil-portal.com");
+    // An action right after it.
+    expect(reasons("Use evil-portal.com to pay your invoice today.")).toContain("link_host_not_allowed:evil-portal.com");
+    // A path, a query, a port, a scheme or www. is a link whatever the wording.
+    for (const link of ["Companies like booking.com/deals rely on us.", "Companies like booking.com?ref=1 rely on us.", "Companies like booking.com:8443 rely on us.", "Companies like www.booking.com rely on us.", "Companies like https://booking.com rely on us.", "Companies like booking.com./x rely on us."]) {
+      expect(verdict(link).ok, link).toBe(false);
+    }
+    // A throwaway TLD is never a brand mention, path or not.
+    for (const tld of ["zip", "tk", "ml", "ga", "cf", "gq", "cfd", "sbs", "top", "xyz", "icu", "click", "link", "rest", "cam", "quest"]) {
+      expect(reasons(`Companies like acme-billing.${tld} rely on us.`), tld).toContain(`link_host_not_allowed:acme-billing.${tld}`);
+    }
+  });
+
+  it("the prospect's own company name may be written even where a stranger's domain may not", () => {
+    const withCompany = { ...ctx, leadDomain: "booking.example", leadCompany: "Booking.com" };
+    // "at" before it would otherwise make it a destination.
+    expect(reasons("I enjoyed your talk about pricing at Booking.com last month.")).toContain("link_host_not_allowed:booking.com");
+    expect(reasons("I enjoyed your talk about pricing at Booking.com last month.", withCompany)).toEqual([]);
+    expect(reasons("I enjoyed your talk about pricing at Booking.com last month.", { ...ctx, leadCompany: "Booking.com B.V." })).toEqual([]);
+    // Still only the bare name: a path is a link.
+    expect(reasons("Sign in at booking.com/login to confirm.", withCompany)).toContain("link_host_not_allowed:booking.com");
+    // And only that company.
+    expect(reasons("Sign in at evil-portal.com to confirm.", withCompany)).toContain("link_host_not_allowed:evil-portal.com");
+  });
+
+  it("generateOutreach passes the lead's company name to the guard", async () => {
+    const lead = { fullName: "Pat Prospect", firstName: "Pat", email: "pat@booking.example", company: { name: "Booking.com", domain: "booking.example" } };
+    const body = "Hi Pat,\n\nI enjoyed your talk about pricing at Booking.com last month. We cut onboarding time 40% for teams like yours.\n\nAsha";
+    const out = await generateOutreach(stub(JSON.stringify({ subject: "Idea for Booking.com", body })), { lead, sender: SENDER, ...TEMPLATE });
+    expect(out.guard).toEqual({ ok: true, reasons: [] });
+    expect(out.personalized).toBe(true);
+    expect(out.body).toContain("at Booking.com last month");
+  });
+
+  it("stays linear: each adversarial 100,000-character input is judged in under 50 ms", () => {
+    const N = 100_000;
+    const INPUTS: Record<string, string> = {
+      "a.": "a.".repeat(N / 2),
+      "x@x.": `x@${"x.".repeat(N / 2)}`,
+      "spaces then colon": `${" ".repeat(N)}:`,
+      "bearer + spaces": `bearer${" ".repeat(N)}`,
+      "a-": "a-".repeat(N / 2),
+      "<a ": "<a ".repeat(N / 3),
+      "{": "{".repeat(N),
+      "[your": "[your".repeat(N / 5),
+      newlines: `x${"\n".repeat(N)}y`,
+      "//a: + run": `//a:${"b".repeat(N)}`,
+      "eyJ + run": `eyJ${"a".repeat(N)}`,
+      "?api_key=": "?api_key=".repeat(N / 9),
+      "www.": "www.".repeat(N / 4),
+      "zero-width run": "​".repeat(N),
+      "zero-width split hosts": "a​.".repeat(N / 3),
+      "joiner run": "‍".repeat(N),
+      "non-ASCII labels": "й.".repeat(N / 2),
+      "long numbers": "12345678/".repeat(N / 9),
+      "bare domains": "see a.com ".repeat(N / 10),
+      "call to visit then a domain": `${"at ".repeat(N / 3)}x.com`,
+    };
+    const shapes: Record<string, (s: string) => unknown> = {
+      "body, whole": (s) => guardOutreach({ subject: "Hello there", body: s }, CTX),
+      "body, 7,200 chars (the most that is scanned)": (s) => guardOutreach({ subject: "Hello there", body: s.slice(0, 7_200) }, CTX),
+      "subject, 600 chars": (s) => guardOutreach({ subject: s.slice(0, 600), body: GOOD_BODY }, CTX),
+      hostsIn: (s) => hostsIn(s, s),
+    };
+    for (const [shape, fn] of Object.entries(shapes)) {
+      fn("warm up a.b@c.d https://x.example evil​.example/pay Booking.com");
+      for (const [name, input] of Object.entries(INPUTS)) {
+        // Best of three: this measures the algorithm, not a GC pause on a shared runner.
+        let best = Infinity;
+        for (let i = 0; i < 3; i++) {
+          const t = performance.now();
+          fn(input);
+          best = Math.min(best, performance.now() - t);
+        }
+        expect(best, `${shape} on "${name}" took ${best.toFixed(1)} ms`).toBeLessThan(50);
+      }
+    }
+  });
+});

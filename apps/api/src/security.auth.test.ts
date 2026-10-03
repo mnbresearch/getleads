@@ -381,6 +381,83 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
     });
   });
 
+  // ── 2b. Migration 0018: accounts that existed at deploy time are linked, not claimed ──
+  describe("existing accounts are grandfathered; new ones are still unproved", () => {
+    const MIGRATION = "0018_grandfather_existing_users.sql";
+    const migrationSql = async () => {
+      const { readFile } = await import("node:fs/promises");
+      const { fileURLToPath } = await import("node:url");
+      return readFile(fileURLToPath(new URL(`../../../packages/db/migrations/${MIGRATION}`, import.meta.url)), "utf8");
+    };
+    /** The migration's UPDATE, narrowed to one user so this test does not touch anyone else's rows. */
+    const grandfather = async (userId: string) => {
+      const body = await migrationSql();
+      const stmt = body.split("\n").find((l) => l.startsWith("UPDATE users SET"));
+      expect(stmt).toBe("UPDATE users SET email_verified_at = created_at WHERE email_verified_at IS NULL;");
+      await db.execute(S.sql.raw(`${stmt!.replace(/;$/, "")} AND id = '${userId}'`));
+    };
+
+    it("the migration has been applied, and created what it says", async () => {
+      const applied = await db.execute(S.sql`SELECT name FROM _migrations WHERE name = ${MIGRATION}`);
+      expect(applied).toHaveLength(1);
+      const cols = await db.execute(S.sql`SELECT column_name FROM information_schema.columns WHERE table_name = 'admin_revoked_tokens' AND table_schema = current_schema()`);
+      expect(cols.map((c: any) => c.column_name).sort()).toEqual(["expires_at", "jti", "revoked_at"]);
+      const tools = await db.execute(S.sql`SELECT provider, key_env_var FROM tool_registry WHERE provider IN ('reoon', 'millionverifier') ORDER BY provider`);
+      expect(tools.map((t: any) => `${t.provider}:${t.key_env_var}`)).toEqual(["millionverifier:MILLIONVERIFIER_API_KEY", "reoon:REOON_API_KEY"]);
+      // Idempotent: every statement can run again and change nothing. (Checked on a copy of the
+      // text with the unscoped UPDATE taken out, so other tests' fresh accounts are left alone.)
+      const body = (await migrationSql()).replace(/^UPDATE users SET.*$/m, "");
+      expect(body).toMatch(/CREATE TABLE IF NOT EXISTS admin_revoked_tokens/);
+      expect(body).toMatch(/ON CONFLICT \(provider\) DO NOTHING/);
+      await db.execute(S.sql.raw(body));
+      await db.execute(S.sql.raw(body));
+      expect(await db.execute(S.sql`SELECT 1 FROM tool_registry WHERE provider = 'reoon'`)).toHaveLength(1);
+    });
+
+    it("an account that existed before the deploy is LINKED on its first Google sign-in: password, session and API key all keep working", async () => {
+      const u = await signup("grandfathered");
+      const [fresh] = await db.select().from(S.users).where(S.eq(S.users.id, u.userId));
+      expect(fresh.emailVerifiedAt).toBeNull();
+      await grandfather(u.userId);
+      const [marked] = await db.select().from(S.users).where(S.eq(S.users.id, u.userId));
+      // Verified as of the day the account was created, not "now".
+      expect(new Date(marked.emailVerifiedAt).getTime()).toBe(new Date(marked.createdAt).getTime());
+      // Running it again changes nothing.
+      await grandfather(u.userId);
+      expect(new Date((await db.select().from(S.users).where(S.eq(S.users.id, u.userId)))[0].emailVerifiedAt).getTime()).toBe(new Date(marked.createdAt).getTime());
+
+      mocks.sent.length = 0;
+      const sub = `g-${randomUUID()}`;
+      const flow = await googleSignIn(identity(u.email, sub));
+      const ex = await req("POST", "/v1/auth/google/exchange", null, { code: flow.code, verifier: flow.verifier });
+      expect(ex.status, ex.text).toBe(200);
+      expect(ex.body.user).toMatchObject({ id: u.userId, hasPassword: true, hasGoogle: true, emailVerified: true });
+      // Nothing was taken away: this is the collateral the migration exists to prevent.
+      expect((await req("POST", "/v1/auth/login", null, { email: u.email, password: u.password })).status).toBe(200);
+      expect((await me(u.token)).status).toBe(200);
+      expect((await req("GET", "/v1/auth/me", null, undefined, { "x-api-key": u.apiKey })).status).toBe(200);
+      const [row] = await db.select().from(S.users).where(S.eq(S.users.id, u.userId));
+      expect(row).toMatchObject({ googleSub: sub, tokenVersion: 0 });
+      expect(await db.select().from(S.auditLog).where(S.and(S.eq(S.auditLog.action, "auth.google_claimed_unverified_account"), S.eq(S.auditLog.orgId, u.orgId)))).toHaveLength(0);
+      expect(mocks.sent.some((m) => m.to === u.email && /linked to Google/.test(m.subject))).toBe(false);
+      const [login] = (await auditRows({ action: "auth.google_login", orgId: u.orgId })).filter((r: any) => r.result === "ok");
+      expect(login.data.match).toBe("linked");
+    });
+
+    it("an account created AFTER the migration is still unproved, and still claimed on Google sign-in", async () => {
+      // The migration ran once, in beforeAll. Signup must not mark the address verified itself.
+      const u = await signup("after-deploy");
+      const [row] = await db.select().from(S.users).where(S.eq(S.users.id, u.userId));
+      expect(row.emailVerifiedAt).toBeNull();
+      expect((await me(u.token)).body.user.emailVerified).toBe(false);
+      const r = await G.resolveGoogleUser({ sub: `g-${randomUUID()}`, email: u.email, emailVerified: true, name: "" });
+      expect(r.match).toBe("claimed_unverified");
+      expect((await req("POST", "/v1/auth/login", null, { email: u.email, password: u.password })).status).toBe(401);
+      expect((await me(u.token)).status).toBe(401);
+      expect((await req("GET", "/v1/auth/me", null, undefined, { "x-api-key": u.apiKey })).status).toBe(401);
+    });
+  });
+
   // ── 3. OAuth state is bound to the browser; tokens have audiences; the handoff is a one-time code ──
   describe("Google OAuth state and handoff", () => {
     it("/start sets an HttpOnly, SameSite=Lax, path-scoped cookie and a state with the oauth_state audience", async () => {
@@ -616,6 +693,77 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
   });
 
   // ── 5. Brute force, enumeration, password policy ──
+  describe("admin sign-out", () => {
+    const adminSession = async () => {
+      const r = await req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
+      expect(r.status, r.text).toBe(200);
+      return r.body.token as string;
+    };
+
+    it("POST /v1/admin/logout revokes the presented token on the server; other sessions and the token header are untouched", async () => {
+      await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
+      const one = await adminSession();
+      const two = await adminSession();
+      expect(jwt.decode(one).payload.jti).toBeTruthy();
+      expect(jwt.decode(one).payload.jti).not.toBe(jwt.decode(two).payload.jti);
+      expect((await req("GET", "/v1/admin/session", one)).status).toBe(200);
+
+      // The exploit: "Sign out" was the browser forgetting the token. A copy kept working for 12 hours.
+      const out = await req("POST", "/v1/admin/logout", one);
+      expect(out.status, out.text).toBe(200);
+      expect(out.body).toEqual({ ok: true, revoked: true });
+      const after = await req("GET", "/v1/admin/session", one);
+      expect(after.status).toBe(401);
+      expect(after.body.error.message).toBeTruthy();
+      expect((await req("GET", "/v1/admin/orgs", one)).status).toBe(401);
+      expect((await req("PATCH", `/v1/admin/orgs/${randomUUID()}/status`, one, { status: "revoked" })).status).toBe(401);
+      // Signing out twice is a 401, not an error: the token is already dead.
+      expect((await req("POST", "/v1/admin/logout", one)).status).toBe(401);
+      // The other session is a different token and is not affected.
+      expect((await req("GET", "/v1/admin/session", two)).status).toBe(200);
+      const [row] = await auditRows({ action: "admin.logout" });
+      expect(row).toMatchObject({ actorType: "admin", result: "ok" });
+      expect(row.data.via).toBe("session");
+      // The revocation row lives exactly as long as the token would have.
+      const stored = await db.execute(S.sql`SELECT expires_at FROM admin_revoked_tokens WHERE jti = ${`jti:${jwt.decode(one).payload.jti}`}`);
+      expect(stored).toHaveLength(1);
+      expect(Math.round(new Date(stored[0].expires_at).getTime() / 1000)).toBe(jwt.decode(one).payload.exp);
+
+      // The server-to-server token is not a session: nothing is revoked, and it says so.
+      const viaHeader = await req("POST", "/v1/admin/logout", null, undefined, { "x-admin-token": ADMIN_TOKEN });
+      expect(viaHeader.status).toBe(200);
+      expect(viaHeader.body).toMatchObject({ ok: true, revoked: false });
+      expect(viaHeader.body.note).toMatch(/not a session/);
+      expect((await req("GET", "/v1/admin/session", null, undefined, { "x-admin-token": ADMIN_TOKEN })).status).toBe(200);
+      // No credential: 401 like every other admin route.
+      expect((await req("POST", "/v1/admin/logout")).status).toBe(401);
+      // A customer session cannot sign the admin out (or do anything else here).
+      const u = await signup("not-admin");
+      expect((await req("POST", "/v1/admin/logout", u.token)).status).toBe(401);
+      expect((await req("GET", "/v1/admin/session", two)).status).toBe(200);
+    });
+
+    it("a token issued before this release (no jti) still works, and can be signed out too", async () => {
+      const { env } = await import("./env.js");
+      const now = Math.floor(Date.now() / 1000);
+      const legacy = await jwt.sign({ role: "admin", aud: "admin", iat: now, exp: now + 3600 }, env.adminJwtSecret);
+      const older = await jwt.sign({ role: "admin", iat: now, exp: now + 3600 }, env.adminJwtSecret);
+      // The deploy signs nobody out.
+      expect((await req("GET", "/v1/admin/session", legacy)).status).toBe(200);
+      expect((await req("GET", "/v1/admin/session", older)).status).toBe(200);
+      expect((await req("POST", "/v1/admin/logout", legacy)).body).toEqual({ ok: true, revoked: true });
+      expect((await req("GET", "/v1/admin/session", legacy)).status).toBe(401);
+      expect((await req("GET", "/v1/admin/session", older)).status).toBe(200);
+      // Expired revocations are pruned on the next sign-out; live ones are kept.
+      await db.execute(S.sql`INSERT INTO admin_revoked_tokens (jti, expires_at) VALUES (${`jti:stale-${randomUUID()}`}, now() - interval '2 hours') ON CONFLICT DO NOTHING`);
+      expect((await req("POST", "/v1/admin/logout", older)).status).toBe(200);
+      expect(await db.execute(S.sql`SELECT 1 FROM admin_revoked_tokens WHERE expires_at < now() - interval '1 hour'`)).toHaveLength(0);
+      expect((await req("GET", "/v1/admin/session", legacy)).status).toBe(401);
+      expect(await A.verifyAdminJwt(legacy)).toBe(false);
+      expect(await A.verifyAdminJwt("not-a-token")).toBe(false);
+    });
+  });
+
   describe("sign-in lockout and password policy", () => {
     it("locks an account after 5 failures from 5 different addresses, before checking the password; a reset unlocks it", async () => {
       const u = await signup("lock");
@@ -784,26 +932,137 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
         expect((await login(u.email, "would-be-new-password-1", home)).status).toBe(401);
       });
 
-      it("(e) admin: after a sign-in from address A, five bad attempts from B lock B and new addresses, not A", async () => {
+      it("(e) admin: five bad attempts from B lock B only; the operator still gets in from a known address AND from a brand-new one", async () => {
         const { A: office, B: stranger, C: fresh } = net();
         const adminLogin = (password: string, headers: Record<string, string>) => req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password }, headers);
         await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
         try {
           expect((await adminLogin(ADMIN_PASSWORD, office)).status).toBe(200);
           for (let i = 0; i < 5; i++) expect((await adminLogin(`bad-admin-guess-${i}`, stranger)).status).toBe(400);
-          expect((await adminLogin(ADMIN_PASSWORD, stranger)).status).toBe(429);
-          expect((await adminLogin(ADMIN_PASSWORD, fresh)).status).toBe(429);
+          // B used up its own five and is locked, right password or not.
+          const lockedB = await adminLogin(ADMIN_PASSWORD, stranger);
+          expect(lockedB.status).toBe(429);
+          expect(lockedB.body.error.code).toBe("too_many_attempts");
+          expect(Number(lockedB.headers.get("retry-after"))).toBeGreaterThan(0);
+          // The exploit (security re-test NEW-3): the admin login has one subject for the whole
+          // platform, so those five anonymous guesses used to lock the operator out from any
+          // address that had not signed in before. A new address now has its own allowance.
+          const fromNew = await adminLogin(ADMIN_PASSWORD, fresh);
+          expect(fromNew.status, fromNew.text).toBe(200);
           const ok = await adminLogin(ADMIN_PASSWORD, office);
           expect(ok.status).toBe(200);
           expect((await req("GET", "/v1/admin/session", ok.body.token)).status).toBe(200);
-          // The operator's success did not reopen the door for the guessers.
-          expect((await adminLogin(ADMIN_PASSWORD, fresh)).status).toBe(429);
+          // The operator's successes did not reopen the door for the guesser.
+          expect((await adminLogin(ADMIN_PASSWORD, stranger)).status).toBe(429);
           // And the office address still locks itself.
           for (let i = 0; i < 5; i++) expect((await adminLogin(`office-typo-${i}`, office)).status).toBe(400);
           expect((await adminLogin(ADMIN_PASSWORD, office)).status).toBe(429);
         } finally {
           await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
         }
+      });
+
+      it("(e2) admin: the account-wide lock needs 50 failures in 15 minutes, and even then a known address is not locked out", async () => {
+        const { A: office, B: fresh, C: fresh2 } = net();
+        const L = await import("./lib/loginGuard.js");
+        expect(L.ADMIN_LOCK_POLICY).toEqual({ accountWide: 50, perAddress: 5 });
+        const adminLogin = (password: string, headers: Record<string, string>) => req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password }, headers);
+        const spread = (n: number, offset = 0) => Array.from({ length: n }, (_, i) => ({ subject: "admin", ip: `192.0.2.${1 + ((offset + i) % 250)}`, succeeded: false }));
+        await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
+        try {
+          expect((await adminLogin(ADMIN_PASSWORD, office)).status).toBe(200);
+          // 49 failures, one per address (a guessing run spread over a botnet): not locked yet.
+          await db.insert(S.loginAttempts).values(spread(49));
+          expect((await L.lockState("admin", fresh["cf-connecting-ip"], L.ADMIN_LOCK_POLICY)).locked).toBe(false);
+          // The customer rule would have locked long ago: the same rows lock a customer subject at 5.
+          expect((await L.lockState("admin", fresh["cf-connecting-ip"])).locked).toBe(true);
+          expect((await adminLogin(ADMIN_PASSWORD, fresh)).status).toBe(200);
+          // The 50th and 51st: the form is now locked for an address that has never signed in...
+          await db.insert(S.loginAttempts).values(spread(2, 49));
+          const locked = await adminLogin(ADMIN_PASSWORD, fresh2);
+          expect(locked.status).toBe(429);
+          expect(locked.body.error.code).toBe("too_many_attempts");
+          expect(Number(locked.headers.get("retry-after"))).toBeGreaterThan(0);
+          // ...but not for the addresses the operator has signed in from.
+          expect((await adminLogin(ADMIN_PASSWORD, office)).status).toBe(200);
+          expect((await adminLogin(ADMIN_PASSWORD, fresh)).status).toBe(200);
+          // Failures older than the window do not count towards the fifty.
+          await db.delete(S.loginAttempts).where(S.and(S.eq(S.loginAttempts.subject, "admin"), S.eq(S.loginAttempts.succeeded, false)));
+          await db.insert(S.loginAttempts).values(spread(60).map((r) => ({ ...r, createdAt: new Date(Date.now() - 16 * 60 * 1000) })));
+          expect((await adminLogin(ADMIN_PASSWORD, fresh2)).status).toBe(200);
+          // Customer accounts keep the old rule: five failures from five addresses lock the account.
+          const u = await signup("still-five");
+          await db.insert(S.loginAttempts).values(Array.from({ length: 5 }, (_, i) => ({ subject: u.email, ip: `192.0.2.${100 + i}`, succeeded: false })));
+          expect((await req("POST", "/v1/auth/login", null, { email: u.email, password: u.password }, fresh)).status).toBe(429);
+        } finally {
+          await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
+        }
+      });
+
+      it("'known' does not survive a credential takeover: a Google claim, a password reset and a password change each forget every other address", async () => {
+        const L = await import("./lib/loginGuard.js");
+        const squatterIp = `198.51.100.${1 + Math.floor(Math.random() * 200)}`;
+        const ownerIp = `203.0.113.${1 + Math.floor(Math.random() * 200)}`;
+        const squatter = { "cf-connecting-ip": squatterIp };
+        const owner = { "cf-connecting-ip": ownerIp };
+        const signupFrom = async (email: string, password: string, headers: Record<string, string>) => {
+          const r = await req("POST", "/v1/auth/signup", undefined, { email, password, orgName: "Squat Co" }, headers);
+          expect(r.status, r.text).toBe(201);
+          return r.body;
+        };
+
+        // 1. Google claim. The squatter registered the victim's address, so their address is
+        //    "known" for it - and stayed known after the victim took the account back, with a
+        //    private allowance of guesses no account-wide lock could touch.
+        const v1 = `ceo-${randomUUID().slice(0, 8)}@example.com`;
+        await signupFrom(v1, "Squatter-Pw-1-long", squatter);
+        expect(await L.isKnownIp(v1, squatterIp)).toBe(true);
+        const p = pkce();
+        const st = await req("GET", `/v1/auth/google/start?next=%2F&cv=${p.cv}`, null, undefined, owner);
+        googleClaims = identity(v1);
+        const cb = await req("GET", `/v1/auth/google/callback?code=4/abc&state=${encodeURIComponent(new URL(st.headers.get("location")!).searchParams.get("state")!)}`, null, undefined, { ...owner, cookie: stateCookie(st.headers) });
+        expect(fragment(cb.headers.get("location")).get("code"), cb.headers.get("location") ?? "").toBeTruthy();
+        expect(await db.select().from(S.auditLog).where(S.and(S.eq(S.auditLog.action, "auth.google_claimed_unverified_account"), S.sql`${S.auditLog.data}->>'email' = ${v1}`))).toHaveLength(1);
+        expect(await L.isKnownIp(v1, squatterIp)).toBe(false);
+        expect((await db.select().from(S.loginAttempts).where(S.and(S.eq(S.loginAttempts.subject, v1), S.eq(S.loginAttempts.succeeded, true)))).filter((r: any) => r.ip === squatterIp)).toHaveLength(0);
+        // Called without an address (the unit path), a claim forgets every known address.
+        const v1b = `coo-${randomUUID().slice(0, 8)}@example.com`;
+        await signupFrom(v1b, "Squatter-Pw-1-long", squatter);
+        expect((await G.resolveGoogleUser({ sub: `g-${randomUUID()}`, email: v1b, emailVerified: true, name: "" })).match).toBe("claimed_unverified");
+        expect(await L.isKnownIp(v1b, squatterIp)).toBe(false);
+
+        // 2. Password reset by the real owner, from the owner's address.
+        const v2 = `cfo-${randomUUID().slice(0, 8)}@example.com`;
+        await signupFrom(v2, "Squatter-Pw-2-long", squatter);
+        expect(await L.isKnownIp(v2, squatterIp)).toBe(true);
+        mocks.sent.length = 0;
+        await req("POST", "/v1/auth/password/forgot", null, { email: v2 }, owner);
+        const token = mocks.sent.find((m) => m.to === v2)!.text.match(/token=([\w-]+)/)![1];
+        expect((await req("POST", "/v1/auth/password/reset", null, { token, password: "Real-Owner-Reset-1" }, owner)).status).toBe(200);
+        expect(await L.isKnownIp(v2, squatterIp)).toBe(false);
+        expect(await L.isKnownIp(v2, ownerIp)).toBe(true);
+        // So the squatter's address is judged like any stranger's again: five failures from
+        // elsewhere lock it out, where before it kept its own five whatever anyone else did.
+        await db.insert(S.loginAttempts).values(Array.from({ length: 5 }, (_, i) => ({ subject: v2, ip: `192.0.2.${150 + i}`, succeeded: false })));
+        expect((await req("POST", "/v1/auth/login", null, { email: v2, password: "Squatter-Pw-2-long" }, squatter)).status).toBe(429);
+        expect((await req("POST", "/v1/auth/login", null, { email: v2, password: "Real-Owner-Reset-1" }, owner)).status).toBe(200);
+
+        // 3. Password change by the signed-in owner.
+        const v3 = `cto-${randomUUID().slice(0, 8)}@example.com`;
+        const acct = await signupFrom(v3, "Shared-Old-Pw-3-long", owner);
+        expect((await req("POST", "/v1/auth/login", null, { email: v3, password: "Shared-Old-Pw-3-long" }, squatter)).status).toBe(200);
+        expect(await L.isKnownIp(v3, squatterIp)).toBe(true);
+        const changed = await req("POST", "/v1/auth/password/change", acct.token, { currentPassword: "Shared-Old-Pw-3-long", newPassword: "Only-Mine-Now-3-long" }, owner);
+        expect(changed.status, changed.text).toBe(200);
+        expect(await L.isKnownIp(v3, squatterIp)).toBe(false);
+        expect(await L.isKnownIp(v3, ownerIp)).toBe(true);
+        // forgetOtherKnownAddresses keeps reset markers (rows with no address) and failures.
+        await db.insert(S.loginAttempts).values([{ subject: v3, ip: null, succeeded: true }, { subject: v3, ip: squatterIp, succeeded: false }]);
+        await L.forgetOtherKnownAddresses(v3, ownerIp);
+        const left = await db.select().from(S.loginAttempts).where(S.eq(S.loginAttempts.subject, v3));
+        expect(left.some((r: any) => r.succeeded && r.ip === null)).toBe(true);
+        expect(left.some((r: any) => !r.succeeded && r.ip === squatterIp)).toBe(true);
+        expect(left.some((r: any) => r.succeeded && r.ip === ownerIp)).toBe(true);
       });
 
       it("IPv6 addresses are matched by /64; things that are not addresses are never 'known'", async () => {
@@ -851,8 +1110,11 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       const since = new Date();
       const good = await req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
       expect(good.status).toBe(200);
-      for (let i = 0; i < 5; i++) expect((await req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password: `guess-${i}` })).status).toBe(400);
-      const locked = await req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD });
+      // Five failures from ONE address lock that address (the admin form counts per address;
+      // the account-wide threshold is fifty - see the "(e2)" test above).
+      const guesser = { "cf-connecting-ip": `198.51.100.${1 + Math.floor(Math.random() * 250)}` };
+      for (let i = 0; i < 5; i++) expect((await req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password: `guess-${i}` }, guesser)).status).toBe(400);
+      const locked = await req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD }, guesser);
       expect(locked.status).toBe(429);
       expect(locked.body.error.code).toBe("too_many_attempts");
       // A dashboard session that is already signed in, and the token header, are unaffected.
@@ -985,6 +1247,19 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       const actions = log.body.entries.map((e: any) => e.action);
       for (const a of ["auth.signup", "admin.plan_changed", "admin.credits_changed", "admin.status_changed"]) expect(actions).toContain(a);
       expect(log.body.entries.find((e: any) => e.action === "admin.plan_changed").actorType).toBe("admin");
+
+      // The customer sees WHAT the operator did, never the address it was done from. Every
+      // admin row used to carry the operator's IP straight into the customer's own log.
+      const adminEntries = log.body.entries.filter((e: any) => e.actorType === "admin");
+      expect(adminEntries.length).toBeGreaterThanOrEqual(4);
+      for (const e of adminEntries) expect(e.ip, e.action).toBeNull();
+      // The address is still recorded for the operator's own records...
+      expect(p.ip).toMatch(/^198\.18\./);
+      expect(JSON.stringify(adminEntries)).not.toContain(p.ip);
+      // ...and the customer's own rows still show the customer's own address.
+      const own = log.body.entries.find((e: any) => e.action === "auth.signup");
+      expect(own.actorType).toBe("user");
+      expect(own.ip).toMatch(/^198\.18\./);
     });
 
     it("GET /v1/audit-log: owners and admins only, own workspace only, newest first, paginated", async () => {
@@ -1113,6 +1388,54 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       // Under the limit the request is handled normally (here: rejected for what it says, not its size).
       const ok = await app.request("/v1/auth/login", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": ip() }, body: JSON.stringify({ email: `small-${randomUUID().slice(0, 8)}@example.com`, password: "x", pad: big(100 * 1024) }) });
       expect(ok.status).toBe(401);
+    });
+
+    it("a 413 (and a 401, a 404, a 400) reaches the web app: error responses carry the CORS headers", async () => {
+      const origin = "https://app.scout.test"; // APP_URL
+      const u = await signup("cors-413");
+      const big2mb = JSON.stringify({ name: big(2 * 1024 * 1024) });
+      // The browser's preflight, then the real request.
+      const pre = await app.request("/v1/leads", { method: "OPTIONS", headers: { origin, "access-control-request-method": "POST", "access-control-request-headers": "authorization,content-type", "cf-connecting-ip": ip() } });
+      expect(pre.status).toBe(204);
+      expect(pre.headers.get("access-control-allow-origin")).toBe(origin);
+      expect(pre.headers.get("access-control-allow-methods")).toContain("POST");
+      // The exploit: the body limiter answered before CORS ran, so the 413 had no
+      // Access-Control-Allow-Origin, the browser hid it, and the web app could only say
+      // "Could not reach the server".
+      const tooBig = await app.request("/v1/leads", { method: "POST", headers: { origin, authorization: `Bearer ${u.token}`, "content-type": "application/json", "cf-connecting-ip": ip() }, body: big2mb });
+      expect(tooBig.status).toBe(413);
+      expect(tooBig.headers.get("access-control-allow-origin")).toBe(origin);
+      expect((await tooBig.json()).error.message).toMatch(/too large.*1 MB/);
+      // Same for the public endpoints (256 KB) and by declared length alone.
+      const publicBig = await app.request("/v1/auth/login", { method: "POST", headers: { origin, "content-type": "application/json", "content-length": String(50 * 1024 * 1024), "cf-connecting-ip": ip() }, body: "{}" });
+      expect(publicBig.status).toBe(413);
+      expect(publicBig.headers.get("access-control-allow-origin")).toBe(origin);
+      const adminBig = await app.request("/v1/admin/tools/check", { method: "POST", headers: { origin, "x-admin-token": ADMIN_TOKEN, "content-type": "application/json", "cf-connecting-ip": ip() }, body: big2mb });
+      expect(adminBig.status).toBe(413);
+      expect(adminBig.headers.get("access-control-allow-origin")).toBe(origin);
+
+      // Every other kind of error under /v1, from the error handler and the 404 handler.
+      const cases: [string, RequestInit, number][] = [
+        ["/v1/leads", { method: "GET" }, 401],
+        ["/v1/admin/orgs", { method: "GET" }, 401],
+        ["/v1/no-such-route", { method: "GET" }, 404],
+        ["/v1/admin/nope", { method: "GET", headers: { "x-admin-token": ADMIN_TOKEN } }, 404],
+        ["/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: "{not json" }, 400],
+        ["/v1/auth/login", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }, 400],
+        [`/v1/leads/not-a-uuid`, { method: "GET", headers: { authorization: `Bearer ${u.token}` } }, 400],
+      ];
+      for (const [path, init, status] of cases) {
+        const r = await app.request(path, { ...init, headers: { origin, "cf-connecting-ip": ip(), ...(init.headers as Record<string, string> | undefined) } });
+        expect(r.status, path).toBe(status);
+        expect(r.headers.get("access-control-allow-origin"), `${init.method} ${path}`).toBe(origin);
+        const body = await r.json();
+        expect(typeof body.error.message, path).toBe("string");
+      }
+      // An origin that is not allowed is never reflected, on an error or otherwise.
+      const evil = await app.request("/v1/leads", { method: "POST", headers: { origin: "https://evil.example", "content-type": "application/json", "cf-connecting-ip": ip() }, body: big2mb });
+      expect(evil.status).toBe(413);
+      expect(evil.headers.get("access-control-allow-origin")).toBe(origin);
+      expect(evil.headers.get("access-control-allow-credentials")).toBeNull();
     });
 
     it("413 on the lead import over 10 MB and on any other authenticated endpoint over 1 MB", async () => {

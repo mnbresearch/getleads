@@ -64,6 +64,18 @@ export type AttentionBucket = keyof ClientAttention;
 export const ATTENTION_BUCKETS: AttentionBucket[] = ["noEmail", "unverified", "badEmail", "readyButIdle"];
 
 /**
+ * A stored "email" that is not one address: a display name with angle brackets, several
+ * addresses separated by commas or semicolons, quotes, or whitespace inside the value
+ * ("Name <a@b.com>", "a@x.com, b@x.com"). Rows written before every writer validated the
+ * address still hold these. Nothing can be sent to them - enrolment skips them and a send
+ * refuses them - so they belong with the known-bad addresses, where the customer can see
+ * and correct them, rather than sitting among the unverified ones looking usable.
+ *
+ * A Postgres regular expression, used on both sides of the bucket definitions below.
+ */
+export const MALFORMED_EMAIL_PATTERN = '[<>,;"\\s]';
+
+/**
  * The one definition of each bucket, over the `leads` table.
  *
  * Used for the counts on the dashboard, for the ids an action acts on, and for the Leads
@@ -76,9 +88,9 @@ export function attentionWhere(bucket: AttentionBucket): ReturnType<typeof sql> 
     case "noEmail":
       return sql`(${leads.email} IS NULL AND ${leads.status} <> 'lost')`;
     case "unverified":
-      return sql`(${leads.email} IS NOT NULL AND ${leads.emailStatus} = 'unknown' AND ${leads.status} <> 'lost')`;
+      return sql`(${leads.email} IS NOT NULL AND ${leads.emailStatus} = 'unknown' AND ${leads.email} !~ ${MALFORMED_EMAIL_PATTERN} AND ${leads.status} <> 'lost')`;
     case "badEmail":
-      return sql`(${leads.emailStatus} = 'invalid' AND ${leads.status} <> 'lost')`;
+      return sql`((${leads.emailStatus} = 'invalid' OR (${leads.email} IS NOT NULL AND ${leads.email} ~ ${MALFORMED_EMAIL_PATTERN})) AND ${leads.status} <> 'lost')`;
     case "readyButIdle":
       return sql`(${leads.status} = 'new' AND ${leads.emailStatus} IN ('valid','catch_all') AND coalesce(${leads.clientAssignedAt}, ${leads.createdAt}) < now() - interval '7 days' AND NOT EXISTS (SELECT 1 FROM campaign_contacts cc WHERE cc.lead_id = ${leads.id}))`;
   }
@@ -102,8 +114,8 @@ const STATS_SQL = (orgId: string, clientFilter: ReturnType<typeof sql>) => sql`
     count(*) FILTER (WHERE l.status = 'customer')::int                                AS customers,
     max(l.updated_at)                                                                 AS last_activity,
     count(*) FILTER (WHERE l.email IS NULL AND l.status <> 'lost')::int               AS no_email,
-    count(*) FILTER (WHERE l.email IS NOT NULL AND l.email_status = 'unknown' AND l.status <> 'lost')::int AS unverified,
-    count(*) FILTER (WHERE l.email_status = 'invalid' AND l.status <> 'lost')::int    AS bad_email,
+    count(*) FILTER (WHERE l.email IS NOT NULL AND l.email_status = 'unknown' AND l.email !~ ${MALFORMED_EMAIL_PATTERN} AND l.status <> 'lost')::int AS unverified,
+    count(*) FILTER (WHERE (l.email_status = 'invalid' OR (l.email IS NOT NULL AND l.email ~ ${MALFORMED_EMAIL_PATTERN})) AND l.status <> 'lost')::int AS bad_email,
     count(*) FILTER (
       WHERE l.status = 'new'
         AND l.email_status IN ('valid','catch_all')

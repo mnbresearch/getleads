@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions } from "@prospex/db";
+import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions, type EmailAccount } from "@prospex/db";
 import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPublicHost, isSsrfBlocked } from "@prospex/core";
 import { aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
@@ -11,7 +11,7 @@ import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, reserveManualSend, resumeContact, sendFailureCategory, tickCampaign } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, leadsWithUsableEmail, markReplied, reserveManualSend, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
@@ -70,12 +70,54 @@ async function assertPublicSmtpHost(host: string) {
   }
 }
 
+type SenderTest = { ok: true } | { ok: false; error: string };
+
+/** What a customer is told when a sender's saved credentials cannot be decrypted or are incomplete. */
+const UNREADABLE_SENDER = "This sender's saved settings can no longer be read, so it cannot be tested or used. Remove the sender and add it again with its host, username and password (or API key).";
+
+/**
+ * The connection test for one sender - the same one whether the sender was just added or is
+ * being tested again.
+ *
+ *  - "system" (the platform sender) has nothing of the customer's to test: it passes.
+ *  - SMTP: the port must be a mail port and the host a public mail server (checked again
+ *    here, at connect time, by the mailer), then the server must let us sign in.
+ *  - Resend: the API key must be accepted.
+ *
+ * The driver's own error text distinguishes "connection refused" from "timed out" from
+ * "auth failed", which is a port-state oracle; it is logged in full and the caller gets a
+ * message that says what to check without describing the network. A setting WE refuse (a
+ * port that is not a mail port, a private host) is different: that message is written for
+ * the customer and is passed through as it is.
+ */
+async function testSender(row: EmailAccount): Promise<{ kind: "tested"; test: SenderTest } | { kind: "unreadable" }> {
+  if (row.provider === "system") return { kind: "tested", test: { ok: true } };
+  const resolved = resolveMailer(row);
+  if (!resolved.ok) return { kind: "unreadable" };
+  const raw = await testMailer(resolved.mailer);
+  if (raw.ok) return { kind: "tested", test: { ok: true } };
+  console.warn(`[campaigns] email account ${row.id} test failed: ${raw.error}`);
+  const error =
+    raw.refused && raw.error
+      ? raw.error
+      : row.provider === "smtp"
+        ? "Could not connect and sign in to the SMTP server. Check the host, port, security setting, username and password."
+        : raw.unreachable
+          ? 'Could not reach the email provider to check this key. The sender was saved; use "Test again" on it in a few minutes.'
+          : "The email provider rejected the API key. Check that it is correct and active.";
+  return { kind: "tested", test: { ok: false, error } };
+}
+
 // Owner/admin only: a sender is the identity the workspace's outreach goes out under.
 campaignRoutes.post("/email-accounts", ownerOrAdmin("sender.created"), zValidator("json", accountInput), async (c) => {
   const b = c.req.valid("json");
   const oid = orgId(c);
   const { db } = getDb();
-  if (b.provider === "system" && !systemMailerConfig() && env.nodeEnv === "production") throw badRequest("No system email provider configured on the server (RESEND_API_KEY or SMTP_*)");
+  if (b.provider === "system" && !systemMailerConfig() && env.nodeEnv === "production") {
+    // Which settings are missing is for whoever runs the server, not for the customer.
+    console.warn("[campaigns] platform sender requested but no system email provider is configured (RESEND_API_KEY or SMTP_*)");
+    throw badRequest("The platform sender isn't available on this workspace yet. Connect your own Resend or SMTP account, or contact support.");
+  }
   if (b.provider === "resend" && !b.config?.apiKey) throw badRequest("config.apiKey required for Resend");
   if (b.provider === "smtp" && !b.config?.host) throw badRequest("config.host required for SMTP");
   if (b.provider === "smtp") {
@@ -114,27 +156,44 @@ campaignRoutes.post("/email-accounts", ownerOrAdmin("sender.created"), zValidato
     .insert(emailAccounts)
     .values({ orgId: oid, provider: b.provider, fromName: b.fromName, fromEmail, replyTo, signature: b.signature, dailyLimit: b.dailyLimit, configEncrypted: b.config ? encryptJson(b.config) : null })
     .returning();
-  const raw = b.provider === "system" ? { ok: true } : await testMailer(mailerFromAccount(row)!);
-  // The driver's own error text distinguishes "connection refused" from "timed out" from
-  // "auth failed", which is a port-state oracle. Logged in full here; the caller gets a
-  // message that says what to check without describing the network.
-  if (!raw.ok) console.warn(`[campaigns] email account ${row.id} test failed: ${raw.error}`);
-  const test = raw.ok
-    ? raw
-    : {
-        ok: false,
-        error:
-          b.provider === "smtp"
-            ? "Could not connect and sign in to the SMTP server. Check the host, port, security setting, username and password."
-            : "unreachable" in raw && raw.unreachable
-              ? "Could not reach the email provider to check this key. The sender was saved; remove and re-add it to test again."
-              : "The email provider rejected the API key. Check that it is correct and active.",
-      };
+  const tested = await testSender(row);
+  // Freshly encrypted a moment ago, so "unreadable" cannot happen here; treated as a failed test if it somehow does.
+  const test: SenderTest = tested.kind === "tested" ? tested.test : { ok: false, error: UNREADABLE_SENDER };
   if (!test.ok) await db.update(emailAccounts).set({ status: "error" }).where(eq(emailAccounts.id, row.id));
   const { configEncrypted: _c, ...pub } = row;
   // No credentials: the provider, the visible identity and whether the test passed.
   await audit(c, "sender.created", { targetType: "email_account", targetId: row.id, data: { provider: row.provider, fromEmail: row.fromEmail, replyTo: row.replyTo, dailyLimit: row.dailyLimit, testOk: test.ok } });
   return c.json({ emailAccount: { ...pub, status: test.ok ? "active" : "error" }, test, ...(note ? { note } : {}) }, 201);
+});
+
+/**
+ * Test a saved sender again.
+ *
+ * A sender whose connection test failed is marked "error", and a campaign will not start (and
+ * a reply will not send) through it. Nothing ever ran the test a second time, so one bad
+ * minute at the mail provider - or a password fixed on the provider's side - left the sender
+ * dead until it was deleted and typed in again, which also detached it from its campaigns.
+ *
+ * Runs exactly the test that adding a sender runs (for SMTP that includes the host and port
+ * rules), sets the status from the result, and returns the same shape. Credentials are never
+ * returned. Stored credentials that can no longer be read cannot be tested: 409, in words.
+ */
+campaignRoutes.post("/email-accounts/:id/retest", ownerOrAdmin("sender.retested"), async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  const row = await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, c.req.param("id")), eq(emailAccounts.orgId, oid)) });
+  if (!row) throw notFound("Email account");
+  const tested = await testSender(row);
+  if (tested.kind === "unreadable") {
+    if (row.status !== "error") await db.update(emailAccounts).set({ status: "error" }).where(and(eq(emailAccounts.id, row.id), eq(emailAccounts.orgId, oid)));
+    await audit(c, "sender.retested", { result: "failed", targetType: "email_account", targetId: row.id, data: { provider: row.provider, fromEmail: row.fromEmail, reason: "credentials_unreadable", previousStatus: row.status } });
+    throw new ApiError(409, UNREADABLE_SENDER, "credential_unreadable");
+  }
+  const status = tested.test.ok ? "active" : "error";
+  if (status !== row.status) await db.update(emailAccounts).set({ status }).where(and(eq(emailAccounts.id, row.id), eq(emailAccounts.orgId, oid)));
+  await audit(c, "sender.retested", { targetType: "email_account", targetId: row.id, data: { provider: row.provider, fromEmail: row.fromEmail, testOk: tested.test.ok, previousStatus: row.status, status } });
+  const { configEncrypted: _c, ...pub } = row;
+  return c.json({ emailAccount: { ...pub, status }, test: tested.test });
 });
 
 campaignRoutes.delete("/email-accounts/:id", ownerOrAdmin("sender.deleted"), async (c) => {
@@ -285,9 +344,12 @@ campaignRoutes.post("/:id/enroll", zValidator("json", z.object({ leadIds: z.arra
   if (b.fromList && cp.listId) ids.push(...(await db.select({ id: listLeads.leadId }).from(listLeads).where(eq(listLeads.listId, cp.listId))).map((r) => r.id));
   if (b.minScore !== undefined) ids.push(...(await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), sql`${leads.score} >= ${b.minScore}`, sql`${leads.email} IS NOT NULL`, cp.icpId ? eq(leads.icpId, cp.icpId) : sql`true`))).map((r) => r.id));
   ids = [...new Set(ids)];
-  // only leads with a usable email
-  const valid = await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, ids), sql`${leads.email} IS NOT NULL`, sql`${leads.emailStatus} <> 'invalid'`));
-  let toEnroll = valid.map((v) => v.id);
+  // Only leads with a usable email: one valid address, not known to be bad. A stored value
+  // that is not a single address ("Name <a@b>", "a@x, b@x" - rows from before imports were
+  // validated) used to be enrolled and only failed when its first email was due; it is left
+  // out here and counted, so the person enrolling learns of it now.
+  const usable = await leadsWithUsableEmail(db, oid, ids);
+  let toEnroll = usable.ids;
   // A campaign run for a client only contacts that client's leads. Unowned ones are claimed
   // for it (they are about to be contacted on its behalf); another client's are left out
   // and counted. Without this, one-owner-per-lead held everywhere except at the point where
@@ -300,7 +362,7 @@ campaignRoutes.post("/:id/enroll", zValidator("json", z.object({ leadIds: z.arra
     clientNote = { claimedForClient: p.claimed, skippedOtherClient: p.ownedByAnotherClient };
   }
   const n = await enrollLeads(cp, toEnroll);
-  return c.json({ enrolled: n, skippedNoEmail: ids.length - valid.length, ...(clientNote ?? {}) });
+  return c.json({ enrolled: n, skippedNoEmail: usable.skippedNoEmail, skippedInvalidEmail: usable.skippedInvalidEmail, ...(clientNote ?? {}) });
 });
 
 /**
@@ -334,7 +396,7 @@ campaignRoutes.post("/:id/start", async (c) => {
     // with every contact queued forever and no reason given.
     const sender = await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, cp.emailAccountId), eq(emailAccounts.orgId, oid)) });
     if (!sender) throw badRequest("The sender attached to this campaign no longer exists. Attach another sender, then start.");
-    if (sender.status !== "active") throw badRequest(`The sender ${sender.fromEmail} failed its connection test, so this campaign would not send anything. Remove that sender and add it again with working settings (or attach another sender), then start.`);
+    if (sender.status !== "active") throw badRequest(`The sender ${sender.fromEmail} failed its connection test, so this campaign would not send anything. Use "Test again" on that sender under Campaigns (or attach another sender), then start.`);
   }
   await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(eq(campaigns.id, cp.id));
   await emitEvent(oid, "campaign.started", { campaignId: cp.id }, { type: "campaign", id: cp.id });
@@ -476,7 +538,7 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   return c.json({
     ...out,
     ai: personalised,
-    ...(personalised ? {} : { note: aiConfigured ? "The AI engine did not return a usable draft - this is a template, not a personalised draft." : "No AI engine configured - this is a template, not a personalised draft." }),
+    ...(personalised ? {} : { note: aiConfigured ? "The AI engine did not return a usable draft - this is a template, not a personalised draft." : "AI drafting isn't switched on for this workspace yet, so this is a template, not a personalised draft. Contact support to enable it." }),
   });
 });
 
@@ -631,11 +693,20 @@ campaignRoutes.post(
     // scoping was for, in a second place an earlier pass missed.
     const campaign = inbound.campaignId ? await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, inbound.campaignId), eq(campaigns.orgId, oid)) }) : null;
     let account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, campaign.emailAccountId), eq(emailAccounts.orgId, oid)) }) : null;
-    if (!account) account = await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.orgId, oid), orderBy: desc(emailAccounts.createdAt) });
-    if (!account) throw badRequest("No email sending account configured for this org");
+    // No sender on the campaign (or no campaign): the workspace's newest WORKING sender, and
+    // only when there is none the newest of any - so the refusal below names a real sender.
+    if (!account) account = await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.orgId, oid), orderBy: [sql`(${emailAccounts.status} = 'active') DESC`, desc(emailAccounts.createdAt)] });
+    if (!account) throw badRequest("No sender is set up yet. Add a sender under Campaigns, then send the reply.");
+    // A sender whose connection test failed sends nothing - the same rule as starting a
+    // campaign. Attempting anyway reported "the sending provider rejected the message",
+    // which sent the customer looking at the recipient instead of at their own sender.
+    if (account.status !== "active") {
+      throw badRequest(`The sender ${account.fromEmail} failed its connection test, so the reply was not sent. Use "Test again" on that sender under Campaigns (or attach another sender to the campaign), then send the reply.`);
+    }
 
-    const mailer = mailerFromAccount(account);
-    if (!mailer) throw badRequest("Sending account is not configured correctly");
+    const resolved = resolveMailer(account);
+    if (!resolved.ok) throw badRequest(`The sender ${account.fromEmail} cannot be used: its saved settings can no longer be read. Remove that sender and add it again under Campaigns, then send the reply.`);
+    const mailer = resolved.mailer;
     if (bodyText.length > 20_000) throw badRequest("That reply is too long to send (20,000 characters at most).");
     const sendOrg = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
     if (!sendOrg) throw notFound("Workspace");
@@ -660,20 +731,34 @@ campaignRoutes.post(
       .values({ orgId: oid, campaignId: campaign?.id, leadId: lead.id, direction: "outbound", toEmail: to, subject, bodyText: text, trackingToken: unsubToken, status: "queued" })
       .returning();
 
-    const res = await sendMail(mailer, {
-      from: `${safeDisplayName(account.fromName) || "Sender"} <${account.provider === "system" ? platformFromAddress() : account.fromEmail}>`,
-      // The canonical address and nothing else: one recipient per send.
-      to,
-      subject: stripControl(subject).slice(0, 500),
-      text,
-      replyTo: account.replyTo ?? account.fromEmail,
-      headers: { "X-Prospex-Message": msg.id, "List-Unsubscribe": mailto ? `<${unsub}>, <mailto:${mailto}?subject=unsubscribe>` : `<${unsub}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
-    });
-    if (!res.ok) {
-      // Not sent: give back the daily slot and the monthly unit it took.
+    /** Not sent: give back the daily slot and the monthly unit it took. */
+    const giveBack = async () => {
       await slot.release();
       await consume(db, oid, "emails", -1, { allowOverage: true }).catch(() => {});
+    };
+    let res: Awaited<ReturnType<typeof sendMail>>;
+    try {
+      res = await sendMail(mailer, {
+        from: `${safeDisplayName(account.fromName) || "Sender"} <${account.provider === "system" ? platformFromAddress() : account.fromEmail}>`,
+        // The canonical address and nothing else: one recipient per send.
+        to,
+        subject: stripControl(subject).slice(0, 500),
+        text,
+        replyTo: account.replyTo ?? account.fromEmail,
+        headers: { "X-Prospex-Message": msg.id, "List-Unsubscribe": mailto ? `<${unsub}>, <mailto:${mailto}?subject=unsubscribe>` : `<${unsub}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
+      });
+    } catch (e) {
+      // A send that THROWS never reported an outcome. Only a returned { ok: false } used to
+      // give the reservation back, so a throw here kept one of the sender's daily slots and
+      // one unit of the month's allowance for an email that did not go out.
+      await giveBack();
+      const thrown = sendFailureCategory((e as Error)?.message ?? "");
+      const category = thrown === SEND_REJECTED ? "The email could not be handed to the sending server" : thrown;
+      await db.update(messages).set({ status: "failed", error: category }).where(eq(messages.id, msg.id)).catch(() => {});
+      console.warn(`[campaigns] reply send threw for message ${msg.id}: ${(e as Error)?.name ?? "Error"}`);
+      throw new ApiError(502, `Send failed: ${category}. Nothing was sent and nothing was counted against your limits - try again.`, "send_failed");
     }
+    if (!res.ok) await giveBack();
     if (res.ok) {
       await db.update(messages).set({ status: "sent", sentAt: new Date(), providerMessageId: res.providerMessageId }).where(eq(messages.id, msg.id));
       await db.update(messages).set({ draftReply: null }).where(eq(messages.id, inbound.id));
@@ -690,10 +775,13 @@ campaignRoutes.post(
       }
       return c.json({ sent: true, messageId: msg.id });
     }
-    await db.update(messages).set({ status: "failed", error: sendFailureCategory(res.error) }).where(eq(messages.id, msg.id));
     // A category, never the provider's own text: that can carry credentials or account ids.
+    // (A setting we refused ourselves - a port that is not a mail port - is the exception:
+    // that sentence is ours, written for the customer, and says what to change.)
+    const category = sendFailureCategory(res);
+    await db.update(messages).set({ status: "failed", error: category }).where(eq(messages.id, msg.id));
     console.warn(`[campaigns] reply send failed for message ${msg.id}`);
-    throw badRequest(`Send failed: ${sendFailureCategory(res.error)}`);
+    throw badRequest(`Send failed: ${category}`);
   },
 );
 

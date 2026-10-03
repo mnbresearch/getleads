@@ -266,7 +266,7 @@ export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: P
     },
     4,
   );
-  if (enrichErrors.length) notes.push(`${enrichErrors.length} company lookup(s) failed: ${redact(enrichErrors.slice(0, 3).join("; "), { max: 300 })}`);
+  if (enrichErrors.length) notes.push(`${enrichErrors.length} company ${enrichErrors.length === 1 ? "lookup" : "lookups"} failed: ${redact(enrichErrors.slice(0, 3).join("; "), { max: 300 })}`);
   progress(65, "enriched companies");
 
   // 3) Email find + verify
@@ -299,7 +299,7 @@ export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: P
       },
       3,
     );
-    if (emailErrors.length) notes.push(`email lookup failed for ${emailErrors.length} lead(s): ${redact(emailErrors[0], { max: 200 })}`);
+    if (emailErrors.length) notes.push(`email lookup failed for ${emailErrors.length} ${emailErrors.length === 1 ? "lead" : "leads"}: ${redact(emailErrors[0], { max: 200 })}`);
     progress(90, "verified emails");
   }
 

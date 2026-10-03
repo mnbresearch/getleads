@@ -53,7 +53,16 @@ clientRoutes.get("/", zValidator("query", z.object({ includeArchived: z.enum(["t
 );
 
 clientRoutes.post("/", zValidator("json", clientInput), async (c) => {
-  const created = await createClient(orgId(c), c.req.valid("json"));
+  const input = c.req.valid("json");
+  // The same gate PATCH has. What the client-facing report shows is a share setting, owner
+  // or admin only - and a member could set it anyway by creating the client with it on.
+  // `false` is what a new client gets regardless, so only turning it ON is refused.
+  const role = c.get("auth")?.user?.role;
+  if (input.reportShowTarget === true && role && role !== "owner" && role !== "admin") {
+    await audit(c, "client.report_settings_changed", { result: "denied", targetType: "client", data: { reason: "role", role, on: "create" } });
+    throw new ApiError(403, `Only a workspace owner or admin can change what the client report shows. Your role is "${role}" - ask an owner or admin, or create the client without that setting.`, "forbidden_role");
+  }
+  const created = await createClient(orgId(c), input);
   await audit(c, "client.created", { targetType: "client", targetId: created.id, data: { name: created.name } });
   return c.json(created, 201);
 });

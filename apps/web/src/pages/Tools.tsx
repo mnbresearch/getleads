@@ -2,19 +2,70 @@ import { useState } from "react";
 import { apiFetch } from "../lib/api";
 import { EmailStatusBadge, Page, useToast } from "../components/ui";
 import { CompanyIntelView, DomainHealthView } from "../components/ToolResults";
+import { ExtLink } from "../components/ExtLink";
 
 type Row = Record<string, unknown>;
 
-const HIDDEN_COLS = ["snippet", "raw", "checks", "person", "candidates"];
+/**
+ * Not shown: bulky payloads, and diagnostics that describe how an answer was reached rather
+ * than what it is (which verifier was tried, where a name was guessed from). They are in the
+ * API response for anyone who wants them; in a results table they were noise with shouting
+ * headers - VERIFIERATTEMPTS, GUESSEDNAME - and JSON in the cells.
+ */
+const HIDDEN_COLS = ["snippet", "raw", "checks", "person", "candidates", "verifierAttempts", "guessedName", "nameSource", "verifiedBy", "mxHost", "source", "pattern"];
+
+/** What each field is called on screen. Unknown keys fall back to their name in words. */
+const COL_LABELS: Record<string, string> = {
+  url: "LinkedIn URL",
+  linkedinUrl: "LinkedIn URL",
+  email: "Email",
+  emailStatus: "Email status",
+  status: "Email status",
+  confidence: "Confidence",
+  found: "Found",
+  reason: "Reason",
+  fullName: "Name",
+  firstName: "First name",
+  lastName: "Last name",
+  title: "Title",
+  company: "Company",
+  companyName: "Company",
+  companyDomain: "Company website",
+  location: "Location",
+  leadId: "Saved",
+  saveSkipped: "Why not saved",
+};
+export const columnLabel = (k: string) => COL_LABELS[k] ?? k.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_-]+/g, " ").replace(/^./, (c) => c.toUpperCase()).replace(/ ([A-Z])(?=[a-z])/g, (_, c: string) => ` ${c.toLowerCase()}`);
+
+const isEmpty = (v: unknown) => v === null || v === undefined || (typeof v === "string" && (v.trim() === "" || v === "null" || v === "undefined")) || (Array.isArray(v) && v.length === 0);
+
+/**
+ * One cell, as text. null, "" and [] are "-" (not the words "null" and "[]"); true/false are
+ * Yes/No; a 0-1 confidence is a percentage; a saved lead's id is just "Yes".
+ */
+export function cellText(key: string, v: unknown): string {
+  if (key === "leadId") return isEmpty(v) ? "No" : "Yes";
+  if (isEmpty(v)) return "-";
+  if (typeof v === "boolean") return v ? "Yes" : "No";
+  if (typeof v === "number") return key === "confidence" ? `${Math.round(v <= 1 ? v * 100 : v)}%` : v.toLocaleString();
+  if (Array.isArray(v)) return v.every((x) => x === null || typeof x !== "object") ? v.map((x) => cellText("", x)).join(", ") : `${v.length} item${v.length === 1 ? "" : "s"}`;
+  if (typeof v === "object") {
+    const parts = Object.entries(v as Row).filter(([, x]) => !isEmpty(x) && typeof x !== "object").map(([k, x]) => `${columnLabel(k)}: ${cellText(k, x)}`);
+    return parts.length ? parts.join(", ") : "-";
+  }
+  return String(v);
+}
 
 /**
  * Columns from every row, in first-seen order. Taking only the first row's keys hid any
  * field the first result happened to lack (no email found, no LinkedIn) for the whole table.
  */
-function columnsOf(rows: Row[]): string[] {
+export function columnsOf(rows: Row[]): string[] {
   const seen: string[] = [];
   for (const r of rows) for (const k of Object.keys(r)) if (!seen.includes(k) && !HIDDEN_COLS.includes(k)) seen.push(k);
-  return seen.slice(0, 8);
+  // A full name makes its two halves redundant.
+  const cols = seen.includes("fullName") ? seen.filter((k) => k !== "firstName" && k !== "lastName") : seen;
+  return cols.slice(0, 8);
 }
 
 /**
@@ -114,8 +165,8 @@ export function ToolsPage() {
           )}
           {out && (Array.isArray(out) ? (
             <div className="overflow-x-auto">
-              <table className="w-full text-sm"><thead><tr>{columnsOf(out).map((k) => <th key={k} className="th">{k}</th>)}</tr></thead>
-                <tbody className="divide-y divide-slate-100">{out.map((r, i) => <tr key={i}>{columnsOf(out).map((k) => <td key={k} className="td text-xs">{k === "emailStatus" || k === "status" ? <EmailStatusBadge status={String(r[k] ?? "")} /> : typeof r[k] === "object" ? JSON.stringify(r[k]) : String(r[k] ?? "")}</td>)}</tr>)}</tbody></table>
+              <table className="w-full text-sm"><thead><tr>{columnsOf(out).map((k) => <th key={k} className="th whitespace-nowrap">{columnLabel(k)}</th>)}</tr></thead>
+                <tbody className="divide-y divide-slate-100">{out.map((r, i) => <tr key={i}>{columnsOf(out).map((k) => <td key={k} className="td text-xs [overflow-wrap:anywhere]">{(k === "emailStatus" || k === "status") && typeof r[k] === "string" && r[k] ? <EmailStatusBadge status={r[k] as string} /> : (k === "linkedinUrl" || k === "url") && typeof r[k] === "string" && r[k] ? <ExtLink className="text-brand-600 hover:underline" href={r[k]} fallback={r[k] as string}>{r[k] as string}</ExtLink> : cellText(k, r[k])}</td>)}</tr>)}</tbody></table>
               {/* Any reason the server gave is in the notices above; no guessed cause here. */}
               {out.length === 0 && <div className="py-4 text-sm text-ink-400">No results found for this request.</div>}
             </div>

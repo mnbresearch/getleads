@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
+import { plural } from "../lib/plural";
 
 interface Icp { id: string; name: string; description: string | null; criteria: Record<string, string[] | undefined>; seedDomains: string[]; aiProfile: { summary?: string; searchQueries?: string[] } | null; chatHistory: { role: "user" | "assistant"; content: string }[]; leadCount: number; createdAt: string; clientId?: string | null }
 
@@ -22,7 +23,7 @@ interface ScoreResponse {
 }
 
 const RERANK_SKIP: Record<string, string> = {
-  no_ai_provider: "no AI engine is configured, so rule scores were used",
+  no_ai_provider: "AI scoring isn't switched on for this workspace yet, so rule scores were used - contact support to turn it on",
   quota: "your plan has no AI messages left this month",
   error: "usage could not be recorded, so it was not run",
 };
@@ -86,7 +87,7 @@ export function IcpPage() {
       // never existed, so every toast fell back to the scored list's length and said nothing
       // about leads skipped or an AI pass that did not run.
       const n = r.counts?.scored ?? r.scored?.length ?? 0;
-      const head = typeof r.counts?.requested === "number" ? `Scored ${n} of ${r.counts.requested} leads` : `Scored ${n} lead${n === 1 ? "" : "s"}`;
+      const head = typeof r.counts?.requested === "number" ? `Scored ${n} of ${r.counts.requested} leads` : `Scored ${plural(n, "lead")}`;
       const extra = [
         r.counts?.outOfScope ? `${r.counts.outOfScope} outside this ICP's scope, not scored` : null,
         r.aiRerank?.skipped ? `AI re-rank ${r.aiRerank.done ? `stopped after ${r.aiRerank.done}` : "skipped"}: ${RERANK_SKIP[r.aiRerank.skipped] ?? r.aiRerank.skipped}` : null,
@@ -110,7 +111,7 @@ export function IcpPage() {
                 <div className="min-w-0"><div className="font-semibold">{i.name}</div><div className="text-xs text-ink-400">{i.leadCount} leads assigned</div></div>
                 <div className="flex flex-wrap gap-2"><button className="btn-secondary" disabled={scoring !== null} onClick={() => score(i)}>{scoring === i.id ? "Scoring…" : "Score leads"}</button><button className="btn-secondary" onClick={() => setChatIcp(i)}>Chat</button><button className="btn-secondary" onClick={() => setEdit(i)}>Edit</button><DeleteButton what={`the ICP "${i.name}"`} consequence={[
                   usedBy(i).length ? `${usedBy(i).map((c) => c.name).join(", ")} ${usedBy(i).length === 1 ? "uses" : "use"} this ICP for routing - pooled leads will stop being routed to ${usedBy(i).length === 1 ? "that client" : "them"}.` : null,
-                  i.leadCount > 0 ? `${i.leadCount} leads are scored against it and will lose that score.` : null,
+                  i.leadCount > 0 ? `${plural(i.leadCount, "lead")} ${i.leadCount === 1 ? "is" : "are"} scored against it and will lose that score.` : null,
                   "It is also selectable in Search, Campaigns and Autopilot.",
                 ].filter(Boolean).join(" ")} onDelete={() => remove(i)} onError={(m) => toast(m, "err")} className="btn-secondary" /></div>
               </div>
@@ -121,7 +122,7 @@ export function IcpPage() {
                 ))}
                 {i.seedDomains.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-ink-400">Seed customers</span>{i.seedDomains.map((v) => <span key={v} className="badge bg-brand-50 text-brand-700">{v}</span>)}</div>}
               </div>
-              {!i.aiProfile && (i.description || i.seedDomains.length > 0) && <div className="mt-3 text-xs text-amber-600">AI profile building… (needs an AI key configured on the server; otherwise your manual criteria are used as-is)</div>}
+              {!i.aiProfile && (i.description || i.seedDomains.length > 0) && <div className="mt-3 text-xs text-amber-600">AI profile building… (if AI isn't switched on for this workspace yet, your manual criteria are used as-is - contact support to turn it on)</div>}
             </div>
           ))}
         </div>

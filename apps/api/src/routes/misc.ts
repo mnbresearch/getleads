@@ -3,7 +3,7 @@ import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import Stripe from "stripe";
 import { isPublicHost } from "@prospex/core";
-import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, inArray, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
+import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, inArray, integrations, isPlanId, leads, limitsFor, messages, organizations, planOverrides, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
 import { sendingHealthForAccount, systemSenderHealthForOrg } from "../services/campaigns.js";
 import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
@@ -288,9 +288,13 @@ miscRoutes.post("/billing/checkout", requireAuth, requireUser, ownerOrAdmin("bil
   const stripe = new Stripe(env.stripe.secretKey);
   const a = c.get("auth");
   const requestedPlan = c.req.valid("json").plan;
-  if (!PLANS[requestedPlan]) throw badRequest(`Unknown plan "${requestedPlan}"`);
+  // isPlanId, not `PLANS[x]`: inherited names ("toString", "constructor") are truthy there.
+  if (!isPlanId(requestedPlan)) throw badRequest(`Unknown plan "${requestedPlan.slice(0, 40)}"`);
   const price = env.stripe.priceForPlan(requestedPlan);
-  if (!price) throw badRequest(`Stripe price id not configured for plan "${requestedPlan}" (set STRIPE_PRICE_${requestedPlan.toUpperCase()})`);
+  if (!price) {
+    console.warn(`[billing] no Stripe price id for plan "${requestedPlan}" (set STRIPE_PRICE_${requestedPlan.toUpperCase()})`);
+    throw badRequest("Online checkout isn't set up for this plan yet. Use the upgrade request form and we will set it up with you.");
+  }
   const { db } = getDb();
   let customer = a.org.stripeCustomerId;
   if (!customer) {
@@ -328,19 +332,16 @@ miscRoutes.post("/billing/webhook", async (c) => {
    */
   /**
    * Admin overrides are stored merged into planLimits (admin.ts PATCH /orgs/:id/plan writes
-   * `{ ...limitsFor(plan), ...overrides }`), so they are whatever differs from the plan's defaults.
+   * `{ ...limitsFor(plan), ...overrides }`), so they are whatever differs from the plan's
+   * defaults - `planOverrides`, which also drops any stored value that is not a usable limit,
+   * so junk is never carried onto the new plan.
    */
-  const adminOverrides = (oldPlan: string, current: unknown): Record<string, unknown> => {
-    const defaults = limitsFor(oldPlan) as unknown as Record<string, unknown>;
-    const cur = (current ?? {}) as Record<string, unknown>;
-    return Object.fromEntries(Object.entries(cur).filter(([k, v]) => JSON.stringify(v) !== JSON.stringify(defaults[k])));
-  };
   const planForPrice = (priceId: string | undefined | null) => (priceId ? Object.keys(PLANS).find((p) => env.stripe.priceForPlan(p) === priceId) : undefined);
   if (event.type === "checkout.session.completed") {
     const s = event.data.object as Stripe.Checkout.Session;
     const orgId = s.metadata?.orgId;
     const plan = s.metadata?.plan;
-    if (orgId && plan && PLANS[plan]) {
+    if (orgId && plan && isPlanId(plan)) {
       await db.update(organizations).set({ plan, planLimits: limitsFor(plan), stripeSubscriptionId: String(s.subscription ?? "") }).where(eq(organizations.id, orgId));
     } else if (orgId) {
       console.error(`[billing] checkout ${s.id} for org ${orgId} names unknown plan ${JSON.stringify(plan)}; plan NOT changed`);
@@ -366,7 +367,7 @@ miscRoutes.post("/billing/webhook", async (c) => {
             if (org.stripeSubscriptionId !== sub.id) await db.update(organizations).set({ stripeSubscriptionId: sub.id }).where(eq(organizations.id, org.id));
             continue;
           }
-          await db.update(organizations).set({ plan, planLimits: { ...limitsFor(plan), ...adminOverrides(org.plan, org.planLimits) }, stripeSubscriptionId: sub.id }).where(eq(organizations.id, org.id));
+          await db.update(organizations).set({ plan, planLimits: { ...limitsFor(plan), ...planOverrides(org) }, stripeSubscriptionId: sub.id }).where(eq(organizations.id, org.id));
         }
       } else console.error(`[billing] subscription ${sub.id} has price ${priceId} that maps to no STRIPE_PRICE_<PLAN>; plan NOT changed`);
     }

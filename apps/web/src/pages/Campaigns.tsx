@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom"
 import { apiFetch, fmtDate } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { useMe } from "../lib/me";
+import { plural } from "../lib/plural";
 
 interface Step { id?: string; delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string | null; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
 interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; steps?: Step[]; createdAt: string }
@@ -80,11 +81,7 @@ export function CampaignsPage() {
       )}
       {/* A sender whose connection test failed sends nothing, and the server refuses to
           start a campaign that uses one. Said here, before someone builds a campaign on it. */}
-      {accounts.some((a) => a.status !== "active") && (
-        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="status">
-          {accounts.filter((a) => a.status !== "active").map((a) => a.fromEmail).join(", ")} failed {accounts.filter((a) => a.status !== "active").length === 1 ? "its" : "their"} connection test and cannot send. {canManage ? <>Remove it and add it again with working settings. <button className="underline" onClick={() => setAccOpen(true)}>Open sender accounts</button></> : "Ask an owner or admin to remove it and add it again with working settings."}
-        </div>
-      )}
+      <FailedSendersBanner accounts={accounts} canManage={canManage} onOpen={() => setAccOpen(true)} />
       {refsErr && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load your lead lists and ICPs: {refsErr} <button className="underline" onClick={loadRefs}>Try again</button></div>}
       {listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
         <div className="card overflow-x-auto">
@@ -117,6 +114,35 @@ export function CampaignsPage() {
       <CampaignModal open={open} onClose={closeCreate} accounts={accounts} lists={lists} icps={icps} refsErr={refsErr} initialClientId={presetClientId} onDone={(id) => { closeCreate(); navigate(`/campaigns/${id}`); }} toast={toast} />
       <AccountsModal open={accOpen} onClose={() => setAccOpen(false)} accounts={accounts} campaigns={rows} sysAvail={sysAvail} canManage={canManage} onChanged={() => { loadAccounts(); load(); }} toast={toast} />
     </Page>
+  );
+}
+
+/**
+ * Which senders cannot send, said once per address and in a sentence that agrees with itself.
+ *
+ * The old line joined one address per failed sender - the same address twice when it had been
+ * added twice - and then chose "its"/"their" from the sender count while saying "Remove it"
+ * regardless.
+ */
+export function failedSendersSentence(accounts: { fromEmail: string; status: string }[]): { text: string; many: boolean } | null {
+  const failed = accounts.filter((a) => a.status !== "active");
+  if (failed.length === 0) return null;
+  const addrs = [...new Set(failed.map((a) => a.fromEmail.trim().toLowerCase()))];
+  const many = failed.length > 1;
+  if (!many) return { text: `The sender ${addrs[0]} failed its connection test and cannot send.`, many };
+  if (addrs.length === 1) return { text: `${failed.length} senders using ${addrs[0]} failed their connection test and cannot send.`, many };
+  return { text: `${addrs.length} senders failed their connection test and cannot send: ${addrs.join(", ")}.`, many };
+}
+
+function FailedSendersBanner({ accounts, canManage, onOpen }: { accounts: Account[]; canManage: boolean; onOpen: () => void }) {
+  const s = failedSendersSentence(accounts);
+  if (!s) return null;
+  const it = s.many ? "them" : "it";
+  return (
+    <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 [overflow-wrap:anywhere]" role="status">
+      {s.text}{" "}
+      {canManage ? <>Fix the settings and test {it} again, or remove {it} and add {it} again. <button className="underline" onClick={onOpen}>Open sender accounts</button></> : `Ask an owner or admin to fix ${it}.`}
+    </div>
   );
 }
 
@@ -238,7 +264,7 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
       <div className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2"><label className="label">Name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
-          <div><label className="label">Sender account</label><select className="input" value={f.emailAccountId} onChange={(e) => setF({ ...f, emailAccountId: e.target.value })}><option value="">{existing ? "None (detach sender)" : "Select…"}</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.fromName} &lt;{a.fromEmail}&gt; ({a.provider}){a.status !== "active" ? " - connection failed, cannot send" : ""}</option>)}</select>{accounts.some((a) => a.id === f.emailAccountId && a.status !== "active") && <p className="mt-1 text-xs text-red-700">This sender failed its connection test. The campaign will not start until the sender is removed and added again with working settings, or another sender is chosen.</p>}</div>
+          <div><label className="label">Sender account</label><select className="input" value={f.emailAccountId} onChange={(e) => setF({ ...f, emailAccountId: e.target.value })}><option value="">{existing ? "None (detach sender)" : "Select…"}</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.fromName} &lt;{a.fromEmail}&gt; ({a.provider}){a.status !== "active" ? " - connection failed, cannot send" : ""}</option>)}</select>{accounts.some((a) => a.id === f.emailAccountId && a.status !== "active") && <p className="mt-1 text-xs text-red-700">This sender failed its connection test. The campaign will not start until the sender passes a new test (Campaigns → Sender accounts → Test again) or another sender is chosen.</p>}</div>
           {clientOptions.length > 0 && (
             <div><label className="label">For client</label><select className="input" value={f.clientId} onChange={(e) => setF({ ...f, clientId: e.target.value })}><option value="">No client</option>{clientOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
           )}
@@ -287,6 +313,33 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
   const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  const [retesting, setRetesting] = useState<string | null>(null);
+  // Why the last "Test again" failed, per sender - kept on the row, because the reason is
+  // what tells the user which setting to fix and a toast is gone in seconds.
+  const [retestErr, setRetestErr] = useState<Record<string, string>>({});
+  const retest = async (a: Account) => {
+    setRetesting(a.id);
+    setRetestErr((m) => { const n = { ...m }; delete n[a.id]; return n; });
+    try {
+      const r = await apiFetch<{ emailAccount?: { status?: string }; test?: { ok?: boolean; error?: string } }>("POST", `/v1/campaigns/email-accounts/${a.id}/retest`);
+      const ok = r?.test?.ok === true || (r?.test === undefined && r?.emailAccount?.status === "active");
+      if (ok) toast(`${a.fromEmail} passed its connection test and can send again`);
+      else {
+        const why = r?.test?.error || "The connection test failed again.";
+        setRetestErr((m) => ({ ...m, [a.id]: why }));
+        toast(`${a.fromEmail} is still failing its connection test: ${why}`, "err");
+      }
+      onChanged();
+    } catch (e) {
+      // An older server has no retest route; say what still works instead of "Not found".
+      const status = (e as { status?: number }).status;
+      const said = (e as Error).message;
+      const noRoute = status === 405 || (status === 404 && !/account|sender/i.test(said));
+      const why = noRoute ? "Testing a sender again is not available yet. Remove this sender and add it again with working settings." : said;
+      setRetestErr((m) => ({ ...m, [a.id]: why }));
+      toast(why, "err");
+    } finally { setRetesting(null); }
+  };
   const remove = async (a: Account) => {
     // Deleting a sender detaches it from every campaign using it (the FK is ON DELETE SET
     // NULL), and those campaigns then stop sending. Say which ones before it happens.
@@ -294,7 +347,7 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
     const lines = [
       `Remove the sender ${a.fromEmail}?`,
       using.length
-        ? `${using.length} campaign${using.length === 1 ? "" : "s"} use${using.length === 1 ? "s" : ""} this sender and will be left without one (they stop sending until you pick another):\n${using.map((c) => `- ${c.name}`).join("\n")}`
+        ? `${plural(using.length, "campaign")} ${using.length === 1 ? "uses" : "use"} this sender and will be left without one (they stop sending until you pick another):\n${using.map((c) => `- ${c.name}`).join("\n")}`
         : "Any campaign using this sender will be left without one and stop sending until you pick another.",
     ];
     if (!confirm(lines.join("\n\n"))) return;
@@ -325,9 +378,15 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
               {a.status === "active" ? <StatusBadge s="active" /> : <span className="badge bg-red-50 text-red-700 ring-1 ring-red-200">connection failed</span>}
               {a.status === "active"
                 ? <div className="text-xs text-ink-400">{a.sentToday}/{a.dailyLimit} sent today</div>
-                : <div className="text-xs text-red-700">This sender failed its connection test, so it sends nothing and a campaign using it will not start. {canManage ? "Remove it and add it again with working settings." : "Ask an owner or admin to remove it and add it again with working settings."}</div>}
+                : <div className="text-xs text-red-700">This sender failed its connection test, so it sends nothing and a campaign using it will not start. {canManage ? "Fix the settings with your email provider, then use Test again. If the settings themselves were wrong, remove it and add it again." : "Ask an owner or admin to fix it."}</div>}
+              {retestErr[a.id] && a.status !== "active" && <div className="mt-1 text-xs text-red-700" role="alert">Last test: {retestErr[a.id]}</div>}
             </div>
-            {canManage && <button className="shrink-0 text-red-600 disabled:opacity-50" disabled={removing === a.id} onClick={() => remove(a)}>{removing === a.id ? "Removing…" : "Remove"}</button>}
+            {canManage && (
+              <div className="flex shrink-0 flex-col items-end gap-1 sm:flex-row sm:items-center sm:gap-3">
+                {a.status !== "active" && <button className="text-brand-600 hover:underline disabled:opacity-50" disabled={retesting === a.id || removing === a.id} onClick={() => retest(a)}>{retesting === a.id ? "Testing…" : "Test again"}</button>}
+                <button className="text-red-600 disabled:opacity-50" disabled={removing === a.id || retesting === a.id} onClick={() => remove(a)}>{removing === a.id ? "Removing…" : "Remove"}</button>
+              </div>
+            )}
           </li>
         ))}
         {accounts.length === 0 && <li className="py-2 text-ink-400">No sender accounts yet.</li>}
@@ -429,14 +488,14 @@ export function CampaignDetail() {
   const sender = accounts.find((a) => a.id === c.emailAccountId);
   const senderFailed = !!sender && sender.status !== "active";
   return (
-    <Page title={c.name} subtitle={`${c.steps?.length ?? 0} steps · ${c.contacts} contacts`} actions={<>
+    <Page title={c.name} subtitle={`${plural(c.steps?.length ?? 0, "step")} · ${plural(c.contacts, "contact")}`} actions={<>
       <Link to="/campaigns" className="btn-secondary">← All campaigns</Link>
       <button className="btn-secondary" onClick={() => setEditOpen(true)}>Edit</button>
       <button className="btn-secondary" onClick={() => setEnrollOpen(true)}>Enroll leads</button>
       {c.status === "active" ? <button className="btn-secondary" onClick={() => act("pause", "Campaign paused")}>Pause</button> : <button className="btn-primary" onClick={() => act("start", "Campaign started")}>Start</button>}
       <DeleteButton
         what={`the campaign "${c.name}"`}
-        consequence={`${c.contacts} enrolled contacts and this campaign's send history go with it. Campaigns count towards your plan limit, so a test campaign you cannot delete permanently occupies a slot.`}
+        consequence={`${plural(c.contacts, "enrolled contact")} and this campaign's send history go with it. Campaigns count towards your plan limit, so a test campaign you cannot delete permanently occupies a slot.`}
         onDelete={async () => {
           await apiFetch("DELETE", `/v1/campaigns/${c.id}`);
           navigate("/campaigns");
@@ -455,7 +514,7 @@ export function CampaignDetail() {
       )}
       {senderFailed && !actErr && (
         <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="status">
-          The sender {sender!.fromEmail} failed its connection test, so this campaign cannot send and will not start. Remove that sender and add it again with working settings (Campaigns → Sender accounts), or choose another sender under Edit.
+          The sender {sender!.fromEmail} failed its connection test, so this campaign cannot send and will not start. Fix its settings and test it again (Campaigns → Sender accounts), or choose another sender under Edit.
         </div>
       )}
       {statsErr && !stats && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load this campaign's numbers: {statsErr} <button className="underline" onClick={load}>Try again</button></div>}
@@ -476,7 +535,7 @@ export function CampaignDetail() {
             <tbody className="divide-y divide-slate-100">
               {contacts.map((x) => (
                 <tr key={x.id}>
-                  <td className="td"><div className="font-medium">{x.lead.fullName}</div><div className="text-xs text-ink-400">{x.lead.title} · {x.lead.company?.name}</div></td>
+                  <td className="td"><div className="font-medium">{x.lead.fullName || x.lead.email || "Unnamed lead"}</div><div className="text-xs text-ink-400">{[x.lead.title, x.lead.company?.name].filter(Boolean).join(" · ")}</div></td>
                   <td className="td">{x.lead.email} <EmailStatusBadge status={x.lead.emailStatus} /></td>
                   <td className="td">
                     <StatusBadge s={x.status} />
@@ -486,7 +545,7 @@ export function CampaignDetail() {
                         "AI draft rejected; sent the template" are notes on a contact that is still queued. */}
                     {(x.lastError || (x.sendFailures ?? 0) > 0) && (
                       <div className={`mt-1 max-w-[240px] text-xs ${x.status === "bounced" || x.status === "failed" || (x.sendFailures ?? 0) > 0 ? "text-red-700" : "text-amber-700"}`} title={x.lastError ?? undefined}>
-                        {(x.sendFailures ?? 0) > 0 && <span>{x.sendFailures} failed attempt{x.sendFailures === 1 ? "" : "s"}{x.lastError ? ": " : ""}</span>}
+                        {(x.sendFailures ?? 0) > 0 && <span>{plural(x.sendFailures, "failed attempt")}{x.lastError ? ": " : ""}</span>}
                         {x.lastError && <span className="line-clamp-2">{x.lastError}</span>}
                       </div>
                     )}
@@ -537,7 +596,9 @@ export function CampaignDetail() {
                 <span className="ml-auto text-xs text-ink-500">{fmtDate(m.sentAt)}{m.openedAt && " · opened"}{m.repliedAt && " · replied"}</span>
               </summary>
               <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-ink-200">{m.bodyText}</pre>
-              {m.draftReply && <ReplyDraft message={m} onSent={() => { toast("Reply sent"); load(); }} toast={toast} />}
+              {/* Every inbound message can be answered from here. The box used to render only
+                  when an AI draft existed, so a workspace with no AI had no way to reply at all. */}
+              {m.direction === "inbound" && <ReplyBox message={m} onSent={() => { toast(`Reply sent to ${m.toEmail}`); load(); }} toast={toast} />}
             </details>
           ))}
           {messages.length === 0 && <div className="p-8 text-center text-sm text-ink-400">No messages yet.</div>}
@@ -608,25 +669,84 @@ function ExperimentsPanel({ campaignId }: { campaignId: string }) {
   );
 }
 
-function ReplyDraft({ message, onSent, toast }: { message: { id: string; draftReply?: { subject: string; body: string } | null }; onSent: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
-  const [subject, setSubject] = useState(message.draftReply?.subject ?? "");
-  const [body, setBody] = useState(message.draftReply?.body ?? "");
+/** "Re: <their subject>", without stacking a second "Re:" on a subject that already has one. */
+export function replySubject(theirs: string | null | undefined): string {
+  const t = (theirs ?? "").trim();
+  if (!t) return "Re:";
+  return /^re\s*:/i.test(t) ? t : `Re: ${t}`;
+}
+
+/**
+ * Answer an inbound message.
+ *
+ * Starts from the AI draft when there is one (and says it is a draft), otherwise from an
+ * empty body with the subject filled in. What the server refuses - no sender, a sender that
+ * failed its test, sending paused, the daily limit, a suppressed address - is shown in its
+ * own words and stays in the box: those are instructions, and a toast is gone before they
+ * can be followed.
+ */
+function ReplyBox({ message, onSent, toast }: { message: { id: string; subject: string; toEmail: string; draftReply?: { subject: string; body: string } | null }; onSent: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  const draft = message.draftReply?.body ? message.draftReply : null;
+  const [subject, setSubject] = useState(draft?.subject || replySubject(message.subject));
+  const [body, setBody] = useState(draft?.body ?? "");
+  const [fromDraft, setFromDraft] = useState(!!draft);
+  const [touched, setTouched] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [sent, setSent] = useState(false);
+  // A draft that arrives after the box was opened (the AI writes it a moment after the reply
+  // lands) is offered - but never over something the user has started typing.
+  useEffect(() => {
+    if (!draft || touched || sent || fromDraft) return;
+    setSubject(draft.subject || replySubject(message.subject));
+    setBody(draft.body);
+    setFromDraft(true);
+  }, [draft?.subject, draft?.body]); // eslint-disable-line react-hooks/exhaustive-deps
   const send = async () => {
     setBusy(true);
+    setErr(null);
     try {
-      await apiFetch("POST", `/v1/campaigns/messages/${message.id}/send-reply`, { subject, body });
+      await apiFetch("POST", `/v1/campaigns/messages/${message.id}/send-reply`, { subject: subject.trim(), body });
+      setSent(true);
+      setBody("");
+      setTouched(false);
+      setFromDraft(false);
       onSent();
-    } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
+    } catch (e) {
+      const m = (e as Error).message;
+      setErr(m);
+      toast(m, "err");
+    } finally { setBusy(false); }
   };
+  const fid = `reply-${message.id}`;
   return (
-    <div className="mt-3 rounded-lg bg-cream p-3">
-      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-400">AI-suggested reply · review before sending</div>
-      <input className="input mb-2" value={subject} onChange={(e) => setSubject(e.target.value)} />
-      <textarea className="input h-28" value={body} onChange={(e) => setBody(e.target.value)} />
+    <div className="mt-3 rounded-lg bg-cream p-3" data-testid="reply-box">
+      <div className="mb-2 text-xs font-semibold uppercase tracking-wide text-ink-400">
+        {fromDraft && !touched ? "AI-suggested reply · a draft - review before sending" : fromDraft ? "Reply · started from an AI draft" : `Reply to ${message.toEmail}`}
+      </div>
+      {sent && !err && <div className="mb-2 rounded-lg border border-emerald-300 bg-emerald-50 p-2 text-sm text-emerald-700" role="status">Reply sent to {message.toEmail}. You can send another below.</div>}
+      <label className="label" htmlFor={`${fid}-subject`}>Subject</label>
+      <input id={`${fid}-subject`} className="input mb-2" value={subject} maxLength={300} onChange={(e) => { setSubject(e.target.value); setTouched(true); }} />
+      <label className="label" htmlFor={`${fid}-body`}>Message</label>
+      <textarea id={`${fid}-body`} className="input h-28" value={body} placeholder="Write your reply…" onChange={(e) => { setBody(e.target.value); setTouched(true); setSent(false); }} />
+      {err && <div className="mt-2 rounded-lg border border-red-300 bg-red-50 p-2 text-sm text-red-800 [overflow-wrap:anywhere]" role="alert">{err}</div>}
       <button className="btn-primary mt-2" disabled={busy || !subject.trim() || !body.trim()} onClick={send}>{busy ? "Sending…" : "Send reply"}</button>
     </div>
   );
+}
+
+interface EnrollResult { enrolled: number; skippedNoEmail?: number; skippedInvalidEmail?: number; claimedForClient?: number; skippedOtherClient?: number }
+
+/** What enrolling did, and - as loudly - what it did not do and why. */
+export function enrollMessage(r: EnrollResult): string {
+  const extra = [
+    r.skippedNoEmail ? `${r.skippedNoEmail} skipped: no valid email` : "",
+    // `skippedInvalidEmail` comes from newer servers only; absent means nothing to report.
+    r.skippedInvalidEmail && r.skippedInvalidEmail > 0 ? `${r.skippedInvalidEmail} skipped: their email is not a single valid address - fix it on the lead` : "",
+    r.skippedOtherClient ? `${r.skippedOtherClient} skipped: they belong to another client` : "",
+    r.claimedForClient ? `${plural(r.claimedForClient, "unassigned lead")} ${r.claimedForClient === 1 ? "was" : "were"} assigned to this campaign's client` : "",
+  ].filter(Boolean);
+  return `Enrolled ${plural(r.enrolled, "lead")}${extra.length ? ` (${extra.join("; ")})` : ""}`;
 }
 
 function EnrollModal({ open, onClose, campaign, lists, listsLoaded = true, onDone, toast }: { open: boolean; onClose: () => void; campaign: Campaign; lists: { id: string; name: string; count: number }[]; listsLoaded?: boolean; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
@@ -636,13 +756,10 @@ function EnrollModal({ open, onClose, campaign, lists, listsLoaded = true, onDon
   const go = async () => {
     setBusy(true);
     try {
-      const r = await apiFetch<{ enrolled: number; skippedNoEmail: number; claimedForClient?: number; skippedOtherClient?: number }>("POST", `/v1/campaigns/${campaign.id}/enroll`, mode === "list" ? { fromList: true } : { minScore });
-      const extra = [
-        r.skippedNoEmail ? `${r.skippedNoEmail} skipped: no valid email` : "",
-        r.skippedOtherClient ? `${r.skippedOtherClient} skipped: they belong to another client` : "",
-        r.claimedForClient ? `${r.claimedForClient} unassigned leads were assigned to this campaign's client` : "",
-      ].filter(Boolean);
-      toast(`Enrolled ${r.enrolled} leads${extra.length ? ` (${extra.join("; ")})` : ""}`);
+      const r = await apiFetch<EnrollResult>("POST", `/v1/campaigns/${campaign.id}/enroll`, mode === "list" ? { fromList: true } : { minScore });
+      // Nobody enrolled and people skipped is not a success, whatever the status code said.
+      const skippedAny = (r.skippedNoEmail ?? 0) + (r.skippedInvalidEmail ?? 0) + (r.skippedOtherClient ?? 0) > 0;
+      toast(enrollMessage(r), r.enrolled === 0 && skippedAny ? "err" : "ok");
       onDone();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };

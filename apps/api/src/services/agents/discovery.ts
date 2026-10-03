@@ -4,6 +4,7 @@ import { chargeNewLead, upsertLead } from "../leads.js";
 import { tryConsume } from "../../lib/quota.js";
 import { emitEvent } from "../../lib/events.js";
 import { env } from "../../env.js";
+import { blockedByProvidersNote, listProviderFailures } from "../notes.js";
 
 /**
  * The scheduled discovery agent.
@@ -119,9 +120,7 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
     // Nothing came back AND something refused us. That is a fact about our providers, not
     // about the customer's market, and it must never be filed as "no matches".
     if (found.length === 0 && providerFailures.length > 0) {
-      const note = `No leads returned, and ${providerFailures.length} data source(s) could not answer: ${providerFailures
-        .map((f) => `${f.provider} - ${f.message}`)
-        .join("; ")}. This is not the same as nobody matching the query.`;
+      const note = blockedByProvidersNote(providerFailures, "This is not the same as nobody matching the query.");
       await finish({ status: "blocked", error: note }, 0);
       return { runId: run.id, status: "blocked", query, found: 0, created: 0, duplicates: 0, providerFailures, note };
     }
@@ -153,11 +152,11 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
     const notSaved = found.length - created - duplicates;
     const note = quotaStopped
       ? notSaved > 0
-        ? `Stopped at your plan's limit: ${notSaved} more were found but not saved. ${quotaStopped}`
+        ? `Stopped at your plan's limit: ${notSaved} more ${notSaved === 1 ? "was" : "were"} found but not saved. ${quotaStopped}`
         : `Stopped at your plan's limit after saving ${created}. ${quotaStopped}`
       : found.length === 0
         ? providerFailures.length
-          ? `Nobody matched, and ${providerFailures.length} source(s) could not answer: ${providerFailures.map((f) => `${f.provider} - ${f.message}`).join("; ")}.`
+          ? `Nobody matched, and ${providerFailures.length === 1 ? "1 source" : `${providerFailures.length} sources`} could not answer: ${listProviderFailures(providerFailures)}.`
           : "Every configured source answered, and nobody matched this query."
         : undefined;
 

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { AI_NOT_SWITCHED_ON } from "../services/visibility.js";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, clients, companies, consume, desc, inArray, enqueue, eq, getDb, icps, isNull, leads, or, sql } from "@prospex/db";
@@ -104,7 +105,7 @@ icpRoutes.post("/:id/chat", zValidator("json", z.object({ message: z.string().mi
 
   const ai = aiFor(c.get("auth"));
   // 503, not 404: the ICP exists; the service it needs is not available.
-  if (!hasAi(ai)) throw new ApiError(503, "No AI provider is configured on the server, so the ICP assistant is unavailable.", "ai_unavailable");
+  if (!hasAi(ai)) throw new ApiError(503, `The ICP assistant is unavailable: ${AI_NOT_SWITCHED_ON}`, "ai_unavailable");
   // Checked before the call and charged after it worked. The charge used to come after with
   // its error swallowed, so an org past its AI quota chatted on for free.
   await assertQuotaAvailable(db, oid, "aiMessages", 1);

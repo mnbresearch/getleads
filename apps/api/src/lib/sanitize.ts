@@ -47,12 +47,20 @@ export function stripControl(s: string): string {
  * removed (the phishing payload), and the result is capped.
  */
 export function safeHeaderText(raw: unknown, max = 80, fallback = ""): string {
-  let s = stripControl(String(raw ?? ""));
+  // Cut first. The result is at most `max` characters, and a link is removed whole, so
+  // nothing past a generous window can end up in it - while the patterns below are not
+  // linear on a hostile input: `(?:label\.)+` over "a.a.a.a..." re-scanned the rest of the
+  // string from every label, 8-20 seconds for a 100 KB workspace name.
+  const window = Math.max(2_000, max * 20);
+  let s = stripControl(String(raw ?? "").slice(0, window));
   // URLs with a scheme, www. hosts, and host.tld/path shapes. A bare "Acme.io" is left
   // alone: plenty of real companies are named after their domain, and without a scheme or
   // a path it is a name, not a destination.
-  s = s.replace(/[a-z][a-z0-9+.-]*:\/\/\S*/gi, " ").replace(/\bwww\.\S+/gi, " ");
-  s = s.replace(/\b(?:[a-z0-9-]+\.)+[a-z]{2,}\/\S*/gi, " ");
+  s = s.replace(/[a-z][a-z0-9+.-]{0,30}:\/\/\S*/gi, " ").replace(/\bwww\.\S+/gi, " ");
+  // At most 8 labels of at most 63 characters: bounded work per starting position, so the
+  // pass is linear in the (already cut) input. A longer host still loses its last 8 labels
+  // and the path, which is the part that made it a link.
+  s = s.replace(/\b(?:[a-z0-9-]{1,63}\.){1,8}[a-z]{2,24}\/\S*/gi, " ");
   s = s.replace(/\s+/g, " ").trim();
   if (s.length > max) s = `${s.slice(0, max - 1).trimEnd()}…`;
   return s || fallback;

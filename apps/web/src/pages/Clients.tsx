@@ -4,6 +4,7 @@ import { apiFetch } from "../lib/api";
 import { BUCKET_COPY, attentionTotal, type ClientAttention, type ClientRow, type Overview } from "../lib/clients";
 import { ClientDot, ClientFormModal, StatusPill, TargetBar, emptyClientForm, toClientPayload } from "../components/ClientBits";
 import { Empty, LoadError, Modal, Page, Spinner, Stat, useFlash, useToast } from "../components/ui";
+import { plural } from "../lib/plural";
 
 /**
  * The agency view: every client, how each is tracking against what was promised, what is
@@ -63,7 +64,7 @@ export function ClientsPage() {
           {data.pool.leads > 0 && (
             <div className="card mt-4 flex flex-wrap items-center justify-between gap-3 border-brand-200 bg-brand-50/50 p-4">
               <div className="text-sm">
-                <span className="font-semibold text-ink-50">{data.pool.leads.toLocaleString()} leads belong to no client.</span>{" "}
+                <span className="font-semibold text-ink-50">{plural(data.pool.leads, "lead")} {data.pool.leads === 1 ? "belongs" : "belong"} to no client.</span>{" "}
                 <span className="text-ink-300">Scout can route the ones that clearly fit a client's ICP, and shows you the rest.</span>
               </div>
               <div className="flex gap-2">
@@ -285,7 +286,7 @@ function RoutingModal({ open, onClose, onChanged, toast }: { open: boolean; onCl
       // Only the clear fits this screen showed, and not the ones already assigned by hand.
       const shown = (r?.routable ?? []).map((x) => x.leadId).filter((id) => !done.has(id));
       const res = await apiFetch<{ routed: number; byClient: { name: string; assigned: number }[]; leftForReview: number }>("POST", "/v1/clients/routing/auto", { leadIds: shown });
-      toast(res.routed ? `Routed ${res.routed} leads: ${res.byClient.filter((b) => b.assigned).map((b) => `${b.name} ${b.assigned}`).join(", ")}` : "Nothing clear enough to route automatically");
+      toast(res.routed ? `Routed ${plural(res.routed, "lead")}: ${res.byClient.filter((b) => b.assigned).map((b) => `${b.name} ${b.assigned}`).join(", ")}` : "Nothing clear enough to route automatically");
       onChanged();
       load();
     } catch (e) {

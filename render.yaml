@@ -45,6 +45,14 @@ services:
       # ADMIN_EMAIL / ADMIN_PASSWORD (set those in the dashboard).
       - key: ADMIN_API_TOKEN
         generateValue: true
+      # Optional, all with safe defaults (set them in the dashboard when needed; see DEPLOY.md B8):
+      #   ADMIN_JWT_SECRET          signs the admin session with its own key (default: JWT_SECRET)
+      #   ENCRYPTION_KEYS_OLD       previous ENCRYPTION_KEY values, needed when rotating that key
+      #   LEAD_NOTIFY_EMAIL         where upgrade requests are emailed (default: ADMIN_EMAIL)
+      #   OUTBOUND_SENDING_ENABLED  "false" pauses every campaign send platform-wide
+      #   ORG_DAILY_SEND_CEILING    most one workspace may send per day (default 2000)
+      #   SYSTEM_SENDER_DAILY_CAP   most one workspace may send per day through the shared sender
+      #   CORS_EXTRA_ORIGINS        extra browser origins allowed to call the API
       # Render's edge is Cloudflare, which sets cf-connecting-ip itself. Rate limits and the
       # security log read the visitor's address from it. Use "xff" on a host that is not
       # behind Cloudflare.

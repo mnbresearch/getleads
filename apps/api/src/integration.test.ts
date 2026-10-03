@@ -329,7 +329,7 @@ suite("database integration", () => {
       }
       try {
         const before = (await getUsage(db, org.id)).usage.aiMessages.used;
-        await expect(sampleAcrossEngines(db, org.id, prompt, { plan: "free" })).rejects.toThrow(/No AI (provider|engine)/i);
+        await expect(sampleAcrossEngines(db, org.id, prompt, { plan: "free" })).rejects.toThrow(/AI drafting isn't switched on/i);
         expect((await getUsage(db, org.id)).usage.aiMessages.used).toBe(before);
       } finally {
         for (const [k, v] of Object.entries(saved)) if (v !== undefined) process.env[k] = v;

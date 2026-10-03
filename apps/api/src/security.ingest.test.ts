@@ -1157,6 +1157,314 @@ suite("ingestion and route-level security", () => {
     });
   });
 
+  // ── final round: what a customer reads ──
+
+  describe("validation messages are written for the person filling in the form", () => {
+    it("zod's built-in wording is replaced; a message a schema wrote itself is kept", async () => {
+      const { z } = await import("zod");
+      const { describeIssues } = await import("./lib/validate.js");
+      const say = (schema: any, value: unknown) => {
+        const r = schema.safeParse(value);
+        return r.success ? null : describeIssues(r.error);
+      };
+      const o = (shape: Record<string, any>) => z.object(shape);
+      // Strings.
+      expect(say(o({ title: z.string().max(300) }), { title: "t".repeat(301) })).toBe("Title is too long (300 characters at most)");
+      expect(say(o({ password: z.string().min(8) }), { password: "abc" })).toBe("Password is too short (at least 8 characters)");
+      expect(say(o({ name: z.string().min(1) }), { name: "" })).toBe("Name is required");
+      expect(say(o({ name: z.string() }), {})).toBe("Name is required");
+      expect(say(o({ name: z.string() }), { name: null })).toBe("Name is required");
+      expect(say(o({ name: z.string() }), { name: 5 })).toBe("Name must be text");
+      // Numbers.
+      expect(say(o({ settings: o({ dailyLimit: z.number().int().min(1).max(2000) }) }), { settings: { dailyLimit: 0 } })).toBe("Daily limit must be 1 or more");
+      expect(say(o({ settings: o({ dailyLimit: z.number().int().min(1).max(2000) }) }), { settings: { dailyLimit: 5000 } })).toBe("Daily limit must be 2,000 or less");
+      expect(say(o({ minScore: z.coerce.number() }), { minScore: "abc" })).toBe("Min score must be a number");
+      expect(say(o({ minScore: z.number() }), { minScore: "7" })).toBe("Min score must be a number");
+      expect(say(o({ steps: z.number().int() }), { steps: 1.5 })).toBe("Steps must be a whole number");
+      // Choices, addresses, ids.
+      expect(say(o({ tone: z.enum(["friendly", "direct", "formal"]) }), { tone: "rude" })).toBe("Tone must be one of: friendly, direct, formal");
+      expect(say(o({ fromEmail: z.string().email() }), { fromEmail: "nope" })).toBe("From email is not a valid email address");
+      expect(say(o({ website: z.string().url() }), { website: "nope" })).toBe("Website is not a valid web address");
+      expect(say(o({ listId: z.string().uuid() }), { listId: "abc" })).toBe("List ID is not a valid id");
+      // Lists.
+      expect(say(o({ leadIds: z.array(z.string()).min(1).max(2) }), { leadIds: [] })).toBe("Lead ids needs at least 1 item");
+      expect(say(o({ leadIds: z.array(z.string()).min(1).max(2) }), { leadIds: ["a", "b", "c"] })).toBe("Lead ids has too many items (2 at most)");
+      // Several at once, in order.
+      expect(say(o({ name: z.string().min(1), tone: z.enum(["a", "b"]) }), { name: "", tone: "c" })).toBe("Name is required; Tone must be one of: a, b");
+      // A message the schema wrote for people is kept, after the field's name.
+      expect(say(o({ start: z.string().regex(/^\d\d:\d\d$/, "Use 24-hour HH:MM, e.g. 09:00") }), { start: "9am" })).toBe("Start: Use 24-hour HH:MM, e.g. 09:00");
+      expect(say(o({ start: z.string().regex(/^\d\d:\d\d$/) }), { start: "9am" })).toBe("Start is not in the expected format");
+      // Nothing of zod's own phrasing survives in any of them.
+      const all = [say(o({ a: z.string().max(3) }), { a: "abcd" }), say(o({ a: z.number() }), { a: NaN }), say(o({ a: z.string() }), {}), say(o({ a: z.enum(["x"]) }), { a: "y" })].join(" | ");
+      expect(all).not.toMatch(/String must|character\(s\)|Expected |received|Required|Invalid enum/);
+    });
+
+    it("the API answers in those words, and keeps zod's raw issues for code", async () => {
+      const limit = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { dailyLimit: 0 } });
+      expect(limit.status).toBe(400);
+      expect(limit.body.error.code).toBe("validation_error");
+      expect(limit.body.error.message).toBe("Daily limit must be 1 or more");
+      // `issues` is untouched: the path and zod's own message, for programs.
+      expect(limit.body.error.issues[0]).toMatchObject({ code: "too_small", path: ["settings", "dailyLimit"], message: "Number must be greater than or equal to 1" });
+
+      const missing = await req("POST", "/v1/campaigns", A.token, {});
+      expect(missing.body.error.message).toBe("Name is required");
+      const nan = await req("GET", "/v1/leads?limit=abc", A.token);
+      expect(nan.status).toBe(400);
+      expect(nan.body.error.message).toBe("Limit must be a number");
+      const sort = await req("GET", "/v1/leads?sort=sideways", A.token);
+      expect(sort.body.error.message).toBe("Sort must be one of: score, created, updated, name");
+      const email = await req("POST", "/v1/leads", A.token, { fullName: "X", email: "not-an-address" });
+      expect(email.status).toBe(400);
+      expect(email.body.error.message).toBe("Email is not a valid email address");
+      const id = await req("POST", "/v1/campaigns", A.token, { name: "x", listId: "abc" });
+      expect(id.body.error.message).toBe("List ID is not a valid id");
+      for (const r of [limit, missing, nan, sort, email, id]) expect(r.body.error.message).not.toMatch(/String must|character\(s\)|Expected |received |: Required|Invalid /);
+    });
+
+    it("a skipped import row gives the same kind of reason", async () => {
+      const t = u8();
+      const r = await importCsv(A.token, `name,email,title\n${"N".repeat(400)},long-${t}@example.com,CEO\nFine ${t},fine-${t}@example.com,CEO\n`);
+      expect(r.status).toBe(200);
+      expect(r.body.created).toBe(1);
+      expect(r.body.skippedRows).toHaveLength(1);
+      expect(r.body.skippedRows[0].reason).toMatch(/^Full name is too long \(\d[\d,]* characters at most\)$/);
+      expect(r.body.skippedRows[0].reason).not.toMatch(/String must|character\(s\)/);
+    });
+  });
+
+  describe("tool results carry no internal diagnostics unless asked for", () => {
+    it("verify-batch and linkedin-to-email: verifierAttempts / guessedName / nameSource only with ?debug=1", async () => {
+      const emails = [`v1-${u8()}@example.com`, "not-an-address"];
+      const plain = await req("POST", "/v1/tools/verify-batch", A.token, { emails });
+      expect(plain.status).toBe(200);
+      expect(plain.body.results).toHaveLength(2);
+      for (const row of plain.body.results) {
+        expect(Object.keys(row)).not.toEqual(expect.arrayContaining(["verifierAttempts"]));
+        expect(row).not.toHaveProperty("raw");
+        // The documented fields are all still there.
+        expect(row).toMatchObject({ email: expect.any(String), status: expect.any(String), confidence: expect.any(Number) });
+      }
+      expect(plain.body.summary).toBeTruthy();
+      const debug = await req("POST", "/v1/tools/verify-batch?debug=1", A.token, { emails });
+      expect(debug.status).toBe(200);
+      expect(debug.body.results.every((row: any) => Array.isArray(row.verifierAttempts))).toBe(true);
+
+      // A profile that cannot be read: only the URL slug is known, which is a guess.
+      const url = `https://www.linkedin.com/in/jane-doe-${u8()}`;
+      const li = await req("POST", "/v1/tools/linkedin-to-email", A.token, { urls: [url] });
+      expect(li.status).toBe(200);
+      expect(li.body.results).toHaveLength(1);
+      expect(li.body.results[0]).toMatchObject({ url, found: false });
+      expect(li.body.results[0].reason).toBeTruthy();
+      expect(li.text).not.toMatch(/guessedName|nameSource|verifierAttempts/);
+      const liDebug = await req("POST", "/v1/tools/linkedin-to-email?debug=1", A.token, { urls: [url] });
+      expect(liDebug.body.results[0]).toHaveProperty("guessedName");
+    });
+  });
+
+  describe("a member cannot turn on what the client report shows by creating the client with it", () => {
+    it("POST /v1/clients has the gate PATCH has", async () => {
+      const O = await signup("client-create");
+      const denied = await req("POST", "/v1/clients", O.memberToken, { name: `Shown ${u8()}`, reportShowTarget: true });
+      expect(denied.status).toBe(403);
+      expect(denied.body.error.code).toBe("forbidden_role");
+      expect(await db.select().from(S.clients).where(S.eq(S.clients.orgId, O.orgId))).toHaveLength(0);
+      expect((await auditOf(O.orgId, "client.report_settings_changed")).map((r: any) => r.result)).toEqual(["denied"]);
+      // A member still creates clients - without the setting, or with it off.
+      const plain = await req("POST", "/v1/clients", O.memberToken, { name: `Plain ${u8()}` });
+      expect(plain.status).toBe(201);
+      expect(plain.body.reportShowTarget).toBe(false);
+      const off = await req("POST", "/v1/clients", O.memberToken, { name: `Off ${u8()}`, reportShowTarget: false });
+      expect(off.status).toBe(201);
+      expect(off.body.reportShowTarget).toBe(false);
+      // And still cannot turn it on afterwards (the existing PATCH gate).
+      expect((await req("PATCH", `/v1/clients/${plain.body.id}`, O.memberToken, { reportShowTarget: true })).status).toBe(403);
+      // An owner can, at creation.
+      const owner = await req("POST", "/v1/clients", O.token, { name: `Owner ${u8()}`, reportShowTarget: true });
+      expect(owner.status).toBe(201);
+      expect(owner.body.reportShowTarget).toBe(true);
+    });
+  });
+
+  describe("safeHeaderText is bounded on hostile input", () => {
+    it("a 100,000-character name is cleaned in milliseconds, with the same result on ordinary names", async () => {
+      const { safeHeaderText } = await import("./lib/sanitize.js");
+      const hostile: Record<string, string> = {
+        "a. repeated": "a.".repeat(50_000),
+        "a.b/ repeated": "a.b/".repeat(25_000),
+        "long scheme": `${"a".repeat(100_000)}://x`,
+        "www. repeated": "www.".repeat(25_000),
+        "a- repeated": "a-".repeat(50_000),
+        spaces: " ".repeat(100_000),
+        "labels then a path": `${"ab.".repeat(30_000)}com/x`,
+      };
+      safeHeaderText("warm up https://x.example a.b/c");
+      for (const [name, input] of Object.entries(hostile)) {
+        const t = performance.now();
+        const out = safeHeaderText(input);
+        const ms = performance.now() - t;
+        expect(ms, `${name} took ${ms.toFixed(0)} ms`).toBeLessThan(100);
+        expect(out.length).toBeLessThanOrEqual(80);
+      }
+      // Unchanged behaviour where it matters.
+      expect(safeHeaderText("Acme.io")).toBe("Acme.io");
+      expect(safeHeaderText("ACTION REQUIRED - sign in at https://phish.example/x now")).toBe("ACTION REQUIRED - sign in at now");
+      expect(safeHeaderText("see evil.example/pay today")).toBe("see today");
+      expect(safeHeaderText("www.evil.example rocks")).toBe("rocks");
+      expect(safeHeaderText("Acme\r\nBcc: x")).toBe("Acme Bcc: x");
+      expect(safeHeaderText("sub.domain.evil.co.uk/path?x=1 after")).toBe("after");
+      // More labels than the pattern takes at once: the link (the path) still goes.
+      expect(safeHeaderText("a.b.c.d.e.f.g.h.i.j.k.evil.example/pay x")).not.toMatch(/evil|pay/);
+      expect(safeHeaderText("", 80, "a workspace")).toBe("a workspace");
+    });
+  });
+
+  describe("no customer-facing message names a server setting", () => {
+    /** Everything a customer could read back, gathered with NO provider configured (see the top of this file). */
+    const NAMES_A_SETTING = /_API_KEY|SMTP_|\.env\b|OUTBOUND_SENDING_ENABLED|ENCRYPTION_KEY/;
+    const NO_SEARCH = "Lead search isn't available right now because no search source is connected on our side. This is not a result about your market - contact support.";
+
+    it("lead search, saved searches, autopilots and the discovery agent say that search is not connected - in words, and never as 'no leads match'", async () => {
+      const O = await signup("no-providers");
+      const { handlers } = await import("./jobs.js");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const seen: string[] = [];
+      const query = { titles: ["CTO"], industries: ["fintech"], limit: 5, findEmails: false };
+
+      // A one-off search: the reason is on the search the customer is looking at.
+      const started = await req("POST", "/v1/search", O.token, query);
+      expect(started.status).toBe(202);
+      expect(await S.runJobById(db, handlers, started.body.jobId)).toBe(true);
+      const search = await req("GET", `/v1/search/${started.body.search.id}`, O.token);
+      expect(search.body.search).toMatchObject({ status: "done", resultCount: 0, error: NO_SEARCH });
+      seen.push(search.text);
+
+      // A saved search with an alert: the same sentence in the job's note and in the email.
+      mocks.sent.length = 0;
+      const ss = await req("POST", "/v1/tools/saved-searches", O.token, { name: `CTOs ${u8()}`, query, alert: true });
+      expect(ss.status).toBe(201);
+      const ssRun = await req("POST", `/v1/tools/saved-searches/${ss.body.id}/run`, O.token, {});
+      expect(await S.runJobById(db, handlers, ssRun.body.jobId)).toBe(true);
+      const ssJob = await req("GET", `/v1/search/jobs/${ssRun.body.jobId}`, O.token);
+      expect(ssJob.body.result.note).toBe(NO_SEARCH);
+      seen.push(ssJob.text);
+      const alert = mocks.sent.find((m) => /Could not check/.test(m.subject));
+      expect(alert?.text).toContain(NO_SEARCH);
+      seen.push(JSON.stringify(alert));
+
+      // An autopilot: the note the Autopilot page shows under the run.
+      const ap = await req("POST", "/v1/tools/autopilots", O.token, { name: `Daily ${u8()}`, query });
+      expect(ap.status).toBe(201);
+      const apRun = await req("POST", `/v1/tools/autopilots/${ap.body.id}/run`, O.token, {});
+      expect(await S.runJobById(db, handlers, apRun.body.jobId)).toBe(true);
+      const aps = await req("GET", "/v1/tools/autopilots", O.token);
+      expect(aps.body.autopilots[0].stats.lastNote).toBe(NO_SEARCH);
+      seen.push(aps.text);
+
+      // The discovery agent.
+      const { runDiscoveryAgent } = await import("./services/agents/discovery.js");
+      const run = await runDiscoveryAgent(O.orgId, "CTOs at fintech companies in Berlin");
+      expect(run).toMatchObject({ status: "blocked", note: NO_SEARCH });
+      seen.push(JSON.stringify(run));
+
+      for (const text of seen) expect(text).not.toMatch(NAMES_A_SETTING);
+    }, 60_000);
+
+    it("AI that is not switched on, an invite email that could not be sent, and a paused platform: all in the customer's words", async () => {
+      const O = await signup("no-ai");
+      vi.spyOn(console, "warn").mockImplementation(() => {});
+      const said: Record<string, string> = {};
+
+      const [prompt] = await db.insert(S.visibilityPrompts).values({ orgId: O.orgId, text: "What is the best CRM for a small agency?" }).returning();
+      const vis = await req("POST", `/v1/visibility/prompts/${prompt.id}/run`, O.token, {});
+      expect(vis.status).toBe(503);
+      expect(vis.body.error.code).toBe("ai_not_configured");
+      expect(vis.body.error.message).toBe("AI visibility can't be sampled: AI drafting isn't switched on for this workspace yet. Contact support to enable it.");
+      said.visibility = vis.text;
+
+      const l = await lead(O.orgId, { firstName: "Asha", lastName: "Rao" });
+      const draft = await req("POST", "/v1/campaigns/generate", O.token, { leadId: l.id, sender: { name: "Me", company: "Us", valueProp: "We help." } });
+      expect(draft.status).toBe(200);
+      expect(draft.body.note).toBe("AI drafting isn't switched on for this workspace yet, so this is a template, not a personalised draft. Contact support to enable it.");
+      said.draft = draft.text;
+
+      const icp = await req("POST", "/v1/icps", O.token, { name: `ICP ${u8()}` });
+      const chat = await req("POST", `/v1/icps/${icp.body.id ?? icp.body.icp?.id}/chat`, O.token, { message: "tighten this" });
+      said.icpChat = chat.text;
+
+      // The platform's mailer has nothing configured: what the mailer itself reports...
+      const mailer = await vi.importActual<typeof import("./lib/mailer.js")>("./lib/mailer.js");
+      const env = (await import("./env.js")).env as { nodeEnv: string };
+      const was = env.nodeEnv;
+      env.nodeEnv = "production";
+      let direct: Awaited<ReturnType<typeof mailer.sendMail>>;
+      try {
+        direct = await mailer.sendMail(null, { from: "Scout <no-reply@platform.test>", to: "x@example.net", subject: "s", text: "t" });
+      } finally {
+        env.nodeEnv = was;
+      }
+      expect(direct).toMatchObject({ ok: false, error: "Email sending is not set up on our side" });
+      said.mailer = JSON.stringify(direct);
+      // ...what a campaign send shows for it...
+      const { sendFailureCategory } = await import("./services/campaigns.js");
+      said.sendCategory = sendFailureCategory(direct);
+      expect(said.sendCategory).toBe("Email sending is not set up on our side yet - contact support");
+      // ...and what the person inviting a teammate is told, with the link to share by hand.
+      const { sendMail } = await import("./lib/mailer.js");
+      vi.mocked(sendMail).mockResolvedValueOnce({ ok: false, provider: "none", error: "No email provider configured (set RESEND_API_KEY or SMTP_*)" });
+      const inv = await req("POST", "/v1/tools/team/invite", O.token, { email: `mate-${u8()}@example.net` });
+      expect(inv.status).toBe(201);
+      expect(inv.body).toMatchObject({ emailed: false, emailError: "The email could not be sent from our side - copy the link below and share it yourself." });
+      expect(inv.body.link).toMatch(/\/join\?token=/);
+      said.invite = inv.text;
+      // A provider's own error text is not passed on either.
+      vi.mocked(sendMail).mockResolvedValueOnce({ ok: false, provider: "resend", error: "API key re_PLATFORMKEY0123456789abcd is invalid" });
+      const resend = await req("POST", `/v1/tools/team/invites/${inv.body.id}/resend`, O.token);
+      expect(resend.body.emailError).toBe("The email could not be sent from our side - copy the link below and share it yourself.");
+      said.resend = resend.text;
+
+      // Sending paused by the operator: the campaign says who paused it, not which switch.
+      const [acct] = await db.insert(S.emailAccounts).values({ orgId: O.orgId, provider: "system", fromName: "Asha", fromEmail: `asha-${u8()}@tenantco.example` }).returning();
+      const cp = await req("POST", "/v1/campaigns", O.token, { name: "Paused", emailAccountId: acct.id, steps: [{ bodyTemplate: "Hello {{first_name}}", subjectTemplate: "Hi" }] });
+      expect(cp.status).toBe(201);
+      process.env.OUTBOUND_SENDING_ENABLED = "false";
+      let start;
+      try {
+        start = await req("POST", `/v1/campaigns/${cp.body.id}/start`, O.token, {});
+      } finally {
+        delete process.env.OUTBOUND_SENDING_ENABLED;
+      }
+      expect(start.status).toBe(200);
+      expect(start.body.tick.reason).toBe("sending is paused platform-wide by the operator");
+      said.start = start.text;
+
+      for (const [where, text] of Object.entries(said)) expect(text, where).not.toMatch(NAMES_A_SETTING);
+    });
+
+    it("counts read as a person would say them", async () => {
+      const { plural, blockedByProvidersNote, listProviderFailures } = await import("./services/notes.js");
+      expect([plural(0, "lead"), plural(1, "lead"), plural(2, "lead"), plural(1, "address", "addresses"), plural(3, "address", "addresses")]).toEqual(["0 leads", "1 lead", "2 leads", "1 address", "3 addresses"]);
+      const refused = { provider: "apollo", message: "HTTP 402 (out of credits)" };
+      const notConnected = { provider: "web_search", message: NO_SEARCH };
+      expect(blockedByProvidersNote([refused], "This is not the same as nobody matching.")).toBe("No leads were returned, and the data source we tried could not answer: apollo - HTTP 402 (out of credits). This is not the same as nobody matching.");
+      expect(blockedByProvidersNote([refused, notConnected], "This is not the same as nobody matching.")).toBe(
+        "No leads were returned, and 2 data sources could not answer: apollo - HTTP 402 (out of credits); web search - no search source is connected on our side. This is not the same as nobody matching.",
+      );
+      expect(blockedByProvidersNote([notConnected], "This is not the same as nobody matching.")).toBe(NO_SEARCH);
+      expect(listProviderFailures([refused])).toBe("apollo - HTTP 402 (out of credits)");
+      // The seat-limit refusal, with one member and one pending invite.
+      const O = await signup("plural-seats");
+      await db.update(S.organizations).set({ planLimits: { ...S.limitsFor("scale"), seats: 2 } }).where(S.eq(S.organizations.id, O.orgId));
+      await db.delete(S.users).where(S.eq(S.users.id, O.memberId));
+      expect((await req("POST", "/v1/tools/team/invite", O.token, { email: `one-${u8()}@example.net` })).status).toBe(201);
+      const full = await req("POST", "/v1/tools/team/invite", O.token, { email: `two-${u8()}@example.net` });
+      expect(full.status).toBe(400);
+      expect(full.body.error.message).toMatch(/\(2: 1 member and 1 pending invite\)/);
+      expect(full.body.error.message).not.toMatch(/\(s\)/);
+    });
+  });
+
   it("made no request that left the machine", () => {
     // Every outbound attempt in this file was refused by the stub; none may have been to a
     // private or metadata address (that would be a request the app should never have built).

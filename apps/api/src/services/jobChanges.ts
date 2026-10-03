@@ -217,7 +217,7 @@ export async function scanJobChanges(
   // cannot support - fifty people genuinely not in any database looks identical from here.
   // So it says what is true: nothing came back, and that is not the same as nobody moving.
   if (out.checked > 0 && answered === 0) {
-    out.blocked = `Nothing came back for any of the ${out.checked} leads checked. That may be a provider or credential problem, or these people may simply not be in the databases we can reach - either way it is not a month in which nobody changed job. Check Settings - Integrations if you expect a provider to be answering.`;
+    out.blocked = `Nothing came back for ${out.checked === 1 ? "the 1 lead" : `any of the ${out.checked} leads`} checked. That may be a provider or credential problem, or these people may simply not be in the databases we can reach - either way it is not a month in which nobody changed job. Check Settings - Integrations if you expect a provider to be answering.`;
   } else if (out.checked === 0 && out.skippedRecentlyAttempted > 0) {
     // The day after a failed scan.
     //

@@ -132,7 +132,7 @@ export function redactJobError(text: unknown): string {
   let out = String(text ?? "");
   if (!out) return "";
   for (const [k, v] of Object.entries(process.env)) {
-    if (v && v.length >= 8 && SECRET_ENV_NAME.test(k) && out.includes(v)) out = out.split(v).join(`[${k}]`);
+    if (v && v.length >= 8 && SECRET_ENV_NAME.test(k) && out.includes(v)) out = out.split(v).join("[redacted-key]");
   }
   return out
     .replace(/([?&;\s](?:api_?key|apikey|key|token|access_token|refresh_token|api_token|auth|password|passwd|pass|secret|client_secret|signature|sig)=)[^&\s"'<>]+/gi, "$1[redacted]")
