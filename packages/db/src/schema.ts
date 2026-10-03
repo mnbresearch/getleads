@@ -53,6 +53,11 @@ export const users = pgTable(
     tokenVersion: integer("token_version").notNull().default(0),
     /** Google account subject this user is bound to (unique when set). */
     googleSub: text("google_sub"),
+    /** Two-factor sign-in (TOTP). The secret is stored encrypted. */
+    totpSecretEncrypted: text("totp_secret_encrypted"),
+    totpEnabledAt: ts("totp_enabled_at"),
+    /** The last TOTP time-step accepted, so a code cannot be used twice. */
+    totpLastStep: bigint("totp_last_step", { mode: "number" }),
     lastLoginAt: ts("last_login_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
@@ -153,7 +158,12 @@ export const clients = pgTable("clients", {
   monthlyLeadTarget: integer("monthly_lead_target"),
   notes: text("notes"),
   /** Read-only report link. Null = sharing off. */
+  /** Legacy plaintext link token; new and rotated links use the two columns below. */
   shareToken: text("share_token").unique(),
+  /** sha256 of the link token: what a public report request is looked up by. */
+  shareTokenHash: text("share_token_hash"),
+  /** The link token, encrypted, so people allowed to see the link can copy it again. */
+  shareTokenEncrypted: text("share_token_encrypted"),
   /** Show delivery against target in the shared report. Opt-in. */
   reportShowTarget: boolean("report_show_target").notNull().default(false),
   createdAt: ts("created_at").notNull().defaultNow(),
@@ -498,7 +508,9 @@ export const invites = pgTable("invites", {
   orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   email: text("email").notNull(),
   role: text("role").notNull().default("member"),
-  token: text("token").notNull().unique(),
+  /** Legacy plaintext token (invites created before hashing). New invites store only tokenHash. */
+  token: text("token").unique(),
+  tokenHash: text("token_hash"),
   invitedBy: uuid("invited_by"),
   acceptedAt: ts("accepted_at"),
   expiresAt: ts("expires_at"),
@@ -1104,3 +1116,41 @@ export const auditLog = pgTable(
   },
   (t) => ({ orgIdx: index("audit_log_org_idx").on(t.orgId, t.createdAt), actionIdx: index("audit_log_action_idx").on(t.action, t.createdAt) }),
 );
+
+/** One-time recovery codes for two-factor sign-in. Hashes only. */
+export const userRecoveryCodes = pgTable(
+  "user_recovery_codes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    codeHash: text("code_hash").notNull(),
+    usedAt: ts("used_at"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ userIdx: index("user_recovery_codes_user_idx").on(t.userId) }),
+);
+
+/** Email verification links. Hashes only. */
+export const emailVerificationTokens = pgTable(
+  "email_verification_tokens",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    tokenHash: text("token_hash").notNull().unique(),
+    expiresAt: ts("expires_at").notNull(),
+    usedAt: ts("used_at"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ userIdx: index("email_verification_tokens_user_idx").on(t.userId) }),
+);
+
+/** A request to delete a workspace and all its data, with a cancellable grace period. */
+export const workspaceDeletionRequests = pgTable("workspace_deletion_requests", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  requestedBy: uuid("requested_by"),
+  requestedAt: ts("requested_at").notNull().defaultNow(),
+  scheduledFor: ts("scheduled_for").notNull(),
+  cancelledAt: ts("cancelled_at"),
+  completedAt: ts("completed_at"),
+});
