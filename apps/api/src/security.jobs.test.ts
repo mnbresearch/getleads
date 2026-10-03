@@ -564,7 +564,10 @@ suite("security: jobs, sending, AI output", () => {
       const { cc } = await newContact(org.id, campaign.id, { firstName: "Bob\r\nBcc: subj-victim@evil.example" });
       expect((await svc.sendStep(campaign.id, cc.id, step.id)).sent).toBe(true);
       const sent = mail.calls[0].input;
-      expect(sent.from).toMatch(/<real@tenantco\.example>$/);
+      // The shared platform sender always sends from the platform's own address (MAIL_FROM),
+      // whatever From address the row carries - so the tenant-chosen one must NOT appear.
+      expect(sent.from).not.toContain("real@tenantco.example");
+      expect(sent.from).toMatch(/<[^<>\s,]+@[^<>\s,]+>$/);
       expect(sent.from.match(/</g)).toHaveLength(1);
       expect(sent.from).not.toMatch(/[\r\n,]/);
       expect(sent.subject).not.toMatch(/[\r\n]/);

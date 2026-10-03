@@ -115,6 +115,11 @@ export function errorHandler(err: Error, c: Context) {
   if (err instanceof QuotaExceededError) return c.json({ error: { code: "quota_exceeded", message: err.message, metric: err.metric, used: err.used, limit: err.limit } }, 402);
   if (err instanceof ZodError) return c.json({ error: { code: "validation_error", message: "Invalid input", details: err.flatten() } }, 400);
   if (err instanceof HTTPException) return c.json({ error: { code: "http_error", message: err.message } }, err.status);
+  // Saved credentials that can no longer be decrypted (key rotated, row damaged). Matched by
+  // code so this file does not import the crypto module.
+  if ((err as { code?: string }).code === "ECREDUNREADABLE") {
+    return c.json({ error: { code: "credential_unreadable", message: "A saved credential could not be read. Reconnect that sender or integration in Settings." } }, 409);
+  }
 
   // Postgres rejecting a value the CLIENT supplied is a bad request, not a server fault.
   // Every route that takes an :id passes it straight into a uuid column, so `/v1/leads/abc`

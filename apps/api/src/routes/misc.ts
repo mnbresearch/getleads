@@ -4,7 +4,7 @@ import { z } from "zod";
 import Stripe from "stripe";
 import { isPublicHost } from "@prospex/core";
 import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, inArray, integrations, leads, limitsFor, messages, organizations, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
-import { sendingHealthForAccount } from "../services/campaigns.js";
+import { sendingHealthForAccount, systemSenderHealthForOrg } from "../services/campaigns.js";
 import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
 import { campaignAttribution, leadFunnel, sourcePerformance } from "../services/analytics.js";
@@ -116,11 +116,14 @@ miscRoutes.get("/analytics/sending-health", requireAuth, async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const accounts = await db.select().from(emailAccounts).where(eq(emailAccounts.orgId, oid));
+  const sendOrg = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
   const out = [];
   for (const a of accounts) {
     out.push({
       account: { id: a.id, fromEmail: a.fromEmail, dailyLimit: a.dailyLimit, status: a.status },
-      health: await sendingHealthForAccount(db, oid, a),
+      // The shared platform sender is judged per workspace, not per account; showing the
+      // per-account verdict would read "healthy" while sending is paused workspace-wide.
+      health: a.provider === "system" && sendOrg ? await systemSenderHealthForOrg(db, sendOrg) : await sendingHealthForAccount(db, oid, a),
     });
   }
   return c.json({ accounts: out });

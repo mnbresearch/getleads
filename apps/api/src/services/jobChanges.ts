@@ -292,7 +292,7 @@ async function recordJobChange(
       occurredAt: new Date(),
       raw: { leadId: lead.id, kind: change.kind, from: change.from, to: change.to, sameEmployer: change.sameEmployer },
     })
-    .onConflictDoNothing({ target: [signals.type, signals.url] })
+    .onConflictDoNothing()
     .returning({ id: signals.id });
 
   return inserted.length > 0;

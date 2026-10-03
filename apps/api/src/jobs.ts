@@ -1,6 +1,8 @@
 import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, inArray, integrations, jobs, leads, lists, monitors, ne, organizations, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, visits, webhooks } from "@prospex/db";
 import { buildIcpWithAi, clampLeadQuery, crawlCompanyWebsite, createAiProviderForPlan, fetchPublic, findEmail, redact, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
+import { orgMemberEmail } from "./lib/members.js";
+import { safeHeaderText } from "./lib/sanitize.js";
 import { hmacSign, hmacSignV2 } from "./lib/crypto.js";
 import { clampSearchQuery } from "./lib/searchQuery.js";
 import { webhookSecret } from "./lib/webhookSecret.js";
@@ -922,8 +924,12 @@ export const handlers: Record<string, JobHandler> = {
       }
     }
     await db.update(savedSearches).set({ lastRunAt: new Date(), lastNewCount: fresh }).where(eq(savedSearches.id, ss.id));
-    if (ss.alert && fresh > 0 && ss.alertEmail) await sendMail(null, { from: env.mailFrom, to: ss.alertEmail, subject: `${fresh} new leads for "${ss.name}"`, text: `Scout found ${fresh} new leads matching "${ss.name}":\n\n${names.join("\n")}${stoppedBecause ? `\n\n${stoppedBecause}` : ""}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
-    else if (ss.alert && blocked && ss.alertEmail) await sendMail(null, { from: env.mailFrom, to: ss.alertEmail, subject: `Could not check "${ss.name}" today`, text: `${note}\n\nThe search will run again tomorrow.` });
+    // Platform mail goes to people in the workspace only. Rows saved before that rule existed
+    // can still carry an outside address; those are not mailed.
+    const alertTo = ss.alert && ss.alertEmail ? await orgMemberEmail(ss.orgId, ss.alertEmail) : null;
+    const ssName = safeHeaderText(ss.name, 80, "your saved search");
+    if (ss.alert && fresh > 0 && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `${fresh} new leads for "${ssName}"`, text: `Scout found ${fresh} new leads matching "${ssName}":\n\n${names.join("\n")}${stoppedBecause ? `\n\n${stoppedBecause}` : ""}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
+    else if (ss.alert && blocked && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `Could not check "${ssName}" today`, text: `${note}\n\nThe search will run again tomorrow.` });
     return { results: results.length, fresh, providerFailures, note, clientClaim };
   },
 

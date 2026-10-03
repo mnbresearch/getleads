@@ -2,15 +2,14 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions } from "@prospex/db";
-import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, isPublicHost } from "@prospex/core";
-import { lookup } from "node:dns/promises";
+import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPublicHost, isSsrfBlocked } from "@prospex/core";
 import { aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
 import { encryptJson } from "../lib/crypto.js";
 import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
-import { testMailer, systemMailerConfig } from "../lib/mailer.js";
+import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, resumeContact, tickCampaign } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
@@ -63,11 +62,12 @@ campaignRoutes.get("/email-accounts", async (c) => {
  */
 async function assertPublicSmtpHost(host: string) {
   const bad = () => badRequest("SMTP host must be a public mail server address (for example smtp.gmail.com). Private, local and internal addresses are not allowed.");
-  if (!isPublicHost(host)) throw bad();
-  if (/^[\d.]+$|:/.test(host)) return; // a literal IP, already checked above
-  const addrs = await lookup(host, { all: true }).catch(() => null);
-  if (!addrs?.length) throw badRequest(`SMTP host "${host}" could not be found. Check the spelling.`);
-  if (addrs.some((a) => !isPublicHost(a.address))) throw bad();
+  // The same resolver the send path uses, so what is accepted here is what gets connected to.
+  try {
+    await assertPublicHost(host);
+  } catch (e) {
+    throw isSsrfBlocked(e) ? bad() : badRequest(`SMTP host "${host}" could not be found. Check the spelling.`);
+  }
 }
 
 // Owner/admin only: a sender is the identity the workspace's outreach goes out under.
@@ -78,7 +78,12 @@ campaignRoutes.post("/email-accounts", ownerOrAdmin("sender.created"), zValidato
   if (b.provider === "system" && !systemMailerConfig() && env.nodeEnv === "production") throw badRequest("No system email provider configured on the server (RESEND_API_KEY or SMTP_*)");
   if (b.provider === "resend" && !b.config?.apiKey) throw badRequest("config.apiKey required for Resend");
   if (b.provider === "smtp" && !b.config?.host) throw badRequest("config.host required for SMTP");
-  if (b.provider === "smtp") await assertPublicSmtpHost(b.config!.host!);
+  if (b.provider === "smtp") {
+    await assertPublicSmtpHost(b.config!.host!);
+    // Mail ports only. Any other port turns "add a sender" into a way to reach arbitrary services.
+    const port = Number((b.config as { port?: number } | undefined)?.port ?? 587);
+    if (!allowedSmtpPorts().includes(port)) throw badRequest(`SMTP port ${port} is not allowed. Use one of: ${allowedSmtpPorts().join(", ")}.`);
+  }
 
   /**
    * The platform sender sends from the PLATFORM'S address.

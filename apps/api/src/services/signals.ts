@@ -136,7 +136,10 @@ export async function refreshCompanySignals(orgId: string, domain: string, name?
   const { db } = getDb();
   if (!name) return 0;
   const news = await companyNews(name, 60).catch(() => []);
-  const stored = await storeSignals(news.filter((n) => n.type !== "news").map((n) => ({ ...n, companyName: name })), null);
+  // Stored for THIS workspace. The company name comes from the workspace's own company row,
+  // which its users can edit; writing that into the global pool let one workspace choose the
+  // company a public news item is attributed to for everyone.
+  const stored = await storeSignals(news.filter((n) => n.type !== "news").map((n) => ({ ...n, companyName: name })), orgId);
   for (const s of stored) await db.update(signals).set({ companyDomain: domain }).where(eq(signals.id, s.id));
   const [{ n, last }] = await db.select({ n: sql<number>`count(*)::int`, last: sql<Date | null>`max(created_at)` }).from(signals).where(and(eq(signals.companyDomain, domain), or(isNull(signals.orgId), eq(signals.orgId, orgId))));
   await db.update(companies).set({ signalsCount: n, lastSignalAt: last ?? undefined }).where(and(eq(companies.orgId, orgId), eq(companies.domain, domain)));

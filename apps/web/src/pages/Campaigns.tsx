@@ -433,8 +433,10 @@ export function CampaignDetail() {
                     <StatusBadge s={x.status} />
                     {/* Why a send didn't go: a bounce or a provider error is worth seeing
                         here rather than only as a "failed" badge. */}
-                    {(x.status === "bounced" || x.status === "failed" || (x.sendFailures ?? 0) > 0) && (x.lastError || (x.sendFailures ?? 0) > 0) && (
-                      <div className="mt-1 max-w-[240px] text-xs text-red-700" title={x.lastError ?? undefined}>
+                    {/* Shown for waiting contacts too: "sending is paused", "daily limit reached" and
+                        "AI draft rejected; sent the template" are notes on a contact that is still queued. */}
+                    {(x.lastError || (x.sendFailures ?? 0) > 0) && (
+                      <div className={`mt-1 max-w-[240px] text-xs ${x.status === "bounced" || x.status === "failed" || (x.sendFailures ?? 0) > 0 ? "text-red-700" : "text-amber-700"}`} title={x.lastError ?? undefined}>
                         {(x.sendFailures ?? 0) > 0 && <span>{x.sendFailures} failed attempt{x.sendFailures === 1 ? "" : "s"}{x.lastError ? ": " : ""}</span>}
                         {x.lastError && <span className="line-clamp-2">{x.lastError}</span>}
                       </div>

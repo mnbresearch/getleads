@@ -8,7 +8,7 @@ import { z } from "zod";
 import { and, autopilots, campaignContacts, campaigns, clients, companies, consume, desc, enqueue, eq, getDb, icps, inArray, invites, leads, limitsFor, listLeads, lists, remainingPremiumBudget, savedSearches, sql, tasks, users, organizations, type Invite } from "@prospex/db";
 import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
 import { env } from "../env.js";
-import { hashPassword, issueJwt } from "../lib/auth.js";
+import { hashPassword, issueJwt, passwordProblem } from "../lib/auth.js";
 import { randomToken } from "../lib/crypto.js";
 import { ApiError, badRequest, forbidden, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
@@ -265,7 +265,8 @@ toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json
   const hiringOk = !!hiring && hiring.reached;
 
   const { storeSignals } = await import("../services/signals.js");
-  if (items.length) await storeSignals(items.filter((n) => n.type !== "news").map((n) => ({ ...n, companyName: company!.name ?? undefined })), null);
+  // Workspace-private: the name is this workspace's own (editable) company name.
+  if (items.length) await storeSignals(items.filter((n) => n.type !== "news").map((n) => ({ ...n, companyName: company!.name ?? undefined })), oid);
 
   const nonNews = items.filter((n) => n.type !== "news").length;
   const intent = Math.min(100, (hiring?.openRoles ?? 0) * 3 + items.filter((n) => n.type === "funding").length * 25 + nonNews * 5);
@@ -672,6 +673,8 @@ joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.obje
   if (!org || org.status === "deactivated" || org.status === "revoked") return c.json({ error: { code: "account_suspended", message: "This workspace is suspended, so its invites cannot be accepted." } }, 403);
   // Seats are re-checked at the moment of joining. This invite's own seat is already counted
   // among the pending ones, so it is the members alone that must still leave room for it.
+  const weak = passwordProblem(b.password, { email: inv.email, name: b.name });
+  if (weak) return c.json({ error: { code: "weak_password", message: weak } }, 400);
   const limits = { ...limitsFor(org.plan), ...org.planLimits };
   const [{ m }] = await db.select({ m: sql<number>`count(*)::int` }).from(users).where(eq(users.orgId, org.id));
   if (limits.seats > 0 && m >= limits.seats) return c.json({ error: { code: "seat_limit", message: `${org.name} has no free seats (${limits.seats}). Ask an owner to upgrade or free a seat.` } }, 400);

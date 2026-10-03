@@ -1,6 +1,6 @@
 import { fetchPublic, isPublicHost, parseHttpUrl, readCapped } from "@prospex/core";
 import { and, companies, eq, getDb, integrations, leads, type Integration, type Lead } from "@prospex/db";
-import { decryptJson } from "../lib/crypto.js";
+import { CredentialUnreadableError, decryptJsonStrict } from "../lib/crypto.js";
 
 /**
  * Outbound CRM sync. Each provider maps a Prospex lead to its contact object.
@@ -360,7 +360,15 @@ export const INTEGRATION_PROVIDERS = Object.keys(providers);
 
 export async function syncLead(integration: Integration, leadId: string): Promise<SyncResult> {
   const { db } = getDb();
-  const stored = decryptJson<Cfg>(integration.configEncrypted) ?? {};
+  // Strict: a blob that cannot be decrypted (key rotated, row damaged) used to read as an
+  // empty config, which then failed in confusing ways. It is its own, sayable, error.
+  let stored: Cfg;
+  try {
+    stored = decryptJsonStrict<Cfg>(integration.configEncrypted) ?? {};
+  } catch (e) {
+    if (e instanceof CredentialUnreadableError) return { ok: false, error: "This connection's saved credentials could not be read. Reconnect it in Settings, Integrations." };
+    throw e;
+  }
   const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, leadId), eq(leads.orgId, integration.orgId)) });
   if (!lead) return { ok: false, error: "lead not found" };
   const company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;

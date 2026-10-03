@@ -19,6 +19,7 @@ import {
   // -> icps), which TypeScript cannot otherwise infer.
   type AnyPgColumn,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 const ts = (name: string) => timestamp(name, { withTimezone: true, mode: "date" });
 
@@ -577,7 +578,10 @@ export const signals = pgTable(
     raw: jsonb("raw").$type<Record<string, unknown>>().notNull().default({}),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
-  (t) => ({ uniq: uniqueIndex("signals_uniq").on(t.type, t.url), orgIdx: index("signals_org_time_idx").on(t.orgId, t.createdAt), domIdx: index("signals_domain_idx").on(t.companyDomain) }),
+  // Two partial unique indexes (see migration 0016): one row per (type, url) in the global
+  // pool, and one per workspace for its private signals. A single (type, url) index let a
+  // private row block the public one for everybody, and the reverse.
+  (t) => ({ uniqGlobal: uniqueIndex("signals_uniq_global").on(t.type, t.url).where(sql`org_id IS NULL`), uniqOrg: uniqueIndex("signals_uniq_org").on(t.orgId, t.type, t.url).where(sql`org_id IS NOT NULL`), orgIdx: index("signals_org_time_idx").on(t.orgId, t.createdAt), domIdx: index("signals_domain_idx").on(t.companyDomain) }),
 );
 
 export const signalSubscriptions = pgTable("signal_subscriptions", {

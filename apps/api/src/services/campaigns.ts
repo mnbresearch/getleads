@@ -3,6 +3,7 @@ import { allocateVariant, coerceIntent, createAiProviderForPlan, domainOfEmail, 
 import { decryptJson as decryptCfg } from "../lib/crypto.js";
 import { consume } from "@prospex/db";
 import { env } from "../env.js";
+import { addressOf } from "../lib/sanitize.js";
 import { decryptJsonStrict, randomToken } from "../lib/crypto.js";
 import { sendMail, type MailerConfig } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
@@ -1161,8 +1162,12 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     // may already have gone out. See the idempotency check above.
     await db.update(messages).set({ status: "sending" }).where(eq(messages.id, msg.id));
 
+    // The shared platform sender sends from the PLATFORM'S address, whatever the row says:
+    // senders saved before that rule carry a tenant-chosen From, which would go out under
+    // our DKIM signature as any address the tenant liked.
+    const fromAddress = account.provider === "system" ? addressOf(env.mailFrom) : account.fromEmail;
     const res = await sendMail(mailer, {
-      from: `${safeDisplayName(account.fromName) || account.fromEmail} <${account.fromEmail}>`,
+      from: `${safeDisplayName(account.fromName) || fromAddress} <${fromAddress}>`,
       // The canonical address and nothing else: one recipient per send.
       to,
       subject,

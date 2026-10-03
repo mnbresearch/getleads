@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, campaigns, desc, enqueue, eq, getDb, icps, inArray, monitorResults, monitors, or, remainingPremiumBudget, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
-import { notFound, requireSomeFields } from "../lib/errors.js";
+import { ApiError, notFound, requireSomeFields } from "../lib/errors.js";
+import { normalizeLinkedinPostUrl } from "@prospex/core";
 import { assertOwned } from "../lib/ownership.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { scanJobChanges } from "../services/jobChanges.js";
@@ -140,8 +141,16 @@ signalRoutes.get("/monitors", async (c) => {
   const { db } = getDb();
   return c.json({ monitors: await db.select().from(monitors).where(eq(monitors.orgId, orgId(c))).orderBy(desc(monitors.createdAt)) });
 });
+/** A linkedin_post monitor fetches its target, so the target must be a LinkedIn post URL. */
+function assertMonitorTarget(type: string | undefined, target: string | undefined) {
+  if (type === "linkedin_post" && target !== undefined && !normalizeLinkedinPostUrl(target)) {
+    throw new ApiError(400, "A LinkedIn post monitor needs a linkedin.com post URL (https://www.linkedin.com/posts/... or /feed/update/...).", "bad_request");
+  }
+}
+
 signalRoutes.post("/monitors", zValidator("json", monitorInput), async (c) => {
   const { db } = getDb();
+  assertMonitorTarget(c.req.valid("json").type, c.req.valid("json").target);
   const [row] = await db.insert(monitors).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
   await enqueue(db, "monitor.run", { monitorId: row.id }, { orgId: row.orgId, priority: 2 });
   return c.json(row, 201);
@@ -149,6 +158,15 @@ signalRoutes.post("/monitors", zValidator("json", monitorInput), async (c) => {
 signalRoutes.patch("/monitors/:id", zValidator("json", monitorInput.partial()), async (c) => {
   const { db } = getDb();
   requireSomeFields(c.req.valid("json"));
+  {
+    // The target is judged against the type it will have AFTER this patch.
+    const patch = c.req.valid("json");
+    if (patch.type !== undefined || patch.target !== undefined) {
+      const cur = await db.query.monitors.findFirst({ where: and(eq(monitors.id, c.req.param("id")), eq(monitors.orgId, orgId(c))) });
+      if (!cur) throw notFound("Monitor");
+      assertMonitorTarget(patch.type ?? cur.type, patch.target ?? cur.target);
+    }
+  }
   const [row] = await db.update(monitors).set(c.req.valid("json")).where(and(eq(monitors.id, c.req.param("id")), eq(monitors.orgId, orgId(c)))).returning();
   if (!row) throw notFound("Monitor");
   return c.json(row);
