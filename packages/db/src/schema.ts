@@ -432,7 +432,11 @@ export const jobs = pgTable(
     createdAt: ts("created_at").notNull().defaultNow(),
     updatedAt: ts("updated_at").notNull().defaultNow(),
   },
-  (t) => ({ pollIdx: index("jobs_poll_idx").on(t.status, t.runAt, t.priority) }),
+  (t) => ({
+    pollIdx: index("jobs_poll_idx").on(t.status, t.runAt, t.priority),
+    /** Counting a workspace's waiting work (per-workspace enqueue limits). The claim-order index (jobs_claim_idx) is an expression index and lives in migration 0020 only. */
+    orgOpenIdx: index("jobs_org_open_idx").on(t.orgId, t.type).where(sql`status IN ('queued', 'running')`),
+  }),
 );
 
 export const usage = pgTable(
@@ -1154,3 +1158,13 @@ export const workspaceDeletionRequests = pgTable("workspace_deletion_requests", 
   cancelledAt: ts("cancelled_at"),
   completedAt: ts("completed_at"),
 });
+
+/** Addresses no workspace on this platform may mail (lower-cased, canonical). Managed from the admin console. */
+export const globalSuppressions = pgTable("global_suppressions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  email: text("email").notNull().unique(),
+  reason: text("reason").notNull().default("request"),
+  note: text("note"),
+  createdAt: ts("created_at").notNull().defaultNow(),
+});
+export type GlobalSuppression = typeof globalSuppressions.$inferSelect;
