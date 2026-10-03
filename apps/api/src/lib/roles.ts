@@ -17,6 +17,9 @@ export function roleGate(action: string, ...roles: string[]): MiddlewareHandler<
   const inner = requireRole(...roles);
   return async (c, next) => {
     let passed = false;
+    // This gate writes the refusal under the action's own name; tell requireRole not to
+    // write its generic "role.denied" row as well (one refusal, one row).
+    (c as unknown as { set: (k: string, v: unknown) => void }).set("roleAuditHandled", true);
     try {
       await inner(c, async () => {
         passed = true;

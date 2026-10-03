@@ -2,35 +2,9 @@ import { useCallback, useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import { API_URL, apiFetch, auth, fmtDate } from "../lib/api";
 import { limitLabel, metricLabel } from "../lib/metrics";
+import { rememberMe, useMe } from "../lib/me";
 import { EXTERNAL_REL } from "../lib/safeHref";
 import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/ui";
-
-type Role = "owner" | "admin" | "member";
-interface Me { user: { id: string; email: string; role: Role; hasPassword?: boolean } | null; org: { name: string; settings: Record<string, string> } }
-
-/**
- * Who is looking. Members get 403 from API keys, org settings, invites, webhooks and
- * integrations, so those controls are shown only to owners and admins - a button that can
- * only ever fail is worse than none. While unknown (loading/failed) controls stay visible
- * and the server remains the authority.
- */
-let meCache: Me | null = null;
-// The cache is "who is signed in", so it cannot outlive the session it was read for. It used
-// to: sign out as an owner, sign in as a member in the same tab, and Settings briefly showed
-// the owner's controls from the previous account.
-auth.subscribe(() => { meCache = null; });
-function useMe() {
-  const [me, setMe] = useState<Me | null>(meCache);
-  // `settled`: the role question has been answered one way or the other - the account is
-  // known (cached or just loaded) or the lookup failed. Lets a caller wait for the answer
-  // before acting on "unknown means allowed", instead of acting and then finding out.
-  const [settled, setSettled] = useState<boolean>(!!meCache);
-  useEffect(() => {
-    apiFetch<Me>("GET", "/v1/auth/me").then((r) => { meCache = r; setMe(r); }).catch(() => {}).finally(() => setSettled(true));
-  }, []);
-  const role = me?.user?.role;
-  return { me, role, settled, canManage: role === undefined || role === "owner" || role === "admin", isOwner: role === undefined || role === "owner" };
-}
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
 function MembersNote({ what }: { what: string }) {
@@ -128,7 +102,7 @@ function ChangePassword() {
       const done = hasPassword === false ? "Password set. You can now also sign in with your email and this password." : "Password changed.";
       setMsg({ ok: true, text: fresh ? `${done} Every other device and browser has been signed out.` : done });
       // auth.set() above cleared the cached account; rebuild it from what this component holds.
-      if (me?.user) meCache = { ...me, user: { ...me.user, hasPassword: true } };
+      if (me?.user) rememberMe({ ...me, user: { ...me.user, hasPassword: true } });
     } catch (e2) {
       setMsg({ ok: false, text: (e2 as Error).message });
     } finally {
@@ -239,7 +213,8 @@ function ApiKeys() {
 
 /**
  * `secret` is present only on the answer to create and rotate. The list carries a preview
- * (`secretPreview`, the first few characters) and which signature scheme the hook uses.
+ * (`secretPreview` - whatever short, non-secret label the server chooses, e.g.
+ * "whsec_...AbC1"; shown exactly as sent, no shape assumed) and the signature scheme.
  * `secretPrefix` / `secret` on a list row are what older servers sent; they are read only as
  * a fallback for the preview and never shown in full.
  */
@@ -354,7 +329,7 @@ function Webhooks() {
                 <span className={`badge ${h.active ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{h.active ? "active" : "disabled"}</span>
                 <span className="min-w-0 break-all font-mono text-xs">{h.url}</span>
                 <span className="text-xs text-ink-400 [overflow-wrap:anywhere]">{h.events.join(", ")}</span>
-                {preview && <span className="text-xs text-ink-500">secret: <span className="font-mono">{preview}</span></span>}
+                {preview && <span className="min-w-0 text-xs text-ink-500 [overflow-wrap:anywhere]">secret: <span className="font-mono">{preview}</span></span>}
                 {h.signatureVersion !== undefined && <span className="badge bg-black/[0.05] text-ink-300">signature v{h.signatureVersion}</span>}
                 {h.failures > 0 && <span className="text-xs text-red-600">{h.failures} failed deliveries</span>}
                 <span className="ml-auto flex flex-wrap items-center gap-2">
@@ -626,15 +601,18 @@ interface AuditEntry {
  */
 const AUDIT_WORDS: Record<string, string> = {
   // Sign-in and sessions
+  "auth.signup": "Workspace created",
   "auth.login": "Sign-in",
   "auth.login.locked": "Sign-in blocked after too many attempts",
   "auth.google.login": "Sign-in with Google",
-  "auth.google.claimed.unverified.account": "Account taken over by its Google owner (old password turned off)",
-  "auth.signup": "Workspace created",
+  "auth.google.claimed.unverified.account": "Google sign-in took over an unverified account",
   "auth.logout.all": "Signed out of all devices",
   "auth.password.changed": "Password change",
   "auth.password.reset": "Password reset from an emailed link",
   "auth.password.reset.requested": "Password reset requested",
+  // Refusals
+  "role.denied": "Refused: needs owner or admin",
+  "reference.denied": "Refused: that record belongs to another workspace",
   // Credentials
   "apikey.created": "API key created",
   "apikey.revoked": "API key revoked",
@@ -645,15 +623,15 @@ const AUDIT_WORDS: Record<string, string> = {
   "integration.connected": "Integration connected",
   "integration.disconnected": "Integration disconnected",
   "integration.synced": "Leads pushed to an integration",
-  "sender.created": "Sending mailbox added",
-  "sender.deleted": "Sending mailbox removed",
+  "sender.created": "Sender account added",
+  "sender.deleted": "Sender account removed",
   // People
   "team.invited": "Teammate invited",
   "team.invite.resent": "Invite resent",
   "team.invite.revoked": "Invite revoked",
   "team.joined": "Teammate joined from an invite",
   "team.member.removed": "Teammate removed",
-  // Data leaving or being destroyed
+  // Data leaving, being shared or being destroyed
   "leads.exported": "Leads exported",
   "leads.imported": "Leads imported",
   "leads.bulk.deleted": "Leads deleted in bulk",
@@ -661,7 +639,9 @@ const AUDIT_WORDS: Record<string, string> = {
   "suppression.added": "Address added to the do-not-contact list",
   "client.created": "Client created",
   "client.deleted": "Client deleted",
+  "client.share.enabled": "Client report link created",
   "client.share.disabled": "Client report link turned off",
+  "client.share.rotated": "Client report link replaced",
   "campaign.started": "Campaign started",
   "campaign.paused": "Campaign paused",
   "campaign.deleted": "Campaign deleted",
@@ -669,10 +649,17 @@ const AUDIT_WORDS: Record<string, string> = {
   "autopilot.deleted": "Autopilot deleted",
   "pixel.created": "Website tracking pixel created",
   "pixel.deleted": "Website tracking pixel deleted",
+  // Workspace and billing
   "org.settings.changed": "Workspace settings changed",
-  "reference.denied": "Request for another workspace's data refused",
+  "billing.checkout": "Plan checkout started",
   // Scout staff
   "admin.login": "Scout admin sign-in",
+  "admin.plan.changed": "Plan changed by Scout admin",
+  "admin.status.changed": "Workspace suspended or restored by Scout admin",
+  "admin.credits.changed": "Credits adjusted by Scout admin",
+  "admin.upgrade.request.status.changed": "Upgrade request updated by Scout admin",
+  "admin.tool.limit.changed": "Tool limit changed by Scout admin",
+  "admin.tools.checked": "Tools checked by Scout admin",
 };
 
 function auditActionLabel(action: string): string {
@@ -694,10 +681,30 @@ function auditWho(e: AuditEntry): string {
   return tried ? `${label} (as ${tried})` : label;
 }
 
+/** Why an action was refused or failed, where the server recorded a reason. */
+const AUDIT_REASONS: Record<string, string> = {
+  role: "Needs owner or admin",
+  locked: "Too many failed attempts - the account was temporarily locked",
+  wrong_current_password: "The current password entered was wrong",
+  verifier_mismatch: "The sign-in was not started in that browser",
+};
+
+function auditReason(e: AuditEntry): string | null {
+  if ((e.result ?? "ok") === "ok") return null;
+  const r = e.data && typeof e.data.reason === "string" ? e.data.reason : null;
+  if (!r) return null;
+  return AUDIT_REASONS[r] ?? r.replace(/[_.-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
+/**
+ * The outcome. A success is the quiet case; a refusal or a failure is the reason someone
+ * opens this page, so those are solid, not tinted - they have to stand out in a long list
+ * of green.
+ */
 function AuditResult({ result }: { result?: string | null }) {
   const r = result ?? "ok";
-  const [cls, text] = r === "ok" ? ["bg-emerald-50 text-emerald-700", "Succeeded"] : r === "denied" ? ["bg-amber-50 text-amber-700", "Blocked"] : r === "failed" ? ["bg-red-50 text-red-700", "Failed"] : ["bg-black/[0.05] text-ink-300", r];
-  return <span className={`badge shrink-0 ${cls}`}>{text}</span>;
+  const [cls, text] = r === "ok" ? ["bg-emerald-50 text-emerald-700", "Succeeded"] : r === "denied" ? ["bg-amber-600 text-white", "Refused"] : r === "failed" ? ["bg-red-600 text-white", "Failed"] : ["bg-black/[0.08] text-ink-200", r];
+  return <span className={`badge shrink-0 font-semibold ${cls}`}>{text}</span>;
 }
 
 const AUDIT_PAGE = 50;
@@ -783,19 +790,30 @@ function SecurityLog() {
           </div>
         ) : (
           <ul className="divide-y divide-slate-100 text-sm">
-            {entries.map((e) => (
+            {entries.map((e) => {
+              const bad = (e.result ?? "ok") !== "ok";
+              const reason = auditReason(e);
+              const label = auditActionLabel(e.action);
+              return (
               <li key={e.id} className="py-2.5">
+                {/* The marker is on an inner block, not the <li>: the list's divide-y rule
+                    sets the border colour of every row after the first and would win. */}
+                <div className={bad ? `border-l-4 pl-3 ${e.result === "denied" ? "border-amber-500" : "border-red-500"}` : undefined}>
                 <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
-                  <div className="min-w-0 font-medium text-ink-100 [overflow-wrap:anywhere]">{auditActionLabel(e.action)}</div>
+                  <div data-audit-label className="min-w-0 font-medium text-ink-100 [overflow-wrap:anywhere]">{label}</div>
                   <AuditResult result={e.result} />
                 </div>
+                {/* Not repeated when the label already says it ("Refused: needs owner or admin"). */}
+                {reason && !label.toLowerCase().includes(reason.toLowerCase()) && <div className={`text-xs ${e.result === "denied" ? "text-amber-800" : "text-red-700"}`}>{reason}</div>}
                 <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-ink-400">
                   <span className="min-w-0 [overflow-wrap:anywhere]">{auditWho(e)}</span>
                   <span className="min-w-0 font-mono [overflow-wrap:anywhere]">{e.ip || "address not recorded"}</span>
                   <time dateTime={e.createdAt}>{fmtDate(e.createdAt)}</time>
                 </div>
+                </div>
               </li>
-            ))}
+              );
+            })}
           </ul>
         )}
         {moreErr && <div className="mt-3 rounded-lg bg-red-50 p-2 text-sm text-red-600" role="alert">Could not load older entries: {moreErr}</div>}

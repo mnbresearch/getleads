@@ -3,7 +3,7 @@ import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, clients, enqueue, eq, getDb, getUsage, listLeads, lists, organizations } from "@prospex/db";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
-import { notFound } from "../lib/errors.js";
+import { ApiError, notFound } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import { ownerOrAdmin } from "../lib/roles.js";
 import {
@@ -89,7 +89,17 @@ clientRoutes.post(
 // ── One client ──
 clientRoutes.get("/:id", async (c) => c.json(await clientDetail(orgId(c), c.req.param("id"))));
 
-clientRoutes.patch("/:id", zValidator("json", clientInput.partial()), async (c) => c.json(await updateClient(orgId(c), c.req.param("id"), c.req.valid("json"))));
+clientRoutes.patch("/:id", zValidator("json", clientInput.partial()), async (c) => {
+  const patch = c.req.valid("json");
+  // What the client-facing report shows is part of the share settings, which are owner/admin
+  // only; a member could otherwise change the report through this general edit route.
+  const role = c.get("auth")?.user?.role;
+  if ((patch as { reportShowTarget?: unknown }).reportShowTarget !== undefined && role && role !== "owner" && role !== "admin") {
+    await audit(c, "client.report_settings_changed", { result: "denied", targetType: "client", targetId: c.req.param("id"), data: { reason: "role", role } });
+    throw new ApiError(403, `Only a workspace owner or admin can change what the client report shows. Your role is "${role}" - ask an owner or admin.`, "forbidden_role");
+  }
+  return c.json(await updateClient(orgId(c), c.req.param("id"), patch));
+});
 
 clientRoutes.delete("/:id", async (c) => {
   const before = await requireClient(orgId(c), c.req.param("id"));

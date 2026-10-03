@@ -6,12 +6,12 @@ import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPubl
 import { aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
-import { encryptJson } from "../lib/crypto.js";
+import { encryptJson, randomToken } from "../lib/crypto.js";
 import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, resumeContact, tickCampaign } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, reserveManualSend, resumeContact, sendFailureCategory, tickCampaign } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
@@ -151,7 +151,7 @@ campaignRoutes.delete("/email-accounts/:id", ownerOrAdmin("sender.deleted"), asy
  * page sends back what it read, so with `.optional()` saving ANY campaign that had such a
  * step failed validation. `id` is optional: a step that carries its id is updated in place.
  */
-const stepInput = z.object({ id: z.string().uuid().optional(), delayDays: z.number().int().min(0).max(60).default(0), channel: z.enum(["email", "linkedin_connect", "linkedin_message", "whatsapp", "call", "task"]).default("email"), subjectTemplate: z.string().nullish().transform((v) => v ?? ""), bodyTemplate: z.string().min(1), aiPersonalize: z.boolean().default(true), aiInstructions: z.string().nullish(), variants: z.array(z.object({ subjectTemplate: z.string(), bodyTemplate: z.string() })).max(4).nullish().transform((v) => v ?? []) });
+const stepInput = z.object({ id: z.string().uuid().optional(), delayDays: z.number().int().min(0).max(60).default(0), channel: z.enum(["email", "linkedin_connect", "linkedin_message", "whatsapp", "call", "task"]).default("email"), subjectTemplate: z.string().max(500).nullish().transform((v) => v ?? ""), bodyTemplate: z.string().min(1).max(20_000), aiPersonalize: z.boolean().default(true), aiInstructions: z.string().max(5000).nullish(), variants: z.array(z.object({ subjectTemplate: z.string().max(500), bodyTemplate: z.string().max(20_000) })).max(4).nullish().transform((v) => v ?? []) });
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
 /** A real IANA zone. An unknown one made the scheduler throw on every tick for that campaign. */
 const isTimeZone = (tz: string) => {
@@ -329,6 +329,13 @@ campaignRoutes.post("/:id/start", async (c) => {
   const steps = await db.select().from(sequenceSteps).where(eq(sequenceSteps.campaignId, cp.id));
   if (!steps.length) throw badRequest("Add at least one sequence step");
   if (steps.some((s) => s.channel === "email") && !cp.emailAccountId) throw badRequest("Attach an email account first (the sequence has email steps)");
+  if (steps.some((s) => s.channel === "email") && cp.emailAccountId) {
+    // A sender whose connection test failed sends nothing. Starting anyway showed "active"
+    // with every contact queued forever and no reason given.
+    const sender = await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, cp.emailAccountId), eq(emailAccounts.orgId, oid)) });
+    if (!sender) throw badRequest("The sender attached to this campaign no longer exists. Attach another sender, then start.");
+    if (sender.status !== "active") throw badRequest(`The sender ${sender.fromEmail} failed its connection test, so this campaign would not send anything. Remove that sender and add it again with working settings (or attach another sender), then start.`);
+  }
   await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(eq(campaigns.id, cp.id));
   await emitEvent(oid, "campaign.started", { campaignId: cp.id }, { type: "campaign", id: cp.id });
   await audit(c, "campaign.started", { targetType: "campaign", targetId: cp.id, data: { name: cp.name, steps: steps.length, emailAccountId: cp.emailAccountId } });
@@ -609,10 +616,15 @@ campaignRoutes.post(
     if (!inbound.leadId) throw badRequest("Inbound message has no matched lead");
     const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, inbound.leadId), eq(leads.orgId, oid)) });
     if (!lead?.email) throw badRequest("Lead has no email");
-    // The same gates every campaign send passes. This path skipped both: it would email
-    // someone who had unsubscribed, and it never counted against the plan's email quota.
-    const suppressed = await db.query.suppressions.findFirst({ where: and(eq(suppressions.orgId, oid), eq(suppressions.email, lead.email.toLowerCase())) });
-    if (suppressed || lead.status === "unsubscribed") throw new ApiError(409, `${lead.email} has unsubscribed or is on your suppression list, so no email was sent.`, "suppressed");
+    // One recipient, in canonical form - the same rule a sequence send applies. A lead row
+    // written before that rule could hold "a@x, b@x": sent verbatim it reached both, and the
+    // exact-string suppression check below missed the one who had unsubscribed.
+    const to = canonicalEmail(lead.email);
+    if (!to) throw badRequest("This lead's email is not a single valid address, so no email was sent. Correct it on the lead first.");
+    // The same gates every campaign send passes: it would otherwise email someone who had
+    // unsubscribed. Compared on the canonical address and on the stored spelling.
+    const suppressed = await db.query.suppressions.findFirst({ where: and(eq(suppressions.orgId, oid), inArray(suppressions.email, [...new Set([to, lead.email.trim().toLowerCase()])])) });
+    if (suppressed || lead.status === "unsubscribed") throw new ApiError(409, `${to} has unsubscribed or is on your suppression list, so no email was sent.`, "suppressed");
 
     // Both scoped to the caller's org. This path also reaches mailerFromAccount, so it
     // decrypts SMTP credentials and sends from that address - exactly what the sendStep
@@ -624,25 +636,48 @@ campaignRoutes.post(
 
     const mailer = mailerFromAccount(account);
     if (!mailer) throw badRequest("Sending account is not configured correctly");
-    await consume(db, oid, "emails", 1);
+    if (bodyText.length > 20_000) throw badRequest("That reply is too long to send (20,000 characters at most).");
+    const sendOrg = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+    if (!sendOrg) throw notFound("Workspace");
+    // Kill switch, the sender's daily cap, the workspace ceiling and the shared sender's cap:
+    // the limits a sequence send is held to. This route used to pass none of them.
+    const slot = await reserveManualSend(sendOrg, account);
+    if (!slot.ok) throw new ApiError(slot.status, slot.message, slot.code);
+    try {
+      await consume(db, oid, "emails", 1);
+    } catch (e) {
+      await slot.release();
+      throw e;
+    }
 
+    // A reply still carries a way out, and the same one-click header a sequence email has.
+    const unsubToken = randomToken(16);
+    const unsub = `${env.apiUrl}/t/u/${unsubToken}`;
+    const text = `${bodyText}\n\n--\nIf you'd rather not hear from me, reply "unsubscribe" or click: ${unsub}`;
+    const mailto = account.replyTo ?? (account.provider === "system" ? null : account.fromEmail);
     const [msg] = await db
       .insert(messages)
-      .values({ orgId: oid, campaignId: campaign?.id, leadId: lead.id, direction: "outbound", toEmail: lead.email, subject, bodyText, status: "queued" })
+      .values({ orgId: oid, campaignId: campaign?.id, leadId: lead.id, direction: "outbound", toEmail: to, subject, bodyText: text, trackingToken: unsubToken, status: "queued" })
       .returning();
 
     const res = await sendMail(mailer, {
       from: `${safeDisplayName(account.fromName) || "Sender"} <${account.provider === "system" ? platformFromAddress() : account.fromEmail}>`,
-      to: lead.email,
+      // The canonical address and nothing else: one recipient per send.
+      to,
       subject: stripControl(subject).slice(0, 500),
-      text: bodyText,
+      text,
       replyTo: account.replyTo ?? account.fromEmail,
-      headers: { "X-Prospex-Message": msg.id },
+      headers: { "X-Prospex-Message": msg.id, "List-Unsubscribe": mailto ? `<${unsub}>, <mailto:${mailto}?subject=unsubscribe>` : `<${unsub}>`, "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
     });
+    if (!res.ok) {
+      // Not sent: give back the daily slot and the monthly unit it took.
+      await slot.release();
+      await consume(db, oid, "emails", -1, { allowOverage: true }).catch(() => {});
+    }
     if (res.ok) {
       await db.update(messages).set({ status: "sent", sentAt: new Date(), providerMessageId: res.providerMessageId }).where(eq(messages.id, msg.id));
       await db.update(messages).set({ draftReply: null }).where(eq(messages.id, inbound.id));
-      await emitEvent(oid, "message.sent", { messageId: msg.id, leadId: lead.id, campaignId: campaign?.id, to: lead.email, subject }, { type: "message", id: msg.id });
+      await emitEvent(oid, "message.sent", { messageId: msg.id, leadId: lead.id, campaignId: campaign?.id, to, subject }, { type: "message", id: msg.id });
       // Learn this org's actual voice: every reply a human actually approved and sent (edited
       // or not) is a better style example than anything we could write for them upfront. Feed
       // the last 5 back into future draftReplyToInbound calls (see /inbound above).
@@ -655,8 +690,10 @@ campaignRoutes.post(
       }
       return c.json({ sent: true, messageId: msg.id });
     }
-    await db.update(messages).set({ status: "failed", error: res.error }).where(eq(messages.id, msg.id));
-    throw badRequest(`Send failed: ${res.error}`);
+    await db.update(messages).set({ status: "failed", error: sendFailureCategory(res.error) }).where(eq(messages.id, msg.id));
+    // A category, never the provider's own text: that can carry credentials or account ids.
+    console.warn(`[campaigns] reply send failed for message ${msg.id}`);
+    throw badRequest(`Send failed: ${sendFailureCategory(res.error)}`);
   },
 );
 

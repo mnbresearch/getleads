@@ -9,7 +9,7 @@ import { issueAdminJwt } from "../lib/auth.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { clientIp, rateLimit, requireAdmin, type Env } from "../middleware.js";
 import { audit } from "../lib/audit.js";
-import { lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
+import { attemptQueue, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
 
 export const adminRoutes = new Hono<Env>();
 
@@ -28,8 +28,8 @@ adminRoutes.post(
   async (c) => {
     const { email, password } = c.req.valid("json");
     if (!env.adminEmail || !env.adminPassword) throw badRequest("Admin login is not configured (set ADMIN_EMAIL and ADMIN_PASSWORD)");
-    return serialised(ADMIN_SUBJECT, async () => {
-      const lock = await lockState(ADMIN_SUBJECT);
+    return serialised(await attemptQueue("admin-login", ADMIN_SUBJECT, clientIp(c)), async () => {
+      const lock = await lockState(ADMIN_SUBJECT, clientIp(c));
       if (lock.locked) {
         if (shouldAuditLock(ADMIN_SUBJECT)) await audit(c, "admin.login", { orgId: null, actorType: "anonymous", result: "denied", data: { reason: "locked", retryAfterSeconds: lock.retryAfterSeconds } });
         c.header("retry-after", String(lock.retryAfterSeconds));

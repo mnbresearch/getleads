@@ -20,6 +20,7 @@ if (TEST_DB) {
   process.env.ENCRYPTION_KEY ??= "y".repeat(48);
   for (const k of ["RESEND_API_KEY", "SMTP_HOST", "SMTP_USER", "SMTP_PASS", "GROQ_API_KEY", "GEMINI_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_COMPAT_BASE_URL", "OPENAI_COMPAT_API_KEY", "OUTBOUND_SENDING_ENABLED", "ORG_DAILY_SEND_CEILING", "SYSTEM_SENDER_DAILY_CAP"]) delete process.env[k];
   process.env.SMTP_PROBE_ENABLED = "false";
+  process.env.PILOT_MODE = "false";
 }
 
 if (!TEST_DB) {
@@ -84,6 +85,7 @@ suite("security: jobs, sending, AI output", () => {
   let svc: any;
   let handlers: any;
   let crypto: any;
+  let app: any;
 
   beforeAll(async () => {
     const dbPkg = await import("@prospex/db");
@@ -93,6 +95,8 @@ suite("security: jobs, sending, AI output", () => {
     svc = await import("./services/campaigns.js");
     ({ handlers } = await import("./jobs.js"));
     crypto = await import("./lib/crypto.js");
+    const { createApp } = await import("./app.js");
+    app = createApp();
   }, 60_000);
 
   afterEach(() => {
@@ -142,6 +146,31 @@ suite("security: jobs, sending, AI output", () => {
   const usageOf = async (orgId: string, metric: string) =>
     (await db.select().from(schema.usage).where(schema.and(eq(schema.usage.orgId, orgId), eq(schema.usage.metric, metric))))[0]?.count ?? 0;
   const messagesOf = (campaignId: string) => db.select().from(schema.messages).where(eq(schema.messages.campaignId, campaignId));
+  /** A distinct client IP per call, so the per-IP limits do not couple tests. */
+  const ip = () => `198.51.100.${Math.floor(Math.random() * 250) + 1}`;
+  async function req(method: string, path: string, token?: string, body?: unknown, headers: Record<string, string> = {}) {
+    const res = await app.request(path, {
+      method,
+      headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body !== undefined ? { "content-type": "application/json" } : {}), "cf-connecting-ip": ip(), ...headers },
+      body: body === undefined ? undefined : typeof body === "string" ? body : JSON.stringify(body),
+    });
+    const text = await res.text();
+    let json: any = null;
+    try {
+      json = JSON.parse(text);
+    } catch {
+      // not JSON (an HTML page)
+    }
+    return { status: res.status, body: json, text };
+  }
+  /** A real workspace with a signed-in owner, through the API. */
+  async function signup(name: string) {
+    const email = `${name}-${uid()}@example.com`;
+    const r = await req("POST", "/v1/auth/signup", undefined, { email, password: "correct-horse-battery", orgName: `${name} Co` });
+    expect(r.status).toBe(201);
+    const org = await db.query.organizations.findFirst({ where: eq(schema.organizations.id, r.body.org.id) });
+    return { token: r.body.token as string, org };
+  }
   const eventsOf = (orgId: string, type: string) => db.select().from(schema.events).where(schema.and(eq(schema.events.orgId, orgId), eq(schema.events.type, type)));
 
   /** Stub the model: an OpenAI-compatible endpoint that answers with `content` (or fails). */
@@ -987,6 +1016,282 @@ suite("security: jobs, sending, AI output", () => {
       // And the send path honours it for any other row holding that mailbox.
       const again = await newContact(org.id, campaign.id, { email: ` ${lead.email.toUpperCase()} ` });
       expect((await svc.sendStep(campaign.id, again.cc.id, step.id)).skipped).toBe("suppressed");
+    });
+  });
+  // ── A (re-test): a manual reply is held to the same limits as a sequence send ──
+
+  describe("POST /v1/campaigns/messages/:id/send-reply", () => {
+    const REPLY = { subject: "Re: Idea for Acme", body: "Happy to share more - does Tuesday at 3pm work for a quick call?\n\nAsha" };
+
+    /** A workspace with a sender, a campaign, a lead, and an inbound reply from that lead. */
+    async function replySetup(opts: { accountPatch?: Record<string, unknown>; leadPatch?: Record<string, unknown>; noCampaign?: boolean } = {}) {
+      const { token, org } = await signup("reply");
+      const acct = await newAccount(org.id, opts.accountPatch);
+      const { campaign } = await newCampaign(org.id, acct.id);
+      const inbound = await newInbound(org.id, opts.noCampaign ? null : campaign.id, opts.leadPatch);
+      return { token, org, acct, campaign, ...inbound };
+    }
+    async function newInbound(orgId: string, campaignId: string | null, leadPatch: Record<string, unknown> = {}) {
+      const [lead] = await db.insert(schema.leads).values({ orgId, email: `p-${uid()}@example.com`, fullName: "Pat Prospect", firstName: "Pat", emailStatus: "valid", ...leadPatch }).returning();
+      const [inbound] = await db.insert(schema.messages).values({ orgId, campaignId, leadId: lead.id, direction: "inbound", toEmail: lead.email, subject: "Re: Idea for Acme", bodyText: "Yes please, send me more.", status: "received", intent: "interested" }).returning();
+      return { lead, inbound };
+    }
+    const sendReply = (token: string, inboundId: string, body: Record<string, unknown> = REPLY) => req("POST", `/v1/campaigns/messages/${inboundId}/send-reply`, token, body);
+    const account = (id: string) => db.query.emailAccounts.findFirst({ where: eq(schema.emailAccounts.id, id) });
+    const outboundOf = (orgId: string) => db.select().from(schema.messages).where(schema.and(eq(schema.messages.orgId, orgId), eq(schema.messages.direction, "outbound")));
+
+    it("the kill switch stops it: 503, nothing sent, nothing charged, nothing reserved", async () => {
+      const { token, org, acct, inbound } = await replySetup();
+      process.env.OUTBOUND_SENDING_ENABLED = "false";
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(503);
+      expect(r.body.error.code).toBe("sending_paused");
+      expect(mail.calls).toHaveLength(0);
+      expect(await outboundOf(org.id)).toHaveLength(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      expect((await account(acct.id)).sentToday).toBe(0);
+      // Back on, the same reply goes out.
+      delete process.env.OUTBOUND_SENDING_ENABLED;
+      expect((await sendReply(token, inbound.id)).status).toBe(200);
+      expect(mail.calls).toHaveLength(1);
+    });
+
+    it("an exhausted shared-sender allowance stops it: 429, nothing sent, the counter unchanged", async () => {
+      process.env.SYSTEM_SENDER_DAILY_CAP = "3";
+      const { token, org, acct, inbound } = await replySetup();
+      // The workspace's OTHER system account has used the whole allowance today.
+      const other = await newAccount(org.id);
+      await db.update(schema.emailAccounts).set({ sentToday: 3, sentTodayDate: svc.accountDay() }).where(eq(schema.emailAccounts.id, other.id));
+      // `acct` is the campaign's sender; `other` is merely newer.
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(429);
+      expect(r.body.error.code).toBe("daily_limit");
+      expect(r.body.error.message).toMatch(/shared sender's daily limit .* \(3\/day\)/);
+      expect(mail.calls).toHaveLength(0);
+      expect(await outboundOf(org.id)).toHaveLength(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      expect((await account(acct.id)).sentToday).toBe(0);
+      expect((await account(other.id)).sentToday).toBe(3);
+    });
+
+    it("the sender's own daily cap and the workspace ceiling stop it too", async () => {
+      const a = await replySetup({ accountPatch: { provider: "smtp", dailyLimit: 1, configEncrypted: crypto.encryptJson({ host: "smtp.tenantco.example", port: 587 }) } });
+      expect((await sendReply(a.token, a.inbound.id)).status).toBe(200);
+      const second = await newInbound(a.org.id, a.campaign.id);
+      const r = await sendReply(a.token, second.inbound.id);
+      expect([r.status, r.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(mail.calls).toHaveLength(1);
+      expect((await account(a.acct.id)).sentToday).toBe(1);
+      expect(await usageOf(a.org.id, "emails")).toBe(1);
+
+      const b = await replySetup({ accountPatch: { provider: "smtp", configEncrypted: crypto.encryptJson({ host: "smtp.tenantco.example", port: 587 }) } });
+      await db.update(schema.organizations).set({ planLimits: { emailsPerDay: 1 } }).where(eq(schema.organizations.id, b.org.id));
+      expect((await sendReply(b.token, b.inbound.id)).status).toBe(200);
+      const again = await newInbound(b.org.id, b.campaign.id);
+      const r2 = await sendReply(b.token, again.inbound.id);
+      expect([r2.status, r2.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(r2.body.error.message).toMatch(/daily sending ceiling \(1 across all senders\)/);
+      expect((await account(b.acct.id)).sentToday).toBe(1);
+    });
+
+    it("a halted shared sender stops it: 429 with the reason", async () => {
+      const { token, org, campaign, inbound } = await replySetup();
+      for (let i = 0; i < 40; i++) {
+        await db.insert(schema.messages).values({ orgId: org.id, campaignId: campaign.id, toEmail: `b${i}@example.com`, subject: "s", bodyText: "b", status: i < 20 ? "bounced" : "sent", sentAt: new Date(Date.now() - 86_400_000), bouncedAt: i < 20 ? new Date(Date.now() - 86_400_000) : null, createdAt: new Date(Date.now() - 2 * 86_400_000) });
+      }
+      const r = await sendReply(token, inbound.id);
+      expect([r.status, r.body.error.code]).toEqual([429, "sending_halted"]);
+      expect(mail.calls).toHaveLength(0);
+    });
+
+    it("replies outside a campaign count toward the shared-sender allowance, and deleting the account does not reset it", async () => {
+      process.env.SYSTEM_SENDER_DAILY_CAP = "1";
+      const { token, org, acct, inbound } = await replySetup({ noCampaign: true });
+      expect((await sendReply(token, inbound.id)).status).toBe(200);
+      expect((await svc.systemSenderHealthForOrg(db, org)).sentToday).toBe(1);
+      await db.delete(schema.emailAccounts).where(eq(schema.emailAccounts.id, acct.id));
+      const fresh = await newAccount(org.id);
+      const next = await newInbound(org.id, null);
+      const r = await sendReply(token, next.inbound.id);
+      expect([r.status, r.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(mail.calls).toHaveLength(1);
+      expect((await account(fresh.id)).sentToday).toBe(0);
+    });
+
+    it("a lead whose stored email is two addresses gets a 400 and nothing is sent to either", async () => {
+      const tag = uid();
+      const { token, org, acct, inbound } = await replySetup({ leadPatch: { email: `a-${tag}@x.example, suppressed-${tag}@x.example` } });
+      await db.insert(schema.suppressions).values({ orgId: org.id, email: `suppressed-${tag}@x.example`, reason: "unsubscribe" });
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toMatch(/not a single valid address/);
+      expect(mail.calls).toHaveLength(0);
+      expect(await outboundOf(org.id)).toHaveLength(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      expect((await account(acct.id)).sentToday).toBe(0);
+      for (const email of [`<a-${tag}@x.example>`, `"Pat" <a-${tag}@x.example>`, `a-${tag}@x.example;b-${tag}@x.example`]) {
+        const other = await newInbound(org.id, null, { email });
+        expect((await sendReply(token, other.inbound.id)).status).toBe(400);
+      }
+      expect(mail.calls).toHaveLength(0);
+    });
+
+    it("a suppressed address gets a 409 whatever spelling the lead row holds", async () => {
+      const victim = `victim-${uid()}@x.example`;
+      const { token, org, acct, inbound } = await replySetup({ leadPatch: { email: `  ${victim.replace("victim", "Victim")} ` } });
+      await db.insert(schema.suppressions).values({ orgId: org.id, email: victim, reason: "unsubscribe" });
+      const r = await sendReply(token, inbound.id);
+      expect([r.status, r.body.error.code]).toEqual([409, "suppressed"]);
+      const upper = await newInbound(org.id, null, { email: victim.toUpperCase() });
+      expect((await sendReply(token, upper.inbound.id)).status).toBe(409);
+      expect(mail.calls).toHaveLength(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      expect((await account(acct.id)).sentToday).toBe(0);
+    });
+
+    it("a normal reply goes to exactly one canonical recipient, carries one-click unsubscribe, takes one slot - and the link works", async () => {
+      const addr = `mixed-${uid()}@x.example`;
+      const { token, org, acct, lead, inbound } = await replySetup({ leadPatch: { email: `  ${addr.replace("mixed", "Mixed")} ` } });
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(200);
+      expect(r.body.sent).toBe(true);
+
+      expect(mail.calls).toHaveLength(1);
+      const sent = mail.calls[0].input;
+      expect(sent.to).toBe(addr);
+      expect(sent.to).not.toMatch(/[,;\s<>]/);
+      expect(sent.subject).toBe(REPLY.subject);
+      expect(sent.text.startsWith(REPLY.body)).toBe(true);
+      const headers = Object.fromEntries(Object.entries(sent.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+      expect(headers["list-unsubscribe-post"]).toBe("List-Unsubscribe=One-Click");
+      const tokenInHeader = /\/t\/u\/([A-Za-z0-9_-]+)>/.exec(headers["list-unsubscribe"] ?? "")?.[1];
+      expect(tokenInHeader).toBeTruthy();
+      expect(sent.text).toContain(`/t/u/${tokenInHeader}`);
+      for (const h of Object.keys(headers)) expect(["x-prospex-message", "list-unsubscribe", "list-unsubscribe-post"]).toContain(h);
+
+      // One slot, one unit, one stored message addressed canonically and carrying the token.
+      expect((await account(acct.id)).sentToday).toBe(1);
+      expect((await account(acct.id)).sentTodayDate).toBe(svc.accountDay());
+      expect(await usageOf(org.id, "emails")).toBe(1);
+      const [msg] = await outboundOf(org.id);
+      expect([msg.toEmail, msg.status, msg.trackingToken, msg.id]).toEqual([addr, "sent", tokenInHeader, r.body.messageId]);
+
+      // The link in that email unsubscribes the lead (RFC 8058 one-click POST).
+      const un = await req("POST", `/t/u/${tokenInHeader}`, undefined, "List-Unsubscribe=One-Click", { "content-type": "application/x-www-form-urlencoded" });
+      expect(un.status).toBe(200);
+      expect((await leadRow(lead.id)).status).toBe("unsubscribed");
+      const sup = await db.select().from(schema.suppressions).where(eq(schema.suppressions.orgId, org.id));
+      expect(sup.map((x: any) => [x.email, x.reason])).toEqual([[addr, "unsubscribe_link"]]);
+      // And from then on a reply to them is refused.
+      const again = await sendReply(token, inbound.id);
+      expect(again.status).toBe(409);
+      expect(mail.calls).toHaveLength(1);
+      expect((await account(acct.id)).sentToday).toBe(1);
+    });
+
+    it("a reply longer than 20,000 characters is refused before anything is reserved", async () => {
+      const { token, org, acct, inbound } = await replySetup();
+      const r = await sendReply(token, inbound.id, { subject: "Re: hi", body: "x".repeat(20_001) });
+      expect(r.status).toBe(400);
+      expect(mail.calls).toHaveLength(0);
+      expect((await account(acct.id)).sentToday).toBe(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+    });
+
+    it("a failed provider send gives back the slot and the monthly unit, and reports a category", async () => {
+      const { token, org, acct, inbound } = await replySetup();
+      mail.impl = async () => ({ ok: false, provider: "resend", error: "API key re_PLATFORMKEY0123456789abcd is invalid for team acct_9f8e7d6c5b4a3210" });
+      const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const r = await sendReply(token, inbound.id);
+      expect(r.status).toBe(400);
+      expect(r.body.error.message).toBe("Send failed: Sender rejected our credentials - reconnect the sender");
+      expect(mail.calls).toHaveLength(1);
+      expect((await account(acct.id)).sentToday).toBe(0);
+      expect(await usageOf(org.id, "emails")).toBe(0);
+      const [msg] = await outboundOf(org.id);
+      expect([msg.status, msg.error]).toEqual(["failed", "Sender rejected our credentials - reconnect the sender"]);
+      const everything = JSON.stringify([r.body, msg, warn.mock.calls]);
+      expect(everything).not.toContain("re_PLATFORMKEY0123456789abcd");
+      expect(everything).not.toContain("acct_9f8e7d6c5b4a3210");
+      // The slot it gave back is usable: the next attempt goes out.
+      mail.impl = null;
+      expect((await sendReply(token, inbound.id)).status).toBe(200);
+      expect((await account(acct.id)).sentToday).toBe(1);
+      expect(await usageOf(org.id, "emails")).toBe(1);
+    });
+
+    it("15 parallel replies against a cap of 7 never send more than 7", async () => {
+      for (const kind of ["shared sender cap", "own sender daily limit"] as const) {
+        mail.calls = [];
+        if (kind === "shared sender cap") process.env.SYSTEM_SENDER_DAILY_CAP = "7";
+        else delete process.env.SYSTEM_SENDER_DAILY_CAP;
+        const { token, org, acct, campaign } = await replySetup(kind === "shared sender cap" ? {} : { accountPatch: { provider: "smtp", dailyLimit: 7, configEncrypted: crypto.encryptJson({ host: "smtp.tenantco.example", port: 587 }) } });
+        const inbounds = [];
+        for (let i = 0; i < 15; i++) inbounds.push((await newInbound(org.id, campaign.id)).inbound);
+        const results = await Promise.all(inbounds.map((m) => sendReply(token, m.id)));
+        const sent = results.filter((x) => x.status === 200).length;
+        const refused = results.filter((x) => x.status === 429 && x.body?.error?.code === "daily_limit").length;
+        expect(sent, kind).toBeLessThanOrEqual(7);
+        expect(sent, kind).toBeGreaterThan(0);
+        expect(sent + refused, kind).toBe(15);
+        expect(mail.calls, kind).toHaveLength(sent);
+        expect(new Set(mail.calls.map((x) => x.input.to)).size, kind).toBe(sent);
+        expect((await account(acct.id)).sentToday, kind).toBe(sent);
+        expect(await usageOf(org.id, "emails"), kind).toBe(sent);
+        expect((await outboundOf(org.id)).filter((m: any) => m.status === "sent"), kind).toHaveLength(sent);
+      }
+    });
+  });
+
+  // ── C (re-test): request-supplied text is bounded before it is stored or scanned ──
+
+  describe("bounded request text", () => {
+    it("PATCH /v1/auth/org refuses a 900 KB setting, too many keys, and an oversized total", async () => {
+      const { token, org } = await signup("caps");
+      const big = await req("PATCH", "/v1/auth/org", token, { settings: { valueProp: "x".repeat(900_000) } });
+      expect(big.status).toBe(400);
+      const manyKeys = await req("PATCH", "/v1/auth/org", token, { settings: Object.fromEntries(Array.from({ length: 61 }, (_, i) => [`k${i}`, "v"])) });
+      expect(manyKeys.status).toBe(400);
+      const total = await req("PATCH", "/v1/auth/org", token, { settings: Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`k${i}`, "v".repeat(4_900)])) });
+      expect(total.status).toBe(400);
+      // Nothing was stored, and an ordinary value still saves.
+      expect((await db.query.organizations.findFirst({ where: eq(schema.organizations.id, org.id) })).settings).toEqual(org.settings);
+      const ok = await req("PATCH", "/v1/auth/org", token, { settings: { valueProp: "We cut onboarding time 40%." } });
+      expect(ok.status).toBe(200);
+      expect((await db.query.organizations.findFirst({ where: eq(schema.organizations.id, org.id) })).settings.valueProp).toBe("We cut onboarding time 40%.");
+    });
+
+    it("a campaign step cannot store an unbounded template", async () => {
+      const { token, org } = await signup("stepcaps");
+      const acct = await newAccount(org.id);
+      const make = (step: Record<string, unknown>) => req("POST", "/v1/campaigns", token, { name: "c", emailAccountId: acct.id, steps: [{ subjectTemplate: "Hi", bodyTemplate: "Hello", ...step }] });
+      expect((await make({ bodyTemplate: "b".repeat(20_001) })).status).toBe(400);
+      expect((await make({ subjectTemplate: "s".repeat(501) })).status).toBe(400);
+      expect((await make({ aiInstructions: "i".repeat(5_001) })).status).toBe(400);
+      expect((await make({ variants: [{ subjectTemplate: "s", bodyTemplate: "b".repeat(20_001) }] })).status).toBe(400);
+      expect((await make({ bodyTemplate: "b".repeat(20_000), subjectTemplate: "s".repeat(500), aiInstructions: "i".repeat(5_000) })).status).toBe(201);
+    });
+
+    it("POST /v1/campaigns/generate with an 80,000-space lead title answers in well under a second", async () => {
+      const { token } = await signup("gen");
+      const body = { lead: { fullName: "Pat Prospect", title: " ".repeat(80_000), company: { name: "Acme", description: " \n ".repeat(20_000) } }, sender: { name: "Asha", company: "TenantCo", valueProp: "We cut onboarding time 40%." } };
+      // Template path (no model configured).
+      let started = performance.now();
+      const plain = await req("POST", "/v1/campaigns/generate", token, body);
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect([200, 400]).toContain(plain.status);
+      // Model path: the prompt builder fences that title, which is where the time used to go.
+      const seen = stubModel({ content: JSON.stringify({ subject: "Idea for Acme", body: "Hi Pat,\n\nWe cut onboarding time 40% for teams like yours. Open to a quick call next week?\n\nAsha" }) });
+      started = performance.now();
+      const ai = await req("POST", "/v1/campaigns/generate", token, body);
+      expect(performance.now() - started).toBeLessThan(1000);
+      expect([200, 400]).toContain(ai.status);
+      if (ai.status === 200) {
+        expect(seen).toHaveLength(1);
+        // Bounded prompt as well as bounded time.
+        expect(JSON.stringify(seen[0].body.messages).length).toBeLessThan(12_000);
+        expect(ai.body.personalized).toBe(true);
+      }
     });
   });
 });

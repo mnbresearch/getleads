@@ -4,6 +4,7 @@ import { apiFetch, fmtDate } from "../lib/api";
 import { BUCKET_COPY, type ClientAttention, type ClientRow, type ClientStats, type TargetProgress } from "../lib/clients";
 import { ClientDot, ClientFormModal, StatusPill, TargetBar, type ClientFormValue, toClientPayload } from "../components/ClientBits";
 import { EmailStatusBadge, LoadError, Page, ScoreBar, Spinner, Stat, useFlash, useToast } from "../components/ui";
+import { useMe } from "../lib/me";
 
 interface Detail {
   client: Omit<ClientRow, "stats" | "attention" | "target"> & { shareToken: string | null };
@@ -27,6 +28,8 @@ const STATUS_TOAST: Record<string, string> = {
 export function ClientDetailPage() {
   const { id = "" } = useParams();
   const [d, setD] = useState<Detail | null>(null);
+  // The report link is owner/admin only on the server (see the report card below).
+  const { canManage } = useMe();
   const [err, setErr] = useState<string | null>(null);
   const [editing, setEditing] = useState(false);
   const [acting, setActing] = useState<string | null>(null);
@@ -220,7 +223,9 @@ export function ClientDetailPage() {
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Client report</div>
             <p className="mt-1 max-w-xl text-sm text-ink-300">A read-only page you can send {c.name}: their pipeline, delivery against target, and every lead's name, title, company and stage. Email addresses, phone numbers and profile links are never included.</p>
           </div>
-          {c.status === "archived" ? (
+          {/* Creating, replacing and turning off the link are owner/admin only on the
+              server; a member is told so instead of being handed buttons that refuse. */}
+          {!canManage ? null : c.status === "archived" ? (
             shareUrl ? <button className="btn-secondary" onClick={() => share(false)}>Turn off</button> : null
           ) : shareUrl ? (
             <button className="btn-secondary" onClick={() => share(false)}>Turn off</button>
@@ -228,10 +233,12 @@ export function ClientDetailPage() {
             <button className="btn-primary" onClick={() => share(true)}>Create report link</button>
           )}
         </div>
-        <label className="mt-3 flex items-center gap-2 text-sm text-ink-300">
+        {!canManage && <p className="mt-3 text-xs text-ink-400">Only owners and admins can create or change the client report link.{shareUrl && c.status !== "archived" ? " You can still copy and open the current one." : !shareUrl ? " Ask one of them to create it." : ""}</p>}
+        <label className={`mt-3 flex items-center gap-2 text-sm text-ink-300 ${canManage ? "" : "opacity-60"}`}>
           <input
             type="checkbox"
             checked={c.reportShowTarget}
+            disabled={!canManage}
             onChange={async (e) => {
               // Optimistic: the box ticks on click rather than a round-trip later, and goes
               // back (with the reason) if the server refuses.
@@ -259,7 +266,7 @@ export function ClientDetailPage() {
             <input className="input flex-1 font-mono text-xs" readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} aria-label="Report link" />
             <button className="btn-secondary" onClick={() => navigator.clipboard.writeText(shareUrl).then(() => toast("Link copied"))}>Copy</button>
             <a className="btn-secondary" href={shareUrl} target="_blank" rel="noopener noreferrer">Open</a>
-            <button className="btn-secondary" onClick={() => share(true)} title="Issues a new link; the old one stops working">New link</button>
+            {canManage && <button className="btn-secondary" onClick={() => share(true)} title="Issues a new link; the old one stops working">New link</button>}
           </div>
         )}
       </div>

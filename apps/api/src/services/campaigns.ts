@@ -283,7 +283,10 @@ export async function systemSenderHealthForOrg(
       sentToday: sql<number>`count(*) FILTER (WHERE ${messages.status} IN ('sent','sending','replied','bounced','unknown') AND ${messages.createdAt} >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::int`,
     })
     .from(messages)
-    .innerJoin(campaigns, eq(campaigns.id, messages.campaignId))
+    // LEFT joins on purpose. A message whose sender account was deleted, and a manual reply
+    // that belongs to no campaign at all, both have nothing to join to - and both must still
+    // count, or deleting the account (or replying outside a campaign) resets the allowance.
+    .leftJoin(campaigns, eq(campaigns.id, messages.campaignId))
     .leftJoin(emailAccounts, eq(emailAccounts.id, campaigns.emailAccountId))
     .where(
       and(
@@ -688,6 +691,43 @@ export async function reserveSendSlot(input: {
     await releaseDailySlot(input.accountId, input.today).catch(() => {});
     throw e;
   }
+}
+
+/**
+ * The gates for a send that does not come from a sequence (a human-approved reply).
+ *
+ * The reply route sent mail with none of them: it ignored the platform kill switch, the
+ * sender's daily cap, the workspace's ceiling and the shared sender's cap, so it was the one
+ * path that could relay unlimited mail through the platform's own address during an incident.
+ * It now takes a slot exactly as a sequence send does. Returns a `release` to give the slot
+ * back when the send does not go out.
+ */
+export async function reserveManualSend(org: Organization, account: EmailAccount): Promise<{ ok: true; release: () => Promise<void> } | { ok: false; status: 429 | 503; code: string; message: string }> {
+  const { db } = getDb();
+  if (!outboundSendingEnabled()) return { ok: false, status: 503, code: "sending_paused", message: "Sending is paused platform-wide by the operator. Nothing was sent; try again once sending resumes." };
+  const health = await senderHealth(db, org, account);
+  if (health.status === "halt") return { ok: false, status: 429, code: "sending_halted", message: `Sending from this sender is halted for deliverability: ${health.reasons[0] ?? "too many bounces or complaints"}.` };
+  const today = accountDay();
+  const orgCeiling = orgDailySendCeiling(org);
+  const systemCap = account.provider === "system" ? Math.min(health.dailyCap ?? systemSenderDailyCap(org), health.recommendedDailyCap) : null;
+  const slot = await reserveSendSlot({
+    orgId: org.id,
+    accountId: account.id,
+    today,
+    accountCap: Math.min(account.dailyLimit, health.recommendedDailyCap),
+    orgCeiling,
+    system: systemCap !== null ? { cap: systemCap, sentFloor: health.sentToday ?? 0 } : null,
+  });
+  if (!slot.ok) {
+    const message =
+      slot.reason === "org_ceiling"
+        ? `Your workspace has reached its daily sending ceiling (${orgCeiling} across all senders). Try again tomorrow.`
+        : slot.reason === "system_cap"
+          ? `The shared sender's daily limit for your workspace is reached (${systemCap ?? 0}/day). Connect your own sending domain to send more, or try again tomorrow.`
+          : "This sender has reached its daily limit. Try again tomorrow.";
+    return { ok: false, status: 429, code: "daily_limit", message };
+  }
+  return { ok: true, release: () => releaseDailySlot(account.id, today).catch(() => {}) };
 }
 
 /**

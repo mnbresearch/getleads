@@ -360,16 +360,18 @@ describe("F6: tenant SMTP transports", () => {
 
     const sent = await mailer.sendMail({ provider: "smtp", smtp: { host: "smtp.acme.example", port: 587, user: "u", pass: "p" } }, input);
     expect(sent).toEqual({ ok: true, provider: "smtp", providerMessageId: "<m@test>" });
-    expect(transports[0]).toEqual({ host: "142.250.1.109", port: 587, secure: false, auth: { user: "u", pass: "p" }, servername: "smtp.acme.example", tls: { servername: "smtp.acme.example" } });
+    // Bounded timeouts: a host that drops the connection must not hold a request or a worker for minutes.
+    const timeouts = { connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000 };
+    expect(transports[0]).toEqual({ host: "142.250.1.109", port: 587, secure: false, auth: { user: "u", pass: "p" }, ...timeouts, servername: "smtp.acme.example", tls: { servername: "smtp.acme.example" } });
 
     expect(await mailer.testMailer({ provider: "smtp", smtp: { host: "smtp.acme.example", port: 465 } })).toEqual({ ok: true });
-    expect(transports[1]).toEqual({ host: "142.250.1.109", port: 465, secure: true, auth: undefined, servername: "smtp.acme.example", tls: { servername: "smtp.acme.example" } });
+    expect(transports[1]).toEqual({ host: "142.250.1.109", port: 465, secure: true, auth: undefined, ...timeouts, servername: "smtp.acme.example", tls: { servername: "smtp.acme.example" } });
     // Resolved once per transport, by us. nodemailer is handed an address, so it resolves nothing.
     expect(calls).toEqual(["smtp.acme.example", "smtp.acme.example"]);
 
     // A public IP typed as the host has no name to verify against, as before.
     await mailer.sendMail({ provider: "smtp", smtp: { host: "8.8.8.8", port: 25 } }, input);
-    expect(transports[2]).toEqual({ host: "8.8.8.8", port: 25, secure: false, auth: undefined });
+    expect(transports[2]).toEqual({ host: "8.8.8.8", port: 25, secure: false, auth: undefined, connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 20_000 });
   });
 
   it("only mail ports: the transport is not a port scanner for public hosts either", async () => {

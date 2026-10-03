@@ -82,7 +82,7 @@ export function requireRole(...roles: string[]): MiddlewareHandler<Env> {
     if (a?.user && !allowed.includes(a.user.role)) {
       // A refused privileged action is exactly what an audit log is for. Imported lazily:
       // audit.ts imports this module for clientIp.
-      await import("./lib/audit.js").then((m) => m.audit(c, "role.denied", { result: "denied", data: { method: c.req.method, path: c.req.path, role: a.user!.role, required: allowed } })).catch(() => {});
+      if (!(c as unknown as { get: (k: string) => unknown }).get("roleAuditHandled")) await import("./lib/audit.js").then((m) => m.audit(c, "role.denied", { result: "denied", data: { method: c.req.method, path: c.req.path, role: a.user!.role, required: allowed } })).catch(() => {});
       throw new ApiError(403, `Only a workspace ${allowed.join(" or ")} can do this. Your role is "${a.user.role}" - ask an owner or admin.`, "forbidden_role");
     }
     await next();

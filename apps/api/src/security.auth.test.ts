@@ -663,16 +663,167 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       expect(okRows[0].actorUserId).toBe(u.userId);
     });
 
-    it("a success resets the count; failures older than the window do not count", async () => {
+    it("a success clears that address's own failures only; failures older than the window do not count", async () => {
       const u = await signup("reset-count");
-      for (let i = 0; i < 4; i++) expect((await req("POST", "/v1/auth/login", null, { email: u.email, password: "nope-nope-nope" })).status).toBe(401);
-      expect((await req("POST", "/v1/auth/login", null, { email: u.email, password: u.password })).status).toBe(200);
-      for (let i = 0; i < 4; i++) expect((await req("POST", "/v1/auth/login", null, { email: u.email, password: "nope-nope-nope" })).status).toBe(401);
-      expect((await req("POST", "/v1/auth/login", null, { email: u.email, password: u.password })).status).toBe(200);
+      const home = { "cf-connecting-ip": `203.0.113.${1 + Math.floor(Math.random() * 250)}` };
+      const login = (password: string, headers: Record<string, string> = {}) => req("POST", "/v1/auth/login", null, { email: u.email, password }, headers);
+      // Four typos at home, then the right password, twice over: never locked.
+      for (let round = 0; round < 2; round++) {
+        for (let i = 0; i < 4; i++) expect((await login("nope-nope-nope", home)).status).toBe(401);
+        expect((await login(u.password, home)).status).toBe(200);
+      }
+      // Four wrong guesses from strangers; the owner signs in from home; ONE more stranger
+      // guess still makes five - the owner's success did not hand the guessers a fresh count.
+      for (let i = 0; i < 4; i++) expect((await login("guess-guess-guess")).status).toBe(401);
+      expect((await login(u.password, home)).status).toBe(200);
+      expect((await login("guess-guess-guess")).status).toBe(401);
+      expect((await login(u.password)).status).toBe(429);
+      expect((await login(u.password, home)).status).toBe(200);
 
       const old = await signup("old-fails");
-      await db.insert(S.loginAttempts).values(Array.from({ length: 6 }, () => ({ subject: old.email, succeeded: false, createdAt: new Date(Date.now() - 16 * 60 * 1000) })));
+      await db.insert(S.loginAttempts).values(Array.from({ length: 6 }, () => ({ subject: old.email, ip: "192.0.2.77", succeeded: false, createdAt: new Date(Date.now() - 16 * 60 * 1000) })));
       expect((await req("POST", "/v1/auth/login", null, { email: old.email, password: old.password })).status).toBe(200);
+    });
+
+    // The lock must not be a way for a stranger to shut the owner out.
+    describe("the lock cannot be used against the owner", () => {
+      /** Fixed, distinct addresses per test (TEST-NET-3), so "known" is exactly what the test made it. */
+      const net = () => {
+        const n = 1 + Math.floor(Math.random() * 200);
+        return { A: { "cf-connecting-ip": `203.0.113.${n}` }, B: { "cf-connecting-ip": `203.0.113.${n + 20}` }, C: { "cf-connecting-ip": `203.0.113.${n + 40}` } };
+      };
+      const login = (email: string, password: string, headers: Record<string, string>) => req("POST", "/v1/auth/login", null, { email, password }, headers);
+
+      it("(a) five failures from address B lock B; the owner on address A, who has signed in there before, still gets in", async () => {
+        const { A: home, B: stranger } = net();
+        const u = await signup("dos-a");
+        expect((await login(u.email, u.password, home)).status).toBe(200);
+        for (let i = 0; i < 5; i++) expect((await login(u.email, `guess-number-${i}`, stranger)).status).toBe(401);
+        const locked = await login(u.email, u.password, stranger);
+        expect(locked.status).toBe(429);
+        expect(locked.body.error.code).toBe("too_many_attempts");
+        // The owner is not locked out - and not just once.
+        expect((await login(u.email, u.password, home)).status).toBe(200);
+        expect((await login(u.email, u.password, home)).status).toBe(200);
+        // A wrong password from home is still wrong, and B is still locked after the owner's sign-ins.
+        expect((await login(u.email, "typo-typo-typo", home)).status).toBe(401);
+        expect((await login(u.email, u.password, stranger)).status).toBe(429);
+      });
+
+      it("(b) the owner's own address locks itself after five wrong passwords, and failures cannot make an address known", async () => {
+        const { A: home, B: other } = net();
+        const u = await signup("dos-b");
+        expect((await login(u.email, u.password, home)).status).toBe(200);
+        for (let i = 0; i < 5; i++) expect((await login(u.email, `wrong-at-home-${i}`, home)).status).toBe(401);
+        expect((await login(u.email, u.password, home)).status).toBe(429);
+        // Only successes make an address known: B has failed (once it is allowed to try) and is
+        // judged account-wide like any stranger, so it is locked by home's five failures too.
+        expect((await login(u.email, u.password, other)).status).toBe(429);
+        const rows = await db.select().from(S.loginAttempts).where(S.eq(S.loginAttempts.subject, u.email));
+        expect(rows.filter((r: any) => r.succeeded && r.ip === other["cf-connecting-ip"])).toHaveLength(0);
+        // Reset by email clears it everywhere, including for the address that locked itself.
+        mocks.sent.length = 0;
+        await req("POST", "/v1/auth/password/forgot", null, { email: u.email });
+        const token = mocks.sent.find((m) => m.to === u.email)!.text.match(/token=([\w-]+)/)![1];
+        expect((await req("POST", "/v1/auth/password/reset", null, { token, password: "fresh-after-reset-1" }, other)).status).toBe(200);
+        expect((await login(u.email, "fresh-after-reset-1", home)).status).toBe(200);
+        expect((await login(u.email, "fresh-after-reset-1", other)).status).toBe(200);
+      });
+
+      it("(c) after five failures from B a brand-new address C is locked too: spreading guesses over addresses still fails", async () => {
+        const { A: home, B: stranger, C: fresh } = net();
+        const u = await signup("dos-c");
+        expect((await login(u.email, u.password, home)).status).toBe(200);
+        for (let i = 0; i < 5; i++) expect((await login(u.email, `guess-number-${i}`, stranger)).status).toBe(401);
+        expect((await login(u.email, u.password, fresh)).status).toBe(429);
+        // ...and it stays that way after the owner signs in from home (their success is theirs alone).
+        expect((await login(u.email, u.password, home)).status).toBe(200);
+        expect((await login(u.email, "another-guess-1", fresh)).status).toBe(429);
+        // One failure each from many addresses adds up the same way.
+        const v = await signup("dos-c2");
+        for (let i = 0; i < 5; i++) expect((await login(v.email, `spread-${i}`, { "cf-connecting-ip": `192.0.2.${10 + i}` })).status).toBe(401);
+        expect((await login(v.email, v.password, { "cf-connecting-ip": "192.0.2.99" })).status).toBe(429);
+        // Spoofing the address header buys nothing when the proxy setting says not to believe
+        // it: under "xff" cf-connecting-ip is ignored, so a claimed "known" address is not one.
+        const { env } = await import("./env.js");
+        const saved = env.trustedProxy;
+        env.trustedProxy = "xff";
+        try {
+          const spoofed = await req("POST", "/v1/auth/login", null, { email: u.email, password: u.password }, { ...home, "x-forwarded-for": "198.51.100.200" });
+          expect(spoofed.status).toBe(429);
+        } finally {
+          env.trustedProxy = saved;
+        }
+      });
+
+      it("(d) password change works while a stranger has the login form locked; its own five wrong guesses lock only password change", async () => {
+        const { A: home, B: stranger, C: fresh } = net();
+        const u = await signup("dos-d");
+        for (let i = 0; i < 5; i++) expect((await login(u.email, `guess-number-${i}`, stranger)).status).toBe(401);
+        expect((await login(u.email, u.password, fresh)).status).toBe(429);
+        // The signed-in owner changes their password regardless.
+        const changed = await req("POST", "/v1/auth/password/change", u.token, { currentPassword: u.password, newPassword: "changed-while-locked-1" }, home);
+        expect(changed.status, changed.text).toBe(200);
+        const token = changed.body.token;
+        // (Proving the old password also wiped the stale guesses: the new one works from anywhere.)
+        expect((await login(u.email, "changed-while-locked-1", fresh)).status).toBe(200);
+
+        // Now someone holding the session guesses the current password through password/change.
+        for (let i = 0; i < 5; i++) {
+          const r = await req("POST", "/v1/auth/password/change", token, { currentPassword: `not-it-${i}`, newPassword: "would-be-new-password-1" }, { "cf-connecting-ip": `192.0.2.${50 + i}` });
+          expect(r.status).toBe(403);
+        }
+        const blocked = await req("POST", "/v1/auth/password/change", token, { currentPassword: "changed-while-locked-1", newPassword: "would-be-new-password-1" }, home);
+        expect(blocked.status).toBe(429);
+        expect(blocked.body.error.code).toBe("too_many_attempts");
+        expect(Number(blocked.headers.get("retry-after"))).toBeGreaterThan(0);
+        // The login form is not affected by that, from a known address or a new one.
+        expect((await login(u.email, "changed-while-locked-1", home)).status).toBe(200);
+        expect((await login(u.email, "changed-while-locked-1", { "cf-connecting-ip": "192.0.2.201" })).status).toBe(200);
+        // The password was not changed by any of it.
+        expect((await login(u.email, "would-be-new-password-1", home)).status).toBe(401);
+      });
+
+      it("(e) admin: after a sign-in from address A, five bad attempts from B lock B and new addresses, not A", async () => {
+        const { A: office, B: stranger, C: fresh } = net();
+        const adminLogin = (password: string, headers: Record<string, string>) => req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password }, headers);
+        await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
+        try {
+          expect((await adminLogin(ADMIN_PASSWORD, office)).status).toBe(200);
+          for (let i = 0; i < 5; i++) expect((await adminLogin(`bad-admin-guess-${i}`, stranger)).status).toBe(400);
+          expect((await adminLogin(ADMIN_PASSWORD, stranger)).status).toBe(429);
+          expect((await adminLogin(ADMIN_PASSWORD, fresh)).status).toBe(429);
+          const ok = await adminLogin(ADMIN_PASSWORD, office);
+          expect(ok.status).toBe(200);
+          expect((await req("GET", "/v1/admin/session", ok.body.token)).status).toBe(200);
+          // The operator's success did not reopen the door for the guessers.
+          expect((await adminLogin(ADMIN_PASSWORD, fresh)).status).toBe(429);
+          // And the office address still locks itself.
+          for (let i = 0; i < 5; i++) expect((await adminLogin(`office-typo-${i}`, office)).status).toBe(400);
+          expect((await adminLogin(ADMIN_PASSWORD, office)).status).toBe(429);
+        } finally {
+          await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
+        }
+      });
+
+      it("IPv6 addresses are matched by /64; things that are not addresses are never 'known'", async () => {
+        const L = await import("./lib/loginGuard.js");
+        expect(L.ipKey("203.0.113.9")).toBe("203.0.113.9");
+        expect(L.ipKey("2401:4900:1C2A:0034:abcd:ef01:2345:6789")).toBe("2401:4900:1c2a:34::/64");
+        expect(L.ipKey("2401:4900:1c2a:34::1")).toBe("2401:4900:1c2a:34::/64");
+        expect(L.ipKey("2001:db8::1")).toBe("2001:db8:0:0::/64");
+        expect(L.ipKey("::ffff:203.0.113.9")).toBe("203.0.113.9");
+        for (const junk of ["unknown", "", null, undefined, "not-an-ip", "203.0.113.9, 10.0.0.1", "' or 1=1 --"]) expect(L.ipKey(junk as any)).toBeNull();
+        const u = await signup("v6");
+        const morning = { "cf-connecting-ip": "2401:4900:1c2a:77:1111:2222:3333:4444" };
+        const evening = { "cf-connecting-ip": "2401:4900:1c2a:77:aaaa:bbbb:cccc:dddd" };
+        expect((await login(u.email, u.password, morning)).status).toBe(200);
+        for (let i = 0; i < 5; i++) expect((await login(u.email, `guess-number-${i}`, { "cf-connecting-ip": `2001:db8:${i + 1}::1` })).status).toBe(401);
+        // Same network, different privacy address: still the owner's known network.
+        expect((await login(u.email, u.password, evening)).status).toBe(200);
+        expect(await L.isKnownIp(u.email, "unknown")).toBe(false);
+        expect(await L.isKnownIp(u.email, "2001:db8:1::1")).toBe(false);
+      });
     });
 
     it("an unknown address locks the same way and costs a password check, so neither says who is a customer", async () => {
@@ -710,7 +861,8 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       const rows = (await auditRows({ action: "admin.login" })).filter((r: any) => r.createdAt >= since);
       expect(rows.filter((r: any) => r.result === "ok").length).toBe(1);
       expect(rows.filter((r: any) => r.result === "failed").length).toBe(5);
-      expect(rows.filter((r: any) => r.result === "denied").length).toBe(1);
+      // At most one "locked" row a minute is written for a subject (another test may have used this minute's).
+      expect(rows.filter((r: any) => r.result === "denied").length).toBeLessThanOrEqual(1);
       expect(JSON.stringify(rows)).not.toContain(ADMIN_PASSWORD);
       expect(JSON.stringify(rows)).not.toContain("guess-");
       await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
@@ -897,6 +1049,29 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       expect(seen).toEqual(entries.map((e) => e.id));
       expect((await req("GET", "/v1/audit-log?limit=201", u.token)).status).toBe(400);
       expect((await req("GET", "/v1/audit-log?before=yesterday", u.token)).status).toBe(400);
+    });
+  });
+
+  // ── Workspace settings are bounded ──
+  describe("workspace settings caps", () => {
+    it("PATCH /v1/auth/org refuses oversized settings with a 400 that says why, and stores nothing", async () => {
+      const u = await signup("caps");
+      const patch = (settings: Record<string, unknown>) => req("PATCH", "/v1/auth/org", u.token, { settings });
+      // 900 KB of "value proposition": under the 1 MB body limit, so it is the settings cap that answers.
+      const huge = await patch({ valueProp: "v".repeat(900 * 1024) });
+      expect(huge.status).toBe(400);
+      expect(huge.body.error.code).toBe("validation_error");
+      expect(huge.body.error.message).toMatch(/too long|too large/i);
+      expect(huge.text.length).toBeLessThan(5000); // the 900 KB is not echoed back
+      expect((await patch({ valueProp: "v".repeat(5001) })).status).toBe(400);
+      expect((await patch(Object.fromEntries(Array.from({ length: 61 }, (_, i) => [`k${i}`, "x"])))).status).toBe(400);
+      expect((await patch(Object.fromEntries(Array.from({ length: 10 }, (_, i) => [`k${i}`, "x".repeat(4000)])))).status).toBe(400); // 40 KB in total
+      expect((await patch({ ["k".repeat(61)]: "x" })).status).toBe(400);
+      expect((await me(u.token)).body.org.settings).toEqual({});
+      // What the settings page actually sends is fine.
+      const ok = await patch({ senderName: "Asha", senderCompany: "Acme", valueProp: "v".repeat(5000) });
+      expect(ok.status, ok.text).toBe(200);
+      expect(ok.body.org.settings.senderName).toBe("Asha");
     });
   });
 

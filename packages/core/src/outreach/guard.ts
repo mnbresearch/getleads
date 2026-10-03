@@ -37,7 +37,8 @@ export type GuardResult = { ok: true; subject: string; body: string; reasons: []
 
 const CTRL = /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/;
 const URL_RE = /\b(?:https?:\/\/|www\.)[^\s<>"')\]]+/gi;
-const BARE_RE = /\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,24}))\b(\/[^\s<>"')\]]*)?/gi;
+// At most 8 labels: an unbounded repeat made this quadratic on "a.a.a.a...".
+const BARE_RE = /\b((?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.){1,8}([a-z]{2,24}))\b(\/[^\s<>"')\]]*)?/gi;
 // Bounded quantifiers throughout: this runs on model output, and an unbounded `[\w.+-]+@`
 // is quadratic on a long run with no "@" in it (a 50,000-character body took seconds).
 const EMAIL_RE = /[\w.+-]{1,64}@[\w-]{1,63}(?:\.[\w-]{1,63}){1,8}/g;
@@ -87,6 +88,29 @@ const LINKABLE_TLDS = new Set(
   ).split(" "),
 );
 
+/**
+ * Domains that are shared by everyone, so "the sender's own domain" proves nothing about a
+ * link on them: free mailbox providers, and big hosts that carry open redirectors, file
+ * shares and form builders. A tenant sending from a yahoo.com address would otherwise have
+ * allowlisted r.search.yahoo.com/...RU=<anywhere>. Links on these never pass the guard; the
+ * tenant's own template (sent unchanged when a draft is rejected) can still carry them.
+ */
+const SHARED_HOSTS = new Set(
+  (
+    "gmail.com googlemail.com google.com googleusercontent.com goo.gl yahoo.com yahoo.co.in yahoo.co.uk ymail.com rocketmail.com " +
+    "outlook.com hotmail.com live.com msn.com microsoft.com office.com sharepoint.com onedrive.com icloud.com me.com mac.com apple.com " +
+    "aol.com proton.me protonmail.com pm.me zoho.com zohomail.com zoho.in yandex.com yandex.ru mail.ru gmx.com gmx.net gmx.de mail.com " +
+    "rediffmail.com fastmail.com hey.com tutanota.com facebook.com fb.com fb.me instagram.com linkedin.com lnkd.in twitter.com x.com t.co " +
+    "youtube.com youtu.be bit.ly tinyurl.com ow.ly is.gd buff.ly rebrand.ly cutt.ly t.ly rb.gy shorturl.at dropbox.com box.com wetransfer.com " +
+    "github.io githubusercontent.com vercel.app netlify.app pages.dev web.app firebaseapp.com herokuapp.com blogspot.com wordpress.com " +
+    "notion.site notion.so typeform.com jotform.com airtable.com docs.google.com forms.gle sites.google.com amazonaws.com cloudfront.net windows.net"
+  ).split(" "),
+);
+const isSharedHost = (h: string) => [...SHARED_HOSTS].some((d) => h === d || h.endsWith(`.${d}`));
+
+/** A dotted-quad (optionally with port/path): a link to an address, never to a site of the tenant's. */
+const IP_LINK_RE = /(?<![\w.])(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?(?:\/[^\s<>"')\]]*)?/g;
+
 const hostOf = (u: string) => {
   try {
     return new URL(/^https?:/i.test(u) ? u : `https://${u}`).hostname.toLowerCase().replace(/\.$/, "");
@@ -101,10 +125,17 @@ const under = (host: string, domain: string) => host === domain || host.endsWith
  * Hosts mentioned in tenant-authored text (step templates and variants, the sender's
  * signature, value proposition, company name): both full URLs and bare domains.
  */
+/**
+ * How much of one tenant-authored text is scanned for hosts and addresses. The patterns
+ * below are not linear on adversarial input ("a." repeated), and these texts come from
+ * request bodies; a real template or signature is far shorter than this.
+ */
+const MAX_HOST_SCAN = 8_000;
+
 export function hostsIn(...texts: (string | null | undefined)[]): string[] {
   const out = new Set<string>();
   for (const t of texts) {
-    const s = String(t ?? "");
+    const s = String(t ?? "").slice(0, MAX_HOST_SCAN);
     if (!s) continue;
     for (const m of s.matchAll(URL_RE)) {
       const h = bareHost(hostOf(m[0]));
@@ -120,7 +151,7 @@ export function hostsIn(...texts: (string | null | undefined)[]): string[] {
 /** Email addresses present in tenant-authored text. */
 export function emailsIn(...texts: (string | null | undefined)[]): string[] {
   const out = new Set<string>();
-  for (const t of texts) for (const m of String(t ?? "").matchAll(EMAIL_RE)) out.add(m[0].toLowerCase());
+  for (const t of texts) for (const m of String(t ?? "").slice(0, MAX_HOST_SCAN).matchAll(EMAIL_RE)) out.add(m[0].toLowerCase());
   return [...out];
 }
 
@@ -155,14 +186,15 @@ export function guardOutreach(draft: { subject?: unknown; body?: unknown } | nul
 
   if (requireSubject ? subject.length < minSubject || subject.length > maxSubject : subject.length > maxSubject) reasons.push("subject_length");
   // Checked on the untrimmed value: "Hello\r\nBcc: x" must not be rescued by a trim.
-  if (/[\r\n]/.test(subject) || CTRL.test(rawSubject)) reasons.push("subject_control_chars");
+  // NEL and the Unicode line/paragraph separators break a line in some clients as well.
+  if (/[\r\n\u0085\u2028\u2029]/.test(subject) || CTRL.test(rawSubject)) reasons.push("subject_control_chars");
   if (body.length < minBody || body.length > maxBody) reasons.push("body_length");
   if (CTRL.test(body)) reasons.push("body_control_chars");
   // Far over the limit: rejected on length alone. Nothing below needs to read 50,000
   // characters to reach the same verdict.
   if (body.length > maxBody * 4 || subject.length > maxSubject * 4) return { ok: false, reasons: [...new Set(reasons)] };
 
-  const allowed = (ctx.allowedHosts ?? []).map(bareHost).filter(Boolean);
+  const allowed = (ctx.allowedHosts ?? []).map(bareHost).filter((d) => !!d && !isSharedHost(d));
   const lead = ctx.leadDomain ? bareHost(ctx.leadDomain) : null;
   const mails = new Set((ctx.allowedEmails ?? []).filter((e): e is string => typeof e === "string" && !!e).map((e) => e.toLowerCase()));
   const hostAllowed = (h: string) => allowed.some((d) => under(h, d));
@@ -193,13 +225,17 @@ export function guardOutreach(draft: { subject?: unknown; body?: unknown } | nul
     if (!h || !hostAllowed(h)) reasons.push(`link_host_not_allowed:${(h || "unparseable").slice(0, 80)}`);
   }
   for (const m of noMail.replace(URL_RE, " ").matchAll(BARE_RE)) {
-    if (!LINKABLE_TLDS.has(m[2].toLowerCase())) continue;
+    // name.tld on a TLD mail clients do not auto-link is prose ("Node.js") - unless it has
+    // a path, which makes it an address whatever the TLD (.zip, .tk, .cfd ...).
+    if (!LINKABLE_TLDS.has(m[2].toLowerCase()) && !m[3]) continue;
     const h = bareHost(m[1]);
     if (hostAllowed(h)) continue;
     // Naming the prospect's own site is fine; a path makes it a link somewhere specific.
     if (lead && h === lead && !m[3]) continue;
     reasons.push(`link_host_not_allowed:${h.slice(0, 80)}`);
   }
+  // A bare IP address with a port or path is a link to a machine, not to anybody's website.
+  for (const m of noMail.replace(URL_RE, " ").matchAll(IP_LINK_RE)) if (/[:/]/.test(m[0])) reasons.push("link_host_not_allowed:ip-address");
   const unique = [...new Set(reasons)];
   return unique.length ? { ok: false, reasons: unique } : { ok: true, subject, body, reasons: [] };
 }
@@ -230,7 +266,8 @@ export function coerceIntent(raw: unknown): { intent: ReplyIntent; confidence: n
  * because the reply quoted our own footer, which contains the word.
  */
 export function stripQuoted(text: string): string {
-  const lines = String(text ?? "").replace(/\r\n?/g, "\n").split("\n");
+  // Bounded: an inbound email body is attacker-supplied and every line is pattern-matched.
+  const lines = String(text ?? "").slice(0, 60_000).replace(/\r\n?/g, "\n").split("\n").map((l) => l.slice(0, 2_000));
   const out: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
@@ -255,7 +292,7 @@ export function stripQuoted(text: string): string {
 
 /** RFC 5322: the address is the LAST <...>; never "the first thing that looks like an email". */
 export function senderAddress(from: string): string | null {
-  const s = String(from ?? "");
+  const s = String(from ?? "").slice(-400);
   const angle = s.match(/<\s*([^<>\s]+)\s*>\s*$/);
   const raw = (angle ? angle[1] : s.trim()).toLowerCase();
   return /^[\w.+-]+@[\w-]+(?:\.[\w-]+)+$/.test(raw) ? raw : null;

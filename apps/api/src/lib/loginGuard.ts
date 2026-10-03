@@ -15,7 +15,33 @@
  * The subject is the lowercased email as typed, whether or not an account exists for it, so a
  * lock does not reveal which addresses are customers. The admin dashboard login uses the
  * single subject "admin".
+ *
+ * A lock anyone can trigger is also a way to shut the real owner out: five wrong guesses from
+ * a stranger, repeated every fifteen minutes, and the customer (or the operator, on the admin
+ * login) never gets in. So an address that has signed in to this account successfully in the
+ * last 90 days is judged on ITS OWN failures only: guesses from elsewhere do not lock it out,
+ * and it still locks itself after five wrong passwords of its own. Guessing from a new
+ * address stays locked account-wide, which is the case the lock exists for.
+ *
+ * What clears a failure, exactly: a later success FROM THE SAME ADDRESS (the person got it
+ * right in the end), or a later password reset (a row with no address - the old guesses were
+ * at a password that no longer exists). A success from some other address clears nothing of
+ * anyone else's: if the owner signing in from home wiped the count, a stranger mid-attack
+ * would get five fresh guesses every time the owner signed in.
+ *
+ * An address can only become "known" by presenting the right password (or completing an
+ * emailed reset, which needs the mailbox). Nothing an attacker can do without one of those
+ * writes a success row, so they cannot promote themselves out of the account-wide lock.
+ *
+ * "Address" is what clientIp() reports, so it is as trustworthy as TRUSTED_PROXY is correct:
+ * behind Cloudflare (Render) or a real reverse proxy the client cannot choose it. If the
+ * header were spoofable, a guesser who also knew one of the owner's addresses could borrow
+ * its separate allowance - five more guesses per fifteen minutes per such address, still a
+ * limit, never a bypass - and random spoofed addresses are simply unknown and stay locked.
+ * The literal "unknown" (no usable header) is never treated as a known address. IPv6
+ * addresses are compared by their /64, because one device changes the other half daily.
  */
+import { isIP } from "node:net";
 import { and, desc, eq, getDb, loginAttempts, sql } from "@prospex/db";
 import { ApiError } from "./errors.js";
 
@@ -31,8 +57,52 @@ export interface LockState {
   failures: number;
 }
 
-export async function lockState(subject: string): Promise<LockState> {
+/** How long a successful sign-in keeps an address "known" for an account. */
+export const KNOWN_IP_DAYS = 90;
+
+/**
+ * The form of an address used for matching and stored in login_attempts.
+ *
+ * IPv4 as is. IPv6 as its /64 prefix: a phone or laptop on IPv6 keeps its network prefix but
+ * rotates the rest (privacy addresses), so comparing whole addresses would make the owner a
+ * stranger again every day. Anything that is not an address (including "unknown") is null.
+ */
+export function ipKey(ip: string | null | undefined): string | null {
+  const raw = (ip ?? "").trim().toLowerCase();
+  if (!raw || raw === "unknown") return null;
+  const kind = isIP(raw);
+  if (kind === 4) return raw;
+  if (kind !== 6) return null;
+  // IPv4-mapped (::ffff:1.2.3.4) is an IPv4 client.
+  const mapped = raw.match(/^::ffff:(\d+\.\d+\.\d+\.\d+)$/);
+  if (mapped) return mapped[1];
+  const [head, tail = ""] = raw.split("%")[0].split("::");
+  const h = head ? head.split(":") : [];
+  const t = tail ? tail.split(":") : [];
+  const groups = raw.includes("::") ? [...h, ...Array(Math.max(0, 8 - h.length - t.length)).fill("0"), ...t] : h;
+  return `${groups.slice(0, 4).map((g) => (g.includes(".") ? "0" : g.replace(/^0+(?=.)/, ""))).join(":")}::/64`;
+}
+
+const KNOWN_WINDOW_SQL = sql.raw(`interval '${KNOWN_IP_DAYS} days'`);
+
+/** Has this address signed in to this account successfully before (recently)? */
+export async function isKnownIp(subject: string, ip: string | null | undefined): Promise<boolean> {
+  const key = ipKey(ip);
+  if (!key) return false;
   const { db } = getDb();
+  const [row] = await db
+    .select({ id: loginAttempts.id })
+    .from(loginAttempts)
+    .where(and(eq(loginAttempts.subject, subject), eq(loginAttempts.ip, key), eq(loginAttempts.succeeded, true), sql`${loginAttempts.createdAt} > now() - ${KNOWN_WINDOW_SQL}`))
+    .limit(1);
+  return !!row;
+}
+
+export async function lockState(subject: string, ip?: string | null): Promise<LockState> {
+  const { db } = getDb();
+  const key = ipKey(ip);
+  // A known address is judged on its own failures; anything else on the account's.
+  const own = await isKnownIp(subject, ip);
   const rows = await db
     .select({ at: loginAttempts.createdAt })
     .from(loginAttempts)
@@ -40,8 +110,11 @@ export async function lockState(subject: string): Promise<LockState> {
       and(
         eq(loginAttempts.subject, subject),
         eq(loginAttempts.succeeded, false),
+        own ? eq(loginAttempts.ip, key!) : undefined,
         sql`${loginAttempts.createdAt} > now() - ${LOCK_WINDOW_SQL}`,
-        sql`${loginAttempts.createdAt} > coalesce((select max(la.created_at) from login_attempts la where la.subject = ${subject} and la.succeeded), '-infinity'::timestamptz)`,
+        // Still counts unless something cleared it: a later success from the same address, or
+        // a later reset marker (success row with no address). Never a success from elsewhere.
+        sql`not exists (select 1 from login_attempts s where s.subject = ${subject} and s.succeeded and s.created_at > ${loginAttempts.createdAt} and (s.ip is null or s.ip = ${loginAttempts.ip}))`,
       ),
     )
     .orderBy(desc(loginAttempts.createdAt))
@@ -53,21 +126,43 @@ export async function lockState(subject: string): Promise<LockState> {
   return { locked: true, retryAfterSeconds, failures: rows.length };
 }
 
+/**
+ * Record an attempt. A failure with no usable address is stored as "unknown" (it still counts
+ * account-wide); a success is what makes its address known for the account.
+ */
 export async function recordAttempt(subject: string, ip: string | null, succeeded: boolean): Promise<void> {
   const { db } = getDb();
-  await db.insert(loginAttempts).values({ subject, ip, succeeded });
-  // Housekeeping, occasionally: nothing older than a day is ever read.
+  await db.insert(loginAttempts).values({ subject, ip: ipKey(ip) ?? "unknown", succeeded });
+  // Housekeeping, occasionally. Failures are only read for 15 minutes; successes are what
+  // make an address "known" for an account, so those are kept for that long.
   if (Math.random() < 0.02) {
     void db
       .delete(loginAttempts)
-      .where(sql`${loginAttempts.createdAt} < now() - interval '1 day'`)
+      .where(sql`(${loginAttempts.succeeded} = false AND ${loginAttempts.createdAt} < now() - interval '1 day') OR ${loginAttempts.createdAt} < now() - ${KNOWN_WINDOW_SQL}`)
       .catch(() => {});
   }
 }
 
-/** Lift a lock: a success marker makes every earlier failure stop counting. */
+/**
+ * Lift every lock on the account. Called when a password reset completes: the failures so
+ * far were guesses at a password that has just been replaced. Writes a marker with no
+ * address (which clears failures from everywhere) and, when the caller's address is usable,
+ * a success for it - completing a reset takes control of the mailbox, which is at least as
+ * strong a proof as the password, so that address becomes known for the account.
+ */
 export async function clearLock(subject: string, ip: string | null = null): Promise<void> {
-  await recordAttempt(subject, ip, true);
+  const { db } = getDb();
+  const key = ipKey(ip);
+  await db.insert(loginAttempts).values([{ subject, ip: null, succeeded: true }, ...(key ? [{ subject, ip: key, succeeded: true }] : [])]);
+}
+
+/**
+ * The queue an attempt waits in (see `serialised`). An address known for the account is
+ * judged on its own failures, so it queues on its own: a stranger flooding the account's
+ * queue cannot make the owner's attempt bounce off a full one.
+ */
+export async function attemptQueue(prefix: string, subject: string, ip: string | null | undefined): Promise<string> {
+  return (await isKnownIp(subject, ip)) ? `${prefix}:${subject}|${ipKey(ip)}` : `${prefix}:${subject}`;
 }
 
 /** "in about 12 minutes" / "in under a minute". */
@@ -103,8 +198,9 @@ export function shouldAuditLock(subject: string, everyMs = 60_000): boolean {
 }
 
 /**
- * Run one sign-in attempt for `subject` with no other attempt for the same subject running
- * at the same time in this process.
+ * Run one sign-in attempt with no other attempt in the same queue running at the same time
+ * in this process. The queue is the account for an unknown address and account + address for
+ * a known one (`attemptQueue`), matching what each is judged on.
  *
  * Check-then-record is a race: twenty parallel requests would each see "4 failures so far"
  * and each get a guess. Serialising per subject closes that on a single instance (which is

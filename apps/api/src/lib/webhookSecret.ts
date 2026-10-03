@@ -34,7 +34,10 @@ export function newWebhookSecret(): { secret: string; columns: { secret: null; s
 /** What a list may show of a secret: enough to tell two hooks apart, not enough to sign. */
 export function secretPreview(row: { secret?: string | null; secretEncrypted?: string | null }): string {
   try {
-    return `${webhookSecret(row).slice(0, 6)}...`;
+    // Every new secret starts "whsec_", so the prefix alone told nothing apart: the last four
+    // characters do, and four of forty-odd random characters are no help in forging one.
+    const s = webhookSecret(row);
+    return s.length >= 16 ? `${s.slice(0, 6)}...${s.slice(-4)}` : "...";
   } catch {
     return "";
   }

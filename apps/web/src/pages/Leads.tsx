@@ -4,6 +4,7 @@ import { API_URL, apiFetch, auth, fmtDate, rejectSession } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 import { BUCKET_COPY, type ClientAttention } from "../lib/clients";
 import { ExtLink } from "../components/ExtLink";
+import { useMe } from "../lib/me";
 import { safeHref } from "../lib/safeHref";
 
 interface Company { id: string; domain: string; name: string | null; industry: string | null; size: string | null; description: string | null; techStack: string[]; location: string | null; linkedinUrl: string | null; emailPattern: string | null }
@@ -34,6 +35,34 @@ function StageBadge({ status }: { status?: string | null }) {
   return <span className={`badge ${STAGE_TONE[s] ?? STAGE_TONE.new}`}>{s}</span>;
 }
 
+const LEAD_SORTS = ["score", "created", "updated", "name"];
+const LEAD_ORDERS = ["asc", "desc"];
+const LEAD_ATTENTION = ["noEmail", "unverified", "badEmail", "readyButIdle"];
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * URL parameters, reduced to what GET /v1/leads will accept (its `listQuery` schema).
+ * Anything that would fail validation there is removed rather than sent; everything else,
+ * including filters this page has no control for, passes through untouched.
+ */
+export function cleanLeadQuery(raw: Record<string, string>): Record<string, string> {
+  const q: Record<string, string> = { ...raw };
+  const keepIf = (k: string, ok: (v: string) => boolean) => { if (k in q && !ok(q[k])) delete q[k]; };
+  // "" and "  " are not numbers either: Number("") is 0, which would quietly mean "score >= 0".
+  const isNumber = (v: string) => v.trim() !== "" && Number.isFinite(Number(v));
+  keepIf("minScore", isNumber);
+  keepIf("sort", (v) => LEAD_SORTS.includes(v));
+  keepIf("order", (v) => LEAD_ORDERS.includes(v));
+  keepIf("limit", (v) => isNumber(v) && Number.isInteger(Number(v)) && Number(v) >= 1 && Number(v) <= 500);
+  keepIf("offset", (v) => isNumber(v) && Number.isInteger(Number(v)) && Number(v) >= 0);
+  keepIf("hasEmail", (v) => v === "true" || v === "false");
+  keepIf("attention", (v) => LEAD_ATTENTION.includes(v));
+  keepIf("icpId", (v) => UUID_RE.test(v));
+  keepIf("listId", (v) => UUID_RE.test(v));
+  keepIf("clientId", (v) => v === "none" || UUID_RE.test(v));
+  return q;
+}
+
 export function LeadsPage() {
   const [params, setParams] = useSearchParams();
   const [rows, setRows] = useState<Lead[]>([]);
@@ -58,13 +87,22 @@ export function LeadsPage() {
   const { toast, Toast } = useToast();
   const [listErr, setListErr] = useState<string | null>(null);
 
-  const q = useMemo(() => Object.fromEntries(params.entries()), [params]);
+  // Pushing leads to a CRM is owner/admin only on the server.
+  const { canManage } = useMe();
+
+  // The address bar is input like any other: a hand-edited or mangled link
+  // (?minScore=abc&sort=best) used to be passed straight to the API, which answered 400
+  // "Min score: Expected number, received nan" and the page showed that instead of leads.
+  // Values the API cannot accept are dropped here, so the page loads with the rest of the
+  // filters intact - and the controls below show what is actually being applied.
+  const q = useMemo(() => cleanLeadQuery(Object.fromEntries(params.entries())), [params]);
   const set = (k: string, v: string) => {
     const p = new URLSearchParams(params);
     v ? p.set(k, v) : p.delete(k);
     p.delete("offset");
     setParams(p);
   };
+  // cleanLeadQuery has already made these whole numbers in range, or removed them.
   const limit = Number(q.limit ?? 50);
   const offset = Number(q.offset ?? 0);
 
@@ -289,7 +327,7 @@ export function LeadsPage() {
             <select className="input w-44" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Assign to client"><option value="">Assign to client…</option>{clients.map((c) => <option key={c.id} value={`client:${c.id}`}>{c.name}</option>)}<option value="client:none">Return to pool</option></select>
           )}
           <select className="input w-44" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }}><option value="">Add to list…</option>{lists.map((l) => <option key={l.id} value={`list:${l.id}`}>{l.name}</option>)}<option value="newlist">+ New list</option></select>
-          {crmTargets.length > 0 && (
+          {crmTargets.length > 0 && canManage && (
             <select className="input w-40" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Push to a connected CRM">
               <option value="">Push to CRM…</option>
               {crmTargets.map((i) => <option key={i.provider} value={`sync:${i.provider}`}>{i.provider}</option>)}
@@ -565,10 +603,10 @@ function ImportModal({ open, onClose, onDone, toast }: { open: boolean; onClose:
   const submit = async () => {
     setBusy(true);
     try {
-      const r = await apiFetch<{ created: number; updated: number; errors: unknown[]; skipped?: number; skippedRows?: { row: number; reason: string }[] }>("POST", "/v1/leads/import", undefined, { contentType: "text/csv", body: text });
+      const r = await apiFetch<{ created: number; updated: number; errors: unknown[]; skipped?: number; skippedRows?: { row: number; reason: string }[]; stopped?: string; notProcessed?: number }>("POST", "/v1/leads/import", undefined, { contentType: "text/csv", body: text });
       const skippedN = r.skipped ?? r.skippedRows?.length ?? 0;
       const firstSkip = r.skippedRows?.[0];
-      toast(`Imported: ${r.created} new, ${r.updated} updated${skippedN ? `, ${skippedN} row${skippedN === 1 ? "" : "s"} skipped${firstSkip ? ` (row ${firstSkip.row}: ${firstSkip.reason})` : ""}` : ""}${r.errors.length ? `, ${r.errors.length} errors` : ""}`, r.created + r.updated === 0 && (skippedN || r.errors.length) ? "err" : "ok");
+      toast(`Imported: ${r.created} new, ${r.updated} updated${skippedN ? `, ${skippedN} row${skippedN === 1 ? "" : "s"} skipped${firstSkip ? ` (row ${firstSkip.row}: ${firstSkip.reason})` : ""}` : ""}${r.errors.length ? `, ${r.errors.length} errors` : ""}${r.stopped ? `. ${r.stopped}${r.notProcessed ? ` - ${r.notProcessed} row${r.notProcessed === 1 ? " was" : "s were"} not processed` : ""}` : ""}`, r.stopped || (r.created + r.updated === 0 && (skippedN || r.errors.length)) ? "err" : "ok");
       onDone();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };

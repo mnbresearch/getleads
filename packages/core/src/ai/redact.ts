@@ -35,7 +35,9 @@ function looksLikeToken(s: string): boolean {
 }
 
 export function redact(text: unknown, opts: RedactOptions = {}): string {
-  let out = String(text ?? "");
+  // Bounded before any pattern runs: error text is attacker-influenced (an upstream body, a
+  // tenant field echoed in a message) and several patterns below are not linear on it.
+  let out = String(text ?? "").slice(0, 8_000);
   if (!out) return "";
   const env = opts.env ?? (typeof process !== "undefined" ? process.env : {});
   // Our own configured secrets first, by value: whatever shape they have, they are known.

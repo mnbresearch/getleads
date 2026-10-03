@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import { apiFetch, fmtDate } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
+import { useMe } from "../lib/me";
 
 interface Step { id?: string; delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string | null; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
 interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; steps?: Step[]; createdAt: string }
@@ -34,6 +35,10 @@ export function CampaignsPage() {
   const [accErr, setAccErr] = useState<string | null>(null);
   const [refsErr, setRefsErr] = useState<string | null>(null);
   const [accLoaded, setAccLoaded] = useState(false);
+  // Adding and removing sender accounts is owner/admin only on the server. Members can see
+  // which senders exist (they pick one for a campaign) but are not shown buttons that can
+  // only answer "Only a workspace owner or admin can do this".
+  const { canManage } = useMe();
   const load = useCallback(() => {
     apiFetch<{ campaigns: Campaign[] }>("GET", "/v1/campaigns")
       .then((r) => { setRows(r.campaigns); setListErr(null); })
@@ -69,7 +74,16 @@ export function CampaignsPage() {
       {accErr ? (
         <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load your sender accounts: {accErr} <button className="underline" onClick={loadAccounts}>Try again</button></div>
       ) : accLoaded && accounts.length === 0 && (
-        <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>
+        canManage
+          ? <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">Add a sender account first (Resend free tier: 3,000 emails/month, or any SMTP like Brevo/Gmail). <button className="underline" onClick={() => setAccOpen(true)}>Add sender</button></div>
+          : <div className="mb-4 rounded-lg border border-amber-300 bg-amber-50 p-3 text-sm text-amber-800">This workspace has no sender account yet, so campaigns cannot send. Ask an owner or admin to add a sender.</div>
+      )}
+      {/* A sender whose connection test failed sends nothing, and the server refuses to
+          start a campaign that uses one. Said here, before someone builds a campaign on it. */}
+      {accounts.some((a) => a.status !== "active") && (
+        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="status">
+          {accounts.filter((a) => a.status !== "active").map((a) => a.fromEmail).join(", ")} failed {accounts.filter((a) => a.status !== "active").length === 1 ? "its" : "their"} connection test and cannot send. {canManage ? <>Remove it and add it again with working settings. <button className="underline" onClick={() => setAccOpen(true)}>Open sender accounts</button></> : "Ask an owner or admin to remove it and add it again with working settings."}
+        </div>
       )}
       {refsErr && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load your lead lists and ICPs: {refsErr} <button className="underline" onClick={loadRefs}>Try again</button></div>}
       {listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={load} /> : rows.length === 0 ? <Empty title="No campaigns yet" hint="Create a sequence, enroll leads from a list or by ICP score, and start sending." /> : (
@@ -101,7 +115,7 @@ export function CampaignsPage() {
         </div>
       )}
       <CampaignModal open={open} onClose={closeCreate} accounts={accounts} lists={lists} icps={icps} refsErr={refsErr} initialClientId={presetClientId} onDone={(id) => { closeCreate(); navigate(`/campaigns/${id}`); }} toast={toast} />
-      <AccountsModal open={accOpen} onClose={() => setAccOpen(false)} accounts={accounts} campaigns={rows} sysAvail={sysAvail} onChanged={() => { loadAccounts(); load(); }} toast={toast} />
+      <AccountsModal open={accOpen} onClose={() => setAccOpen(false)} accounts={accounts} campaigns={rows} sysAvail={sysAvail} canManage={canManage} onChanged={() => { loadAccounts(); load(); }} toast={toast} />
     </Page>
   );
 }
@@ -224,7 +238,7 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
       <div className="space-y-4">
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="sm:col-span-2"><label className="label">Name</label><input className="input" value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} /></div>
-          <div><label className="label">Sender account</label><select className="input" value={f.emailAccountId} onChange={(e) => setF({ ...f, emailAccountId: e.target.value })}><option value="">{existing ? "None (detach sender)" : "Select…"}</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.fromName} &lt;{a.fromEmail}&gt; ({a.provider})</option>)}</select></div>
+          <div><label className="label">Sender account</label><select className="input" value={f.emailAccountId} onChange={(e) => setF({ ...f, emailAccountId: e.target.value })}><option value="">{existing ? "None (detach sender)" : "Select…"}</option>{accounts.map((a) => <option key={a.id} value={a.id}>{a.fromName} &lt;{a.fromEmail}&gt; ({a.provider}){a.status !== "active" ? " - connection failed, cannot send" : ""}</option>)}</select>{accounts.some((a) => a.id === f.emailAccountId && a.status !== "active") && <p className="mt-1 text-xs text-red-700">This sender failed its connection test. The campaign will not start until the sender is removed and added again with working settings, or another sender is chosen.</p>}</div>
           {clientOptions.length > 0 && (
             <div><label className="label">For client</label><select className="input" value={f.clientId} onChange={(e) => setF({ ...f, clientId: e.target.value })}><option value="">No client</option>{clientOptions.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select></div>
           )}
@@ -268,7 +282,7 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
   );
 }
 
-function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, onChanged, toast }: { open: boolean; onClose: () => void; accounts: Account[]; campaigns?: Campaign[]; sysAvail: boolean; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canManage = true, onChanged, toast }: { open: boolean; onClose: () => void; accounts: Account[]; campaigns?: Campaign[]; sysAvail: boolean; canManage?: boolean; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const blank = { provider: sysAvail ? "system" : "resend", fromName: "", fromEmail: "", replyTo: "", signature: "", dailyLimit: 50, apiKey: "", host: "", port: 587, user: "", pass: "" };
   const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
@@ -305,9 +319,22 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, onCh
     <Modal open={open} onClose={onClose} title="Sender accounts" wide>
       <ul className="mb-4 divide-y divide-slate-100 text-sm">
         {accounts.map((a) => (
-          <li key={a.id} className="flex items-center justify-between py-2"><div>{a.fromName} &lt;{a.fromEmail}&gt; <span className="badge ml-2 bg-black/[0.05] text-ink-300">{a.provider}</span> <StatusBadge s={a.status === "active" ? "active" : "failed"} /><div className="text-xs text-ink-400">{a.sentToday}/{a.dailyLimit} sent today</div></div><button className="text-red-600 disabled:opacity-50" disabled={removing === a.id} onClick={() => remove(a)}>{removing === a.id ? "Removing…" : "Remove"}</button></li>
+          <li key={a.id} className="flex items-start justify-between gap-3 py-2">
+            <div className="min-w-0 [overflow-wrap:anywhere]">
+              {a.fromName} &lt;{a.fromEmail}&gt; <span className="badge ml-2 bg-black/[0.05] text-ink-300">{a.provider}</span>{" "}
+              {a.status === "active" ? <StatusBadge s="active" /> : <span className="badge bg-red-50 text-red-700 ring-1 ring-red-200">connection failed</span>}
+              {a.status === "active"
+                ? <div className="text-xs text-ink-400">{a.sentToday}/{a.dailyLimit} sent today</div>
+                : <div className="text-xs text-red-700">This sender failed its connection test, so it sends nothing and a campaign using it will not start. {canManage ? "Remove it and add it again with working settings." : "Ask an owner or admin to remove it and add it again with working settings."}</div>}
+            </div>
+            {canManage && <button className="shrink-0 text-red-600 disabled:opacity-50" disabled={removing === a.id} onClick={() => remove(a)}>{removing === a.id ? "Removing…" : "Remove"}</button>}
+          </li>
         ))}
+        {accounts.length === 0 && <li className="py-2 text-ink-400">No sender accounts yet.</li>}
       </ul>
+      {!canManage ? (
+        <p className="text-xs text-ink-400">Only owners and admins can add or remove sender accounts. Ask an owner or admin to add a sender.</p>
+      ) : (<>
       <div className="grid gap-3 sm:grid-cols-2">
         <div><label className="label">Provider</label><select className="input" value={f.provider} onChange={(e) => setF({ ...f, provider: e.target.value })}>{sysAvail && <option value="system">Platform default (free, shared)</option>}<option value="resend">Resend (3,000/mo free)</option><option value="smtp">SMTP (Brevo, Gmail, Zoho…)</option></select></div>
         <div><label className="label">Daily limit</label><input type="number" className="input" value={f.dailyLimit} onChange={(e) => setF({ ...f, dailyLimit: Number(e.target.value) })} /></div>
@@ -324,6 +351,7 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, onCh
         <div className="sm:col-span-2"><label className="label">Signature</label><textarea className="input h-16" value={f.signature} onChange={(e) => setF({ ...f, signature: e.target.value })} /></div>
       </div>
       <button className="btn-primary mt-3 w-full justify-center" disabled={busy || !f.fromName || !f.fromEmail} onClick={add}>{busy ? "Testing…" : "Add sender"}</button>
+      </>)}
     </Modal>
   );
 }
@@ -338,6 +366,7 @@ export function CampaignDetail() {
   const [tab, setTab] = useState<"contacts" | "messages">("contacts");
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const [actErr, setActErr] = useState<string | null>(null);
   const [preview, setPreview] = useState<{ subject: string; body: string } | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [lists, setLists] = useState<{ id: string; name: string; count: number }[]>([]);
@@ -386,10 +415,19 @@ export function CampaignDetail() {
   if (!c) return <Page title="Campaign"><Spinner /></Page>;
   // Name the action that happened, and pass on any warning the server attached (e.g.
   // starting a campaign with nobody enrolled succeeds but will send nothing).
-  const act = (path: string, success: string) =>
-    apiFetch<{ warning?: string }>("POST", `/v1/campaigns/${c.id}/${path}`)
+  //
+  // A refusal is kept on the page as well as toasted. The server's reason for not starting
+  // (e.g. "The sender x failed its connection test ... remove that sender and add it again")
+  // is a sentence with instructions in it; a toast that leaves after a few seconds is not
+  // long enough to read and act on.
+  const act = (path: string, success: string) => {
+    setActErr(null);
+    return apiFetch<{ warning?: string }>("POST", `/v1/campaigns/${c.id}/${path}`)
       .then((r) => { toast(r?.warning ? `${success}. ${r.warning}` : success, r?.warning ? "err" : "ok"); load(); })
-      .catch((e) => toast(e.message, "err"));
+      .catch((e) => { toast(e.message, "err"); setActErr(e.message); });
+  };
+  const sender = accounts.find((a) => a.id === c.emailAccountId);
+  const senderFailed = !!sender && sender.status !== "active";
   return (
     <Page title={c.name} subtitle={`${c.steps?.length ?? 0} steps · ${c.contacts} contacts`} actions={<>
       <Link to="/campaigns" className="btn-secondary">← All campaigns</Link>
@@ -409,6 +447,17 @@ export function CampaignDetail() {
     </>}>
       {Toast}
       <div className="mb-4 flex items-center gap-2"><StatusBadge s={c.status} /><span className="text-sm text-ink-400">Sends only inside the send window and daily limit. Sequences stop automatically on reply or unsubscribe.</span></div>
+      {actErr && (
+        <div className="mb-4 flex flex-wrap items-start justify-between gap-2 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">
+          <span className="min-w-0 [overflow-wrap:anywhere]">{actErr}</span>
+          <button className="shrink-0 underline" onClick={() => setActErr(null)}>Dismiss</button>
+        </div>
+      )}
+      {senderFailed && !actErr && (
+        <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="status">
+          The sender {sender!.fromEmail} failed its connection test, so this campaign cannot send and will not start. Remove that sender and add it again with working settings (Campaigns → Sender accounts), or choose another sender under Edit.
+        </div>
+      )}
       {statsErr && !stats && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load this campaign's numbers: {statsErr} <button className="underline" onClick={load}>Try again</button></div>}
       {refsErr && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load sender accounts, lists and ICPs ({refsErr}), so Edit and Enroll may show them as missing. <button className="underline" onClick={loadRefs}>Try again</button></div>}
       {stats && (

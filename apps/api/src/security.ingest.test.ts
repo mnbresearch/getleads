@@ -855,7 +855,7 @@ suite("ingestion and route-level security", () => {
       const made = await req("POST", "/v1/webhooks", A.token, { url: "https://hooks.example.com/in" });
       expect(made.status).toBe(201);
       expect(made.body.secret).toMatch(/^whsec_/);
-      expect(made.body).toMatchObject({ signatureVersion: 2, secretPreview: `${made.body.secret.slice(0, 6)}...` });
+      expect(made.body).toMatchObject({ signatureVersion: 2, secretPreview: `${made.body.secret.slice(0, 6)}...${made.body.secret.slice(-4)}` });
       expect(made.body.secretEncrypted).toBeUndefined();
       const [row] = await db.select().from(S.webhooks).where(S.eq(S.webhooks.id, made.body.id));
       expect(row.secret).toBeNull();
@@ -878,7 +878,7 @@ suite("ingestion and route-level security", () => {
         for (const h of list.body.webhooks) {
           expect(h.secret).toBeUndefined();
           expect(h.secretEncrypted).toBeUndefined();
-          expect(h.secretPreview).toMatch(/^.{6}\.\.\.$/);
+          expect(h.secretPreview).toMatch(/^.{6}\.\.\..{4}$/);
           expect([1, 2]).toContain(h.signatureVersion);
         }
       }

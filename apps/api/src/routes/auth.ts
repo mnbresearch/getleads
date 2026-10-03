@@ -27,7 +27,7 @@ import { randomToken, safeEqual, sha256 } from "../lib/crypto.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
-import { clearLock, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
+import { attemptQueue, clearLock, humanWait, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
 
 export const authRoutes = new Hono<Env>();
 
@@ -96,6 +96,9 @@ authRoutes.post(
     await db.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash });
     await emitEvent(org.id, "org.created", { orgId: org.id, email: user.email });
     await audit(c, "auth.signup", { orgId: org.id, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, data: { email: user.email, via: "password" } });
+    // The address that chose the password is known for the account from the start, so a
+    // stranger's wrong guesses cannot lock the new owner out before their first sign-in.
+    await recordAttempt(email, clientIp(c), true).catch(() => {});
     return c.json({ token: await issueJwt(user), user: publicUser(user), org: publicOrg(org), apiKey: key.raw }, 201);
   },
 );
@@ -131,10 +134,10 @@ authRoutes.post("/login", rateLimit({ perMinute: 20 }), rejectNul, zValidator("j
   const body = c.req.valid("json");
   const email = body.email.toLowerCase();
   const ip = clientIp(c);
-  return serialised(`user:${email}`, async () => {
+  return serialised(await attemptQueue("user", email, ip), async () => {
     const { db } = getDb();
     const user = await db.query.users.findFirst({ where: eq(users.email, email) });
-    const lock = await lockState(email);
+    const lock = await lockState(email, ip);
     if (lock.locked) {
       // Logged against the workspace (so its owner can see it), once a minute at most. A lock
       // on an address with no account is not logged at all: it would be a row nobody can
@@ -260,18 +263,27 @@ authRoutes.post("/password/change", requireAuth, requireUser, rateLimit({ perMin
   const hadPassword = hasUsablePassword(user.passwordHash);
   if (hadPassword) {
     if (!b.currentPassword) throw new ApiError(400, "Enter your current password to set a new one.", "current_password_required");
-    // A stolen session must not be a way to guess the current password without limit either:
-    // wrong guesses here count towards the same per-account lock as the login form.
-    const lock = await lockState(user.email);
-    if (lock.locked) {
-      c.header("retry-after", String(lock.retryAfterSeconds));
-      throw lockedError(lock);
-    }
-    if (!(await checkPassword(b.currentPassword, user.passwordHash))) {
-      await recordAttempt(user.email, clientIp(c), false);
-      await audit(c, "auth.password_changed", { result: "failed", targetType: "user", targetId: user.id, data: { reason: "wrong_current_password" } });
-      throw new ApiError(403, "Your current password is not correct.", "invalid_credentials");
-    }
+    // A stolen session must not be a way to guess the current password without limit either,
+    // so wrong guesses here are limited too - under their own key. Sharing the login form's
+    // lock meant a stranger failing five sign-ins stopped the signed-in owner changing their
+    // own password.
+    // Judged per user, not per address: whoever holds this session gets five guesses in
+    // fifteen minutes in total, however many addresses they come from. One check at a time,
+    // so parallel requests cannot all slip in under the count.
+    const changeKey = `pwchange:${user.id}`;
+    const currentPassword = b.currentPassword;
+    await serialised(changeKey, async () => {
+      const lock = await lockState(changeKey);
+      if (lock.locked) {
+        c.header("retry-after", String(lock.retryAfterSeconds));
+        throw new ApiError(429, `Too many wrong attempts at your current password. Try again ${humanWait(lock.retryAfterSeconds)}, or sign out and use "Forgot password".`, "too_many_attempts", { retryAfterSeconds: lock.retryAfterSeconds });
+      }
+      if (!(await checkPassword(currentPassword, user.passwordHash))) {
+        await recordAttempt(changeKey, clientIp(c), false);
+        await audit(c, "auth.password_changed", { result: "failed", targetType: "user", targetId: user.id, data: { reason: "wrong_current_password" } });
+        throw new ApiError(403, "Your current password is not correct.", "invalid_credentials");
+      }
+    });
   }
   assertAcceptablePassword(b.newPassword, { email: user.email });
   const [updated] = await db
@@ -282,6 +294,12 @@ authRoutes.post("/password/change", requireAuth, requireUser, rateLimit({ perMin
   // Outstanding reset links were issued for the old password; they should not outlive it.
   await db.update(passwordResetTokens).set({ usedAt: new Date() }).where(and(eq(passwordResetTokens.userId, user.id), isNull(passwordResetTokens.usedAt)));
   await audit(c, "auth.password_changed", { targetType: "user", targetId: user.id, data: { hadPassword, sessionsRevoked: true } });
+  if (hadPassword) {
+    // They proved the old password. Earlier wrong guesses - here or on the login form - were
+    // at a password that no longer exists, and this address has earned being known.
+    await clearLock(`pwchange:${user.id}`).catch(() => {});
+    await clearLock(user.email, clientIp(c)).catch(() => {});
+  }
   return c.json({ ok: true, token: await issueJwt(updated ?? user), sessionsRevoked: true });
 });
 
@@ -479,7 +497,18 @@ authRoutes.get("/me", requireAuth, async (c) => {
   return c.json({ user: a.user ? publicUser(a.user) : null, org: publicOrg(a.org), via: a.via, apiKey: a.apiKey ? { id: a.apiKey.id, name: a.apiKey.name, prefix: a.apiKey.prefix } : null });
 });
 
-authRoutes.patch("/org", requireAuth, requireUser, requireRole("owner", "admin"), zValidator("json", z.object({ name: text(80, 1).optional(), settings: z.record(z.unknown()).optional() })), async (c) => {
+/**
+ * Workspace settings are free-form, but not unbounded: they are read on every AI draft and
+ * every send, and a 900 KB "value proposition" was accepted and then pattern-matched on each
+ * request. At most 60 keys, text values up to 5,000 characters, 32 KB in total.
+ */
+const orgSettingsInput = z
+  .record(z.string().max(60), z.unknown())
+  .refine((s) => Object.keys(s).length <= 60, "Too many settings (60 at most).")
+  .refine((s) => Object.values(s).every((v) => typeof v !== "string" || v.length <= 5000), "A setting's text is too long (5,000 characters at most).")
+  .refine((s) => JSON.stringify(s).length <= 32_000, "Settings are too large (32 KB at most).");
+
+authRoutes.patch("/org", requireAuth, requireUser, requireRole("owner", "admin"), zValidator("json", z.object({ name: text(80, 1).optional(), settings: orgSettingsInput.optional() })), async (c) => {
   const a = c.get("auth");
   const body = c.req.valid("json");
   requireSomeFields(body);

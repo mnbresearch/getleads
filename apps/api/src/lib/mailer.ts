@@ -98,6 +98,12 @@ export async function tenantSmtpTransportOptions(smtp: SmtpSettings) {
     port,
     secure: smtp.secure ?? port === 465,
     auth: smtp.user ? { user: smtp.user, pass: smtp.pass } : undefined,
+    // Bounded. nodemailer's defaults are two minutes to connect and ten to idle: a host that
+    // silently drops the connection held the "add sender" request (and a worker slot on every
+    // send) for that long, and the form had already told the customer it timed out.
+    connectionTimeout: 10_000,
+    greetingTimeout: 10_000,
+    socketTimeout: 20_000,
     // SNI and certificate verification use the name, not the pinned address. An IP typed
     // as the host has no name to offer, which is how it behaved before too.
     ...(named ? { servername: host, tls: { servername: host } } : {}),
