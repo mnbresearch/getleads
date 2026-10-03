@@ -106,7 +106,7 @@ export function openapi(apiUrl: string) {
         patch: {
           tags: ["Admin"],
           security: [{ bearerAuth: [] }],
-          summary: "Change a workspace's plan and/or its limit overrides. `plan` must be one of the plan ids from /v1/admin/plans. Existing overrides are kept when `overrides` is omitted; pass `overrides` to replace them, or `{}` to clear them. Unknown override keys and values of the wrong kind are a 400",
+          summary: "Change a workspace's plan and/or its limit overrides. `plan` must be one of the plan ids from /v1/admin/plans. Existing overrides are kept when `overrides` is omitted; pass `overrides` to replace them, or `{}` to clear them. Unknown override keys and values of the wrong kind are a 400, and so is an override for a limit the server does not enforce yet (`campaigns`, `apiAccess`, `integrations`)",
           parameters: [{ name: "id", in: "path", required: true, schema: str }],
           requestBody: j(
             obj(
@@ -115,11 +115,9 @@ export function openapi(apiUrl: string) {
                 overrides: {
                   type: "object",
                   additionalProperties: false,
-                  description: "Strict partial of the plan limits. Counts are whole numbers from 0 (0 = no limit for the monthly metrics; for premiumLeadsPerMonth 0 means none)",
+                  description: "Strict partial of the plan limits the server enforces. Counts are whole numbers from 0 (0 = no limit for the monthly metrics; for premiumLeadsPerMonth 0 means none)",
                   properties: Object.fromEntries([
-                    ...["leadsPerMonth", "premiumLeadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth", "campaigns", "seats"].map((k) => [k, { type: "integer", minimum: 0, maximum: 1000000000 }]),
-                    ["apiAccess", bool],
-                    ["integrations", bool],
+                    ...["leadsPerMonth", "premiumLeadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth", "seats"].map((k) => [k, { type: "integer", minimum: 0, maximum: 1000000000 }]),
                     ["emailsPerDay", { type: "integer", minimum: 1, maximum: 1000000000, description: "Daily sending ceiling for this workspace" }],
                   ]),
                 },
@@ -182,8 +180,8 @@ export function openapi(apiUrl: string) {
         post: {
           tags: ["Admin"],
           security: [{ bearerAuth: [] }],
-          summary: "Test every configured provider key with one free or minimal call. `summary` says how many were tested and passed; `notTested` lists providers that hold a key but have no free test call, with the reason. With no key configured the summary is \"No provider keys are configured, so nothing was tested.\"",
-          responses: ok(obj({ results: arr({ type: "object" }), checkedAt: str, retired: arr(), tested: { type: "integer" }, passed: { type: "integer" }, notTested: arr(obj({ provider: str, label: str, reason: str })), summary: str })),
+          summary: "Test every configured provider key with one free or minimal call. `summary` says how many were tested and passed, and `testedCount` (the same number as `tested`) is that count: it leaves out retired providers, which are still listed in `results` with `retired: true`; `notTested` lists providers that hold a key but have no free test call, with the reason. With no key configured the summary is \"No provider keys are configured, so nothing was tested.\"",
+          responses: ok(obj({ results: arr({ type: "object" }), checkedAt: str, retired: arr(), tested: { type: "integer" }, testedCount: { type: "integer", description: "How many provider keys were tested, as the summary counts them (retired providers excluded)" }, passed: { type: "integer" }, skippedRetired: arr(), notTested: arr(obj({ provider: str, label: str, reason: str })), summary: str })),
         },
       },
       "/v1/admin/tools/{provider}": {

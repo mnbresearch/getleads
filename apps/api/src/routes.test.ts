@@ -215,11 +215,15 @@ suite("route surface", () => {
    */
   it("returns 400, not 500, for a malformed id on every route that takes one", async () => {
     const results: { path: string; status: number; code?: string }[] = [];
+    const messages: string[] = [];
     for (const path of ["/v1/leads/not-a-uuid", "/v1/icps/not-a-uuid", "/v1/campaigns/not-a-uuid", "/v1/companies/not-a-uuid"]) {
       const r = await app.request(path, { headers: { authorization: `Bearer ${token}` } });
       const body = await r.json().catch(() => ({}));
       results.push({ path, status: r.status, code: (body as any)?.error?.code });
+      messages.push(String((body as any)?.error?.message));
     }
+    // What the person is told: nothing about UUIDs or what "the server" can store.
+    for (const m of messages) expect(m).toBe("Something in that request wasn't in a form we can use. Reload the page and try again.");
     // Asserted positively. An earlier version of this test accepted "anything under 500",
     // which passes for a 200 and for a 404 - so it would have gone on passing if the fix
     // it exists to protect were reverted to any other non-crashing behaviour.

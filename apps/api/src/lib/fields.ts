@@ -30,7 +30,8 @@ export const httpUrlField = (max = 500) => z.string().max(max).refine((v) => htt
 export const profileUrlField = z.string().max(500).transform((v, ctx) => {
   const u = profileUrlOrNull(v, 500);
   if (!u) {
-    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "Must be a web address starting with http:// or https://" });
+    // A whole sentence (it ends with a period), so it is shown as written - see describeIssue.
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: "LinkedIn URL must be a web address starting with http:// or https://." });
     return z.NEVER;
   }
   return u;

@@ -63,7 +63,7 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
     }
     const charge = await chargeNewLead(ap.orgId, r.source);
     if (!charge.ok) {
-      stoppedBecause = charge.reason === "quota" ? `Stopped at your plan's lead limit: ${charge.message}` : `Stopped: could not record lead usage (${charge.message})`;
+      stoppedBecause = charge.reason === "quota" ? `Stopped early: ${charge.message}` : `Stopped: could not record lead usage (${charge.message})`;
       break;
     }
     const { lead, created } = await upsertLead(ap.orgId, pipelineLeadToInput(r, { icpId: icp?.id ?? null, tags: ["autopilot", `ap:${ap.id.slice(0, 8)}`], source: r.source }), { fillOnly: true });

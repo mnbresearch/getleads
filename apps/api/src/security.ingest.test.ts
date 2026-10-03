@@ -1194,6 +1194,17 @@ suite("ingestion and route-level security", () => {
       // A message the schema wrote for people is kept, after the field's name.
       expect(say(o({ start: z.string().regex(/^\d\d:\d\d$/, "Use 24-hour HH:MM, e.g. 09:00") }), { start: "9am" })).toBe("Start: Use 24-hour HH:MM, e.g. 09:00");
       expect(say(o({ start: z.string().regex(/^\d\d:\d\d$/) }), { start: "9am" })).toBe("Start is not in the expected format");
+      // A schema message that is a complete sentence (it ends with a period) already names what
+      // it is about, and is shown exactly as written - no "Start: " in front of it.
+      const times = "Send window times must be 24-hour HH:MM, for example 09:00.";
+      expect(say(o({ start: z.string().regex(/^\d\d:\d\d$/, times) }), { start: "9am" })).toBe(times);
+      // The same sentence from two fields is said once; a finished sentence is followed by a space, a clause by "; ".
+      const window = o({ start: z.string().regex(/^\d\d:\d\d$/, times), end: z.string().regex(/^\d\d:\d\d$/, times), name: z.string().min(1), tone: z.enum(["a", "b"]) });
+      expect(say(window, { start: "9am", end: "5pm", name: "", tone: "c" })).toBe(`${times} Name is required; Tone must be one of: a, b`);
+      expect(say(o({ name: z.string().min(1), start: z.string().regex(/^\d\d:\d\d$/, times) }), { name: "", start: "9am" })).toBe(`Name is required; ${times}`);
+      // Ending with a period is the mark; a fragment that merely trails off, or starts in lower case, is still prefixed.
+      expect(say(o({ note: z.string().refine(() => false, "contains a character that cannot be used") }), { note: "x" })).toBe("Note: contains a character that cannot be used");
+      expect(say(o({ note: z.string().refine(() => false, "and so on...") }), { note: "x" })).toBe("Note: and so on...");
       // Nothing of zod's own phrasing survives in any of them.
       const all = [say(o({ a: z.string().max(3) }), { a: "abcd" }), say(o({ a: z.number() }), { a: NaN }), say(o({ a: z.string() }), {}), say(o({ a: z.enum(["x"]) }), { a: "y" })].join(" | ");
       expect(all).not.toMatch(/String must|character\(s\)|Expected |received|Required|Invalid enum/);
@@ -1219,6 +1230,16 @@ suite("ingestion and route-level security", () => {
       expect(email.body.error.message).toBe("Email is not a valid email address");
       const id = await req("POST", "/v1/campaigns", A.token, { name: "x", listId: "abc" });
       expect(id.body.error.message).toBe("List ID is not a valid id");
+      // Sentences a schema wrote in full are shown as written - no "Linkedin URL: " or "Settings: " in front.
+      const link = await req("POST", "/v1/leads", A.token, { fullName: "X", linkedinUrl: "javascript:alert(1)" });
+      expect(link.status).toBe(400);
+      expect(link.body.error).toMatchObject({ code: "validation_error", message: "LinkedIn URL must be a web address starting with http:// or https://." });
+      expect(link.body.error.issues[0].path).toEqual(["linkedinUrl"]);
+      const setting = await req("PATCH", "/v1/auth/org", A.token, { settings: { valueProp: "v".repeat(5001) } });
+      expect(setting.status).toBe(400);
+      expect(setting.body.error.message).toBe("A setting's text is too long (5,000 characters at most).");
+      const zone = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { timezone: "Mars/Olympus_Mons", sendWindow: { start: "9am", end: "17:00", days: [1] } } });
+      expect(zone.body.error.message).toBe("Send window times must be 24-hour HH:MM, for example 09:00. Unknown time zone. Use a name like Asia/Kolkata or America/New_York.");
       for (const r of [limit, missing, nan, sort, email, id]) expect(r.body.error.message).not.toMatch(/String must|character\(s\)|Expected |received |: Required|Invalid /);
     });
 

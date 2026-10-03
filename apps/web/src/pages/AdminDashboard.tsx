@@ -2,7 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { adminFetch, adminLogout, endAdminSession, useAdminToken } from "../lib/adminApi";
-import { fmtDate, fmtNum } from "../lib/api";
+import { expectLists, expectShape, fmtDate, fmtNum } from "../lib/api";
 import { plural } from "../lib/plural";
 
 type PlanLimits = Record<string, number | boolean>;
@@ -123,9 +123,19 @@ const LIMIT_LABELS: Record<string, string> = {
   integrations: "integrations",
 };
 const limitLabel = (k: string) => LIMIT_LABELS[k] ?? k.replace(/PerMonth$/, "/month").replace(/([a-z0-9])([A-Z])/g, "$1 $2").toLowerCase();
-const limitValue = (v: unknown) =>
-  typeof v === "number" ? fmtNum(v) : typeof v === "boolean" ? (v ? "on" : "off") : v === null || v === undefined ? "-" : typeof v === "string" ? v : JSON.stringify(v);
-const overridesText = (o: Record<string, unknown>) => Object.entries(o).map(([k, v]) => `${limitLabel(k)} ${limitValue(v)}`).join(", ");
+/**
+ * A stored monthly limit of 0 means "no limit" - except premium leads, where 0 is the plan
+ * including none (the same rule the customer dashboard applies, lib/metrics.ts). Printed as a
+ * bare 0 it read as the opposite: "3/0" looked over quota and "leads/month 0" like a block.
+ */
+const ZERO_IS_UNLIMITED = new Set(["leadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth"]);
+const limitValue = (v: unknown, key?: string) =>
+  typeof v === "number"
+    ? v <= 0 && key && ZERO_IS_UNLIMITED.has(key) ? "no limit" : fmtNum(v)
+    : typeof v === "boolean" ? (v ? "on" : "off") : v === null || v === undefined ? "-" : typeof v === "string" ? v : JSON.stringify(v);
+const overridesText = (o: Record<string, unknown>) => Object.entries(o).map(([k, v]) => `${limitLabel(k)} ${limitValue(v, k)}`).join(", ");
+/** "12 / 1,000", "12 / no limit", "0 / 0" (premium leads) - a usage cell. */
+const usedOf = (used: number, limit: unknown, key: string) => `${fmtNum(used)} / ${typeof limit === "number" ? limitValue(limit, key) : "-"}`;
 
 /**
  * The limits this workspace has that its plan does not give it.
@@ -205,7 +215,11 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
   const load = useCallback(
     () =>
       adminFetch<OrgDetail>("GET", `/v1/admin/orgs/${orgId}`)
-        .then((d) => { setDetail(d); setPlan(d.org.plan); setClearOverrides(false); setRefreshErr(null); return d; })
+        .then((r) => {
+          const d = expectShape(expectLists(r, "users"), (x) => !!x.org && typeof x.org.id === "string" && !!x.usage && typeof x.usage === "object");
+          setDetail(d); setPlan(d.org.plan); setClearOverrides(false); setRefreshErr(null);
+          return d;
+        })
         .catch((e) => { setRefreshErr(errText(e)); return null; }),
     [orgId],
   );
@@ -233,7 +247,10 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
       const info = (r ?? {}) as { changed?: unknown; note?: unknown };
       const unchanged = info.changed === false;
       const line = describe?.(r) ?? null;
-      const note = typeof info.note === "string" && info.note.trim() ? info.note.trim() : null;
+      // "Nothing changed." is said once, here. A note that opens with the same words has them
+      // taken off rather than printed twice.
+      const rawNote = typeof info.note === "string" ? info.note.trim() : "";
+      const note = (unchanged ? rawNote.replace(/^nothing changed[.:!]?\s*/i, "") : rawNote) || null;
       setOkMsg({ text: [unchanged ? "Nothing changed." : line ? null : `${what} saved.`, line, note].filter(Boolean).join(" "), unchanged });
       await load();
       onChanged();
@@ -281,6 +298,9 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
     if (!parsed.ok) {
       // Nothing is sent. The message sits under the field, not in the banner at the top of
       // the panel, because that is where the admin is looking.
+      // The green line above is about the previous save, not this attempt.
+      setOkMsg(null);
+      setErr(null);
       setCreditErr(parsed.error);
       return;
     }
@@ -295,7 +315,8 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
         if (typeof r?.used !== "number") return null;
         // `limit` comes with newer servers (null = no limit); an older one sends only `used`.
         const limit = r.limit === null ? null : typeof r.limit === "number" ? r.limit : knownLimit;
-        return `${metricLabel(metric)}: ${fmtNum(r.used)} used${limit === null ? " (no limit)" : limit === undefined ? "" : ` of ${fmtNum(limit)}`} this period.`;
+        const none = limit === null || (limit === 0 && metric !== "premiumLeads");
+        return `${metricLabel(metric)}: ${fmtNum(r.used)} used${none ? " (no limit)" : limit === undefined ? "" : ` of ${fmtNum(limit as number)}`} this period.`;
       },
     );
     if (saved) setCreditForm((f) => ({ ...f, amount: "" }));
@@ -304,7 +325,7 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
   const usedNow = detail.usage[creditForm.metric] ?? 0;
   const usageLine = CREDIT_METRICS.filter(([id]) => detail.usage[id] !== undefined).map(([id, label, key]) => {
     const lim = org.limits?.[key];
-    return `${label} ${fmtNum(detail.usage[id])}${typeof lim === "number" ? ` / ${fmtNum(lim)}` : ""}`;
+    return `${label} ${typeof lim === "number" ? usedOf(detail.usage[id], lim, key) : fmtNum(detail.usage[id])}`;
   });
 
   return (
@@ -353,7 +374,7 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
           <div className="mt-2 rounded-lg bg-black/[0.03] p-2 text-xs text-ink-300" data-testid="org-overrides">
             <div className="font-medium text-ink-200">Custom limits</div>
             <ul className="mt-1 space-y-0.5 [overflow-wrap:anywhere]">
-              {Object.entries(overrides).map(([k, v]) => <li key={k}>{limitLabel(k)} <b className="font-semibold text-ink-100">{limitValue(v)}</b></li>)}
+              {Object.entries(overrides).map(([k, v]) => <li key={k}>{limitLabel(k)} <b className="font-semibold text-ink-100">{limitValue(v, k)}</b></li>)}
             </ul>
             {planDirty && !clearOverrides && <div className="mt-2 text-amber-800">These custom limits are kept when the plan changes, unless you clear them.</div>}
             <label className="mt-2 flex items-center gap-2 max-lg:min-h-[40px]">
@@ -461,7 +482,7 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
   const load = () => {
     const mine = ++seq.current;
     return adminFetch<{ orgs: OrgRow[] }>("GET", `/v1/admin/orgs${debouncedQ ? `?q=${encodeURIComponent(debouncedQ)}` : ""}`)
-      .then((r) => { if (mine === seq.current) { setOrgs(r.orgs); setLoadErr(null); } })
+      .then((r) => { if (mine === seq.current) { setOrgs(expectLists(r, "orgs").orgs); setLoadErr(null); } })
       .catch((e) => { if (mine === seq.current) setLoadErr(errText(e)); });
   };
   useEffect(() => { load(); }, [debouncedQ]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -499,7 +520,7 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
     <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
       <div className="card min-w-0 overflow-x-auto p-0">
         <div className="border-b border-black/10 p-3">
-          <input className="input" placeholder="Search workspace or email…" aria-label="Search workspace or email" value={q} onChange={(e) => setQ(e.target.value)} />
+          <input className="input" placeholder="Search workspace or email…" aria-label="Search workspace or email" maxLength={200} value={q} onChange={(e) => setQ(e.target.value)} />
           <div className="mt-2 text-xs text-ink-400 lg:hidden">Tap a workspace to manage its plan, status and credits.</div>
         </div>
         {loadErr && <div className="border-b border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">Could not load workspaces: {loadErr} <button className={LINK_BTN} onClick={load}>Retry</button></div>}
@@ -522,8 +543,8 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
                 <td className="td"><div className="font-medium text-ink-50">{o.name}</div><div className="text-xs text-ink-400">{o.ownerEmail ?? "-"}</div></td>
                 <td className="td">{planCell(o.plan)}</td>
                 <td className="td"><StatusBadge status={o.status} /></td>
-                <td className="td">{fmtNum(o.leadsUsed)}/{fmtNum(Number(o.limits?.leadsPerMonth ?? 0))}</td>
-                <td className="td">{fmtNum(o.premiumLeadsUsed)}/{fmtNum(Number(o.limits?.premiumLeadsPerMonth ?? 0))}</td>
+                <td className="td whitespace-nowrap">{usedOf(o.leadsUsed, o.limits?.leadsPerMonth, "leadsPerMonth")}</td>
+                <td className="td whitespace-nowrap">{usedOf(o.premiumLeadsUsed, o.limits?.premiumLeadsPerMonth, "premiumLeadsPerMonth")}</td>
                 <td className="td">{o.userCount}</td>
                 <td className="td">{fmtDate(o.createdAt)}</td>
               </tr>
@@ -570,7 +591,7 @@ function LeadsTab({ plans, onViewOrg }: { plans: Plan[] | null; onViewOrg: (orgI
   const load = () => {
     const mine = ++loadSeq.current;
     return adminFetch<{ requests: UpgradeRequest[] }>("GET", "/v1/admin/upgrade-requests")
-      .then((r) => { if (mine === loadSeq.current) { setRequests(r.requests); setLoadErr(null); } })
+      .then((r) => { if (mine === loadSeq.current) { setRequests(expectLists(r, "requests").requests); setLoadErr(null); } })
       .catch((e) => { if (mine === loadSeq.current) setLoadErr(errText(e)); });
   };
   useEffect(() => { load(); }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -631,9 +652,10 @@ function LeadsTab({ plans, onViewOrg }: { plans: Plan[] | null; onViewOrg: (orgI
       {notice && !actionErr && <div className="border-b border-black/10 bg-black/[0.03] p-3 text-sm text-ink-200" role="status">{notice}</div>}
       {!requests && !loadErr && <div className="p-6 text-center text-sm text-ink-400" role="status">Loading upgrade requests…</div>}
 
-      {/* Phones: one card per request. The six-column table showed only its first column
-          at 390px, with the contact, the plan and the status control off to the right. */}
-      <ul className="divide-y divide-black/5 md:hidden">
+      {/* Below the desktop breakpoint: one card per request. The table showed only its first
+          column at 390px, and between 768 and 1100px still needed a sideways scroll to reach
+          the status control and "View workspace". */}
+      <ul className="divide-y divide-black/5 lg:hidden">
         {requests?.map((r) => (
           <li key={r.id} className="space-y-2 p-3 text-sm">
             <div className="flex items-start justify-between gap-3">
@@ -651,7 +673,7 @@ function LeadsTab({ plans, onViewOrg }: { plans: Plan[] | null; onViewOrg: (orgI
         ))}
       </ul>
 
-      <div className="hidden overflow-x-auto md:block">
+      <div className="hidden overflow-x-auto lg:block">
         <table className="w-full text-sm">
           <thead><tr className="text-left text-ink-400"><th className="th">Name</th><th className="th">Contact</th><th className="th">Country</th><th className="th">Plan wanted</th><th className="th">Status</th><th className="th">Workspace</th><th className="th">Received</th></tr></thead>
           <tbody>
@@ -681,7 +703,8 @@ const TOOL_STATUS_STYLES: Record<ToolSummary["status"], string> = {
   unmetered: "bg-black/5 text-ink-400",
 };
 
-const TOOL_LIMIT_MAX = 2_000_000_000;
+// The same ceiling the server applies to a tool limit.
+const TOOL_LIMIT_MAX = 1_000_000_000;
 
 function ToolRow({ tool, onSaved }: { tool: ToolSummary; onSaved: (t: ToolSummary) => void }) {
   const [editing, setEditing] = useState(false);
@@ -710,6 +733,7 @@ function ToolRow({ tool, onSaved }: { tool: ToolSummary; onSaved: (t: ToolSummar
   const save = async () => {
     const l = limit.trim();
     const t = threshold.trim();
+    setSaved(null);
     if (l !== "" && !/^\d+$/.test(l)) return setSaveErr("The limit must be a whole number, or blank for no limit.");
     if (l !== "" && Number(l) > TOOL_LIMIT_MAX) return setSaveErr(`The limit can be at most ${fmtNum(TOOL_LIMIT_MAX)}.`);
     if (!/^\d+$/.test(t) || Number(t) < 1 || Number(t) > 100) return setSaveErr("The alert threshold must be a whole number from 1 to 100 (percent used).");
@@ -743,7 +767,7 @@ function ToolRow({ tool, onSaved }: { tool: ToolSummary; onSaved: (t: ToolSummar
             <span className={`badge w-fit whitespace-nowrap ${KEY_STATUS_STYLES[tool.keyStatus]}`} title={tool.lastDetail ?? undefined}>
               {tool.keyStatusLabel}
             </span>
-            {tool.keyStatus === "unverified" && <span className="text-[11px] text-ink-500">nothing has called it yet</span>}
+            {tool.keyStatus === "unverified" && tool.category !== "Infrastructure" && <span className="text-[11px] text-ink-500">nothing has called it yet</span>}
             {tool.lastDetail && tool.keyStatus !== "working" && <span className="max-w-[220px] text-[11px] text-ink-500">{tool.lastDetail}</span>}
             {tool.keyStatus === "not_configured" && <span className="text-[11px] text-ink-500">{tool.keyEnvVar}</span>}
           </span>
@@ -812,7 +836,7 @@ const CHECK_LABELS: Record<string, string> = {
 
 // `notTested`: providers that hold a key no check exercises. Newer servers list them (with a
 // reason each); an older one sends nothing, and a bare slug is tolerated too.
-type CheckResponse = { results: (ProviderCheck & { label?: string })[]; summary: string; checkedAt: string; retired?: string[]; notTested?: (string | { provider: string; label?: string; reason?: string })[] };
+type CheckResponse = { results: (ProviderCheck & { label?: string })[]; summary: string; checkedAt: string; retired?: string[]; testedCount?: number; tested?: number; notTested?: (string | { provider: string; label?: string; reason?: string })[] };
 
 function ToolsTab() {
   const [tools, setTools] = useState<ToolSummary[] | null>(null);
@@ -822,7 +846,7 @@ function ToolsTab() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   // Uncaught before: a failed load left "Loading…" on screen forever.
   const load = () => adminFetch<{ tools: ToolSummary[] }>("GET", "/v1/admin/tools")
-    .then((r) => { setTools(r.tools); setLoadErr(null); })
+    .then((r) => { setTools(expectLists(r, "tools").tools); setLoadErr(null); })
     .catch((e) => setLoadErr(errText(e)));
   useEffect(() => { load(); }, []);
 
@@ -832,7 +856,7 @@ function ToolsTab() {
     setChecking(true);
     setCheckError(null);
     try {
-      const r = await adminFetch<CheckResponse>("POST", "/v1/admin/tools/check", {});
+      const r = expectShape(expectLists(await adminFetch<CheckResponse>("POST", "/v1/admin/tools/check", {}), "results"), (x) => typeof x.summary === "string");
       setCheck(r);
       await load();
     } catch (e) {
@@ -861,6 +885,9 @@ function ToolsTab() {
   const results = Array.isArray(check?.results) ? check!.results : [];
   const retiredSlugs = new Set(check?.retired ?? []);
   const tested = results.filter((r) => r.configured);
+  // The count the server reports when it sends one (it leaves retired providers out);
+  // otherwise the rows shown below.
+  const testedCount = typeof check?.testedCount === "number" ? check.testedCount : typeof check?.tested === "number" ? check.tested : tested.length;
   // Named, not counted: "all configured providers responded" over a list of eleven grey
   // "no key" rows read as eleven passes.
   const noKey = [...new Set(results.filter((r) => !r.configured).map(checkLabel))];
@@ -924,7 +951,7 @@ function ToolsTab() {
           {/* The server's own sentence, word for word - it knows what it did and did not test. */}
           <div className="border-b border-black/5 px-4 py-2 text-sm text-ink-100" role="status">{check.summary}</div>
           <div className="border-b border-black/5 px-4 py-2 text-xs text-ink-500">
-            Checked {new Date(check.checkedAt).toLocaleString()} · {plural(tested.length, "provider")} tested
+            Checked {new Date(check.checkedAt).toLocaleString()} · {plural(testedCount, "provider")} tested
           </div>
           {(untestable.length > 0 || noKey.length > 0) && (
             <div className="border-b border-black/5 px-4 py-2 text-xs text-ink-400 [overflow-wrap:anywhere]" data-testid="check-not-tested">
@@ -1028,7 +1055,8 @@ function CreditsTab() {
     setErr(null);
     try {
       const r = await adminFetch<{ balances: ProviderBalance[] }>("GET", "/v1/admin/balances");
-      setRows(Array.isArray(r?.balances) ? r.balances : []);
+      // A wrong shape is an error with Retry - not "No providers reported a balance."
+      setRows(expectLists(r, "balances").balances);
     } catch (e) {
       setErr(errText(e));
     } finally {
@@ -1119,7 +1147,7 @@ export function AdminDashboardPage() {
   const loadPlans = useCallback(() => {
     setPlansLoading(true);
     adminFetch<{ plans: Plan[] }>("GET", "/v1/admin/plans")
-      .then((r) => { setPlans(Array.isArray(r?.plans) ? r.plans : []); setPlansErr(null); })
+      .then((r) => { setPlans(expectLists(r, "plans").plans); setPlansErr(null); })
       .catch((e) => setPlansErr(errText(e)))
       .finally(() => setPlansLoading(false));
   }, []);

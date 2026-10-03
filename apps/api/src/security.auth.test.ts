@@ -1405,11 +1405,12 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       const tooBig = await app.request("/v1/leads", { method: "POST", headers: { origin, authorization: `Bearer ${u.token}`, "content-type": "application/json", "cf-connecting-ip": ip() }, body: big2mb });
       expect(tooBig.status).toBe(413);
       expect(tooBig.headers.get("access-control-allow-origin")).toBe(origin);
-      expect((await tooBig.json()).error.message).toMatch(/too large.*1 MB/);
+      expect((await tooBig.json()).error).toEqual({ code: "payload_too_large", message: "That request is too large (1 MB at most)." });
       // Same for the public endpoints (256 KB) and by declared length alone.
       const publicBig = await app.request("/v1/auth/login", { method: "POST", headers: { origin, "content-type": "application/json", "content-length": String(50 * 1024 * 1024), "cf-connecting-ip": ip() }, body: "{}" });
       expect(publicBig.status).toBe(413);
       expect(publicBig.headers.get("access-control-allow-origin")).toBe(origin);
+      expect((await publicBig.json()).error.message).toBe("That request is too large (256 KB at most).");
       const adminBig = await app.request("/v1/admin/tools/check", { method: "POST", headers: { origin, "x-admin-token": ADMIN_TOKEN, "content-type": "application/json", "cf-connecting-ip": ip() }, body: big2mb });
       expect(adminBig.status).toBe(413);
       expect(adminBig.headers.get("access-control-allow-origin")).toBe(origin);
@@ -1443,7 +1444,8 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       const auth = { authorization: `Bearer ${u.token}` };
       const csv20 = await app.request("/v1/leads/import", { method: "POST", headers: { ...auth, "content-type": "text/csv" }, body: `email\n${big(20 * 1024 * 1024)}` });
       expect(csv20.status).toBe(413);
-      expect((await csv20.json()).error).toMatchObject({ code: "payload_too_large" });
+      // The import says what to do about it: this one is a file somebody chose.
+      expect((await csv20.json()).error).toEqual({ code: "payload_too_large", message: "That file is too large to import in one go (10 MB at most). Split it and import in parts." });
       const s = stream(20 * 1024 * 1024);
       const chunked = await app.request("/v1/leads/import", { method: "POST", headers: { ...auth, "content-type": "text/csv" }, body: s.body, duplex: "half" } as any);
       expect(chunked.status).toBe(413);

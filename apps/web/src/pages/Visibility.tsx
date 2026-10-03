@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch } from "../lib/api";
+import { apiFetch, expectLists } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 import { plural } from "../lib/plural";
 
@@ -55,7 +55,7 @@ export function VisibilityPage() {
     // before {Toast} ever rendered, so a failure showed a spinner that span forever with no
     // message at all. The error now has somewhere to live that the user can actually see.
     apiFetch<Overview>("GET", "/v1/visibility/overview").then(setD).catch((e) => setLoadErr((e as Error).message));
-    apiFetch<{ prompts: Prompt[] }>("GET", "/v1/visibility/prompts").then((r) => { setPrompts(r.prompts); setPromptsErr(null); }).catch((e) => setPromptsErr((e as Error).message));
+    apiFetch<{ prompts: Prompt[] }>("GET", "/v1/visibility/prompts").then((r) => { setPrompts(expectLists(r, "prompts").prompts); setPromptsErr(null); }).catch((e) => setPromptsErr((e as Error).message));
     apiFetch<{ engines: typeof engines }>("GET", "/v1/visibility/engines").then((r) => setEngines(r.engines ?? [])).catch(() => setEngines([]));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);

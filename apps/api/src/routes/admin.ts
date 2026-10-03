@@ -242,9 +242,27 @@ adminRoutes.get("/orgs/:id", async (c) => {
 /** A limit that is a count: a whole number from 0 up. (0 means "no limit" for the monthly metrics.) */
 const countLimit = z.number().int().min(0).max(MAX_PLAN_LIMIT);
 /**
- * Overrides are a strict partial of the plan limits. They used to be `z.record(z.unknown())`,
- * stored verbatim: `{"leadsPerMonth":"lots","seats":-1,"campaigns":null,"evil":{}}` was
- * accepted, and the string switched that customer's lead quota off. An unknown key or a
+ * Plan limits that are part of every plan's definition but that NOTHING in the server reads
+ * when deciding what a workspace may do: no route counts a workspace's campaigns against
+ * `campaigns`, and no route checks `apiAccess` or `integrations` before serving the API or
+ * connecting an integration. An override for one of them was accepted, stored and shown in
+ * the console - and changed nothing (a customer set to `apiAccess: false` kept using the
+ * API). An override that cannot take effect is refused, with the reason.
+ *
+ * Enforced, and so overridable: the six monthly metrics (consume / remainingPremiumBudget in
+ * packages/db usage.ts), `seats` (the invite and join routes) and `emailsPerDay`
+ * (orgDailySendCeiling). When one of the three below gains real enforcement, give it its
+ * value schema in OVERRIDES_SCHEMA and remove it from here.
+ */
+const UNENFORCED_LIMITS = { campaigns: "The campaigns limit", apiAccess: "API access", integrations: "Integrations access" } as const;
+const notEnforced = (what: string) =>
+  z.unknown().superRefine((_v, ctx) => {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${what} is not enforced by the server yet, so it cannot be overridden.` });
+  });
+/**
+ * Overrides are a strict partial of the plan limits the server enforces. They used to be
+ * `z.record(z.unknown())`, stored verbatim: `{"leadsPerMonth":"lots","seats":-1,"evil":{}}`
+ * was accepted, and the string switched that customer's lead quota off. An unknown key or a
  * value of the wrong kind is now a 400 that names it.
  */
 const OVERRIDES_SCHEMA = z
@@ -255,15 +273,30 @@ const OVERRIDES_SCHEMA = z
     verificationsPerMonth: countLimit,
     aiMessagesPerMonth: countLimit,
     emailsPerMonth: countLimit,
-    campaigns: countLimit,
     seats: countLimit,
-    apiAccess: z.boolean(),
-    integrations: z.boolean(),
     /** The workspace's daily sending ceiling, when it should differ from the computed one. */
     emailsPerDay: z.number().int().min(1).max(MAX_PLAN_LIMIT),
+    campaigns: notEnforced(UNENFORCED_LIMITS.campaigns),
+    apiAccess: notEnforced(UNENFORCED_LIMITS.apiAccess),
+    integrations: notEnforced(UNENFORCED_LIMITS.integrations),
   })
   .partial()
   .strict();
+/** Limit names as the console shows them (the same words as its "Custom limits" list). */
+const LIMIT_LABELS: Record<string, string> = {
+  leadsPerMonth: "leads/month",
+  premiumLeadsPerMonth: "premium leads/month",
+  searchesPerMonth: "searches/month",
+  verificationsPerMonth: "verifications/month",
+  aiMessagesPerMonth: "AI messages/month",
+  emailsPerMonth: "emails/month",
+  emailsPerDay: "emails/day",
+  campaigns: "campaigns",
+  seats: "seats",
+  apiAccess: "API access",
+  integrations: "integrations",
+};
+const limitText = (k: string, v: unknown) => `${LIMIT_LABELS[k] ?? k} ${typeof v === "boolean" ? (v ? "on" : "off") : String(v)}`;
 const PLAN_SCHEMA = z.object({ plan: z.string().max(100), overrides: OVERRIDES_SCHEMA.optional() });
 
 /** Key order does not matter when comparing two sets of limits (jsonb reorders keys anyway). */
@@ -283,7 +316,7 @@ adminRoutes.patch("/orgs/:id/plan", zValidator("json", PLAN_SCHEMA), async (c) =
   // whatever had been granted. They are kept unless the request says otherwise: `overrides`
   // replaces them, and an explicit `{}` clears them.
   const explicit = b.overrides !== undefined;
-  const overrides = explicit ? b.overrides! : planOverrides(before);
+  const overrides = (explicit ? b.overrides! : planOverrides(before)) as Record<string, number | boolean>;
   const nextLimits = { ...limitsFor(b.plan), ...overrides };
   // Stored values that are not usable limits (written before overrides were validated).
   const junk = sanitizePlanLimits(before.planLimits).rejected;
@@ -306,7 +339,8 @@ adminRoutes.patch("/orgs/:id/plan", zValidator("json", PLAN_SCHEMA), async (c) =
   });
   const kept = !explicit && before.plan !== b.plan ? Object.entries(shownOverrides) : [];
   const notes = [
-    kept.length ? `Kept this workspace's existing overrides (${kept.map(([k, v]) => `${k}: ${String(v)}`).join(", ")}). Send "overrides": {} with the plan to clear them.` : "",
+    // Shown as it is in the console, so it names the limits and the control the way the page does.
+    kept.length ? `Custom limits were kept: ${kept.map(([k, v]) => limitText(k, v)).join(", ")}. Tick 'Clear custom limits' to remove them.` : "",
     junk.length ? `Removed stored limit values that were not usable: ${junk.slice(0, 10).join(", ")}.` : "",
   ].filter(Boolean);
   return c.json({ id: row.id, plan: row.plan, limits: effectiveLimits(row), overrides: shownOverrides, changed: true, ...(notes.length ? { note: notes.join(" ") } : {}) });
@@ -364,7 +398,7 @@ adminRoutes.patch("/orgs/:id/credits", zValidator("json", CREDITS_SCHEMA), async
 
   if (action === "grant" && b.amount === 0) {
     const row = await db.query.usage.findFirst({ where: and(eq(usage.orgId, org.id), eq(usage.period, currentPeriod()), eq(usage.metric, b.metric)) });
-    return c.json({ metric: b.metric, period: currentPeriod(), used: row?.count ?? 0, limit, changed: false, note: "Nothing to change: the amount was 0." });
+    return c.json({ metric: b.metric, period: currentPeriod(), used: row?.count ?? 0, limit, changed: false, note: "The amount was 0." });
   }
 
   // One statement in the database, on the row as it is at that moment (see adjustUsage). The
@@ -374,12 +408,17 @@ adminRoutes.patch("/orgs/:id/credits", zValidator("json", CREDITS_SCHEMA), async
   const r = await adjustUsage(db, org.id, b.metric, action === "grant" ? { delta: -b.amount } : { set: b.amount });
   const changed = r.before !== r.after;
 
+  // One sentence, and never "Nothing changed": the console writes that itself for
+  // `changed: false` and puts this after it.
   let note: string | undefined;
   if (action === "grant" && b.amount > 0) {
     const givenBack = r.before - r.after;
     if (r.before === 0) {
       // Said plainly: this used to answer "saved" and do nothing.
-      note = `This workspace has used 0 ${what} this month, so there was nothing to give back and nothing changed. Granting only returns usage; it does not raise the allowance${limit === null ? " (which has no limit on this plan)" : ` of ${limit}`}. To allow more than the plan gives, set a plan override for this workspace.`;
+      note =
+        limit === null
+          ? `This workspace has used 0 ${what} this month, so there was nothing to give back, and its plan has no limit on ${what} to raise.`
+          : `This workspace has used 0 ${what} this month, so there was nothing to give back: a grant only returns usage, and raising the allowance of ${limit.toLocaleString("en-US")} takes a custom limit (a plan override).`;
     } else if (givenBack < b.amount) {
       note = `Usage cannot go below zero, so only ${givenBack} ${givenBack === 1 ? "was" : "were"} granted back.`;
     }
@@ -388,7 +427,7 @@ adminRoutes.patch("/orgs/:id/credits", zValidator("json", CREDITS_SCHEMA), async
     if (added < -b.amount) note = `The usage counter is at its maximum, so only ${added} ${added === 1 ? "was" : "were"} added.`;
   } else if (action === "set") {
     if (b.amount < 0) note = "Usage cannot go below zero, so used was set to 0.";
-    else if (!changed) note = `Nothing to change: used was already ${r.after}.`;
+    else if (!changed) note = `The used count was already ${r.after.toLocaleString("en-US")}.`;
   }
 
   if (changed) {
@@ -505,20 +544,36 @@ adminRoutes.post("/tools/check", rateLimit({ perMinute: 3 }), async (c) => {
     await adminAudit(c, "admin.tools_checked", null, { targetType: "tools", data: { checked: results.filter((r) => r.configured).length, broken: broken.map((b) => b.provider), notTested: notTested.map((n) => n.provider) } });
   }
   return c.json({
-    results,
+    // `retired` marks a row that was called but is not part of the count: a retired provider
+    // cannot pass, so it is neither "tested" nor a failure.
+    results: results.map((r) => ({ ...r, retired: retired.has(r.provider) })),
     checkedAt: new Date().toISOString(),
     retired: [...retired],
+    // The number the summary sentence uses. Counting `results` rows that have a key gives a
+    // different one (it includes retired providers): the page said "4 providers tested"
+    // under a summary that said 3. `tested` has always been this number; `testedCount` is
+    // the same value under a name that cannot be mistaken for a list.
     tested: tested.length,
+    testedCount: tested.length,
     passed: tested.length - broken.length,
+    skippedRetired: skippedRetired.map((r) => r.provider),
     notTested,
     summary,
   });
 });
 
+/** One sentence for every way the number can be wrong, naming the largest value it may hold. */
+const USAGE_LIMIT_RULE = `Usage limit must be a whole number from 0 to ${MAX_PLAN_LIMIT.toLocaleString("en-US")}.`;
 const TOOL_LIMIT_SCHEMA = z.object({
   // Bounded: the column is a 32-bit integer, and a larger number used to reach the database
   // and come back as a generic "value not usable" error that did not name the field.
-  usageLimit: z.number().int().min(0).max(MAX_PLAN_LIMIT).nullable().optional(),
+  usageLimit: z
+    .number({ invalid_type_error: USAGE_LIMIT_RULE })
+    .int(USAGE_LIMIT_RULE)
+    .min(0, USAGE_LIMIT_RULE)
+    .max(MAX_PLAN_LIMIT, USAGE_LIMIT_RULE)
+    .nullable()
+    .optional(),
   period: z.enum(["day", "month"]).optional(),
   alertThresholdPct: z.number().int().min(1).max(100).optional(),
   notes: z.string().max(2000).nullable().optional(),

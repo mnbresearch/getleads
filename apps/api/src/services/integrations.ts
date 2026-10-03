@@ -384,6 +384,26 @@ const providers: Record<string, (cfg: Cfg, lead: Lead, company: { name?: string 
 
 export const INTEGRATION_PROVIDERS = Object.keys(providers);
 
+/**
+ * Each provider as its own name is written, for sentences a customer reads. The ids
+ * ("hubspot", "sheets", "pdl") are what the API and the database use; a message that said
+ * "to connect hubspot" was showing an id.
+ */
+const PROVIDER_NAMES: Record<string, string> = {
+  hubspot: "HubSpot",
+  pipedrive: "Pipedrive",
+  zoho: "Zoho",
+  sheets: "Google Sheets",
+  cortex: "Cortex",
+  webhook: "your webhook",
+  whatsapp: "WhatsApp",
+  apollo: "Apollo",
+  hunter: "Hunter",
+  pdl: "People Data Labs",
+  ipinfo: "IPinfo",
+};
+export const integrationName = (provider: string): string => (Object.hasOwn(PROVIDER_NAMES, provider) ? PROVIDER_NAMES[provider] : provider);
+
 export async function syncLead(integration: Integration, leadId: string): Promise<SyncResult> {
   const { db } = getDb();
   // Strict: a blob that cannot be decrypted (key rotated, row damaged) used to read as an
@@ -409,7 +429,8 @@ export async function syncLead(integration: Integration, leadId: string): Promis
     r = await fn(checked.config, lead, company ?? null);
   } catch {
     // Nothing a provider throws is passed on verbatim: it can carry bytes of the response.
-    r = { ok: false, error: `${integration.provider} sync failed unexpectedly` };
+    const name = integrationName(integration.provider);
+    r = { ok: false, error: `${name.charAt(0).toUpperCase()}${name.slice(1)} sync failed unexpectedly` };
   }
   if (r.ok) {
     await db.update(leads).set({ custom: { ...(lead.custom ?? {}), [`${integration.provider}_id`]: r.externalId ?? true } }).where(eq(leads.id, lead.id));

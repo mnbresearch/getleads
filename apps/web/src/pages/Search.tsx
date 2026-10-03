@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router-dom";
-import { apiFetch, fmtDate } from "../lib/api";
+import { apiFetch, fmtDate, expectLists } from "../lib/api";
 import { LoadError, Page, Spinner, TagInput, useToast } from "../components/ui";
 
 /** The API's caps on a search (routes/search.ts searchInput). Checked here so the user gets a sentence, not a 400. */
@@ -76,7 +76,7 @@ export function SearchPage() {
   useEffect(() => {
     load();
     loadIcps();
-    apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClients(r.clients)).catch(() => setClients([]));
+    apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClients(expectLists(r, "clients").clients)).catch(() => setClients([]));
     const t = setInterval(() => { void load(); }, 4000);
     return () => clearInterval(t);
   }, []);

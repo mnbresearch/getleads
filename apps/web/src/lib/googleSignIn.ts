@@ -1,4 +1,5 @@
-import { API_URL } from "./api";
+import { useEffect, useState } from "react";
+import { API_URL, apiFetch } from "./api";
 
 /**
  * Google sign-in, bound to the browser that started it.
@@ -65,4 +66,34 @@ export function takeGoogleVerifier(): string | null {
   } catch {
     return null;
   }
+}
+
+/**
+ * Whether this deployment offers Google sign-in at all.
+ *
+ * Asked once per page load and shared: several pages mention "Continue with Google" in their
+ * help text, and on a deployment without it that sends people looking for a button that is
+ * not there. False until the server says yes - an unanswered or failed question is not a yes.
+ */
+let googleEnabledCache: boolean | null = null;
+let googleEnabledInflight: Promise<boolean> | null = null;
+function fetchGoogleEnabled(): Promise<boolean> {
+  if (googleEnabledCache !== null) return Promise.resolve(googleEnabledCache);
+  if (!googleEnabledInflight) {
+    googleEnabledInflight = apiFetch<{ enabled?: boolean }>("GET", "/v1/auth/google/status", undefined, undefined, { anonymous: true })
+      .then((r) => { googleEnabledCache = r?.enabled === true; return googleEnabledCache; })
+      .catch(() => false)
+      .finally(() => { googleEnabledInflight = null; });
+  }
+  return googleEnabledInflight;
+}
+
+export function useGoogleEnabled(): boolean {
+  const [enabled, setEnabled] = useState(googleEnabledCache === true);
+  useEffect(() => {
+    let live = true;
+    void fetchGoogleEnabled().then((v) => { if (live) setEnabled(v); });
+    return () => { live = false; };
+  }, []);
+  return enabled;
 }

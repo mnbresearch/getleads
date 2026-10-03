@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { apiFetch, fmtNum } from "../lib/api";
+import { apiFetch, fmtNum, expectLists } from "../lib/api";
 import { metricLabel } from "../lib/metrics";
 import { LoadError, Page, Spinner, Stat } from "../components/ui";
 import { plural } from "../lib/plural";
@@ -28,7 +28,7 @@ export function Dashboard() {
   const [hotErr, setHotErr] = useState<string | null>(null);
   const loadHot = useCallback(() => {
     setHotErr(null);
-    apiFetch<{ leads: HotLead[] }>("GET", "/v1/leads/hot/list?limit=6").then((r) => setHot(r.leads)).catch((e) => setHotErr((e as Error).message));
+    apiFetch<{ leads: HotLead[] }>("GET", "/v1/leads/hot/list?limit=6").then((r) => setHot(expectLists(r, "leads").leads)).catch((e) => setHotErr((e as Error).message));
   }, []);
   const load = useCallback(() => {
     setErr(null);

@@ -144,6 +144,8 @@ describe("verify chain falls through on 'unknown'", () => {
     stubFetch((u) => (u.includes("hunter.io") ? { body: { data: { status: "unknown", score: 40 } } } : u.includes("abstractapi.com") ? { body: { deliverability: "UNKNOWN" } } : undefined));
     const v = await verifyEmail("jane@acme.example", { smtp: false, hunterApiKey: "h", abstractApiKey: "a" });
     expect(v.verifiedBy).toBe("mx-only");
+    // The reason is shown to customers in Tools: in their words, not "MX ok, SMTP probe disabled".
+    expect(v.reason).toBe("The domain accepts email; the individual mailbox was not checked.");
     expect(v.verifierAttempts?.map((a) => a.verifier)).toEqual(["hunter", "abstract"]);
   });
 

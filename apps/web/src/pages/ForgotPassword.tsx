@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch } from "../lib/api";
 import { Logo } from "../components/Logo";
+import { useGoogleEnabled } from "../lib/googleSignIn";
 
 /**
  * Request a password reset link.
@@ -15,6 +16,8 @@ export function ForgotPasswordPage() {
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // "Continue with Google" is only suggested when the sign-in page really has that button.
+  const googleEnabled = useGoogleEnabled();
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (busy) return;
@@ -41,7 +44,7 @@ export function ForgotPasswordPage() {
           <p className="text-sm text-ink-300">
             If an account exists for <span className="font-medium text-ink-100">{email.trim()}</span>, we&apos;ve emailed a link to reset its password. The link works once and expires soon, so use it shortly.
           </p>
-          <p className="text-xs text-ink-400">Nothing arrived after a few minutes? Check spam, or try again. If you signed up with Google, use "Continue with Google" on the sign-in page instead.</p>
+          <p className="text-xs text-ink-400">Nothing arrived after a few minutes? Check spam, or try again.{googleEnabled ? ' If you signed up with Google, use "Continue with Google" on the sign-in page instead.' : ""}</p>
           <div className="flex gap-2">
             <button className="btn-secondary flex-1 justify-center" onClick={() => setSent(false)}>Try again</button>
             <Link className="btn-primary flex-1 justify-center" to="/login">Back to sign in</Link>

@@ -186,6 +186,21 @@ export async function getToolsSummary(): Promise<ToolSummary[]> {
     } else if (reg.usageLimit === null) {
       status = "unmetered";
     }
+    // Infrastructure rows are not API keys. The database row carries DATABASE_URL only so
+    // the page can say it is set, nothing ever "calls" it the way a provider is called, and
+    // so it read "Key set, never used" - about the database this very query just ran on. It
+    // is connected, by definition. The hosting rows have no key at all and are not tracked
+    // from here (their notes say where to look), so they say that instead of "Key set".
+    let keyStatus = keyStatusFrom(configured, reg.lastOutcome ?? null, reg.retired ?? false);
+    let keyStatusLabel = KEY_STATUS_LABEL[keyStatus];
+    if (reg.category === "Infrastructure" && !reg.retired) {
+      if (reg.keyEnvVar === "DATABASE_URL") {
+        keyStatus = "working";
+        keyStatusLabel = "Connected";
+      } else if (!reg.keyEnvVar && keyStatus === "unverified") {
+        keyStatusLabel = "Not tracked here";
+      }
+    }
     out.push({
       provider: reg.provider,
       label: reg.label,
@@ -201,8 +216,8 @@ export async function getToolsSummary(): Promise<ToolSummary[]> {
       currentPeriodKey: period,
       used,
       percentUsed,
-      keyStatus: keyStatusFrom(configured, reg.lastOutcome ?? null, reg.retired ?? false),
-      keyStatusLabel: KEY_STATUS_LABEL[keyStatusFrom(configured, reg.lastOutcome ?? null, reg.retired ?? false)],
+      keyStatus,
+      keyStatusLabel,
       retired: reg.retired ?? false,
       lastOutcome: reg.lastOutcome ?? null,
       lastStatusCode: reg.lastStatus ?? null,

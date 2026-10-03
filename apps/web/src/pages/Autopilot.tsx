@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, fmtDate } from "../lib/api";
+import { apiFetch, fmtDate, expectLists } from "../lib/api";
 import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { plural } from "../lib/plural";
 
@@ -67,9 +67,9 @@ export function AutopilotPage() {
       .catch((e) => setSavedErr((e as Error).message));
     const fails: string[] = [];
     Promise.all([
-      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps)).catch((e) => { fails.push(`ICPs (${(e as Error).message})`); }),
-      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)).catch((e) => { fails.push(`lists (${(e as Error).message})`); }),
-      apiFetch<{ campaigns: typeof camps }>("GET", "/v1/campaigns").then((r) => setCamps(r.campaigns)).catch((e) => { fails.push(`campaigns (${(e as Error).message})`); }),
+      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(expectLists(r, "icps").icps)).catch((e) => { fails.push(`ICPs (${(e as Error).message})`); }),
+      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(expectLists(r, "lists").lists)).catch((e) => { fails.push(`lists (${(e as Error).message})`); }),
+      apiFetch<{ campaigns: typeof camps }>("GET", "/v1/campaigns").then((r) => setCamps(expectLists(r, "campaigns").campaigns)).catch((e) => { fails.push(`campaigns (${(e as Error).message})`); }),
     ]).then(() => setPickErr(fails.length ? `Couldn't load ${fails.join(", ")}.` : null));
   }, []);
   useEffect(() => { load(); }, [load]);

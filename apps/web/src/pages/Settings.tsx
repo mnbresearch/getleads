@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes, useNavigate } from "react-router-dom";
-import { API_URL, apiFetch, auth, fmtDate } from "../lib/api";
+import { API_URL, apiFetch, auth, fmtDate, expectLists } from "../lib/api";
 import { limitLabel, metricLabel } from "../lib/metrics";
 import { rememberMe, useMe } from "../lib/me";
 import { EXTERNAL_REL } from "../lib/safeHref";
 import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/ui";
 import { plural, pluralWord } from "../lib/plural";
+import { integrationName } from "../lib/integrations";
+import { useGoogleEnabled } from "../lib/googleSignIn";
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
 function MembersNote({ what }: { what: string }) {
@@ -85,6 +87,8 @@ function ChangePassword() {
   // hasPassword comes from /v1/auth/me. Unknown (older server, or not loaded): show the
   // field as optional and say why it might be blank.
   const hasPassword = me?.user?.hasPassword;
+  // Google is only mentioned where this deployment actually offers it.
+  const googleEnabled = useGoogleEnabled();
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (pw.length < 8) return setMsg({ ok: false, text: "Use at least 8 characters." });
@@ -116,7 +120,7 @@ function ChangePassword() {
       {hasPassword === false && <p className="text-xs text-ink-400">You sign in with Google. Setting a password lets you sign in with your email as well.</p>}
       {hasPassword !== false && (
         <div>
-          <label className="label" htmlFor="pw-current">{hasPassword ? "Current password" : "Current password (leave blank if you signed up with Google)"}</label>
+          <label className="label" htmlFor="pw-current">{!hasPassword && googleEnabled ? "Current password (leave blank if you signed up with Google)" : "Current password"}</label>
           <input id="pw-current" className="input" type="password" autoComplete="current-password" required={hasPassword === true} value={cur} onChange={(e) => setCur(e.target.value)} />
         </div>
       )}
@@ -179,7 +183,7 @@ function ApiKeys() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const { canManage } = useMe();
-  const load = () => apiFetch<{ apiKeys: typeof keys }>("GET", "/v1/auth/api-keys").then((r) => { setKeys(r.apiKeys); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
+  const load = () => apiFetch<{ apiKeys: typeof keys }>("GET", "/v1/auth/api-keys").then((r) => { setKeys(expectLists(r, "apiKeys").apiKeys); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { if (canManage) load(); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
   const revoke = async (k: { id: string; name: string; prefix: string }) => {
     if (!confirm(`Revoke the API key "${k.name}" (${k.prefix}…)?\n\nAnything using it - agents, scripts, the MCP server - stops working immediately. This cannot be undone.`)) return;
@@ -261,7 +265,7 @@ function Webhooks() {
   const [testing, setTesting] = useState<string | null>(null);
   const [rotating, setRotating] = useState<string | null>(null);
   const { canManage } = useMe();
-  const load = () => apiFetch<{ webhooks: Hook[] }>("GET", "/v1/webhooks").then((r) => { setHooks(r.webhooks); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
+  const load = () => apiFetch<{ webhooks: Hook[] }>("GET", "/v1/webhooks").then((r) => { setHooks(expectLists(r, "webhooks").webhooks); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { if (canManage) load(); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
   const add = async () => {
     try {
@@ -388,15 +392,15 @@ function Integrations() {
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
   const { canManage } = useMe();
-  const load = () => apiFetch<{ integrations: typeof list }>("GET", "/v1/integrations").then((r) => { setList(r.integrations); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
+  const load = () => apiFetch<{ integrations: typeof list }>("GET", "/v1/integrations").then((r) => { setList(expectLists(r, "integrations").integrations); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { if (canManage) load(); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
   const p = PROVIDER_FIELDS[provider];
   const disconnect = async (prov: string) => {
-    const label = PROVIDER_FIELDS[prov]?.label ?? prov;
+    const label = integrationName(prov);
     if (!confirm(`Disconnect ${label}?\n\nScout stops pushing leads to it and forgets the saved credentials; you will need to enter them again to reconnect. Data already pushed stays in ${label}.`)) return;
     try {
       await apiFetch("DELETE", `/v1/integrations/${prov}`);
-      toast("Disconnected");
+      toast(`${label} disconnected`);
       load();
     } catch (e) { toast((e as Error).message, "err"); }
   };
@@ -409,11 +413,11 @@ function Integrations() {
         <select className="input mb-3" value={provider} onChange={(e) => { setProvider(e.target.value); setCfg({}); }}>{Object.entries(PROVIDER_FIELDS).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}</select>
         {p.fields.map(([k, label]) => <div key={k} className="mb-2"><label className="label">{label}</label><input className="input" value={cfg[k] ?? ""} onChange={(e) => setCfg({ ...cfg, [k]: e.target.value })} /></div>)}
         <p className="mb-3 text-xs text-ink-400">{p.help}</p>
-        <button className="btn-primary" onClick={() => apiFetch("PUT", `/v1/integrations/${provider}`, { config: cfg }).then(() => { toast("Connected"); load(); }).catch((e) => toast(e.message, "err"))}>Save connection</button>
+        <button className="btn-primary" onClick={() => apiFetch("PUT", `/v1/integrations/${provider}`, { config: cfg }).then(() => { toast(`${integrationName(provider)} connected`); load(); }).catch((e) => toast(e.message, "err"))}>Save connection</button>
       </div>
       <div className="card p-5">
         <div className="mb-3 font-medium">Connected</div>
-        <ul className="divide-y divide-slate-100 text-sm">{list.map((i) => <li key={i.provider} className="flex items-center justify-between py-2"><div><div className="font-medium">{PROVIDER_FIELDS[i.provider]?.label ?? i.provider}</div><div className="text-xs text-ink-400">{i.lastSyncAt ? `last sync ${fmtDate(i.lastSyncAt)}` : "nothing pushed yet"}</div></div><button className="text-red-600" onClick={() => disconnect(i.provider)}>Disconnect</button></li>)}{loaded && list.length === 0 && <li className="py-2 text-ink-400">Nothing connected yet.</li>}</ul>
+        <ul className="divide-y divide-slate-100 text-sm">{list.map((i) => <li key={i.provider} className="flex items-center justify-between py-2"><div><div className="font-medium">{PROVIDER_FIELDS[i.provider]?.label ?? integrationName(i.provider)}</div><div className="text-xs text-ink-400">{i.lastSyncAt ? `last sync ${fmtDate(i.lastSyncAt)}` : "nothing pushed yet"}</div></div><button className="text-red-600" onClick={() => disconnect(i.provider)}>Disconnect</button></li>)}{loaded && list.length === 0 && <li className="py-2 text-ink-400">Nothing connected yet.</li>}</ul>
         {loadErr && !loaded && <LoadError message={loadErr} onRetry={load} />}
         <p className="mt-3 text-xs text-ink-400">
           Push leads from the Leads page: select them, then choose <strong>Push to CRM</strong> in the bar that appears. Or call{" "}

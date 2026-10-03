@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { apiFetch, fmtDate } from "../lib/api";
+import { apiFetch, fmtDate, expectLists } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 import { ExtLink } from "../components/ExtLink";
 import { plural } from "../lib/plural";
@@ -82,8 +82,8 @@ export function SignalsPage() {
       .then((r) => { setSignals(r.signals); setListErr(null); })
       .catch((e) => setListErr((e as Error).message))
       .finally(() => setLoading(false));
-    apiFetch<{ subscriptions: Sub[] }>("GET", "/v1/signals/subscriptions").then((r) => { setSubs(r.subscriptions); setSubsErr(null); }).catch((e) => setSubsErr((e as Error).message));
-    apiFetch<{ monitors: Monitor[] }>("GET", "/v1/signals/monitors").then((r) => { setMons(r.monitors); setMonsErr(null); }).catch((e) => setMonsErr((e as Error).message));
+    apiFetch<{ subscriptions: Sub[] }>("GET", "/v1/signals/subscriptions").then((r) => { setSubs(expectLists(r, "subscriptions").subscriptions); setSubsErr(null); }).catch((e) => setSubsErr((e as Error).message));
+    apiFetch<{ monitors: Monitor[] }>("GET", "/v1/signals/monitors").then((r) => { setMons(expectLists(r, "monitors").monitors); setMonsErr(null); }).catch((e) => setMonsErr((e as Error).message));
   }, [type, q, matched]);
   useEffect(() => { load(); }, [load]);
 

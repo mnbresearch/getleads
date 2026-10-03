@@ -568,10 +568,37 @@ suite("database integration", () => {
       const over = await tryConsume(db, org.id, "leads", 1);
       expect(over.ok).toBe(false);
       expect(over.reason).toBe("quota");
-      expect(over.message).toMatch(/2\/2|quota/i);
+      // Written for the customer: which allowance, how large, and what to do next.
+      expect(over.message).toBe("You've used all 2 leads in your plan this month. Upgrade your plan, or wait until next month.");
 
       // And the rollback means the org is not left stuck above its own limit.
       expect((await getUsage(db, org.id)).usage.leads.used).toBe(2);
+    });
+
+    it("the quota sentence names each allowance in the customer's words, with thousands separators, and keeps metric/used/limit", () => {
+      const next = "Upgrade your plan, or wait until next month.";
+      const cases: [string, number, string][] = [
+        ["leads", 1000, `You've used all 1,000 leads in your plan this month. ${next}`],
+        ["searches", 20, `You've used all 20 searches in your plan this month. ${next}`],
+        ["verifications", 2000, `You've used all 2,000 email verifications in your plan this month. ${next}`],
+        ["aiMessages", 1500, `You've used all 1,500 AI messages in your plan this month. ${next}`],
+        ["emails", 120000, `You've used all 120,000 emails in your plan this month. ${next}`],
+        ["premiumLeads", 150, `You've used all 150 premium provider leads in your plan this month. ${next}`],
+      ];
+      for (const [metric, limit, message] of cases) {
+        const e = new schema.QuotaExceededError(metric as never, limit, limit);
+        expect(e.message, metric).toBe(message);
+        expect(e).toMatchObject({ metric, used: limit, limit });
+        expect(e).toBeInstanceOf(Error);
+        // Nothing of the old developer wording, and no internal metric id where a noun belongs.
+        expect(e.message).not.toMatch(/Monthly quota exceeded|aiMessages|premiumLeads|\d\/\d/);
+      }
+      // One of something is not "all 1 leads".
+      expect(new schema.QuotaExceededError("leads", 1, 1).message).toBe(`You've used the 1 lead in your plan this month. ${next}`);
+      // A charge for several that would not fit is refused while some are left: it must not claim they are all used.
+      const partial = new schema.QuotaExceededError("leads", 980, 1000);
+      expect(partial.message).toBe(`This would go over the 1,000 leads in your plan this month (980 used so far). ${next}`);
+      expect(partial).toMatchObject({ metric: "leads", used: 980, limit: 1000 });
     });
 
     it("calls a database fault a fault, not a plan limit", async () => {

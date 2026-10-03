@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiFetch } from "../lib/api";
+import { apiFetch, expectLists } from "../lib/api";
 import { CLIENT_COLORS, type TargetProgress } from "../lib/clients";
 import { Modal } from "./ui";
 
@@ -86,7 +86,7 @@ export function ClientFormModal({
   const loadIcps = () => {
     setIcpErr(null);
     // A failed fetch used to leave only "None yet", which says the workspace has no ICPs.
-    apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcps(r.icps)).catch((e) => setIcpErr((e as Error).message));
+    apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcps(expectLists(r, "icps").icps)).catch((e) => setIcpErr((e as Error).message));
   };
   useEffect(() => {
     if (!open) return;

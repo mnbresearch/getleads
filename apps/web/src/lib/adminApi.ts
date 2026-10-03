@@ -1,5 +1,5 @@
 import { useSyncExternalStore } from "react";
-import { API_URL, errorCode, errorMessage, networkErrorMessage } from "./api";
+import { API_URL, UNREADABLE_CODE, UNREADABLE_MESSAGE, errorCode, errorMessage, networkErrorMessage, unreadableSuccess } from "./api";
 
 const TOKEN_KEY = "gl.admin.token";
 const listeners = new Set<() => void>();
@@ -84,10 +84,56 @@ export function adminLogout() {
   const token = adminAuth.token;
   adminAuth.set(null);
   if (!token) return;
+  // Remembered until the server has heard it: if this request never arrives (API down, no
+  // network), the token would otherwise stay valid server-side until it expires on its own.
+  setPendingRevoke(token);
+  void revokeAdminToken(token).then((reached) => { if (reached) clearPendingRevoke(token); });
+}
+
+const PENDING_REVOKE_KEY = "gl.admin.pendingLogout";
+
+function setPendingRevoke(token: string) {
   try {
-    void fetch(`${API_URL}/v1/admin/logout`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: "{}", keepalive: true }).catch(() => {});
+    sessionStorage.setItem(PENDING_REVOKE_KEY, token);
   } catch {}
 }
+function clearPendingRevoke(token: string) {
+  try {
+    if (sessionStorage.getItem(PENDING_REVOKE_KEY) === token) sessionStorage.removeItem(PENDING_REVOKE_KEY);
+  } catch {}
+}
+
+/** POST /v1/admin/logout for `token`. Resolves true when the server answered at all. */
+function revokeAdminToken(token: string): Promise<boolean> {
+  try {
+    return fetch(`${API_URL}/v1/admin/logout`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: "{}", keepalive: true }).then(
+      () => true,
+      () => false,
+    );
+  } catch {
+    return Promise.resolve(false);
+  }
+}
+
+/**
+ * One more try at a sign-out the server never heard, then forget the token either way.
+ *
+ * Runs once per page load, on an admin page. Best-effort by design: it is not awaited by
+ * anything, it never touches the UI, and a second failure is not retried - the token is
+ * dropped from this tab regardless, and expires server-side on its own.
+ */
+export function retryPendingAdminLogout() {
+  let token: string | null = null;
+  try {
+    token = sessionStorage.getItem(PENDING_REVOKE_KEY);
+    if (token) sessionStorage.removeItem(PENDING_REVOKE_KEY);
+  } catch {}
+  // Never the token currently in use: signing in again must not be undone by an old sign-out.
+  if (!token || token === adminAuth.token) return;
+  void revokeAdminToken(token);
+}
+
+if (typeof window !== "undefined" && window.location.pathname.startsWith("/admin")) retryPendingAdminLogout();
 
 export class AdminApiError extends Error {
   constructor(public status: number, message: string, public code: string = "http_error") {
@@ -120,8 +166,10 @@ export async function adminFetch<T = unknown>(method: string, path: string, body
     clearTimeout(timer);
   }
   let data: unknown = text;
+  let parsed = false;
   try {
     data = JSON.parse(text);
+    parsed = true;
   } catch {}
   if (!res.ok) {
     // A rejected admin token is dropped at once rather than left in storage. Only if it is
@@ -130,5 +178,7 @@ export async function adminFetch<T = unknown>(method: string, path: string, body
     if (res.status === 401 && path !== "/v1/admin/login") endAdminSession(sentToken);
     throw new AdminApiError(res.status, errorMessage(data, res.status), errorCode(data));
   }
+  // A 200 that is HTML or otherwise not JSON is not an answer (see unreadableSuccess).
+  if (unreadableSuccess(text, parsed, res.headers.get("content-type"))) throw new AdminApiError(res.status, UNREADABLE_MESSAGE, UNREADABLE_CODE);
   return data as T;
 }

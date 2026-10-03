@@ -517,14 +517,50 @@ suite("security: jobs, sending, AI output", () => {
       }
     });
 
-    it("any other redirect is not followed: another host, another port, a downgrade, a 301/302, or a second redirect", async () => {
+    it("a same-host 301/302 that only upgrades http -> https, or only adds or removes a trailing slash, replays the POST once", async () => {
+      for (const [status, from, location, to] of [
+        // The usual nginx pair: `return 301 https://$host$request_uri;` and the directory slash.
+        [301, "http://hooks.customer-site.com/in?token=abc", "https://hooks.customer-site.com/in?token=abc", "https://hooks.customer-site.com/in?token=abc"],
+        [302, "http://hooks.customer-site.com/in", "https://hooks.customer-site.com/in", "https://hooks.customer-site.com/in"],
+        [301, "https://hooks.customer-site.com/in", "/in/", "https://hooks.customer-site.com/in/"],
+        [302, "https://hooks.customer-site.com/in/?k=1", "https://hooks.customer-site.com/in?k=1", "https://hooks.customer-site.com/in?k=1"],
+        [301, "https://user:s3cret@hooks.customer-site.com:8443/in", "/in/", "https://hooks.customer-site.com:8443/in/"],
+      ] as const) {
+        const { org, hook, ev } = await hookAndEvent({ url: from, failures: 9 });
+        let n = 0;
+        const seen = routeFetch(() => (++n === 1 ? new Response(null, { status, headers: { location } }) : new Response("ok", { status: 200 })));
+        const r = await handlers["webhook.deliver"](job(org.id, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { attempts: 1, maxAttempts: 5 }), ctx());
+        expect(r, `${status} ${from}`).toMatchObject({ status: 200, via: `HTTP ${status} to the same host` });
+        // A POST both times - the event itself, not a payload-less GET - and never a third request.
+        expect(seen.map((x) => x.method), `${status} ${from}`).toEqual(["POST", "POST"]);
+        expect(seen[1].url).toBe(to);
+        expect(seen[1].body).toBe(seen[0].body);
+        expect(JSON.parse(seen[1].body)).toMatchObject({ id: ev.id, type: "lead.created" });
+        expect(seen[1].headers.get("x-prospex-signature")).toBe(seen[0].headers.get("x-prospex-signature"));
+        expect(seen[1].headers.get("x-prospex-timestamp")).toBe(seen[0].headers.get("x-prospex-timestamp"));
+        if (from.includes("user:")) expect(seen[1].headers.get("authorization")).toBe(seen[0].headers.get("authorization"));
+        // Delivered: the hook that was one failure from being switched off is clean again.
+        expect(await hookRow(hook.id)).toMatchObject({ failures: 0, active: true });
+      }
+    });
+
+    it("any other redirect is not followed: another host, another port, a downgrade, any other 301/302/303, or a second redirect", async () => {
       for (const [status, from, location] of [
         [308, "https://hooks.customer-site.com/in", "https://collector.attacker.example/in"],
         [307, "https://hooks.customer-site.com/in", "https://hooks.customer-site.com:8443/in"],
         [308, "https://hooks.customer-site.com/in", "http://hooks.customer-site.com/in"],
         [308, "https://hooks.customer-site.com/in", "http://127.0.0.1:37777/in"],
-        [301, "http://hooks.customer-site.com/in", "https://hooks.customer-site.com/in"],
-        [302, "https://hooks.customer-site.com/in", "/in/"],
+        // 301/302: only the bare http -> https upgrade and the bare trailing slash are followed.
+        [301, "https://hooks.customer-site.com/in", "https://collector.attacker.example/in"],
+        [301, "https://hooks.customer-site.com/in", "/elsewhere"],
+        [302, "http://hooks.customer-site.com/in", "https://hooks.customer-site.com/in/"],
+        [301, "http://hooks.customer-site.com/in", "https://hooks.customer-site.com/in?next=1"],
+        [302, "https://hooks.customer-site.com/in?k=1", "/in/?k=2"],
+        [301, "https://hooks.customer-site.com/in", "http://hooks.customer-site.com/in"],
+        [301, "http://hooks.customer-site.com:8080/in", "https://hooks.customer-site.com/in"],
+        [302, "https://hooks.customer-site.com/in", "/in"],
+        [303, "http://hooks.customer-site.com/in", "https://hooks.customer-site.com/in"],
+        [303, "https://hooks.customer-site.com/in", "/in/"],
       ] as const) {
         const { org, hook, ev } = await hookAndEvent({ url: from });
         const seen = routeFetch(() => new Response(null, { status, headers: { location } }));
@@ -1584,13 +1620,18 @@ suite("security: jobs, sending, AI output", () => {
       expect(bad.body.test).toEqual({ ok: false, error: "The email provider rejected the API key. Check that it is correct and active." });
       expect(bad.body.emailAccount.status).toBe("error");
       expect((await account(acct.id)).status).toBe("error");
-      // The provider being unreachable is a failed test too (not a 500), and says to try again.
+      // The provider being unreachable is a failed test too (not a 500). On a RE-test it says
+      // only what failed: "The sender was saved; use "Test again"..." is the add-time sentence,
+      // and here it sat on the sender's own row, beside the button it names.
       vi.stubGlobal("fetch", vi.fn(async () => { throw new TypeError("fetch failed"); }));
       const down = await retest(token, acct.id);
       expect(down.status).toBe(200);
-      expect(down.body.test.ok).toBe(false);
-      expect(down.body.test.error).toMatch(/Could not reach the email provider.*"Test again"/);
+      expect(down.body.test).toEqual({ ok: false, error: "Could not reach the email provider to check this key." });
       expect((await account(acct.id)).status).toBe("error");
+      // Adding a sender while the provider is unreachable still says it was saved and what to do.
+      const added = await req("POST", "/v1/campaigns/email-accounts", token, { provider: "resend", fromName: "Ops", fromEmail: `ops-${uid()}@customer-site.com`, config: { apiKey: RESEND_KEY } });
+      expect(added.status, added.text).toBe(201);
+      expect(added.body.test).toEqual({ ok: false, error: 'Could not reach the email provider to check this key. The sender was saved; use "Test again" on it in a few minutes.' });
       // And back.
       stubResend(() => new Response("[]", { status: 200 }));
       expect((await retest(token, acct.id)).body.emailAccount.status).toBe("active");

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { API_URL, apiFetch, auth, fmtDate, rejectSession } from "../lib/api";
+import { API_URL, apiFetch, auth, expectLists, fmtDate, rejectSession } from "../lib/api";
+import { integrationName } from "../lib/integrations";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 import { BUCKET_COPY, type ClientAttention } from "../lib/clients";
 import { ExtLink } from "../components/ExtLink";
@@ -111,7 +112,8 @@ export function LeadsPage() {
     if (!silent) setLoading(true);
     const qs = new URLSearchParams({ limit: String(limit), offset: String(offset), sort: q.sort ?? "created", order: q.order ?? "desc", ...Object.fromEntries(Object.entries(q).filter(([k, v]) => v && !["limit", "offset", "sort", "order"].includes(k))) });
     apiFetch<{ leads: Lead[]; total: number }>("GET", `/v1/leads?${qs}`)
-      .then((r) => {
+      .then((res) => {
+        const r = expectLists(res, "leads");
         // Deleting everything on the last page left an empty page reading "No leads match"
         // while the earlier pages still had leads. Step back to the real last page instead.
         if (r.leads.length === 0 && r.total > 0 && offset > 0) {
@@ -135,7 +137,7 @@ export function LeadsPage() {
   useEffect(() => { if (detail) { const fresh = rows.find((r) => r.id === detail.id); if (fresh && fresh !== detail) setDetail(fresh); } }, [rows]); // eslint-disable-line
   const reloadLists = useCallback(() => {
     apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all")
-      .then((r) => setLists(r.lists))
+      .then((r) => setLists(expectLists(r, "lists").lists))
       .catch((e) => toast(`Couldn't load your lists: ${(e as Error).message}`, "err"));
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { reloadLists(); }, [reloadLists]);
@@ -145,7 +147,7 @@ export function LeadsPage() {
     if (!q.icpId) return;
     apiFetch<{ icps: { id: string; name: string }[] }>("GET", "/v1/icps").then((r) => setIcpNames(new Map(r.icps.map((i) => [i.id, i.name])))).catch(() => {});
   }, [q.icpId]);
-  useEffect(() => { apiFetch<{ clients: typeof clients }>("GET", "/v1/clients").then((r) => setClients(r.clients)).catch(() => setClients([])); }, []);
+  useEffect(() => { apiFetch<{ clients: typeof clients }>("GET", "/v1/clients").then((r) => setClients(expectLists(r, "clients").clients)).catch(() => setClients([])); }, []);
   const clientById = useMemo(() => new Map(clients.map((c) => [c.id, c])), [clients]);
   useEffect(() => {
     apiFetch<{ integrations: { provider: string; status: string }[]; providers?: string[] }>("GET", "/v1/integrations")
@@ -180,7 +182,7 @@ export function LeadsPage() {
       if (action.startsWith("sync:")) {
         const provider = action.slice(5);
         const r = await apiFetch<{ queued: number }>("POST", `/v1/integrations/${provider}/sync`, { leadIds: ids });
-        toast(`Queued ${plural(r.queued, "lead")} to ${provider} - they appear there within a minute or two`);
+        toast(`Queued ${plural(r.queued, "lead")} to ${integrationName(provider)} - they appear there within a minute or two`);
       }
       if (action === "client:none") {
         const r = await apiFetch<{ returnedToPool: number; alreadyInPool: number }>("POST", "/v1/clients/unassign", { leadIds: ids });
@@ -331,7 +333,7 @@ export function LeadsPage() {
           {crmTargets.length > 0 && canManage && (
             <select className="input w-40" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Push to a connected CRM">
               <option value="">Push to CRM…</option>
-              {crmTargets.map((i) => <option key={i.provider} value={`sync:${i.provider}`}>{i.provider}</option>)}
+              {crmTargets.map((i) => <option key={i.provider} value={`sync:${i.provider}`}>{integrationName(i.provider)}</option>)}
             </select>
           )}
           <button className="btn-danger" onClick={() => bulk("delete")}>Delete</button>

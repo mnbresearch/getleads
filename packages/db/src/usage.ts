@@ -34,9 +34,35 @@ export async function getUsage(db: Db, orgId: string) {
   return { period, plan: org?.plan ?? "free", usage: out };
 }
 
+/** What each metric is called when a customer is told about it: [one, many]. */
+const METRIC_NOUNS: Record<Metric, [string, string]> = {
+  leads: ["lead", "leads"],
+  searches: ["search", "searches"],
+  verifications: ["email verification", "email verifications"],
+  aiMessages: ["AI message", "AI messages"],
+  emails: ["email", "emails"],
+  premiumLeads: ["premium provider lead", "premium provider leads"],
+};
+
+/**
+ * The sentence a customer reads when a monthly allowance is spent. It is shown as it is (a
+ * toast, the reason an import stopped) and after a short lead-in ("Stopped at row 981 of
+ * 3764: ..."), so it is a complete sentence either way and says what to do next.
+ *
+ * `used` can be below `limit`: a charge for several at once is refused when it would not
+ * fit, and "you've used all" would not be true then.
+ */
+export function quotaExceededMessage(metric: Metric, used: number, limit: number): string {
+  const [one, many] = METRIC_NOUNS[metric] ?? [metric, metric];
+  const n = (v: number) => v.toLocaleString("en-US");
+  const next = "Upgrade your plan, or wait until next month.";
+  if (used < limit) return `This would go over the ${n(limit)} ${limit === 1 ? one : many} in your plan this month (${n(used)} used so far). ${next}`;
+  return limit === 1 ? `You've used the 1 ${one} in your plan this month. ${next}` : `You've used all ${n(limit)} ${many} in your plan this month. ${next}`;
+}
+
 export class QuotaExceededError extends Error {
   constructor(public metric: Metric, public used: number, public limit: number) {
-    super(`Monthly quota exceeded for ${metric}: ${used}/${limit}`);
+    super(quotaExceededMessage(metric, used, limit));
   }
 }
 

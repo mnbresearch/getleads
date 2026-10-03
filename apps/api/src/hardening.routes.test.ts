@@ -435,9 +435,15 @@ suite("route hardening", () => {
     it("validates the send window and time zone", async () => {
       const bad1 = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { sendWindow: { start: "9:00", end: "17:00", days: [1] } } });
       expect(bad1.status).toBe(400);
-      expect(bad1.body.error.message).toMatch(/^Send window start: /);
+      // Whole sentences, shown as written - not "Send window start: Use 24-hour HH:MM, e.g. 09:00".
+      expect(bad1.body.error.message).toBe("Send window times must be 24-hour HH:MM, for example 09:00.");
+      expect(bad1.body.error.issues[0].path).toEqual(["settings", "sendWindow", "start"]);
+      const both = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { sendWindow: { start: "9:00", end: "5pm", days: [1] } } });
+      expect(both.body.error.message).toBe("Send window times must be 24-hour HH:MM, for example 09:00.");
+      expect(both.body.error.issues).toHaveLength(2);
       const bad2 = await req("POST", "/v1/campaigns", A.token, { name: "x", settings: { timezone: "Mars/Olympus_Mons" } });
       expect(bad2.status).toBe(400);
+      expect(bad2.body.error).toMatchObject({ code: "validation_error", message: "Unknown time zone. Use a name like Asia/Kolkata or America/New_York." });
     });
   });
 
@@ -776,6 +782,25 @@ suite("route hardening", () => {
       expect(r.body.error.message).toMatch(/access token/);
       const r2 = await req("PUT", "/v1/integrations/webhook", A.token, { config: { url: "" } });
       expect(r2.status).toBe(400);
+      // Each provider by its own name (not its id), and what to type - in one sentence.
+      const wording: [string, Record<string, string>, string][] = [
+        ["hubspot", { accessToken: "   " }, "Enter the access token to connect HubSpot."],
+        ["pipedrive", {}, "Enter the API token to connect Pipedrive."],
+        ["zoho", { accessToken: "" }, "Enter the access token to connect Zoho."],
+        ["sheets", { url: "" }, "Enter the URL to connect Google Sheets."],
+        ["webhook", { url: " " }, "Enter the URL to connect your webhook."],
+        ["whatsapp", {}, "Enter the phone number ID and access token to connect WhatsApp."],
+        ["whatsapp", { phoneNumberId: "123" }, "Enter the access token to connect WhatsApp."],
+        ["apollo", {}, "Enter the credentials for Apollo before saving the connection."],
+        ["pdl", { apiKey: "" }, "Enter the credentials for People Data Labs before saving the connection."],
+      ];
+      for (const [provider, config, message] of wording) {
+        const w = await req("PUT", `/v1/integrations/${provider}`, A.token, { config });
+        expect(w.status, provider).toBe(400);
+        expect(w.body.error, provider).toMatchObject({ code: "bad_request", message });
+      }
+      // The list of missing fields is still there for code.
+      expect((await req("PUT", "/v1/integrations/whatsapp", A.token, { config: {} })).body.error.details).toEqual({ missing: ["phoneNumberId", "accessToken"] });
       const ok = await req("PUT", "/v1/integrations/hubspot", A.token, { config: { accessToken: "pat-123" } });
       expect(ok.status).toBe(200);
       await req("DELETE", "/v1/integrations/hubspot", A.token);
@@ -852,6 +877,29 @@ suite("route hardening", () => {
       const r = await req("POST", "/v1/leads", A.token, { email, tags: ["c"] });
       expect(r.status).toBe(200);
       expect(r.body.lead.tags).toEqual(["c"]);
+    });
+
+    it("starting a sequence that has email steps with no sender attached says what to attach", async () => {
+      const cp = await req("POST", "/v1/campaigns", A.token, { name: "No sender", steps: [{ subjectTemplate: "Hi", bodyTemplate: "Hello" }] });
+      expect(cp.status).toBe(201);
+      const r = await req("POST", `/v1/campaigns/${cp.body.id}/start`, A.token);
+      expect(r.status).toBe(400);
+      expect(r.body.error).toMatchObject({ code: "bad_request", message: "Attach a sender account first - this sequence has email steps." });
+    });
+
+    it("an import that runs into the plan's lead limit says so in a sentence that reads well after its lead-in", async () => {
+      const u = await signup("import-quota");
+      await db.update(S.organizations).set({ planLimits: { leadsPerMonth: 2 } }).where(S.eq(S.organizations.id, u.orgId));
+      const tag = u8();
+      const r = await req("POST", "/v1/leads/import", u.token, { leads: [1, 2, 3, 4].map((i) => ({ email: `q${i}-${tag}@example.com`, fullName: `Q ${i}` })) });
+      expect(r.status, r.text).toBe(200);
+      const quota = "You've used all 2 leads in your plan this month. Upgrade your plan, or wait until next month.";
+      expect(r.body).toMatchObject({ created: 2, notProcessed: 1, stopped: `Stopped at row 3 of 4: ${quota}` });
+      expect(r.body.errors).toEqual([{ row: 3, error: quota }]);
+      // The single-lead route answers with the same sentence, and the same code, status and fields as before.
+      const one = await req("POST", "/v1/leads", u.token, { email: `q9-${tag}@example.com` });
+      expect(one.status).toBe(402);
+      expect(one.body.error).toEqual({ code: "quota_exceeded", message: quota, metric: "leads", used: 2, limit: 2 });
     });
 
     it("starting a campaign with no contacts works but warns", async () => {

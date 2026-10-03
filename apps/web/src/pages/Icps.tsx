@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { apiFetch } from "../lib/api";
+import { apiFetch, expectLists } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 import { plural } from "../lib/plural";
 
@@ -40,7 +40,7 @@ export function IcpPage() {
   // Which clients route by each ICP, so the delete and score confirmations can say who is
   // affected. Best-effort: without it the confirmations fall back to generic wording.
   const [clients, setClients] = useState<{ id: string; name: string; icpId: string | null }[]>([]);
-  const load = () => apiFetch<{ icps: Icp[] }>("GET", "/v1/icps").then((r) => { setIcps(r.icps); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
+  const load = () => apiFetch<{ icps: Icp[] }>("GET", "/v1/icps").then((r) => { setIcps(expectLists(r, "icps").icps); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { load(); const t = setInterval(load, 5000); return () => clearInterval(t); }, []);
   useEffect(() => {
     apiFetch<{ clients: { id: string; name: string; icpId: string | null }[] }>("GET", "/v1/clients?includeArchived=true").then((r) => setClients(r.clients ?? [])).catch(() => {});

@@ -11,7 +11,7 @@ import { campaignAttribution, leadFunnel, sourcePerformance } from "../services/
 import { encryptJson } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { orgId, requireAuth, requireUser, type Env } from "../middleware.js";
-import { INTEGRATION_PROVIDERS, validateIntegrationConfig } from "../services/integrations.js";
+import { INTEGRATION_PROVIDERS, integrationName, validateIntegrationConfig } from "../services/integrations.js";
 import { audit } from "../lib/audit.js";
 import { ownerOrAdmin } from "../lib/roles.js";
 import { newWebhookSecret, publicWebhook } from "../lib/webhookSecret.js";
@@ -236,8 +236,13 @@ miscRoutes.put("/integrations/:provider", requireAuth, ownerOrAdmin("integration
   const config = Object.fromEntries(Object.entries(b.config).map(([k, v]) => [k, v.trim()]));
   const required = REQUIRED_CREDENTIALS[provider] ?? [];
   const missing = required.filter((k) => !config[k]);
-  if (missing.length) throw badRequest(`Missing ${missing.map((k) => CREDENTIAL_LABELS[k] ?? k).join(", ")}: fill in ${missing.length === 1 ? "this field" : "these fields"} to connect ${provider}.`, { missing });
-  if (!required.length && !Object.values(config).some(Boolean)) throw badRequest(`Enter the credentials for ${provider} before saving the connection.`);
+  // "Enter the access token to connect HubSpot." - the provider by its own name, not its id.
+  if (missing.length) {
+    const labels = missing.map((k) => CREDENTIAL_LABELS[k] ?? k);
+    const list = labels.length > 1 ? `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}` : labels[0];
+    throw badRequest(`Enter the ${list} to connect ${integrationName(provider)}.`, { missing });
+  }
+  if (!required.length && !Object.values(config).some(Boolean)) throw badRequest(`Enter the credentials for ${integrationName(provider)} before saving the connection.`);
   if (config.url && !/^https?:\/\/[^\s]+$/i.test(config.url)) throw badRequest("URL must be a full http(s):// address.");
   // Per-provider rules: which keys a provider takes, and that any base URL or host in them
   // (Zoho's apiDomain, Pipedrive's companyDomain, a webhook/Cortex/Sheets url) is a public

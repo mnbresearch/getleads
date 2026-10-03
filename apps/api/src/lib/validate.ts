@@ -128,9 +128,18 @@ const OWN_SHORTHAND: Record<string, (field: string) => string> = {
 /**
  * One issue as the customer reads it.
  *
- * A message a schema wrote ITSELF (`.regex(HHMM, "Use 24-hour HH:MM, e.g. 09:00")`) is
- * already written for a person and is kept, after the field's name: "Send window start: Use
- * 24-hour HH:MM, e.g. 09:00". Only zod's built-in wording is replaced.
+ * A message a schema wrote ITSELF is already written for a person and is kept. How it is
+ * shown depends on how it was written:
+ *
+ *  - a COMPLETE SENTENCE - it ends with a period - names what it is about and is shown
+ *    exactly as written: "Send window times must be 24-hour HH:MM, for example 09:00."
+ *    Putting the field's name in front of one gave "Send window start: Send window times
+ *    must be ..." and "Request: A setting's text is too long ...".
+ *  - a fragment ("Enter a sender name using letters or digits") goes after the field's
+ *    name: "Sender name: Enter a sender name using letters or digits".
+ *
+ * So a schema marks its message as complete by ending it with a period. Only zod's
+ * built-in wording is replaced.
  */
 export function describeIssue(issue: ZodIssue, fallbackPath = "body"): string {
   const field = humanizePath(issue.path, fallbackPath);
@@ -142,7 +151,14 @@ export function describeIssue(issue: ZodIssue, fallbackPath = "body"): string {
   }
   if (builtIn !== undefined && issue.message === builtIn) return plainIssue(field, issue) ?? `${field}: ${issue.message}`;
   const own = OWN_SHORTHAND[issue.message];
-  return own ? own(field) : `${field}: ${issue.message}`;
+  if (own) return own(field);
+  return isCompleteSentence(issue.message) ? issue.message.trim() : `${field}: ${issue.message}`;
+}
+
+/** A schema-authored message that stands by itself: starts with a capital (or a quote) and ends with a period. */
+function isCompleteSentence(message: string): boolean {
+  const m = message.trim();
+  return m.length > 1 && m.endsWith(".") && !m.endsWith("..") && /^["'A-Z0-9]/.test(m);
 }
 
 /**
@@ -154,10 +170,9 @@ export function describeIssue(issue: ZodIssue, fallbackPath = "body"): string {
  * in `issues` for code.
  */
 export function describeIssues(error: ZodError, fallbackPath = "body"): string {
-  return error.issues
-    .slice(0, 10)
-    .map((i) => describeIssue(i, fallbackPath))
-    .join("; ");
+  const parts = [...new Set(error.issues.slice(0, 10).map((i) => describeIssue(i, fallbackPath)))];
+  // "; " between clauses; a part that is already a finished sentence is followed by a space.
+  return parts.map((p, i) => (i === parts.length - 1 ? p : p.endsWith(".") ? `${p} ` : `${p}; `)).join("");
 }
 
 /**

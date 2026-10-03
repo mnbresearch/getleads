@@ -90,7 +90,7 @@ const UNREADABLE_SENDER = "This sender's saved settings can no longer be read, s
  * port that is not a mail port, a private host) is different: that message is written for
  * the customer and is passed through as it is.
  */
-async function testSender(row: EmailAccount): Promise<{ kind: "tested"; test: SenderTest } | { kind: "unreadable" }> {
+async function testSender(row: EmailAccount, opts: { retest?: boolean } = {}): Promise<{ kind: "tested"; test: SenderTest } | { kind: "unreadable" }> {
   if (row.provider === "system") return { kind: "tested", test: { ok: true } };
   const resolved = resolveMailer(row);
   if (!resolved.ok) return { kind: "unreadable" };
@@ -103,7 +103,11 @@ async function testSender(row: EmailAccount): Promise<{ kind: "tested"; test: Se
       : row.provider === "smtp"
         ? "Could not connect and sign in to the SMTP server. Check the host, port, security setting, username and password."
         : raw.unreachable
-          ? 'Could not reach the email provider to check this key. The sender was saved; use "Test again" on it in a few minutes.'
+          ? // "The sender was saved" is news when it was just added. On a re-test it is not:
+            // the text sits on the sender's own row, next to the "Test again" button it names.
+            opts.retest
+            ? "Could not reach the email provider to check this key."
+            : 'Could not reach the email provider to check this key. The sender was saved; use "Test again" on it in a few minutes.'
           : "The email provider rejected the API key. Check that it is correct and active.";
   return { kind: "tested", test: { ok: false, error } };
 }
@@ -183,7 +187,7 @@ campaignRoutes.post("/email-accounts/:id/retest", ownerOrAdmin("sender.retested"
   const { db } = getDb();
   const row = await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, c.req.param("id")), eq(emailAccounts.orgId, oid)) });
   if (!row) throw notFound("Email account");
-  const tested = await testSender(row);
+  const tested = await testSender(row, { retest: true });
   if (tested.kind === "unreadable") {
     if (row.status !== "error") await db.update(emailAccounts).set({ status: "error" }).where(and(eq(emailAccounts.id, row.id), eq(emailAccounts.orgId, oid)));
     await audit(c, "sender.retested", { result: "failed", targetType: "email_account", targetId: row.id, data: { provider: row.provider, fromEmail: row.fromEmail, reason: "credentials_unreadable", previousStatus: row.status } });
@@ -212,6 +216,7 @@ campaignRoutes.delete("/email-accounts/:id", ownerOrAdmin("sender.deleted"), asy
  */
 const stepInput = z.object({ id: z.string().uuid().optional(), delayDays: z.number().int().min(0).max(60).default(0), channel: z.enum(["email", "linkedin_connect", "linkedin_message", "whatsapp", "call", "task"]).default("email"), subjectTemplate: z.string().max(500).nullish().transform((v) => v ?? ""), bodyTemplate: z.string().min(1).max(20_000), aiPersonalize: z.boolean().default(true), aiInstructions: z.string().max(5000).nullish(), variants: z.array(z.object({ subjectTemplate: z.string().max(500), bodyTemplate: z.string().max(20_000) })).max(4).nullish().transform((v) => v ?? []) });
 const HHMM = /^([01]\d|2[0-3]):[0-5]\d$/;
+const SEND_WINDOW_TIME = "Send window times must be 24-hour HH:MM, for example 09:00.";
 /** A real IANA zone. An unknown one made the scheduler throw on every tick for that campaign. */
 const isTimeZone = (tz: string) => {
   try {
@@ -223,8 +228,9 @@ const isTimeZone = (tz: string) => {
 };
 const settingsInput = z.object({
   dailyLimit: z.number().int().min(1).max(2000).optional(),
-  timezone: z.string().refine(isTimeZone, { message: "Unknown time zone; use an IANA name such as Asia/Kolkata or America/New_York" }).optional(),
-  sendWindow: z.object({ start: z.string().regex(HHMM, "Use 24-hour HH:MM, e.g. 09:00"), end: z.string().regex(HHMM, "Use 24-hour HH:MM, e.g. 17:30"), days: z.array(z.number().int().min(0).max(6)) }).optional(),
+  // Whole sentences (they end with a period), so they are shown as written - see describeIssue.
+  timezone: z.string().refine(isTimeZone, { message: "Unknown time zone. Use a name like Asia/Kolkata or America/New_York." }).optional(),
+  sendWindow: z.object({ start: z.string().regex(HHMM, SEND_WINDOW_TIME), end: z.string().regex(HHMM, SEND_WINDOW_TIME), days: z.array(z.number().int().min(0).max(6)) }).optional(),
   stopOnReply: z.boolean().optional(),
   trackOpens: z.boolean().optional(),
   trackClicks: z.boolean().optional(),
@@ -390,7 +396,7 @@ campaignRoutes.post("/:id/start", async (c) => {
   if (!cp) throw notFound("Campaign");
   const steps = await db.select().from(sequenceSteps).where(eq(sequenceSteps.campaignId, cp.id));
   if (!steps.length) throw badRequest("Add at least one sequence step");
-  if (steps.some((s) => s.channel === "email") && !cp.emailAccountId) throw badRequest("Attach an email account first (the sequence has email steps)");
+  if (steps.some((s) => s.channel === "email") && !cp.emailAccountId) throw badRequest("Attach a sender account first - this sequence has email steps.");
   if (steps.some((s) => s.channel === "email") && cp.emailAccountId) {
     // A sender whose connection test failed sends nothing. Starting anyway showed "active"
     // with every contact queued forever and no reason given.

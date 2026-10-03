@@ -119,8 +119,10 @@ export async function apiFetch<T = unknown>(
     clearTimeout(timer);
   }
   let data: unknown = text;
+  let parsed = false;
   try {
     data = JSON.parse(text);
+    parsed = true;
   } catch {}
   if (!res.ok) {
     if (res.status === 401) {
@@ -136,7 +138,54 @@ export async function apiFetch<T = unknown>(
     }
     throw new ProspexError(res.status, errorCode(data), errorMessage(data, res.status), data);
   }
+  if (unreadableSuccess(text, parsed, res.headers.get("content-type"))) throw unreadableAnswer(res.status);
   return data as T;
+}
+
+/** What the screen says when the server answered "200 OK" with something that is not an answer. */
+export const UNREADABLE_MESSAGE = "The server gave an answer this app could not read. Reload the page; if it keeps happening, contact support.";
+export const UNREADABLE_CODE = "unreadable_response";
+
+/**
+ * A 2xx whose body is not what an API sends: a captive portal's sign-in page, a proxy's
+ * placeholder, or this app's own index.html when the API address points at the web host.
+ *
+ * Those used to be handed to the caller as a string. Nothing threw, so nothing was reported:
+ * lists sat on "Loading…" forever or rendered as empty. An empty body is still fine (a 204,
+ * a DELETE) - it is a body that is present and is not JSON that is the problem.
+ */
+export function unreadableSuccess(text: string, parsed: boolean, contentType: string | null): boolean {
+  if (text.trim() === "") return false;
+  return !parsed || /\bhtml\b/i.test(contentType ?? "");
+}
+
+export function unreadableAnswer(status = 200): ProspexError {
+  return new ProspexError(status, UNREADABLE_CODE, UNREADABLE_MESSAGE, null);
+}
+
+/**
+ * The response, once it is known to hold a list under each of `keys` - otherwise the
+ * "could not read" error.
+ *
+ * Valid JSON of the wrong shape (`{"ok":true}` from something that is not this API) is the
+ * same failure as HTML, one step later: `setRows(r.leads)` with no `leads` either crashed the
+ * page or left it loading. A list page calls this on what it loaded, so a wrong shape takes
+ * the same visible error-with-Retry path as any other failed load.
+ */
+export function expectLists<T>(r: T, ...keys: string[]): T {
+  const o = r as unknown as Record<string, unknown> | null;
+  if (!o || typeof o !== "object" || keys.some((k) => !Array.isArray(o[k]))) throw unreadableAnswer();
+  return r;
+}
+
+/** The same check for any other shape: `expectShape(r, (x) => typeof x.token === "string")`. */
+export function expectShape<T>(r: T, ok: (r: T) => boolean): T {
+  let good = false;
+  try {
+    good = !!r && typeof r === "object" && ok(r);
+  } catch {}
+  if (!good) throw unreadableAnswer();
+  return r;
 }
 
 /** What a gateway error, a rate limit and an oversized upload are called when the server gave no sentence of its own. */

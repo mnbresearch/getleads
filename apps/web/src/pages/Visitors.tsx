@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { apiFetch, fmtDate } from "../lib/api";
+import { apiFetch, fmtDate, expectLists } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 import { plural, pluralWord } from "../lib/plural";
 
@@ -22,7 +22,7 @@ export function VisitorsPage() {
   const [pixErr, setPixErr] = useState<string | null>(null);
   const [pixLoaded, setPixLoaded] = useState(false);
   const load = useCallback(() => {
-    apiFetch<{ pixels: Pixel[] }>("GET", "/v1/visitors/pixels").then((r) => { setPixels(r.pixels); setPixErr(null); setPixLoaded(true); }).catch((e) => setPixErr((e as Error).message));
+    apiFetch<{ pixels: Pixel[] }>("GET", "/v1/visitors/pixels").then((r) => { setPixels(expectLists(r, "pixels").pixels); setPixErr(null); setPixLoaded(true); }).catch((e) => setPixErr((e as Error).message));
     apiFetch<{ companies: VC[]; totals: typeof totals }>("GET", `/v1/visitors?days=${days}${status ? `&status=${status}` : ""}`)
       .then((r) => { setRows(r.companies); setTotals(r.totals); setListErr(null); })
       .catch((e) => setListErr((e as Error).message))

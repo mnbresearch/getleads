@@ -140,7 +140,20 @@ function requestBodyLimit(): MiddlewareHandler {
     if (!l) {
       l = bodyLimit({
         maxSize,
-        onError: (c) => c.json({ error: { code: "payload_too_large", message: `The request body is too large. This endpoint accepts at most ${humanSize(maxSize)}.` } }, 413),
+        // Written for the person who chose the file or pressed Save, not for the HTTP client.
+        onError: (c) =>
+          c.json(
+            {
+              error: {
+                code: "payload_too_large",
+                message:
+                  maxSize === BODY_LIMITS.leadImport
+                    ? `That file is too large to import in one go (${humanSize(maxSize)} at most). Split it and import in parts.`
+                    : `That request is too large (${humanSize(maxSize)} at most).`,
+              },
+            },
+            413,
+          ),
       });
       limiters.set(maxSize, l);
     }

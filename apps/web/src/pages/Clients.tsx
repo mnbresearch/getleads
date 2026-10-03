@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { apiFetch } from "../lib/api";
+import { apiFetch, expectLists } from "../lib/api";
 import { BUCKET_COPY, attentionTotal, type ClientAttention, type ClientRow, type Overview } from "../lib/clients";
 import { ClientDot, ClientFormModal, StatusPill, TargetBar, emptyClientForm, toClientPayload } from "../components/ClientBits";
 import { Empty, LoadError, Modal, Page, Spinner, Stat, useFlash, useToast } from "../components/ui";
@@ -24,7 +24,7 @@ export function ClientsPage() {
   const load = useCallback(() => {
     setErr(null);
     apiFetch<Overview>("GET", `/v1/clients${showArchived ? "?includeArchived=true" : ""}`)
-      .then(setData)
+      .then((r) => setData(expectLists(r, "clients")))
       .catch((e) => setErr((e as Error).message));
   }, [showArchived]);
   useEffect(() => { load(); }, [load]);

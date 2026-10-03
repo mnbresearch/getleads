@@ -268,19 +268,60 @@ suite("admin API", () => {
 
     it("accepts real overrides, returns them, and shows them on GET /v1/admin/orgs/:id", async () => {
       const u = await signup("real-ov");
-      const r = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "starter", overrides: { leadsPerMonth: 5000, apiAccess: false, seats: 0, emailsPerDay: 25 } });
+      const r = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "starter", overrides: { leadsPerMonth: 5000, seats: 0, emailsPerDay: 25 } });
       expect(r.status, r.text).toBe(200);
       expect(r.body).toMatchObject({ id: u.orgId, plan: "starter", changed: true });
-      expect(r.body.overrides).toEqual({ leadsPerMonth: 5000, apiAccess: false, seats: 0, emailsPerDay: 25 });
-      expect(r.body.limits).toEqual({ ...S.PLANS.starter.limits, leadsPerMonth: 5000, apiAccess: false, seats: 0, emailsPerDay: 25 });
+      expect(r.body.overrides).toEqual({ leadsPerMonth: 5000, seats: 0, emailsPerDay: 25 });
+      expect(r.body.limits).toEqual({ ...S.PLANS.starter.limits, leadsPerMonth: 5000, seats: 0, emailsPerDay: 25 });
       const detail = await admin("GET", `/orgs/${u.orgId}`);
-      expect(detail.body.overrides).toEqual({ leadsPerMonth: 5000, apiAccess: false, seats: 0, emailsPerDay: 25 });
+      expect(detail.body.overrides).toEqual({ leadsPerMonth: 5000, seats: 0, emailsPerDay: 25 });
       expect(detail.body.org.overrides).toEqual(detail.body.overrides);
       expect(detail.body.org.limits.leadsPerMonth).toBe(5000);
       // An override equal to the plan's default is not an override.
       const same = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "starter", overrides: { leadsPerMonth: S.PLANS.starter.limits.leadsPerMonth } });
       expect(same.body.overrides).toEqual({});
       expect((await admin("GET", `/orgs/${u.orgId}`)).body.overrides).toEqual({});
+    });
+
+    it("refuses an override for a limit the server does not enforce, saying so, and accepts every limit it does enforce", async () => {
+      const u = await signup("unenforced");
+      const before = await orgRow(u.orgId);
+      const audits = await auditCount(u.orgId);
+      // Accepted and shown, these changed nothing: a workspace set to apiAccess:false kept using the API.
+      const refused: [Record<string, unknown>, string][] = [
+        [{ apiAccess: false }, "API access is not enforced by the server yet, so it cannot be overridden."],
+        [{ apiAccess: true }, "API access is not enforced by the server yet, so it cannot be overridden."],
+        [{ integrations: true }, "Integrations access is not enforced by the server yet, so it cannot be overridden."],
+        [{ campaigns: 2 }, "The campaigns limit is not enforced by the server yet, so it cannot be overridden."],
+      ];
+      for (const [overrides, message] of refused) {
+        const r = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "starter", overrides });
+        expect(r.status, JSON.stringify(overrides)).toBe(400);
+        expect(r.body.error).toMatchObject({ code: "validation_error", message });
+      }
+      // One of them next to a real limit refuses the whole request: nothing is half-applied.
+      const mixed = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "starter", overrides: { leadsPerMonth: 9000, apiAccess: false } });
+      expect(mixed.status).toBe(400);
+      expect(mixed.body.error.message).toBe("API access is not enforced by the server yet, so it cannot be overridden.");
+      const after = await orgRow(u.orgId);
+      expect(after.plan).toBe(before.plan);
+      expect(after.planLimits).toEqual(before.planLimits);
+      expect(await auditCount(u.orgId)).toBe(audits);
+      // The plans themselves are untouched: every plan still defines all three.
+      for (const p of Object.values(S.PLANS) as any[]) expect(Object.keys(p.limits)).toEqual(expect.arrayContaining(["campaigns", "apiAccess", "integrations"]));
+
+      // Every limit that IS enforced is still overridable, and the override takes effect.
+      const enforced = { leadsPerMonth: 2, premiumLeadsPerMonth: 7, searchesPerMonth: 3, verificationsPerMonth: 4, aiMessagesPerMonth: 5, emailsPerMonth: 6, seats: 1, emailsPerDay: 9 };
+      const ok = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "starter", overrides: enforced });
+      expect(ok.status, ok.text).toBe(200);
+      expect(ok.body.overrides).toEqual(enforced);
+      await setUsed(u.orgId, "leads", 2);
+      await expect(S.consume(db, u.orgId, "leads", 1)).rejects.toBeInstanceOf(S.QuotaExceededError);
+      for (const [metric, limit] of [["searches", 3], ["verifications", 4], ["aiMessages", 5], ["emails", 6]] as const) {
+        await setUsed(u.orgId, metric, limit);
+        await expect(S.consume(db, u.orgId, metric, 1), metric).rejects.toMatchObject({ metric, used: limit, limit });
+      }
+      expect(await S.remainingPremiumBudget(db, u.orgId)).toBe(7);
     });
 
     it("junk that is ALREADY stored never disables a quota: every unusable value reads as the plan's default", async () => {
@@ -355,16 +396,18 @@ suite("admin API", () => {
       expect(moved.body.overrides).toEqual({ leadsPerMonth: 5000, seats: 9 });
       expect(moved.body.limits).toEqual({ ...S.PLANS.starter.limits, leadsPerMonth: 5000, seats: 9 });
       // Not silent: the response says what was carried and how to clear it.
-      expect(moved.body.note).toMatch(/Kept this workspace's existing overrides \(.*leadsPerMonth: 5000/);
+      // Written for the person at the console, in the page's own words - not as an API hint.
+      expect(moved.body.note).toBe("Custom limits were kept: leads/month 5000, seats 9. Tick 'Clear custom limits' to remove them.");
+      expect(moved.body.note).not.toMatch(/overrides|\{\}/);
       expect((await orgRow(u.orgId)).planLimits).toEqual({ ...S.PLANS.starter.limits, leadsPerMonth: 5000, seats: 9 });
       expect((await admin("GET", `/orgs/${u.orgId}`)).body.overrides).toEqual({ leadsPerMonth: 5000, seats: 9 });
       const [audit] = await db.select().from(S.auditLog).where(S.and(S.eq(S.auditLog.orgId, u.orgId), S.eq(S.auditLog.action, "admin.plan_changed"))).orderBy(S.desc(S.auditLog.createdAt));
       expect(audit.data).toMatchObject({ before: { plan: "pilot" }, after: { plan: "starter" }, overrides: { leadsPerMonth: 5000, seats: 9 }, overridesFrom: "kept" });
 
       // New overrides replace the old set entirely.
-      const replaced = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "growth", overrides: { campaigns: 2 } });
-      expect(replaced.body.overrides).toEqual({ campaigns: 2 });
-      expect(replaced.body.limits).toEqual({ ...S.PLANS.growth.limits, campaigns: 2 });
+      const replaced = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "growth", overrides: { searchesPerMonth: 2 } });
+      expect(replaced.body.overrides).toEqual({ searchesPerMonth: 2 });
+      expect(replaced.body.limits).toEqual({ ...S.PLANS.growth.limits, searchesPerMonth: 2 });
       expect(replaced.body.note).toBeUndefined();
 
       // An explicit empty object clears them.
@@ -482,9 +525,8 @@ suite("admin API", () => {
       const nothing = await admin("PATCH", `/orgs/${u.orgId}/credits`, { metric: "premiumLeads", action: "grant", amount: 50 });
       expect(nothing.status).toBe(200);
       expect(nothing.body).toMatchObject({ metric: "premiumLeads", used: 0, limit: 0, changed: false });
-      expect(nothing.body.note).toMatch(/used 0 premium leads this month.*nothing changed/);
-      expect(nothing.body.note).toMatch(/does not raise the allowance of 0/);
-      expect(nothing.body.note).toMatch(/plan override/);
+      // One sentence, and not "Nothing changed": the console says that itself, before this.
+      expect(nothing.body.note).toBe("This workspace has used 0 premium leads this month, so there was nothing to give back: a grant only returns usage, and raising the allowance of 0 takes a custom limit (a plan override).");
       expect(await auditCount(u.orgId)).toBe(before);
       // ...and the override it points to does what the operator wanted.
       expect((await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "free", overrides: { premiumLeadsPerMonth: 50 } })).body.overrides).toEqual({ premiumLeadsPerMonth: 50 });
@@ -507,9 +549,15 @@ suite("admin API", () => {
       const big = await admin("PATCH", "/tools/bing_html", { usageLimit: 99999999999 });
       expect(big.status).toBe(400);
       expect(big.body.error.code).toBe("validation_error");
-      expect(big.body.error.message).toMatch(/Usage limit.*1,?000,?000,?000/);
-      expect((await admin("PATCH", "/tools/bing_html", { usageLimit: -1 })).status).toBe(400);
-      expect((await admin("PATCH", "/tools/bing_html", { usageLimit: 1.5 })).status).toBe(400);
+      // The largest value is still 1,000,000,000, and every refusal names it.
+      const rule = "Usage limit must be a whole number from 0 to 1,000,000,000.";
+      expect(big.body.error.message).toBe(rule);
+      expect((await admin("PATCH", "/tools/bing_html", { usageLimit: 1_000_000_001 })).body.error.message).toBe(rule);
+      for (const usageLimit of [-1, 1.5, "lots"]) {
+        const r = await admin("PATCH", "/tools/bing_html", { usageLimit });
+        expect(r.status, String(usageLimit)).toBe(400);
+        expect(r.body.error.message, String(usageLimit)).toBe(rule);
+      }
       expect((await admin("PATCH", "/tools/no_such_tool", { usageLimit: 5 })).status).toBe(404);
     });
   });
@@ -525,8 +573,10 @@ suite("admin API", () => {
       const audits = await auditCount(u.orgId);
 
       const cases: [string, unknown, Record<string, unknown>][] = [
-        [`/orgs/${u.orgId}/credits`, { metric: "leads", action: "grant", amount: 0 }, { used: 12, limit: 777, changed: false }],
-        [`/orgs/${u.orgId}/credits`, { metric: "leads", action: "set", amount: 12 }, { used: 12, changed: false }],
+        // `note` is one sentence and does not open with "Nothing changed" / "Nothing to change":
+        // the console writes "Nothing changed." itself and puts the note after it.
+        [`/orgs/${u.orgId}/credits`, { metric: "leads", action: "grant", amount: 0 }, { used: 12, limit: 777, changed: false, note: "The amount was 0." }],
+        [`/orgs/${u.orgId}/credits`, { metric: "leads", action: "set", amount: 12 }, { used: 12, changed: false, note: "The used count was already 12." }],
         [`/orgs/${u.orgId}/status`, { status: "active" }, { id: u.orgId, status: "active", changed: false }],
         [`/orgs/${u.orgId}/plan`, { plan: "starter" }, { plan: "starter", changed: false, overrides: { leadsPerMonth: 777 } }],
         [`/orgs/${u.orgId}/plan`, { plan: "starter", overrides: { leadsPerMonth: 777 } }, { plan: "starter", changed: false, overrides: { leadsPerMonth: 777 } }],
@@ -536,6 +586,10 @@ suite("admin API", () => {
         const r = await admin("PATCH", path, body);
         expect(r.status, `${path} ${JSON.stringify(body)}: ${r.text}`).toBe(200);
         expect(r.body, `${path} ${JSON.stringify(body)}`).toMatchObject(expected);
+        if (r.body.note !== undefined) {
+          expect(r.body.note, path).not.toMatch(/^Nothing/);
+          expect(r.body.note.match(/[.!?](\s|$)/g), r.body.note).toHaveLength(1);
+        }
       }
       expect(await auditCount(u.orgId)).toBe(audits);
       const after = await orgRow(u.orgId);
@@ -699,7 +753,7 @@ suite("admin API", () => {
         expect(r.status, r.text).toBe(200);
         // Was: "All configured providers responded successfully."
         expect(r.body.summary).toBe("No provider keys are configured, so nothing was tested.");
-        expect(r.body).toMatchObject({ tested: 0, passed: 0, notTested: [] });
+        expect(r.body).toMatchObject({ tested: 0, testedCount: 0, passed: 0, notTested: [] });
         expect(r.body.results.length).toBeGreaterThanOrEqual(15);
         expect(r.body.results.every((x: any) => x.configured === false && x.ok === false && x.outcome === "not_configured")).toBe(true);
         expect(typeof r.body.checkedAt).toBe("string");
@@ -756,7 +810,8 @@ suite("admin API", () => {
           expect(n.label).toBeTruthy();
           expect(n.reason.length).toBeGreaterThan(20);
         }
-        expect(r.body).toMatchObject({ tested: 4, passed: 2 });
+        expect(r.body).toMatchObject({ tested: 4, testedCount: 4, passed: 2, skippedRetired: [] });
+        expect(r.body.results.filter((x: any) => x.configured).every((x: any) => x.retired === false)).toBe(true);
         expect(r.body.summary).toMatch(/^2 of 4 tested provider key\(s\) did not respond successfully: /);
         expect(r.body.summary).toMatch(/gemini \(auth\)/);
         expect(r.body.summary).toMatch(/anthropic \(auth\)/);
@@ -784,6 +839,50 @@ suite("admin API", () => {
         setKeys({});
         await db.update(S.toolRegistry).set({ lastOutcome: null, lastStatus: null, lastDetail: null, lastSeenAt: null, lastOkAt: null }).where(S.inArray(S.toolRegistry.provider, providers));
       }
+    });
+
+    it("a retired provider that still holds a key is not counted: testedCount, tested and the summary all give the same number", async () => {
+      setKeys({ GROQ_API_KEY: "gsk_SECRETGROQ", GEMINI_API_KEY: "AIzaSECRETGEMINI", IPINFO_TOKEN: "SECRETIPINFO" });
+      vi.stubGlobal("fetch", async (input: any) => {
+        const url = String(typeof input === "string" ? input : input?.url ?? input);
+        const j = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
+        if (url.startsWith("https://api.groq.com/")) return j(200, { data: [] });
+        if (url.startsWith("https://generativelanguage.googleapis.com/")) return j(404, { error: { message: "gone" } });
+        if (url.startsWith("https://ipinfo.io/")) return j(200, { token: "x", requests: { month: 3, limit: 50000 } });
+        throw new Error(`unexpected outbound call to ${url}`);
+      });
+      await db.update(S.toolRegistry).set({ retired: true }).where(S.eq(S.toolRegistry.provider, "gemini"));
+      try {
+        const r = await admin("POST", "/tools/check", {});
+        expect(r.status, r.text).toBe(200);
+        // Three rows hold a key - the count the page used to print ("3 providers tested")...
+        const keyed = r.body.results.filter((x: any) => x.configured);
+        expect(keyed.map((x: any) => x.provider).sort()).toEqual(["gemini", "groq", "ipinfo"]);
+        // ...but two were tested, and every number in the answer says two.
+        expect(r.body).toMatchObject({ tested: 2, testedCount: 2, passed: 2, skippedRetired: ["gemini"] });
+        expect(r.body.summary).toBe("All 2 tested provider key(s) responded successfully. 1 retired provider(s) skipped.");
+        // The retired row is still listed, marked, so the page can leave it out of its own count.
+        expect(keyed.filter((x: any) => x.retired).map((x: any) => x.provider)).toEqual(["gemini"]);
+        expect(keyed.filter((x: any) => !x.retired)).toHaveLength(r.body.testedCount);
+        expect(r.body.retired).toContain("gemini");
+      } finally {
+        vi.unstubAllGlobals();
+        setKeys({});
+        await db.update(S.toolRegistry).set({ retired: false, lastOutcome: null, lastStatus: null, lastDetail: null, lastSeenAt: null, lastOkAt: null }).where(S.inArray(S.toolRegistry.provider, ["groq", "gemini", "ipinfo"]));
+      }
+    });
+
+    it("GET /v1/admin/tools: the database row says Connected, and no infrastructure row talks about a key that was never used", async () => {
+      const r = await admin("GET", "/tools");
+      expect(r.status, r.text).toBe(200);
+      const infra = r.body.tools.filter((t: any) => t.category === "Infrastructure");
+      const pg = infra.find((t: any) => t.provider === "postgres_host");
+      // It is the database this request was just answered from. Was: "Key set, never used".
+      expect(pg).toMatchObject({ keyStatus: "working", keyStatusLabel: "Connected", retired: false });
+      for (const t of infra) expect(t.keyStatusLabel, t.provider).not.toMatch(/Key set|never used/i);
+      for (const t of infra.filter((t: any) => !t.keyEnvVar)) expect(t.keyStatusLabel, t.provider).toBe("Not tracked here");
+      // A real provider key that nothing has called yet still says so.
+      expect(S.KEY_STATUS_LABEL[S.keyStatusFrom(true, null)]).toBe("Key set, never used");
     });
 
     it("every provider that holds a key is either tested or listed as untested, and every tested provider has a Tools row", async () => {

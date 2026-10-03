@@ -393,7 +393,7 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
     checks.smtp = "skipped";
     // reason stays as it always read (the UI shows it); which verifiers declined and why is in
     // verifierAttempts, so "nobody checked" and "every checker failed" stay distinguishable.
-    return result("risky", 0.55, "MX ok, SMTP probe disabled", mxHost, "mx-only");
+    return result("risky", 0.55, "The domain accepts email; the individual mailbox was not checked.", mxHost, "mx-only");
   }
 
   const probe = await smtpProbe(email, mxHost);

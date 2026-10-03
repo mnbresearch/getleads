@@ -35,7 +35,7 @@ export function requireSomeFields(body: Record<string, unknown> | undefined | nu
 const CLIENT_DATA_ERRORS = new Set(["22P02", "22003", "22007", "22008", "22001", "22021", "22P05", "54000"]);
 
 /** The sentence a caller gets when the database refused one of their values. */
-export const UNUSABLE_VALUE_MESSAGE = "One of the values in this request is not in a form the server can use (for example an id that is not a UUID, or text containing characters that cannot be stored).";
+export const UNUSABLE_VALUE_MESSAGE = "Something in that request wasn't in a form we can use. Reload the page and try again.";
 
 /**
  * Is this a database error caused by the VALUE the caller sent (as opposed to a fault)?

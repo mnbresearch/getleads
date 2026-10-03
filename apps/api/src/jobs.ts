@@ -266,16 +266,26 @@ function noMoreAttempts(job: Pick<Job, "attempts" | "maxAttempts">) {
 }
 
 /**
- * Where a 307/308 from a webhook endpoint may be followed to, or null.
+ * Where a redirect from a webhook endpoint may be followed to (by repeating the POST), or null.
  *
  * 307 and 308 mean "repeat this exact request there". They are followed ONCE and only when
  * "there" is the address the customer typed in all but spelling: the same hostname, and
  * either the same origin (a trailing slash, a canonical path) or the plain-http address
  * upgraded to https on the default ports. Another host, another port, or a downgrade from
  * https is somewhere the customer did not address, and the event is not sent to it.
+ *
+ * 301 and 302 do not say "repeat the request", so they are followed in two cases only - the
+ * two redirects an ordinary web server (nginx) adds by itself in front of a working endpoint:
+ *   - http -> https and nothing else: same hostname, same path, same query, default ports;
+ *   - a trailing slash added or removed and nothing else: same origin, same query.
+ * Every such endpoint used to fail each event once and was switched off after ten, where the
+ * code before that "delivered" (as a GET without the payload). Any other 301/302, and every
+ * 303 ("fetch that with GET"), is not followed.
  */
 function sameEndpointRedirect(posted: URL, status: number, location: string | null): URL | null {
-  if (status !== 307 && status !== 308) return null;
+  const repeat = status === 307 || status === 308;
+  const moved = status === 301 || status === 302;
+  if (!repeat && !moved) return null;
   if (!location) return null;
   let next: URL | null;
   try {
@@ -289,6 +299,13 @@ function sameEndpointRedirect(posted: URL, status: number, location: string | nu
   const sameOrigin = next.protocol === posted.protocol && next.port === posted.port;
   const upgraded = posted.protocol === "http:" && next.protocol === "https:" && posted.port === "" && next.port === "";
   if (!sameOrigin && !upgraded) return null;
+  if (moved) {
+    if (next.search !== posted.search) return null;
+    const samePath = next.pathname === posted.pathname;
+    const slashOnly = next.pathname === `${posted.pathname}/` || posted.pathname === `${next.pathname}/`;
+    // Exactly one of the two: the scheme alone changed, or the trailing slash alone did.
+    if (upgraded ? !samePath : !slashOnly) return null;
+  }
   // Basic-auth credentials in the configured URL belong to this endpoint: they go along.
   next.username = posted.username;
   next.password = posted.password;
@@ -587,6 +604,8 @@ export const handlers: Record<string, JobHandler> = {
            *    not sent again.
            *  - 307/308 to the same hostname (http -> https, a trailing slash): "repeat this
            *    request there". The POST is replayed once, through the same guarded fetch.
+           *    A 301/302 gets the same treatment only when it is exactly the http -> https
+           *    upgrade or exactly a trailing slash (see sameEndpointRedirect).
            *
            * Anything else stays a failed delivery, and is not retried: the endpoint will
            * give the same answer every time.
@@ -986,7 +1005,7 @@ export const handlers: Record<string, JobHandler> = {
       if (!existing) {
         const charge = await chargeNewLead(ss.orgId, r.source);
         if (!charge.ok) {
-          stoppedBecause = charge.reason === "quota" ? `Stopped at your plan's lead limit: ${charge.message}` : `Stopped: could not record lead usage (${charge.message})`;
+          stoppedBecause = charge.reason === "quota" ? `Stopped early: ${charge.message}` : `Stopped: could not record lead usage (${charge.message})`;
           break;
         }
       }

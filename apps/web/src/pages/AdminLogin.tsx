@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { adminAuth, adminFetch, adminSessionExpiredNotice, useAdminToken } from "../lib/adminApi";
+import { expectShape } from "../lib/api";
 
 export function AdminLoginPage() {
   const [form, setForm] = useState({ email: "", password: "" });
@@ -27,7 +28,9 @@ export function AdminLoginPage() {
     setBusy(true);
     setErr(null);
     try {
-      const r = await adminFetch<{ token: string }>("POST", "/v1/admin/login", form);
+      // A 200 with no token in it is not a sign-in. It used to do nothing at all: no error,
+      // no navigation, the button simply came back.
+      const r = expectShape(await adminFetch<{ token: string }>("POST", "/v1/admin/login", form), (x) => typeof x.token === "string" && x.token.length > 0);
       adminAuth.set(r.token);
       navigate("/admin", { replace: true });
     } catch (e) {

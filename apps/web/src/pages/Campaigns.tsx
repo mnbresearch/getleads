@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
-import { apiFetch, fmtDate } from "../lib/api";
+import { apiFetch, expectLists, fmtDate } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { useMe } from "../lib/me";
 import { plural } from "../lib/plural";
@@ -42,18 +42,18 @@ export function CampaignsPage() {
   const { canManage } = useMe();
   const load = useCallback(() => {
     apiFetch<{ campaigns: Campaign[] }>("GET", "/v1/campaigns")
-      .then((r) => { setRows(r.campaigns); setListErr(null); })
+      .then((r) => { setRows(expectLists(r, "campaigns").campaigns); setListErr(null); })
       .catch((e) => setListErr((e as Error).message));
   }, []);
   const loadAccounts = useCallback(() => {
     apiFetch<{ emailAccounts: Account[]; systemProviderAvailable: boolean }>("GET", "/v1/campaigns/email-accounts")
-      .then((r) => { setAccounts(r.emailAccounts); setSysAvail(r.systemProviderAvailable); setAccErr(null); setAccLoaded(true); })
+      .then((r) => { setAccounts(expectLists(r, "emailAccounts").emailAccounts); setSysAvail(r.systemProviderAvailable); setAccErr(null); setAccLoaded(true); })
       .catch((e) => setAccErr((e as Error).message));
   }, []);
   const loadRefs = useCallback(() => {
     Promise.all([
-      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)),
-      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps)),
+      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(expectLists(r, "lists").lists)),
+      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(expectLists(r, "icps").icps)),
     ])
       .then(() => setRefsErr(null))
       .catch((e) => setRefsErr((e as Error).message));
@@ -212,7 +212,7 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
   const [clientOptions, setClientOptions] = useState<{ id: string; name: string }[]>([]);
   useEffect(() => {
     if (!open) return;
-    apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClientOptions(r.clients)).catch(() => setClientOptions([]));
+    apiFetch<{ clients: { id: string; name: string }[] }>("GET", "/v1/clients").then((r) => setClientOptions(expectLists(r, "clients").clients)).catch(() => setClientOptions([]));
   }, [open]);
   const [f, setF] = useState(BLANK_FORM);
   const [steps, setSteps] = useState<Step[]>(DEFAULT_STEPS);
@@ -446,8 +446,8 @@ export function CampaignDetail() {
       .then((r) => { setC(r); setLoadErr(null); })
       .catch((e) => setLoadErr((e as Error).message));
     apiFetch<typeof stats>("GET", `/v1/campaigns/${id}/stats`).then((r) => { setStats(r); setStatsErr(null); }).catch((e) => setStatsErr((e as Error).message));
-    apiFetch<{ contacts: typeof contacts }>("GET", `/v1/campaigns/${id}/contacts`).then((r) => { setContacts(r.contacts); setContactsErr(null); }).catch((e) => setContactsErr((e as Error).message));
-    apiFetch<{ messages: typeof messages }>("GET", `/v1/campaigns/${id}/messages`).then((r) => { setMessages(r.messages); setMessagesErr(null); }).catch((e) => setMessagesErr((e as Error).message));
+    apiFetch<{ contacts: typeof contacts }>("GET", `/v1/campaigns/${id}/contacts`).then((r) => { setContacts(expectLists(r, "contacts").contacts); setContactsErr(null); }).catch((e) => setContactsErr((e as Error).message));
+    apiFetch<{ messages: typeof messages }>("GET", `/v1/campaigns/${id}/messages`).then((r) => { setMessages(expectLists(r, "messages").messages); setMessagesErr(null); }).catch((e) => setMessagesErr((e as Error).message));
   }, [id]);
   // Paused while the edit modal is open: nothing on screen behind it needs refreshing, and
   // each poll handed the form a new campaign object.
@@ -456,9 +456,9 @@ export function CampaignDetail() {
   useEffect(() => { load(); const t = setInterval(() => { if (!editingRef.current) load(); }, 6000); return () => clearInterval(t); }, [load]);
   const loadRefs = useCallback(() => {
     Promise.all([
-      apiFetch<{ emailAccounts: Account[] }>("GET", "/v1/campaigns/email-accounts").then((r) => setAccounts(r.emailAccounts)),
-      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(r.lists)),
-      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(r.icps)),
+      apiFetch<{ emailAccounts: Account[] }>("GET", "/v1/campaigns/email-accounts").then((r) => setAccounts(expectLists(r, "emailAccounts").emailAccounts)),
+      apiFetch<{ lists: typeof lists }>("GET", "/v1/leads/lists/all").then((r) => setLists(expectLists(r, "lists").lists)),
+      apiFetch<{ icps: typeof icps }>("GET", "/v1/icps").then((r) => setIcps(expectLists(r, "icps").icps)),
     ])
       .then(() => { setRefsErr(null); setRefsLoaded(true); })
       .catch((e) => setRefsErr((e as Error).message));
@@ -598,7 +598,7 @@ export function CampaignDetail() {
               <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-ink-200">{m.bodyText}</pre>
               {/* Every inbound message can be answered from here. The box used to render only
                   when an AI draft existed, so a workspace with no AI had no way to reply at all. */}
-              {m.direction === "inbound" && <ReplyBox message={m} onSent={() => { toast(`Reply sent to ${m.toEmail}`); load(); }} toast={toast} />}
+              {m.direction === "inbound" && <ReplyBox message={m} onSent={() => { toast(`Reply sent to ${m.toEmail}`); load(); }} onFailed={load} toast={toast} />}
             </details>
           ))}
           {messages.length === 0 && <div className="p-8 text-center text-sm text-ink-400">No messages yet.</div>}
@@ -685,7 +685,7 @@ export function replySubject(theirs: string | null | undefined): string {
  * own words and stays in the box: those are instructions, and a toast is gone before they
  * can be followed.
  */
-function ReplyBox({ message, onSent, toast }: { message: { id: string; subject: string; toEmail: string; draftReply?: { subject: string; body: string } | null }; onSent: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+function ReplyBox({ message, onSent, onFailed, toast }: { message: { id: string; subject: string; toEmail: string; draftReply?: { subject: string; body: string } | null }; onSent: () => void; onFailed?: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
   const draft = message.draftReply?.body ? message.draftReply : null;
   const [subject, setSubject] = useState(draft?.subject || replySubject(message.subject));
   const [body, setBody] = useState(draft?.body ?? "");
@@ -716,6 +716,10 @@ function ReplyBox({ message, onSent, toast }: { message: { id: string; subject: 
       const m = (e as Error).message;
       setErr(m);
       toast(m, "err");
+      // A refused or failed send can still have written a row (the attempt, marked failed) and
+      // moved the Failed counter. Shown now, not at the next 6 s poll - until then the list
+      // said "queued" and the counter 0, which read as "it is on its way".
+      onFailed?.();
     } finally { setBusy(false); }
   };
   const fid = `reply-${message.id}`;
