@@ -6,11 +6,13 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { effectiveLimits } from "@prospex/db";
-import { and, autopilots, campaignContacts, campaigns, clients, companies, consume, desc, enqueue, eq, getDb, icps, inArray, invites, leads, limitsFor, listLeads, lists, remainingPremiumBudget, savedSearches, sql, tasks, users, organizations, type Invite } from "@prospex/db";
+import { and, or, autopilots, campaignContacts, campaigns, clients, companies, consume, desc, enqueue, eq, getDb, icps, inArray, invites, leads, limitsFor, listLeads, lists, remainingPremiumBudget, savedSearches, sql, tasks, users, organizations, type Invite } from "@prospex/db";
 import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, redact, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
 import { env } from "../env.js";
 import { hashPassword, issueJwt, passwordProblem } from "../lib/auth.js";
 import { randomToken } from "../lib/crypto.js";
+import { hashLinkToken } from "../lib/linkTokens.js";
+import { requireVerifiedEmail, sendVerificationEmailWithin } from "../lib/emailVerification.js";
 import { ApiError, badRequest, forbidden, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { sendMail } from "../lib/mailer.js";
@@ -546,12 +548,18 @@ toolRoutes.get("/team", requireUser, async (c) => {
   const pending = await db.select().from(invites).where(and(eq(invites.orgId, oid), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`)).orderBy(desc(invites.createdAt));
   const limits = effectiveLimits(c.get("auth").org);
   const now = Date.now();
-  const shaped = pending.map(({ token: _t, ...i }) => ({ ...i, expiresAt: inviteExpiry(i), expired: inviteExpiry(i).getTime() <= now }));
+  // Named fields only. An invite link is shown once, when it is created or re-sent: the list
+  // carries neither the link nor anything it could be rebuilt from (no token, no token hash),
+  // and a column added to the table later does not appear here by accident.
+  const shaped = pending.map((i) => ({ id: i.id, email: i.email, role: i.role, invitedBy: i.invitedBy, createdAt: i.createdAt, expiresAt: inviteExpiry(i), expired: inviteExpiry(i).getTime() <= now }));
   return c.json({ members, invites: shaped, seats: { used: members.length, pending: shaped.filter((i) => !i.expired).length, limit: limits.seats } });
 });
 toolRoutes.post("/team/invite", requireUser, roleGate("team.invited", "owner", "admin"), zValidator("json", z.object({ email: emailField, role: z.enum(["admin", "member"]).default("member") })), async (c) => {
   const a = c.get("auth");
   if (!["owner", "admin"].includes(a.user!.role)) throw forbidden("Only owners/admins can invite");
+  // An invitation is mail from the platform to an address the caller chose. An account that
+  // has not confirmed its own address yet does not get to send it.
+  await requireVerifiedEmail(c);
   const { db } = getDb();
   const b = c.req.valid("json");
   const email = b.email;
@@ -568,8 +576,10 @@ toolRoutes.post("/team/invite", requireUser, roleGate("team.invited", "owner", "
   }
   // Checked last, so only an invite that is actually about to be sent uses the allowance.
   limitInviteMail(a.org.id, email);
+  // Only the hash of the token is stored: the link exists in this response and in the email,
+  // and a copy of the invites table is not a list of working links.
   const token = randomToken(24);
-  const [inv] = await db.insert(invites).values({ orgId: a.org.id, email, role: b.role, token, invitedBy: a.user!.id, expiresAt: new Date(Date.now() + INVITE_TTL_MS) }).returning();
+  const [inv] = await db.insert(invites).values({ orgId: a.org.id, email, role: b.role, token: null, tokenHash: hashLinkToken(token), invitedBy: a.user!.id, expiresAt: new Date(Date.now() + INVITE_TTL_MS) }).returning();
   // sendMail answers { ok: false } rather than throwing; that used to be ignored, so the UI
   // said "Invite sent" for mail that never left. The link is returned either way so it can
   // be shared by hand.
@@ -591,9 +601,16 @@ async function revokeInvite(c: import("hono").Context<Env>) {
   return c.json({ ok: true, id: row.id });
 }
 
-/** Re-send a pending invite, renewing its 14 days. Same link, so a forwarded copy still works. */
+/**
+ * Re-send a pending invite, renewing its 14 days.
+ *
+ * A NEW link every time: the token is not stored, so the old link cannot be sent again -
+ * and should not be, since "re-send" is also what someone does when the first email went to
+ * the wrong place. The previous link stops working the moment this one is issued.
+ */
 async function resendInvite(c: import("hono").Context<Env>) {
   const a = c.get("auth");
+  await requireVerifiedEmail(c);
   const { db } = getDb();
   const inv = await db.query.invites.findFirst({ where: and(eq(invites.id, c.req.param("id")!), eq(invites.orgId, a.org.id), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`) });
   if (!inv) throw notFound("Pending invite");
@@ -605,8 +622,16 @@ async function resendInvite(c: import("hono").Context<Env>) {
   }
   limitInviteMail(a.org.id, inv.email);
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
-  await db.update(invites).set({ expiresAt }).where(eq(invites.id, inv.id));
-  const sent = await sendInviteEmail({ orgName: a.org.name, inviter: a.user?.name || a.user?.email || a.org.name }, inv.email, inv.token);
+  const token = randomToken(24);
+  // Still pending at the moment of writing: an invite accepted or revoked in between is not
+  // handed a fresh link.
+  const renewed = await db
+    .update(invites)
+    .set({ expiresAt, token: null, tokenHash: hashLinkToken(token) })
+    .where(and(eq(invites.id, inv.id), eq(invites.orgId, a.org.id), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`))
+    .returning({ id: invites.id });
+  if (!renewed.length) throw notFound("Pending invite");
+  const sent = await sendInviteEmail({ orgName: a.org.name, inviter: a.user?.name || a.user?.email || a.org.name }, inv.email, token);
   await audit(c, "team.invite_resent", { targetType: "invite", targetId: inv.id, data: { email: inv.email, emailed: sent.emailed } });
   return c.json({ id: inv.id, email: inv.email, link: sent.link, expiresAt, emailed: sent.emailed, emailError: sent.emailError });
 }
@@ -702,7 +727,10 @@ export const joinRoutes = new Hono();
 joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.object({ token: z.string().max(200), password: z.string().min(8).max(200), name: z.string().max(80).optional() })), async (c) => {
   const b = c.req.valid("json");
   const { db } = getDb();
-  const inv = await db.query.invites.findFirst({ where: eq(invites.token, b.token) });
+  // Looked up by the hash of the token. The second arm is for an invite the previous release
+  // created while both were running (plaintext token, no hash yet); the boot-time task gives
+  // those their hash, after which only the first arm ever matches.
+  const inv = b.token ? await db.query.invites.findFirst({ where: or(eq(invites.tokenHash, hashLinkToken(b.token)), and(sql`${invites.tokenHash} IS NULL`, eq(invites.token, b.token))) }) : undefined;
   if (!inv || inv.acceptedAt) return c.json({ error: { code: "invalid_invite", message: "Invite is invalid or already used" } }, 400);
   if (inv.revokedAt) return c.json({ error: { code: "invite_revoked", message: "This invite was cancelled by the workspace. Ask them to send a new one." } }, 400);
   if (inviteExpiry(inv).getTime() <= Date.now()) return c.json({ error: { code: "invite_expired", message: "This invite has expired. Ask the workspace to re-send it." } }, 400);
@@ -719,6 +747,10 @@ joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.obje
   if (limits.seats > 0 && m >= limits.seats) return c.json({ error: { code: "seat_limit", message: `${org.name} has no free seats (${limits.seats}). Ask an owner to upgrade or free a seat.` } }, 400);
   const [user] = await db.insert(users).values({ orgId: inv.orgId, email: inv.email, passwordHash: await hashPassword(b.password), name: b.name ?? "", role: inv.role, lastLoginAt: new Date() }).returning();
   await db.update(invites).set({ acceptedAt: new Date() }).where(eq(invites.id, inv.id));
+  // A new account, so it gets the same "confirm your address" email a signup gets. Accepting
+  // an invite does not prove the mailbox (the link is also shown to the inviter). Nothing is
+  // sent when the platform has no mail provider, and this never delays or fails the join.
+  await sendVerificationEmailWithin(user).catch(() => ({ emailed: false }));
   await audit(c, "team.joined", { orgId: inv.orgId, actorType: "user", actorUserId: user.id, targetType: "invite", targetId: inv.id, data: { email: user.email, role: user.role, invitedBy: inv.invitedBy } });
   return c.json({ token: await issueJwt(user), user: { id: user.id, email: user.email, name: user.name, role: user.role } });
 });

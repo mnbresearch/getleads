@@ -97,6 +97,7 @@ You can start in Stripe **test mode** (test-mode keys, e.g. `sk_test_...`) to ve
 | `ADMIN_API_TOKEN` | Server-to-server calls to `/v1/admin/*` (header `x-admin-token`) | Separate from `INTERNAL_TOKEN`. Leave it unset and the header path is off; the admin dashboard's password login still works. |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | The admin dashboard login | Use a long random password. Five wrong attempts from one address lock that address for up to 15 minutes; fifty wrong attempts in 15 minutes lock the form for every address that has not signed in before. An address you have signed in from keeps working either way. "Sign out" in the dashboard revokes the session on the server. |
 | `ADMIN_JWT_SECRET` (optional) | Signs the admin dashboard session | Falls back to `JWT_SECRET`. Setting it means a leak of `JWT_SECRET` alone cannot mint an admin session. |
+| `ADMIN_TOTP_SECRET` (optional, recommended) | A second factor on the admin dashboard login | A base32 secret that you also add to an authenticator app. When set, signing in to `/admin` needs the current 6-digit code as well as the password. Unset, the login is email + password as before. How to create it: section B9, "Admin two-factor sign-in". |
 
 **If `INTERNAL_TOKEN` was ever put in a URL** (the old cron instructions said `?token=`), treat it as leaked - URLs are written to access logs and cron dashboards - and rotate it: Render → the API service → Environment → `INTERNAL_TOKEN` → generate a new value → save. Nothing else needs to change on Render.
 
@@ -212,6 +213,65 @@ Optional settings that this release reads (all have safe defaults, none is requi
 | `ORG_DAILY_SEND_CEILING` | The most one workspace may send per day across all its senders | 2000 |
 | `SYSTEM_SENDER_DAILY_CAP` | The most one workspace may send per day through the shared platform sender | 50, or 1/20 of the plan's monthly emails |
 | `AUTO_MIGRATE` | `false` stops the API applying migrations on boot (you then run `npm run db:migrate` yourself before each deploy) | `true` |
+
+### B9. Account security in this release (migration 0019)
+
+Migration `0019_account_security.sql` only adds things (nullable columns and new tables), so the previous release keeps running on the upgraded database. Nothing here changes how an existing customer signs in: every protection is either something a person turns on for themselves, or applies to accounts created from now on.
+
+**What customers get**
+
+- **Two-factor sign-in** (Settings > Security). Opt-in per person. After the password, sign-in asks for a 6-digit code from an authenticator app (Google Authenticator, 1Password, Authy, Microsoft Authenticator - any app that reads a standard QR code). Ten single-use recovery codes are shown once when it is turned on. Sign in with Google is not asked for the code (Google does its own).
+- **Email confirmation for new accounts.** A new signup is emailed a link (valid 24 hours). Until they click it the workspace cannot send team invitations or use the shared platform sender; everything else works. Accounts that existed before this release, and accounts created with Google, are already confirmed.
+- **Read-only API keys.** A key can be created as "read-only": it can fetch data and cannot change anything. Existing keys are full access, as before.
+- **Security emails.** The account owner is emailed when their password is changed or reset, two-factor sign-in is turned on or off, an API key is created, or the account is signed in to from an address it has not used before.
+
+The confirmation link and the security emails are sent through the platform's own mail provider (`RESEND_API_KEY`, or `SMTP_HOST` and friends - section A5). **With no mail provider configured they are simply not sent, and unconfirmed accounts are not restricted in any way** - a deployment can never lock its users behind an email it cannot send. Set a mail provider to get both.
+
+**When a customer has lost their phone AND their recovery codes**
+
+There is one way back in, and it is yours: Admin > the workspace > the user > "Reset two-factor" (`POST /v1/admin/orgs/:id/users/:userId/reset-2fa`). Their password alone then signs them in and they can set two-factor up again. Before you do it, satisfy yourself that the person asking is the account's owner (reply to the address on the account, not to the address the request came from): the reset removes a protection the owner chose. It is recorded in the workspace's security log and the user is emailed that support did it.
+
+**Admin two-factor sign-in (recommended)**
+
+The admin dashboard guards every customer's plan and status behind one password. Add a second factor:
+
+1. Create a secret - 32 base32 characters (letters A-Z and digits 2-7). Either of:
+   ```
+   node -e "const a='ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';console.log([...require('crypto').randomBytes(32)].map(b=>a[b&31]).join(''))"
+   openssl rand 20 | base32
+   ```
+2. Add it to your authenticator app: "Add account" > "Enter a setup key" (some apps say "Enter key manually"). Account name: `Scout admin`. Key: the secret. Type: time based. (If you prefer to scan a QR code, make one on your own machine from `otpauth://totp/Scout%20admin?secret=<THE SECRET>&issuer=Scout`, for example with `qrencode -t ansiutf8 '<that link>'`. Do not paste the secret into an online QR generator.)
+3. Store the secret in your password manager as well. It is the only copy apart from the one on the server, and it is how you add a second phone or replace a lost one.
+4. Set it on the server: Render > the API service > Environment > add `ADMIN_TOTP_SECRET` with the secret as its value > save (the service restarts).
+5. Sign out of `/admin` and sign in again. After the email and password the form asks for the 6-digit code.
+
+Notes:
+
+- A code works once. If a sign-in fails on the code, wait for the next one (they change every 30 seconds) and check that the phone's clock is set automatically: the codes depend on the time, and one step (30 seconds) either way is tolerated.
+- Wrong codes count towards the admin lock exactly like wrong passwords.
+- The server-to-server header (`x-admin-token: $ADMIN_API_TOKEN`) is a separate credential and is not asked for a code.
+- Lost the phone: add the secret from your password manager to a new phone. Lost the secret too: delete `ADMIN_TOTP_SECRET` (or set a new one) in the Render dashboard; whoever can do that already controls the deployment.
+- A value that is not base32 is refused at sign-in with a message saying so, rather than silently ignored; the API also warns about it at startup.
+
+When a mail provider is configured, `ADMIN_EMAIL` is emailed when the admin dashboard is signed in to from an address that has not signed in before, and when the admin login is locked after failed attempts.
+
+**The Security tab in the admin dashboard**
+
+`GET /v1/admin/security/summary` (the last 24 hours: failed sign-ins, locked accounts, refused actions, admin sign-ins, new workspaces, exports, bulk deletions, workspaces waiting to be deleted, the addresses with the most failed sign-ins) and `GET /v1/admin/audit-log` (the security log across every workspace, filterable by workspace, action, result and actor). Both accept the admin session or the `x-admin-token` header.
+
+**Limits that are new**
+
+- New workspaces: 5 an hour and 20 a day from one network address. Past that the signup form says so and asks the person to try later or write to us. (Counted in the API process's memory, like the other rate limits.)
+- "Forgot password": one address is mailed at most 3 reset links an hour, whoever asks. The form answers the same either way.
+
+**Rolling back**
+
+Redeploy the previous build; the database needs nothing undone. On the old code:
+
+- **Read-only API keys become full-access keys.** The old code does not know about key scopes and lets any key write. If you roll back for more than a moment, revoke the read-only keys first (`UPDATE api_keys SET revoked_at = now() WHERE NOT ('*' = ANY(scopes)) AND revoked_at IS NULL;`) or tell the customers who created them.
+- **Two-factor sign-in is not asked for.** Accounts that turned it on sign in with their password alone until you roll forward; their setting is kept.
+- `ADMIN_TOTP_SECRET` is ignored: the admin login is email + password again.
+- Email confirmation is not enforced and security emails are not sent.
 
 ---
 

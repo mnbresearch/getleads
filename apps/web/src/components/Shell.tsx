@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState, type ReactNode } from "react";
 import { NavLink, useNavigate } from "react-router-dom";
 import { apiFetch, auth, ProspexError } from "../lib/api";
 import { Logo } from "./Logo";
+import { DeletionBanner, RecoveryCodeNotice, VerifyEmailBanner } from "./AccountBanners";
+import { emailVerificationAvailable } from "../lib/me";
 
 const nav = [
   { to: "/", label: "Overview", icon: "▦" },
@@ -23,7 +25,7 @@ const nav = [
 ];
 
 export function Shell({ children }: { children: ReactNode }) {
-  const [me, setMe] = useState<{ user: { email: string; name: string }; org: { name: string; plan: string } } | null>(null);
+  const [me, setMe] = useState<{ user: { email: string; name: string; role?: string; emailVerified?: boolean } | null; org: { name: string; plan: string; emailVerificationAvailable?: boolean }; emailVerificationAvailable?: boolean } | null>(null);
   const [open, setOpen] = useState(false);
   const [suspended, setSuspended] = useState(false);
   const [meErr, setMeErr] = useState<string | null>(null);
@@ -93,7 +95,7 @@ export function Shell({ children }: { children: ReactNode }) {
         </nav>
         <div className="shrink-0 border-t border-black/10 p-3 text-xs text-ink-400">
           <div className="truncate font-medium text-ink-100">{me?.org.name}</div>
-          <div className="truncate">{me?.user.email}</div>
+          <div className="truncate">{me?.user?.email}</div>
           <button className="mt-2 text-brand-600 hover:text-brand-800 hover:underline" onClick={signOut}>
             Sign out
           </button>
@@ -110,6 +112,11 @@ export function Shell({ children }: { children: ReactNode }) {
             <button className="font-medium underline" onClick={loadMe}>Retry</button>
           </div>
         )}
+        {/* Nothing for a session that never loaded its account, an older server that does not
+            say whether the address is confirmed, or a deployment that cannot send the email. */}
+        <DeletionBanner isOwner={me?.user?.role === "owner"} />
+        <RecoveryCodeNotice />
+        {me?.user && me.user.emailVerified === false && emailVerificationAvailable(me) && <VerifyEmailBanner key={me.user.email} email={me.user.email} onRecheck={loadMe} />}
         <main className="flex-1">{children}</main>
       </div>
     </div>

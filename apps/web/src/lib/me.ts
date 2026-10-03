@@ -3,8 +3,23 @@ import { apiFetch, auth } from "./api";
 
 export type Role = "owner" | "admin" | "member";
 export interface Me {
-  user: { id: string; email: string; role: Role; hasPassword?: boolean } | null;
-  org: { name: string; settings: Record<string, string> };
+  /**
+   * `emailVerified`, `twoFactorEnabled` and `twoFactorEnabledAt` are absent on an older
+   * server. Absent is "this server has no such feature", never "off": the controls that
+   * depend on them are not offered at all rather than offered and refused.
+   */
+  user: { id: string; email: string; role: Role; hasPassword?: boolean; emailVerified?: boolean; twoFactorEnabled?: boolean; twoFactorEnabledAt?: string | null } | null;
+  org: { name: string; settings: Record<string, string>; emailVerificationAvailable?: boolean };
+  emailVerificationAvailable?: boolean;
+}
+
+/**
+ * Whether this deployment can send a confirmation email at all. When it cannot, nothing is
+ * restricted for an unconfirmed address, so nothing should nag about one either. The server
+ * may say so at the top level or on the workspace; either is read.
+ */
+export function emailVerificationAvailable(me: { emailVerificationAvailable?: unknown; org?: { emailVerificationAvailable?: unknown } | null } | null | undefined): boolean {
+  return me?.emailVerificationAvailable === true || me?.org?.emailVerificationAvailable === true;
 }
 
 /**
@@ -50,9 +65,24 @@ function fetchMe(): Promise<Me> {
   return p;
 }
 
-/** Replace the cached account after a change this app made itself (e.g. a password was set). */
+/**
+ * Replace the cached account after a change this app made itself (e.g. a password was set,
+ * two-factor was turned on).
+ *
+ * Every mounted useMe() hears about it. It used to update only the cache, which was enough
+ * while each change was read back by the component that made it; turning two-factor on in
+ * one card has to reach the password form next to it, which must then ask for a code.
+ */
+const meListeners = new Set<(me: Me) => void>();
 export function rememberMe(me: Me | null) {
   meCache = me;
+  if (me) meListeners.forEach((fn) => fn(me));
+}
+
+/** Drop the cached account so the next reader asks the server (e.g. the email was just confirmed). */
+export function forgetMe() {
+  meCache = null;
+  inflight = null;
 }
 
 export function useMe() {
@@ -67,7 +97,9 @@ export function useMe() {
       .then((r) => { if (live) setMe(r); })
       .catch(() => {})
       .finally(() => { if (live) setSettled(true); });
-    return () => { live = false; };
+    const onChange = (m: Me) => { if (live) setMe(m); };
+    meListeners.add(onChange);
+    return () => { live = false; meListeners.delete(onChange); };
   }, []);
   const role = me?.user?.role;
   return { me, role, settled, canManage: role === undefined || role === "owner" || role === "admin", isOwner: role === undefined || role === "owner" };

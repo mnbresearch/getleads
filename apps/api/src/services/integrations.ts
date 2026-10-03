@@ -1,6 +1,6 @@
 import { fetchPublic, isPublicHost, parseHttpUrl, readCapped } from "@prospex/core";
 import { and, companies, eq, getDb, integrations, leads, type Integration, type Lead } from "@prospex/db";
-import { CredentialUnreadableError, decryptJsonStrict } from "../lib/crypto.js";
+import { CredentialUnreadableError, openOrgJson, rebindOnReadSoon } from "../lib/credentials.js";
 
 /**
  * Outbound CRM sync. Each provider maps a Prospex lead to its contact object.
@@ -410,7 +410,10 @@ export async function syncLead(integration: Integration, leadId: string): Promis
   // empty config, which then failed in confusing ways. It is its own, sayable, error.
   let stored: Cfg;
   try {
-    stored = decryptJsonStrict<Cfg>(integration.configEncrypted) ?? {};
+    // Bound to the workspace that saved it: a config copied from another workspace's
+    // connection does not open here (lib/credentials.ts).
+    stored = openOrgJson<Cfg>(integration.orgId, "integration", integration.configEncrypted) ?? {};
+    if (integration.configEncrypted) rebindOnReadSoon(integration.orgId, "integration", integration.id, integration.configEncrypted, JSON.stringify(stored));
   } catch (e) {
     if (e instanceof CredentialUnreadableError) return { ok: false, error: "This connection's saved credentials could not be read. Reconnect it in Settings, Integrations." };
     throw e;

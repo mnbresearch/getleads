@@ -1,5 +1,5 @@
 import type { Context, MiddlewareHandler } from "hono";
-import { authenticate, verifyAdminJwt, type AuthContext } from "./lib/auth.js";
+import { authenticate, scopeAllows, verifyAdminJwt, type AuthContext } from "./lib/auth.js";
 import { ApiError } from "./lib/errors.js";
 import { env } from "./env.js";
 import { safeEqual } from "./lib/crypto.js";
@@ -14,8 +14,36 @@ export const requireAuth: MiddlewareHandler<Env> = async (c, next) => {
     throw new ApiError(403, "This account has been suspended. Contact support to reactivate it.", "account_suspended");
   }
   c.set("auth", auth);
+  // A read-only API key may look and not touch. Checked here, once, for every route behind
+  // requireAuth - not per route, where the next new route would forget it. (The admin API
+  // and the job runner have their own credentials and never come through here.)
+  if (!scopeAllows(auth, c.req.method)) {
+    await auditScopeDenied(c, auth);
+    throw new ApiError(403, READ_ONLY_KEY_MESSAGE, "insufficient_scope");
+  }
   await next();
 };
+
+export const READ_ONLY_KEY_MESSAGE = "This API key is read-only. Create a full-access key to make changes.";
+
+/**
+ * A refused write is worth a line in the workspace's security log - once a minute per key at
+ * most, because a script that holds the wrong key retries, and each retry would be a row.
+ */
+const scopeDeniedAt = new Map<string, number>();
+async function auditScopeDenied(c: Context, auth: AuthContext): Promise<void> {
+  const id = auth.apiKey?.id;
+  if (!id) return;
+  const now = Date.now();
+  const last = scopeDeniedAt.get(id);
+  if (last !== undefined && now - last < 60_000) return;
+  if (scopeDeniedAt.size > 5000) scopeDeniedAt.clear();
+  scopeDeniedAt.set(id, now);
+  // Imported lazily: audit.ts imports this module for clientIp.
+  await import("./lib/audit.js")
+    .then((m) => m.audit(c, "apikey.scope_denied", { result: "denied", targetType: "api_key", targetId: id, data: { method: c.req.method, path: c.req.path.slice(0, 200), prefix: auth.apiKey?.prefix, scope: "read" } }))
+    .catch(() => {});
+}
 
 /**
  * Super-admin dashboard auth - a signed admin JWT from POST /v1/admin/login, or a shared

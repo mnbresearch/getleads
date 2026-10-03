@@ -43,16 +43,50 @@ export async function checkPassword(p: string, hash: string) {
  * Google OAuth `state`) were all "anything signed with JWT_SECRET", told apart only by which
  * fields happened to be present - so a 14-day session token was accepted as an OAuth state.
  */
-export type TokenAudience = "session" | "admin" | "oauth_state";
+export type TokenAudience = "session" | "admin" | "oauth_state" | "2fa";
+
+/** How long a customer session lasts, and the oldest a session token may ever be. */
+export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 14;
 
 /**
  * Customer session. `tv` is the user's token version at the moment of issue: a password
  * change, a password reset or "sign out everywhere" bumps the stored version, and every
  * token carrying an older one stops working at once.
  */
-export async function issueJwt(user: Pick<User, "id" | "orgId"> & { tokenVersion?: number | null }, ttlSeconds = 60 * 60 * 24 * 14) {
+export async function issueJwt(user: Pick<User, "id" | "orgId"> & { tokenVersion?: number | null }, ttlSeconds = SESSION_TTL_SECONDS) {
   const now = Math.floor(Date.now() / 1000);
   return sign({ sub: user.id, org: user.orgId, tv: user.tokenVersion ?? 0, aud: "session" satisfies TokenAudience, iat: now, exp: now + ttlSeconds }, env.jwtSecret);
+}
+
+/** How long the second step of a two-factor sign-in may take. */
+export const TWO_FACTOR_CHALLENGE_TTL_SECONDS = 5 * 60;
+
+/**
+ * The token handed back by a sign-in whose password was right but whose account also needs a
+ * code. It says "this person passed the password step" and nothing else: its audience is
+ * "2fa", so authenticate() refuses it as a session, and it is only accepted by
+ * POST /v1/auth/2fa/verify together with a valid code.
+ *
+ * It carries the user's token version, like a session does: a password reset or "sign out
+ * everywhere" made in the meantime kills an outstanding challenge too.
+ */
+export async function issueTwoFactorChallenge(user: Pick<User, "id"> & { tokenVersion?: number | null }, ttlSeconds = TWO_FACTOR_CHALLENGE_TTL_SECONDS) {
+  const now = Math.floor(Date.now() / 1000);
+  return sign({ sub: user.id, tv: user.tokenVersion ?? 0, aud: "2fa" satisfies TokenAudience, jti: randomToken(12), iat: now, exp: now + ttlSeconds }, env.jwtSecret);
+}
+
+/** The user id and token version of a valid, unexpired two-factor challenge, or null. */
+export async function readTwoFactorChallenge(token: unknown): Promise<{ userId: string; tokenVersion: number } | null> {
+  if (typeof token !== "string" || !token || token.length > 2000) return null;
+  try {
+    const p = (await verify(token, env.jwtSecret, "HS256")) as { sub?: unknown; tv?: unknown; aud?: unknown };
+    // Strict: a session token (aud "session", or a legacy one with no audience) is not a challenge.
+    if (p.aud !== "2fa") return null;
+    if (typeof p.sub !== "string" || !p.sub || typeof p.tv !== "number") return null;
+    return { userId: p.sub, tokenVersion: p.tv };
+  } catch {
+    return null;
+  }
 }
 
 /** Admin dashboard session - a single shared super-admin account (ADMIN_EMAIL/ADMIN_PASSWORD),
@@ -147,6 +181,38 @@ export async function revokeAdminJwt(token: string): Promise<"revoked" | "invali
 }
 
 /**
+ * Claim a time step of the ADMIN authenticator code, so the code that was just accepted
+ * cannot be used again (by someone who saw it typed, or took it from a proxy log).
+ *
+ * There is no user row to keep "the last step" on - the admin account lives in the
+ * environment - so the claim is a row in admin_revoked_tokens under `totp:<step>`, which the
+ * session check never looks up (its keys start with `jti:` or `tok:`). Being in the database
+ * it holds across restarts and instances. A step at or below one already claimed is refused.
+ * If that table does not exist yet (migrations not run), the claim falls back to this
+ * process's memory.
+ */
+let adminTotpLastStep = -1;
+export async function claimAdminTotpStep(step: number): Promise<boolean> {
+  if (!Number.isInteger(step) || step <= adminTotpLastStep) return false;
+  const { db } = getDb();
+  try {
+    const rows = (await db.execute(sql`
+      INSERT INTO admin_revoked_tokens (jti, expires_at)
+      SELECT ${`totp:${step}`}, now() + interval '10 minutes'
+      WHERE NOT EXISTS (
+        SELECT 1 FROM admin_revoked_tokens WHERE jti LIKE 'totp:%' AND substring(jti from 6)::bigint >= ${step}
+      )
+      ON CONFLICT (jti) DO NOTHING
+      RETURNING jti`)) as unknown as unknown[];
+    if (rows.length === 0) return false;
+  } catch (e) {
+    if (!isMissingTable(e)) throw e;
+  }
+  adminTotpLastStep = step;
+  return true;
+}
+
+/**
  * A fixed bcrypt hash of a random value, compared against when the account does not exist or
  * has no password. Without it a login for an unknown address returned in ~2ms and a known one
  * in ~100ms, which answers "is this person a customer?" for anyone who asks.
@@ -224,12 +290,17 @@ export async function authenticate(header: string | undefined): Promise<AuthCont
   }
   if (scheme.toLowerCase() !== "bearer") return null;
   try {
-    const payload = (await verify(token, env.jwtSecret, "HS256")) as { sub?: unknown; org?: unknown; aud?: unknown; tv?: unknown; role?: unknown };
+    const payload = (await verify(token, env.jwtSecret, "HS256")) as { sub?: unknown; org?: unknown; aud?: unknown; tv?: unknown; role?: unknown; iat?: unknown };
     // Only a session token is a session. A token issued before `aud` existed has none and is
     // treated as a session (so the deploy signs nobody out); one that names any other
-    // audience - an admin session, an OAuth state - is not, whatever else it contains.
+    // audience - an admin session, an OAuth state, a two-factor challenge - is not, whatever
+    // else it contains.
     if (payload.aud !== undefined && payload.aud !== "session") return null;
     if (payload.role === "admin" || typeof payload.sub !== "string" || !payload.sub) return null;
+    // An absolute cap on a session's age, whatever its `exp` says: nothing signed with this
+    // secret is a session for longer than a session is issued for. (Every token this API has
+    // issued carries `iat`; one without it is judged on `exp` alone, as before.)
+    if (sessionTooOld(payload.iat)) return null;
     const user = await db.query.users.findFirst({ where: eq(users.id, payload.sub) });
     if (!user) return null;
     // Revocation: the token must carry the user's current token version. A legacy token has
@@ -242,6 +313,54 @@ export async function authenticate(header: string | undefined): Promise<AuthCont
   } catch {
     return null;
   }
+}
+
+/**
+ * Is `code` a valid second factor for this user right now (an authenticator code that has
+ * not been used, or an unused recovery code)? The code is spent when it is. False when
+ * two-factor is not on for the user. After five wrong codes in fifteen minutes this throws
+ * 429 `too_many_attempts` rather than answering.
+ *
+ * The rules live in lib/twoFactor.ts; this is the same function, reachable from here for
+ * callers that already import the sign-in helpers. Loaded on first use: twoFactor.ts depends
+ * on the request helpers, which depend on this file.
+ */
+export async function verifySecondFactor(user: User, code: string, opts: { ip?: string | null; during?: string } = {}): Promise<boolean> {
+  const m = await import("./twoFactor.js");
+  return m.verifySecondFactor(user, code, opts);
+}
+
+/** Is a token issued at `iat` (seconds since the epoch) past the longest a session may live? */
+export function sessionTooOld(iat: unknown, nowMs: number = Date.now()): boolean {
+  if (typeof iat !== "number" || !Number.isFinite(iat)) return false;
+  // A minute of slack for clocks; the token's own `exp` is still checked by the verifier.
+  return nowMs / 1000 - iat > SESSION_TTL_SECONDS + 60;
+}
+
+// ── API key scopes ──
+
+export type ApiKeyScope = "full" | "read";
+
+/** What is stored in api_keys.scopes for each scope. Keys created before scopes exist hold ["*"]. */
+export function scopesFor(scope: ApiKeyScope): string[] {
+  return scope === "read" ? ["read"] : ["*"];
+}
+
+/**
+ * The scope of a stored key. Only "*" is full access; anything else - including a value
+ * this code does not know - is read-only, so an unrecognised scope can never widen a key.
+ */
+export function apiKeyScope(key: Pick<ApiKey, "scopes">): ApiKeyScope {
+  return Array.isArray(key.scopes) && key.scopes.includes("*") ? "full" : "read";
+}
+
+/** Methods that only read. A read-only key may use these and nothing else. */
+const READ_METHODS = new Set(["GET", "HEAD"]);
+
+/** May this caller make a request with this method? Sessions and full keys: always. */
+export function scopeAllows(auth: AuthContext, method: string): boolean {
+  if (auth.via !== "api_key" || !auth.apiKey) return true;
+  return apiKeyScope(auth.apiKey) === "full" || READ_METHODS.has(method.toUpperCase());
 }
 
 export function generateApiKey() {

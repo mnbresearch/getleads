@@ -32,6 +32,7 @@ import { ClientDetailPage } from "./pages/ClientDetail";
 import { ClientReportPage } from "./pages/ClientReport";
 import { ForgotPasswordPage } from "./pages/ForgotPassword";
 import { ResetPasswordPage } from "./pages/ResetPassword";
+import { VerifyEmailPage } from "./pages/VerifyEmail";
 import { PrivacyPage, TermsPage } from "./pages/Legal";
 
 function Protected({ children }: { children: React.ReactNode }) {
@@ -56,6 +57,8 @@ function Root() {
       <Route path="/auth/google" element={<GoogleCallbackPage />} />
       <Route path="/forgot-password" element={<ForgotPasswordPage />} />
       <Route path="/reset-password" element={<ResetPasswordPage />} />
+      {/* Public: opened from the confirmation email, usually in a browser that is not signed in. */}
+      <Route path="/verify-email" element={<VerifyEmailPage />} />
       <Route path="/privacy" element={<PrivacyPage />} />
       <Route path="/terms" element={<TermsPage />} />
       <Route path="/admin/login" element={<AdminLoginPage />} />

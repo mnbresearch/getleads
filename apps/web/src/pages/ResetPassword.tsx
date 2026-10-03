@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { Link, useNavigate, useSearchParams } from "react-router-dom";
-import { ProspexError, apiFetch, auth } from "../lib/api";
+import { ProspexError, apiFetch, auth, unreadableAnswer } from "../lib/api";
 import { Logo } from "../components/Logo";
+import { TwoFactorStep, twoFactorChallenge } from "../components/TwoFactorStep";
 
 /**
  * Set a new password from an emailed reset link (?token=...).
@@ -39,6 +40,9 @@ export function ResetPasswordPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [linkBad, setLinkBad] = useState(false);
+  // The password was changed, but this account has two-factor on: the reset does not sign in
+  // by itself, it hands back the same "now the code" step the login form gets.
+  const [challenge, setChallenge] = useState<string | null>(null);
 
   const mismatch = confirmPw.length > 0 && pw !== confirmPw;
   const submit = async (e: React.FormEvent) => {
@@ -50,6 +54,13 @@ export function ResetPasswordPage() {
     setErr(null);
     try {
       const r = await apiFetch<{ token: string }>("POST", "/v1/auth/password/reset", { token, password: pw });
+      const pending = twoFactorChallenge(r);
+      if (pending) {
+        setChallenge(pending);
+        setBusy(false);
+        return;
+      }
+      if (!r || typeof r.token !== "string" || !r.token) throw unreadableAnswer();
       auth.set(r.token);
       navigate("/", { replace: true });
     } catch (e2) {
@@ -64,7 +75,21 @@ export function ResetPasswordPage() {
       <div className="mb-6 flex items-center justify-center">
         <Logo size={34} textClassName="text-2xl" />
       </div>
-      {!token || linkBad ? (
+      {challenge ? (
+        // The reset link is spent and the new password is saved by now, so "start again"
+        // here means the ordinary sign-in form with the new password - not this page.
+        <TwoFactorStep
+          challenge={challenge}
+          intro="Your password has been changed. Enter a code to finish signing in."
+          backLabel="Sign in later"
+          onSignedIn={(t) => {
+            auth.set(t);
+            navigate("/", { replace: true });
+          }}
+          onExpired={() => navigate("/login", { replace: true, state: { notice: "Your password has been changed. That sign-in took too long to finish - sign in with your new password." } })}
+          onBack={() => navigate("/login", { replace: true, state: { notice: "Your password has been changed. Sign in with your new password." } })}
+        />
+      ) : !token || linkBad ? (
         <div className="card space-y-3 p-6" role={linkBad ? "alert" : undefined}>
           <h1 className="text-lg font-semibold">Reset link not valid</h1>
           <p className="text-sm text-ink-300">{BAD_LINK}</p>

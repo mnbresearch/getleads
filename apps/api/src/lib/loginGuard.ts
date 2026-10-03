@@ -102,6 +102,35 @@ export async function isKnownIp(subject: string, ip: string | null | undefined):
 }
 
 /**
+ * Has ANY address signed in to this account successfully (recently)?
+ *
+ * "A sign-in from a new address" only means something when there are old ones to compare
+ * with. An account with no history at all (it last signed in before sign-ins were recorded)
+ * has no known addresses, and telling its owner that today's ordinary sign-in is "new" would
+ * be a false alarm sent to every existing customer on the day this shipped.
+ */
+export async function hasKnownIps(subject: string): Promise<boolean> {
+  const { db } = getDb();
+  const [row] = await db
+    .select({ id: loginAttempts.id })
+    .from(loginAttempts)
+    .where(and(eq(loginAttempts.subject, subject), eq(loginAttempts.succeeded, true), sql`${loginAttempts.ip} IS NOT NULL`, sql`${loginAttempts.createdAt} > now() - ${KNOWN_WINDOW_SQL}`))
+    .limit(1);
+  return !!row;
+}
+
+/**
+ * Is this a sign-in from an address the account has not used before? True only when the
+ * address is usable, is not known for the account, and the account has other known addresses.
+ * Call it BEFORE recording the success - afterwards every address is known.
+ */
+export async function isNewAddressFor(subject: string, ip: string | null | undefined): Promise<boolean> {
+  if (!ipKey(ip)) return false;
+  if (await isKnownIp(subject, ip)) return false;
+  return hasKnownIps(subject);
+}
+
+/**
  * How a subject is locked.
  *
  * `accountWide`: failures from ALL addresses (within the window, not since cleared) at which

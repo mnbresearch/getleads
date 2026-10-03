@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
-import { apiFetch, auth, consumeReturnPath, sessionExpiredNotice } from "../lib/api";
+import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
+import { apiFetch, auth, consumeReturnPath, sessionExpiredNotice, unreadableAnswer } from "../lib/api";
 import { googleStartUrl } from "../lib/googleSignIn";
 import { Logo, BRAND_NAME, BRAND_TAGLINE } from "../components/Logo";
+import { TwoFactorStep, twoFactorChallenge } from "../components/TwoFactorStep";
 
 /** Google's four-colour mark, drawn inline so the button needs no external request. */
 function GoogleMark() {
@@ -29,12 +30,20 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
   // that path has its own destination (the API-key screen, or the saved return path).
   const [signedInAtMount] = useState(() => !!auth.token);
   const [notice, setNotice] = useState<string | null>(null);
+  const loc = useLocation();
   useEffect(() => {
     // The API client flags a rejected token; say so instead of a blank login form.
     // Only set, never cleared here: StrictMode runs this twice and the second read is empty.
     const n = sessionExpiredNotice();
     if (n) setNotice(n);
-  }, []);
+    // Or a page that sent the person here with something to say (a password reset that
+    // still needs the two-factor step and could not finish it).
+    const handed = (loc.state as { notice?: unknown } | null)?.notice;
+    if (!n && typeof handed === "string" && handed) setNotice(handed);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Set once the password has been accepted for an account with two-factor on: the server
+  // has not signed anyone in yet, and holds this sign-in open for a few minutes.
+  const [challenge, setChallenge] = useState<string | null>(null);
 
   // The Google button only appears when the server actually has OAuth credentials. A button
   // that leads to "not configured" is worse than no button.
@@ -81,6 +90,16 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
     setErr(null);
     try {
       const r = await apiFetch<{ token: string; apiKey?: string }>("POST", `/v1/auth/${mode}`, mode === "login" ? { email: form.email, password: form.password } : { ...form, inviteCode: form.inviteCode || undefined, orgName: form.orgName || undefined, name: form.name || undefined });
+      // Password accepted, but this account also needs the code from an authenticator app.
+      const pending = mode === "login" ? twoFactorChallenge(r) : null;
+      if (pending) {
+        setNotice(null);
+        setChallenge(pending);
+        return;
+      }
+      // A 200 with no session in it is not a sign-in; storing "undefined" as the token used
+      // to look like one for a moment and then bounce back here with no explanation.
+      if (!r || typeof r.token !== "string" || !r.token) throw unreadableAnswer();
       if (r.apiKey) setApiKey(r.apiKey);
       auth.set(r.token);
       // Back to where the session ran out (or a deep link that bounced here), else home.
@@ -101,6 +120,34 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
           <code className="mt-3 block break-all rounded-lg bg-black p-3 text-xs text-emerald-600">{apiKey}</code>
           <button className="btn-primary mt-4 w-full justify-center" onClick={() => navigate(consumeReturnPath("/"))}>Go to dashboard</button>
         </div>
+      </div>
+    );
+  if (challenge && mode === "login")
+    return (
+      <div className="mx-auto mt-16 max-w-md p-4 sm:p-6">
+        <div className="mb-6 flex items-center justify-center">
+          <Logo size={34} textClassName="text-2xl" />
+        </div>
+        <TwoFactorStep
+          challenge={challenge}
+          intro={form.email ? `Signing in as ${form.email}.` : undefined}
+          onSignedIn={(token) => {
+            auth.set(token);
+            // The same destination as a sign-in without the second step.
+            navigate(consumeReturnPath("/"), { replace: true });
+          }}
+          onExpired={(text) => {
+            setChallenge(null);
+            setForm((f) => ({ ...f, password: "" }));
+            setErr(null);
+            setNotice(text);
+          }}
+          onBack={() => {
+            setChallenge(null);
+            setForm((f) => ({ ...f, password: "" }));
+            setErr(null);
+          }}
+        />
       </div>
     );
   return (

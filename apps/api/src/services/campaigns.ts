@@ -1,14 +1,16 @@
 import { and, asc, inArray, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, events, getDb, integrations, leads, limitsFor, lte, messages, organizations, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount, type Organization } from "@prospex/db";
 import { allocateVariant, coerceIntent, createAiProviderForPlan, domainOfEmail, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, redact, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type GuardContext, type SendingHealth } from "@prospex/core";
-import { decryptJson as decryptCfg } from "../lib/crypto.js";
 import { consume, effectiveLimits } from "@prospex/db";
 import { env } from "../env.js";
 import { addressOf } from "../lib/sanitize.js";
-import { decryptJsonStrict, randomToken } from "../lib/crypto.js";
+import { randomToken } from "../lib/crypto.js";
+import { openOrgJson, rebindOnReadSoon } from "../lib/credentials.js";
 import { NO_PLATFORM_MAILER, sendMail, type MailerConfig } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
 import { canonicalEmail } from "./leads.js";
+import { workspaceEmailVerified } from "../lib/emailVerification.js";
+import { PAUSED_FOR_DELETION, pendingDeletion } from "./accountDeletion.js";
 
 const DEFAULT_SETTINGS: Required<CampaignSettings> = {
   dailyLimit: 50,
@@ -434,6 +436,15 @@ export async function tickCampaign(campaignId: string) {
   // A suspended workspace sends nothing. Auth already blocked its users; the scheduler
   // did not, so a deactivated org's campaigns kept emailing prospects on its behalf.
   if (!org || org.status !== "active") return { sent: 0, reason: "organization not active" };
+  // A workspace scheduled for deletion sends nothing: its campaigns were paused when the
+  // deletion was requested, and one found active again (started through a path that did not
+  // check) is paused here rather than ticked.
+  const deletion = await pendingDeletion(campaign.orgId);
+  if (deletion) {
+    await db.update(campaigns).set({ status: "paused", updatedAt: new Date() }).where(eq(campaigns.id, campaign.id));
+    await emitEvent(campaign.orgId, "campaign.paused_workspace_deletion", { campaignId: campaign.id, requestId: deletion.id, reason: PAUSED_FOR_DELETION }, { type: "campaign", id: campaign.id }).catch(() => {});
+    return { sent: 0, reason: "paused: this workspace is scheduled for deletion" };
+  }
   if (!outboundSendingEnabled()) {
     await noteOutboundPaused(campaign).catch(() => {});
     // The reason is returned to the customer by POST /:id/start: it says who paused sending,
@@ -552,11 +563,16 @@ export function resolveMailer(a: EmailAccount): { ok: true; mailer: MailerConfig
   if (a.provider !== "resend" && a.provider !== "smtp") return { ok: false, reason: "unknown_provider" };
   let cfg: Record<string, unknown> | null;
   try {
-    cfg = decryptJsonStrict<Record<string, unknown>>(a.configEncrypted);
+    // Opens only for the workspace the sender belongs to: credentials copied onto another
+    // workspace's sender row are unreadable there (lib/credentials.ts).
+    cfg = openOrgJson<Record<string, unknown>>(a.orgId, "email-account", a.configEncrypted);
   } catch {
     return { ok: false, reason: "unreadable" };
   }
   if (!cfg || typeof cfg !== "object") return { ok: false, reason: "incomplete" };
+  // Saved before credentials were bound to their workspace: rewritten bound now that it has
+  // been read. Best-effort and off the request path.
+  rebindOnReadSoon(a.orgId, "email-account", a.id, a.configEncrypted, JSON.stringify(cfg));
   if (a.provider === "resend") {
     const apiKey = typeof cfg.apiKey === "string" ? cfg.apiKey.trim() : "";
     if (!apiKey) return { ok: false, reason: "incomplete" };
@@ -1106,6 +1122,14 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   }
   const mailer = resolved.mailer;
 
+  // The shared platform sender is only for workspaces whose owner has confirmed their email
+  // address (when verification is available; otherwise this is always true). Waiting, not
+  // failed: the contact goes out once the address is confirmed.
+  if (account.provider === "system" && !(await workspaceEmailVerified(campaign.orgId))) {
+    await requeueContact(cc.id, new Date(Date.now() + 3600_000), "Confirm your email address to send through the shared platform sender");
+    return { skipped: "email unverified" };
+  }
+
   const s = settingsOf(campaign);
   if (!isValidTimezone(s.timezone)) {
     await requeueContact(cc.id, new Date(Date.now() + 3600_000), `Campaign timezone "${s.timezone}" is not recognised`);
@@ -1558,7 +1582,8 @@ export async function whatsappSender(
   if (!integ) return { ok: false, error: "WhatsApp integration not configured (Settings → Integrations → WhatsApp Cloud API)" };
   let cfg: { phoneNumberId: string; accessToken: string; templateName?: string; templateLanguage?: string } | null = null;
   try {
-    cfg = decryptCfg<{ phoneNumberId: string; accessToken: string; templateName?: string; templateLanguage?: string }>(integ.configEncrypted);
+    cfg = openOrgJson<{ phoneNumberId: string; accessToken: string; templateName?: string; templateLanguage?: string }>(orgId, "integration", integ.configEncrypted);
+    if (cfg && integ.configEncrypted) rebindOnReadSoon(orgId, "integration", integ.id, integ.configEncrypted, JSON.stringify(cfg));
   } catch (e) {
     // The reason it could not be read (a rotated key, a damaged value) is the operator's to
     // see, in the log; this sentence ends up on a task a customer reads.

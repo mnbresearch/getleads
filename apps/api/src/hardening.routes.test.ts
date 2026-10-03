@@ -503,7 +503,12 @@ suite("route hardening", () => {
       const resent = await req("POST", `/v1/tools/team/invites/${y.body.id}/resend`, O.token);
       expect(resent.status).toBe(200);
       expect(resent.body.emailed).toBe(true);
-      const joined = await req("POST", "/v1/auth/join", undefined, { token: yToken, password: "long-enough-pw" });
+      // Re-sending issues a NEW link (only the hash of a token is stored, so the old link
+      // cannot be sent again); the previous one stops working.
+      const resentToken = new URL(resent.body.link).searchParams.get("token");
+      expect(resentToken).not.toBe(yToken);
+      expect((await req("POST", "/v1/auth/join", undefined, { token: yToken, password: "long-enough-pw" })).body.error.code).toBe("invalid_invite");
+      const joined = await req("POST", "/v1/auth/join", undefined, { token: resentToken, password: "long-enough-pw" });
       expect(joined.status).toBe(200);
       expect(joined.body.token).toBeTruthy();
     });

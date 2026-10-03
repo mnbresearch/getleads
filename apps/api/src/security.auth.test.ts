@@ -1534,6 +1534,158 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
       expect(r.headers.get("referrer-policy")).toBe("no-referrer");
     });
   });
+
+  // ── 11. Admin console: authenticator code, and notices to the operator ──
+  //
+  // These live in this file, with every other test that signs in to the admin form: that form
+  // has ONE lock subject for the whole platform, and a second test file using it at the same
+  // time would move the counts under the lockout tests above.
+  describe("admin console: second factor and operator notices", () => {
+    const SECRET = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP";
+    const adminLogin = (body: Record<string, unknown> = {}, headers: Record<string, string> = {}) => req("POST", "/v1/admin/login", null, { email: ADMIN_EMAIL, password: ADMIN_PASSWORD, ...body }, headers);
+    const clearAdmin = async () => {
+      await db.delete(S.loginAttempts).where(S.eq(S.loginAttempts.subject, "admin"));
+      // Authenticator steps claimed by an earlier run in the same half minute.
+      await db.execute(S.sql`DELETE FROM admin_revoked_tokens WHERE jti LIKE 'totp:%'`);
+    };
+
+    it("unset, the admin login works exactly as before and the session says so", async () => {
+      await clearAdmin();
+      const r = await adminLogin();
+      expect(r.status).toBe(200);
+      expect((await req("GET", "/v1/admin/session", r.body.token)).body).toEqual({ ok: true, totpEnabled: false });
+      // A code nobody asked for is ignored, not an error.
+      expect((await adminLogin({ code: "123456" })).status).toBe(200);
+      await clearAdmin();
+    });
+
+    it("set: no code -> totp_required, wrong code -> invalid_totp (counted), right code -> a session, the same code twice -> refused", async () => {
+      const { env } = await import("./env.js");
+      const T = await import("./lib/totp.js");
+      const key = T.base32Decode(SECRET)!;
+      await clearAdmin();
+      env.adminTotpSecret = SECRET;
+      try {
+        // No code: asked for one - with the same answer whether the password was right or not.
+        const noCode = await adminLogin();
+        expect(noCode.status).toBe(401);
+        expect(noCode.body.error.code).toBe("totp_required");
+        expect(noCode.body.token).toBeUndefined();
+        const noCodeWrongPw = await adminLogin({ password: "not-the-admin-password" });
+        expect(noCodeWrongPw.status).toBe(401);
+        expect(noCodeWrongPw.body.error).toEqual(noCode.body.error);
+        // ...but the wrong password was counted and logged; the right one was not.
+        const failures = () => db.select().from(S.loginAttempts).where(S.and(S.eq(S.loginAttempts.subject, "admin"), S.eq(S.loginAttempts.succeeded, false)));
+        expect(await failures()).toHaveLength(1);
+
+        const step = T.totpStep();
+        const valid = new Set([-1, 0, 1, 2].map((d) => T.hotp(key, step + d)));
+        let wrong = "000000";
+        for (let n = 1; valid.has(wrong); n++) wrong = String(n).padStart(6, "0");
+
+        // A wrong code with the right password.
+        const bad = await adminLogin({ code: wrong });
+        expect(bad.status).toBe(401);
+        expect(bad.body.error.code).toBe("invalid_totp");
+        expect(await failures()).toHaveLength(2);
+        const [logged] = await auditRows({ action: "admin.login" });
+        expect(logged).toMatchObject({ result: "failed", data: expect.objectContaining({ reason: "invalid_totp" }) });
+        // A right code with the wrong password is a wrong password.
+        const wrongPw = await adminLogin({ password: "not-the-admin-password", code: T.hotp(key, step) });
+        expect(wrongPw.status).toBe(400);
+        expect(wrongPw.body.token).toBeUndefined();
+
+        // Right password, right code.
+        const code = T.hotp(key, step);
+        const ok = await adminLogin({ code });
+        expect(ok.status, ok.text).toBe(200);
+        expect(ok.body.token).toBeTruthy();
+        expect((await req("GET", "/v1/admin/session", ok.body.token)).body).toEqual({ ok: true, totpEnabled: true });
+        expect((await auditRows({ action: "admin.login" }))[0]).toMatchObject({ result: "ok", actorType: "admin", data: expect.objectContaining({ secondFactor: "totp" }) });
+        // Typed with a space, as authenticator apps show it - the NEXT code, since this one is spent.
+        const next = T.hotp(key, step + 1);
+
+        // Replay: the code that just worked does not work again.
+        const replay = await adminLogin({ code });
+        expect(replay.status).toBe(401);
+        expect(replay.body.error.code).toBe("invalid_totp");
+        const spaced = await adminLogin({ code: `${next.slice(0, 3)} ${next.slice(3)}` });
+        expect(spaced.status, spaced.text).toBe(200);
+        // And neither does an older one, once a newer one has been used.
+        expect((await adminLogin({ code })).status).toBe(401);
+
+        // The server-to-server token is a different credential and is not asked for a code.
+        expect((await req("GET", "/v1/admin/session", null, undefined, { "x-admin-token": ADMIN_TOKEN })).status).toBe(200);
+
+        // Wrong codes count towards the lock: five from one address lock that address.
+        await clearAdmin();
+        const guesser = { "cf-connecting-ip": "192.0.2.177" };
+        for (let i = 0; i < 5; i++) expect((await adminLogin({ code: wrong }, guesser)).body.error.code).toBe("invalid_totp");
+        const locked = await adminLogin({ code: T.hotp(key, step + 2) }, guesser);
+        expect(locked.status).toBe(429);
+        expect(locked.body.error.code).toBe("too_many_attempts");
+
+        // Set but not a usable secret: fails closed, and says what is wrong - only to someone who has the password.
+        await clearAdmin();
+        env.adminTotpSecret = "NOT-BASE32-!!";
+        const broken = await adminLogin({ code: "123456" });
+        expect(broken.status).toBe(503);
+        expect(broken.body.error.code).toBe("not_configured");
+        expect(broken.body.token).toBeUndefined();
+        expect((await adminLogin({ password: "not-the-admin-password", code: "123456" })).status).toBe(400);
+      } finally {
+        env.adminTotpSecret = "";
+        await clearAdmin();
+      }
+    });
+
+    it("the operator is emailed about a sign-in from a new address and about a lock - when there is a mailer", async () => {
+      const { env } = await import("./env.js");
+      const office = { "cf-connecting-ip": "192.0.2.61" };
+      const hotel = { "cf-connecting-ip": "192.0.2.62" };
+      const stranger = { "cf-connecting-ip": "192.0.2.63" };
+      const toAdmin = (subject: RegExp) => mocks.sent.filter((m) => m.to === ADMIN_EMAIL && subject.test(m.subject));
+      const settle = () => new Promise((r) => setTimeout(r, 150));
+      await clearAdmin();
+      const savedKey = env.resendApiKey;
+      (env as any).resendApiKey = "re_test_key_not_real";
+      mocks.sent.length = 0;
+      try {
+        // The first sign-in on record has nothing to be "new" against: no mail.
+        expect((await adminLogin({}, office)).status).toBe(200);
+        await settle();
+        expect(toAdmin(/new address/)).toHaveLength(0);
+        // The same address again: known.
+        expect((await adminLogin({}, office)).status).toBe(200);
+        // A different one: the operator is told, with the address.
+        expect((await adminLogin({}, hotel)).status).toBe(200);
+        await vi.waitFor(() => expect(toAdmin(/admin console: sign-in from a new address/)).toHaveLength(1));
+        const mail = toAdmin(/new address/)[0];
+        expect(mail.text).toContain("From: IP address 192.0.2.62 (approximate)");
+        expect(mail.text).toMatch(/When: \d{4}-\d{2}-\d{2} \d{2}:\d{2} UTC/);
+        expect(mail.text).not.toContain(ADMIN_PASSWORD);
+        expect((await auditRows({ action: "admin.login" }))[0].data).toMatchObject({ newAddress: true });
+
+        // Five wrong passwords from one address lock it: one mail, on the failure that locked it.
+        for (let i = 0; i < 5; i++) expect((await adminLogin({ password: `guess-${i}` }, stranger)).status).toBe(400);
+        await vi.waitFor(() => expect(toAdmin(/admin console: sign-in locked/)).toHaveLength(1));
+        expect(toAdmin(/sign-in locked/)[0].text).toContain("From: IP address 192.0.2.63 (approximate)");
+        expect((await adminLogin({}, stranger)).status).toBe(429);
+        await settle();
+        expect(toAdmin(/sign-in locked/)).toHaveLength(1);
+
+        // With no mailer, the same events send nothing and the sign-in is unaffected.
+        (env as any).resendApiKey = undefined;
+        mocks.sent.length = 0;
+        expect((await adminLogin({}, { "cf-connecting-ip": "192.0.2.64" })).status).toBe(200);
+        await settle();
+        expect(mocks.sent).toHaveLength(0);
+      } finally {
+        (env as any).resendApiKey = savedKey;
+        await clearAdmin();
+      }
+    });
+  });
 });
 
 // ── 7. Stored-credential encryption (no database needed) ──

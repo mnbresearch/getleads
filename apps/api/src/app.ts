@@ -28,6 +28,7 @@ import { docsHtml, openapi, SWAGGER_UI } from "./openapi.js";
 import { runMaintenanceTick } from "./jobs.js";
 import { emailEventRoutes } from "./routes/emailEvents.js";
 import { auditRoutes } from "./routes/audit.js";
+import { accountRoutes } from "./routes/account.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
 
 // ── Access log ──
@@ -242,9 +243,11 @@ export function createApp(opts: AppOptions = {}) {
       // navigations to /v1/auth/google/*; it must never become readable to cross-origin
       // fetches, which is what turning credentials on would do.
       origin: (o) => (!o ? "*" : corsOriginAllowed(o) ? o : env.appUrl),
-      allowHeaders: ["authorization", "content-type", "x-api-key", "x-internal-token", "x-admin-token"],
+      // x-confirm-*: the password / two-factor code that re-confirms an export (GET /v1/account/export).
+      allowHeaders: ["authorization", "content-type", "x-api-key", "x-internal-token", "x-admin-token", "x-confirm-password", "x-confirm-code"],
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-      exposeHeaders: ["x-ratelimit-limit", "x-ratelimit-remaining", "retry-after"],
+      // content-disposition: so the web app can name the export file it downloads.
+      exposeHeaders: ["x-ratelimit-limit", "x-ratelimit-remaining", "retry-after", "content-disposition"],
       maxAge: 86400,
     }),
   );
@@ -290,6 +293,8 @@ export function createApp(opts: AppOptions = {}) {
   app.route("/v1", leadCaptureRoutes);
   app.route("/v1/admin", adminRoutes);
   app.route("/v1/audit-log", auditRoutes);
+  // Workspace export and deletion: owner only, session only, re-confirmed (routes/account.ts).
+  app.route("/v1/account", accountRoutes);
   app.route("/t", trackRoutes);
   // Provider delivery events (bounces, complaints). Authenticated by the provider signature, not a session.
   app.route("/v1/email-events", emailEventRoutes);

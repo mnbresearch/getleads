@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, clients, enqueue, eq, getDb, getUsage, listLeads, lists, organizations } from "@prospex/db";
+import { and, enqueue, eq, getDb, getUsage, listLeads, lists, organizations } from "@prospex/db";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { ApiError, notFound } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
@@ -16,6 +16,8 @@ import {
   deleteClient,
   disableSharing,
   enableSharing,
+  findClientByShareToken,
+  hasShareLink,
   publicReport,
   requireClient,
   routeSuggestions,
@@ -96,7 +98,12 @@ clientRoutes.post(
 );
 
 // ── One client ──
-clientRoutes.get("/:id", async (c) => c.json(await clientDetail(orgId(c), c.req.param("id"))));
+// The report link itself goes to owners and admins only (and to API keys, which act for the
+// workspace). A member sees that sharing is on - `sharing: true` - and no link.
+clientRoutes.get("/:id", async (c) => {
+  const role = c.get("auth")?.user?.role;
+  return c.json(await clientDetail(orgId(c), c.req.param("id"), { canSeeShareLink: !role || role === "owner" || role === "admin" }));
+});
 
 clientRoutes.patch("/:id", zValidator("json", clientInput.partial()), async (c) => {
   const patch = c.req.valid("json");
@@ -113,7 +120,7 @@ clientRoutes.patch("/:id", zValidator("json", clientInput.partial()), async (c) 
 clientRoutes.delete("/:id", async (c) => {
   const before = await requireClient(orgId(c), c.req.param("id"));
   const r = await deleteClient(orgId(c), c.req.param("id"));
-  await audit(c, "client.deleted", { targetType: "client", targetId: before.id, data: { name: before.name, leadsReturnedToPool: r.leadsReturnedToPool, hadShareLink: !!before.shareToken } });
+  await audit(c, "client.deleted", { targetType: "client", targetId: before.id, data: { name: before.name, leadsReturnedToPool: r.leadsReturnedToPool, hadShareLink: hasShareLink(before) } });
   return c.json(r);
 });
 
@@ -156,13 +163,13 @@ clientRoutes.post("/:id/share", ownerOrAdmin("client.share_enabled"), async (c) 
   const before = await requireClient(orgId(c), c.req.param("id"));
   const r = await enableSharing(orgId(c), c.req.param("id"));
   // POST on a client that already has a link replaces it: the old link stops working.
-  await audit(c, before.shareToken ? "client.share_rotated" : "client.share_enabled", { targetType: "client", targetId: before.id, data: { name: before.name } });
+  await audit(c, hasShareLink(before) ? "client.share_rotated" : "client.share_enabled", { targetType: "client", targetId: before.id, data: { name: before.name } });
   return c.json(r);
 });
 clientRoutes.delete("/:id/share", ownerOrAdmin("client.share_disabled"), async (c) => {
   const before = await requireClient(orgId(c), c.req.param("id"));
   const r = await disableSharing(orgId(c), c.req.param("id"));
-  await audit(c, "client.share_disabled", { targetType: "client", targetId: before.id, data: { name: before.name, hadShareLink: !!before.shareToken } });
+  await audit(c, "client.share_disabled", { targetType: "client", targetId: before.id, data: { name: before.name, hadShareLink: hasShareLink(before) } });
   return c.json(r);
 });
 
@@ -229,7 +236,7 @@ clientReportPublic.get("/clients/report/:token", rateLimit({ perMinute: 30 }), a
   // A suspended workspace's reports go dark with the rest of it, and an archived client's
   // report is closed - both answer exactly like a token that never existed.
   const { db } = getDb();
-  const client = await db.query.clients.findFirst({ where: eq(clients.shareToken, c.req.param("token")) });
+  const client = await findClientByShareToken(c.req.param("token"));
   if (!client || client.status === "archived") throw notFound("Report");
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, client.orgId) });
   if (!org || org.status === "deactivated" || org.status === "revoked") throw notFound("Report");

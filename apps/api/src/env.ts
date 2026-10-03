@@ -89,6 +89,13 @@ export const env = {
   adminApiToken: process.env.ADMIN_API_TOKEN ?? "",
   adminEmail: (process.env.ADMIN_EMAIL ?? "").toLowerCase(),
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
+  /**
+   * Second factor for the admin dashboard login: a base32 TOTP secret, the same one that is
+   * added to an authenticator app. Optional. When set, POST /v1/admin/login also needs the
+   * current 6-digit code; when unset the login is email + password, as before. Spaces and
+   * dashes are ignored, so it can be pasted the way an app displays it.
+   */
+  adminTotpSecret: (process.env.ADMIN_TOTP_SECRET ?? "").replace(/[\s-]/g, "").toUpperCase(),
   /** Where "upgrade me" lead-capture emails are sent. Falls back to ADMIN_EMAIL. */
   leadNotifyEmail: process.env.LEAD_NOTIFY_EMAIL ?? process.env.ADMIN_EMAIL ?? "",
   /**
@@ -157,4 +164,12 @@ if (env.nodeEnv === "production" && process.env.ADMIN_JWT_SECRET && process.env.
 }
 if (env.nodeEnv === "production" && env.adminPassword && env.adminPassword.length < 12) {
   console.warn("[env] WARNING: ADMIN_PASSWORD is shorter than 12 characters. It guards every customer's plan and status; use a long random value.");
+}
+/**
+ * ADMIN_TOTP_SECRET that is set but is not base32 cannot match any code. The admin login then
+ * refuses every sign-in (it fails closed - the operator asked for a second factor) and says
+ * why; this line is the same message at boot, where it is seen before anyone is locked out.
+ */
+if (env.adminTotpSecret && !/^[A-Z2-7]{16,}=*$/.test(env.adminTotpSecret)) {
+  console.warn("[env] WARNING: ADMIN_TOTP_SECRET is set but is not a base32 secret (letters A-Z and digits 2-7, at least 16 characters). The admin login will refuse every sign-in until it is fixed or removed. See DEPLOY.md, 'Admin two-factor sign-in'.");
 }

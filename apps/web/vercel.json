@@ -16,11 +16,11 @@
       ]
     },
     {
-      "source": "/((?!reset-password|join|r/).*)",
+      "source": "/((?!reset-password|join|verify-email|r/).*)",
       "headers": [{ "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" }]
     },
     {
-      "source": "/(reset-password|join)(/?)",
+      "source": "/(reset-password|join|verify-email)(/?)",
       "headers": [{ "key": "Referrer-Policy", "value": "no-referrer" }]
     },
     {

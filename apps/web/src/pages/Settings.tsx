@@ -8,6 +8,9 @@ import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/
 import { plural, pluralWord } from "../lib/plural";
 import { integrationName } from "../lib/integrations";
 import { useGoogleEnabled } from "../lib/googleSignIn";
+import { AuditResult, auditEntryLabel, auditReason, auditWho, type AuditEntry } from "../components/AuditBits";
+import { TwoFactorCard } from "../components/TwoFactorCard";
+import { WorkspaceData } from "../components/WorkspaceData";
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
 function MembersNote({ what }: { what: string }) {
@@ -69,10 +72,17 @@ function Workspace() {
       <div><label className="label">Company</label><input className="input" value={f.senderCompany} onChange={(e) => setF({ ...f, senderCompany: e.target.value })} /></div>
       <div><label className="label">Value proposition</label><textarea className="input h-20" value={f.valueProp} onChange={(e) => setF({ ...f, valueProp: e.target.value })} /></div>
       <p className="text-xs text-ink-400">Campaigns use these when a campaign has no sender details of its own.</p>
-      {canManage && <button className="btn-primary" onClick={() => apiFetch("PATCH", "/v1/auth/org", { name: f.name, settings: { senderName: f.senderName, senderCompany: f.senderCompany, valueProp: f.valueProp } }).then(() => toast("Saved")).catch((e) => toast(e.message, "err"))}>Save</button>}
+      {canManage && <button className="btn-primary" onClick={() => apiFetch<{ org?: { name?: unknown } } | null>("PATCH", "/v1/auth/org", { name: f.name, settings: { senderName: f.senderName, senderCompany: f.senderCompany, valueProp: f.valueProp } }).then((r) => {
+        toast("Saved");
+        // The saved name is what "type the workspace name to confirm" below has to match.
+        const saved = typeof r?.org?.name === "string" && r.org.name ? r.org.name : f.name;
+        setOrg((o) => (o ? { ...o, name: saved } : o));
+      }).catch((e) => toast(e.message, "err"))}>Save</button>}
     </div>
     <ChangePassword />
+    <TwoFactorCard />
     <Sessions />
+    <WorkspaceData orgName={org.name} />
     </div>
   );
 }
@@ -87,6 +97,10 @@ function ChangePassword() {
   // hasPassword comes from /v1/auth/me. Unknown (older server, or not loaded): show the
   // field as optional and say why it might be blank.
   const hasPassword = me?.user?.hasPassword;
+  // With two-factor on, the server also wants a code before it changes the password: the
+  // current password alone is exactly what a thief would have.
+  const twoFactor = me?.user?.twoFactorEnabled === true;
+  const [code, setCode] = useState("");
   // Google is only mentioned where this deployment actually offers it.
   const googleEnabled = useGoogleEnabled();
   const submit = async (e: React.FormEvent) => {
@@ -96,20 +110,23 @@ function ChangePassword() {
     setBusy(true);
     setMsg(null);
     try {
-      const r = await apiFetch<{ token?: unknown } | null>("POST", "/v1/auth/password/change", { currentPassword: cur || undefined, newPassword: pw });
+      // reconfirm: a refused password or code here is not an expired session.
+      const r = await apiFetch<{ token?: unknown } | null>("POST", "/v1/auth/password/change", { currentPassword: cur || undefined, newPassword: pw, ...(twoFactor ? { code: code.trim() } : {}) }, undefined, { reconfirm: true });
       // Changing the password signs every other session out on the server, and this tab's
       // old token goes with them. The response carries the replacement; storing it is what
       // keeps the person who just changed their password signed in. (An older server sends
       // no token and retires nothing, so there is nothing to swap.)
       const fresh = r && typeof r.token === "string" && r.token ? r.token : null;
       if (fresh) auth.set(fresh);
-      setCur(""); setPw(""); setPw2("");
+      setCur(""); setPw(""); setPw2(""); setCode("");
       const done = hasPassword === false ? "Password set. You can now also sign in with your email and this password." : "Password changed.";
       setMsg({ ok: true, text: fresh ? `${done} Every other device and browser has been signed out.` : done });
       // auth.set() above cleared the cached account; rebuild it from what this component holds.
       if (me?.user) rememberMe({ ...me, user: { ...me.user, hasPassword: true } });
     } catch (e2) {
-      setMsg({ ok: false, text: (e2 as Error).message });
+      setMsg({ ok: false, text: (e2 as { code?: string }).code === "invalid_2fa_code" ? "That two-factor code is not right. Enter the code your app is showing now, or a recovery code you have not used." : (e2 as Error).message });
+      // A code is good for one try; the next attempt needs the one showing then.
+      if (twoFactor) setCode("");
     } finally {
       setBusy(false);
     }
@@ -126,8 +143,15 @@ function ChangePassword() {
       )}
       <div><label className="label" htmlFor="pw-new">New password</label><input id="pw-new" className="input" type="password" autoComplete="new-password" minLength={8} required value={pw} onChange={(e) => setPw(e.target.value)} /></div>
       <div><label className="label" htmlFor="pw-new2">Confirm new password</label><input id="pw-new2" className="input" type="password" autoComplete="new-password" minLength={8} required value={pw2} onChange={(e) => setPw2(e.target.value)} /></div>
+      {twoFactor && (
+        <div>
+          <label className="label" htmlFor="pw-code">Code from your authenticator app, or a recovery code</label>
+          <input id="pw-code" className="input max-w-xs font-mono" autoComplete="one-time-code" autoCapitalize="none" autoCorrect="off" spellCheck={false} maxLength={64} required value={code} onChange={(e) => setCode(e.target.value)} />
+          <p className="mt-1 text-xs text-ink-400">Asked because two-factor sign-in is on for your account.</p>
+        </div>
+      )}
       {msg && <div className={`rounded-lg p-2 text-sm ${msg.ok ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`} role={msg.ok ? "status" : "alert"}>{msg.text}</div>}
-      <button className="btn-primary" disabled={busy || pw.length < 8 || pw !== pw2}>{busy ? "Saving…" : hasPassword === false ? "Set password" : "Change password"}</button>
+      <button className="btn-primary" disabled={busy || pw.length < 8 || pw !== pw2 || (twoFactor && !code.trim())}>{busy ? "Saving…" : hasPassword === false ? "Set password" : "Change password"}</button>
     </form>
   );
 }
@@ -172,8 +196,21 @@ function Sessions() {
   );
 }
 
+/** What a listed key may do. Only an explicit "read" is read-only; anything else is the full key it always was. */
+function keyScope(k: { scope?: string | null; scopes?: string[] | null }): "read" | "full" {
+  if (k.scope === "read") return "read";
+  if (k.scope) return "full";
+  return Array.isArray(k.scopes) && k.scopes.length > 0 && !k.scopes.includes("*") && k.scopes.every((x) => x === "read") ? "read" : "full";
+}
+
 function ApiKeys() {
-  const [keys, setKeys] = useState<{ id: string; name: string; prefix: string; lastUsedAt: string | null; revokedAt: string | null; createdAt: string }[]>([]);
+  // `scope` (newer servers) or `scopes` (the stored list) says what a key may do; a key from
+  // before scopes existed has neither and is a full-access key.
+  const [keys, setKeys] = useState<{ id: string; name: string; prefix: string; lastUsedAt: string | null; revokedAt: string | null; createdAt: string; scope?: string | null; scopes?: string[] | null }[]>([]);
+  const [newName, setNewName] = useState("Agent");
+  const [newScope, setNewScope] = useState<"full" | "read">("full");
+  const [formOpen, setFormOpen] = useState(false);
+  const [freshScope, setFreshScope] = useState<"full" | "read" | null>(null);
   const [fresh, setFresh] = useState<string | null>(null);
   const { toast, Toast } = useToast();
   // A second click created a second key and only ever displayed the second one. The first
@@ -193,16 +230,57 @@ function ApiKeys() {
       load();
     } catch (e) { toast((e as Error).message, "err"); }
   };
+  const create = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const name = newName.trim();
+    if (creating || !name) return;
+    setCreating(true);
+    try {
+      // "full" is what the server assumes when no scope is sent, so an older server that has
+      // never heard of scopes still gets a request it understands for the default choice.
+      const r = await apiFetch<{ key: string; scope?: unknown }>("POST", "/v1/auth/api-keys", newScope === "read" ? { name, scope: "read" } : { name });
+      // Asked for read-only and the server did not say it made one: it is an older server
+      // that ignored the choice, and the key in hand can do everything. Say so, loudly.
+      const made = r.scope === "read" || r.scope === "full" ? r.scope : newScope === "read" ? null : "full";
+      setFresh(r.key);
+      setFreshScope(made);
+      if (made === null) toast("This key was created, but the server could not confirm it is read-only. Treat it as a full-access key, or revoke it.", "err");
+      setFormOpen(false);
+      setNewName("Agent");
+      setNewScope("full");
+      load();
+    } catch (x) { toast((x as Error).message, "err"); } finally { setCreating(false); }
+  };
   if (!canManage) return <MembersNote what="API keys" />;
   return (
     <div className="space-y-4">
       {Toast}
       <div className="card p-5">
-        <div className="mb-2 flex items-center justify-between"><div className="font-medium">API keys</div><button className="btn-primary" disabled={creating} onClick={async () => { if (creating) return; const name = prompt("Key name", "Agent") ?? ""; if (!name) return; setCreating(true); try { const r = await apiFetch<{ key: string }>("POST", "/v1/auth/api-keys", { name }); setFresh(r.key); load(); } catch (e) { toast((e as Error).message, "err"); } finally { setCreating(false); } }}>{creating ? "Creating…" : "Create key"}</button></div>
-        {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-400"><div className="mb-1 flex items-center justify-between gap-2 text-white/85"><span>Copy now - shown once:</span><button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(fresh, toast)}>Copy</button></div><code className="break-all">{fresh}</code></div>}
+        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="font-medium">API keys</div>{!formOpen && <button className="btn-primary" disabled={creating} onClick={() => setFormOpen(true)}>Create key</button>}</div>
+        {formOpen && (
+          <form onSubmit={create} className="mb-3 space-y-3 rounded-lg border border-black/10 bg-black/[0.02] p-3" data-testid="apikey-form">
+            <div>
+              <label className="label" htmlFor="apikey-name">Key name</label>
+              <input id="apikey-name" className="input max-w-sm" autoFocus maxLength={80} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="What will use this key?" />
+            </div>
+            <fieldset>
+              <legend className="label">Access</legend>
+              <div className="flex flex-col gap-1 text-sm sm:flex-row sm:gap-5">
+                <label className="flex min-h-[40px] items-center gap-2"><input type="radio" name="apikey-scope" checked={newScope === "full"} onChange={() => setNewScope("full")} /> Full access</label>
+                <label className="flex min-h-[40px] items-center gap-2"><input type="radio" name="apikey-scope" checked={newScope === "read"} onChange={() => setNewScope("read")} /> Read-only</label>
+              </div>
+              <p className="text-xs text-ink-400">{newScope === "read" ? "Read-only: the key can look things up (leads, campaigns, analytics) but cannot create, change, send or delete anything." : "Full access: the key can do everything you can through the API - find and change leads, run campaigns, send email."}</p>
+            </fieldset>
+            <div className="flex flex-wrap gap-2">
+              <button className="btn-primary" disabled={creating || !newName.trim()}>{creating ? "Creating…" : "Create key"}</button>
+              <button type="button" className="btn-secondary" disabled={creating} onClick={() => setFormOpen(false)}>Cancel</button>
+            </div>
+          </form>
+        )}
+        {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-400"><div className="mb-1 flex items-center justify-between gap-2 text-white/85"><span>{freshScope === "read" ? "Read-only key - copy now, shown once:" : freshScope === "full" ? "Full-access key - copy now, shown once:" : "Copy now - shown once:"}</span><button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(fresh, toast)}>Copy</button></div><code className="break-all">{fresh}</code></div>}
         {loadErr && !loaded && <LoadError message={loadErr} onRetry={load} />}
-        {loaded && <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
-          <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-600" onClick={() => revoke(k)}>Revoke</button>}</td></tr>)}</tbody></table></div>}
+        {loaded && <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Access</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
+          <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td">{keyScope(k) === "read" ? <span className="badge whitespace-nowrap bg-sky-50 text-sky-800" title="Can look things up; cannot create, change, send or delete">Read-only</span> : <span className="badge whitespace-nowrap bg-black/[0.05] text-ink-300" title="Can do everything through the API">Full access</span>}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-600" onClick={() => revoke(k)}>Revoke</button>}</td></tr>)}</tbody></table></div>}
         {loaded && keys.length === 0 && <div className="py-3 text-sm text-ink-400">No API keys yet.</div>}
       </div>
       <div className="card p-5 text-sm">
@@ -455,7 +533,7 @@ function Billing() {
 
 
 type Invite = { id: string; email: string; role: string; createdAt: string; expiresAt?: string | null; expired?: boolean };
-type InviteResult = { id: string; email: string; link?: string; emailed?: boolean; emailError?: string; expiresAt?: string | null };
+type InviteResult = { id: string; email: string; link?: string; emailed?: boolean; emailError?: string; expiresAt?: string | null; /** Set here, not by the server: this came from "Resend", which replaces the link. */ resent?: boolean };
 
 function Team() {
   const [d, setD] = useState<{ members: { id: string; email: string; name: string; role: string; lastLoginAt: string | null }[]; invites: Invite[]; seats: { used: number; pending?: number; limit: number } } | null>(null);
@@ -476,8 +554,8 @@ function Team() {
   useEffect(() => { void load(); }, [load]);
   const announce = (r: InviteResult, verb: string) => {
     setSent(r);
-    if (r.emailed === false) toast(`${verb}, but the email could not be sent - copy the link below`, "err");
-    else toast(r.emailed ? `${verb} - email sent to ${r.email}` : verb);
+    if (r.emailed === false) toast(r.link ? `${verb}, but the email could not be sent - copy the link below` : `${verb}, but the email could not be sent and the server returned no link. Resend the invite to get one.`, "err");
+    else toast(`${r.emailed ? `${verb} - email sent to ${r.email}` : verb}${r.resent ? ". The previous link no longer works." : ""}`);
   };
   const invite = async () => {
     setInviting(true);
@@ -494,7 +572,10 @@ function Team() {
   const resend = async (i: Invite) => {
     setRowBusy(i.id);
     try {
-      announce(await apiFetch<InviteResult>("POST", `/v1/tools/team/invites/${i.id}/resend`), "Invite renewed for 14 days");
+      // Resending issues a new link; the one sent before stops working. The list has no link
+      // of its own any more, so this answer is the only time the new one can be shown.
+      const r = await apiFetch<InviteResult>("POST", `/v1/tools/team/invites/${i.id}/resend`);
+      announce({ ...r, id: r.id ?? i.id, email: r.email ?? i.email, resent: true }, "Invite renewed for 14 days");
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setRowBusy(null); }
   };
@@ -553,10 +634,13 @@ function Team() {
                   : <>Invite link for {sent.email}:</>}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <code className="min-w-0 flex-1 break-all">{sent.link}</code>
+              <code className="min-w-0 flex-1 break-all" data-testid="invite-link">{sent.link}</code>
               <button type="button" className="btn-secondary py-1 text-xs" onClick={() => copyText(sent.link!, toast)}>Copy link</button>
+              <button type="button" className="btn-secondary py-1 text-xs" onClick={() => setSent(null)}>Done</button>
             </div>
-            {sent.expiresAt && <div className="mt-1 text-ink-400">Expires {fmtDate(sent.expiresAt)}.</div>}
+            <div className="mt-1 text-ink-400">
+              {sent.resent ? "This is a new link - the previous link no longer works. " : ""}It is shown only now: copy it before leaving this page.{sent.expiresAt ? ` Expires ${fmtDate(sent.expiresAt)}.` : ""}
+            </div>
           </div>
         )}
       </div>
@@ -582,137 +666,6 @@ function Team() {
       )}
     </div>
   );
-}
-
-interface AuditEntry {
-  id: string;
-  action: string;
-  actorType?: string | null;
-  actorEmail?: string | null;
-  targetType?: string | null;
-  targetId?: string | null;
-  result?: string | null;
-  ip?: string | null;
-  createdAt: string;
-  data?: Record<string, unknown> | null;
-}
-
-/**
- * Security-log actions in plain words. Keyed on the action with its separators normalised
- * ("auth.password_change", "auth.password.change" and "auth:password-change" are one key),
- * so a spelling difference on the server does not turn a row into raw identifiers. Anything
- * not listed still reads as words through the fallback below - a new server action shows up
- * as "Webhook: rotate secret", never as a blank.
- */
-const AUDIT_WORDS: Record<string, string> = {
-  // Sign-in and sessions
-  "auth.signup": "Workspace created",
-  "auth.login": "Sign-in",
-  "auth.login.locked": "Sign-in blocked after too many attempts",
-  "auth.google.login": "Sign-in with Google",
-  "auth.google.claimed.unverified.account": "Google sign-in took over an unverified account",
-  "auth.logout.all": "Signed out of all devices",
-  "auth.password.changed": "Password change",
-  "auth.password.reset": "Password reset from an emailed link",
-  "auth.password.reset.requested": "Password reset requested",
-  // Refusals
-  "role.denied": "Refused: needs owner or admin",
-  "reference.denied": "Refused: that record belongs to another workspace",
-  // Credentials
-  "apikey.created": "API key created",
-  "apikey.revoked": "API key revoked",
-  "webhook.created": "Webhook added",
-  "webhook.deleted": "Webhook deleted",
-  "webhook.secret.rotated": "Webhook secret rotated",
-  "webhook.tested": "Webhook test sent",
-  "integration.connected": "Integration connected",
-  "integration.disconnected": "Integration disconnected",
-  "integration.synced": "Leads pushed to an integration",
-  "sender.created": "Sender account added",
-  "sender.deleted": "Sender account removed",
-  "sender.retested": "Sender account tested again",
-  // People
-  "team.invited": "Teammate invited",
-  "team.invite.resent": "Invite resent",
-  "team.invite.revoked": "Invite revoked",
-  "team.joined": "Teammate joined from an invite",
-  "team.member.removed": "Teammate removed",
-  // Data leaving, being shared or being destroyed
-  "leads.exported": "Leads exported",
-  "leads.imported": "Leads imported",
-  "leads.bulk.deleted": "Leads deleted in bulk",
-  "list.deleted": "List deleted",
-  "suppression.added": "Address added to the do-not-contact list",
-  "client.created": "Client created",
-  "client.deleted": "Client deleted",
-  "client.share.enabled": "Client report link created",
-  "client.share.disabled": "Client report link turned off",
-  "client.share.rotated": "Client report link replaced",
-  "client.report.settings.changed": "Client report settings changed",
-  "campaign.started": "Campaign started",
-  "campaign.paused": "Campaign paused",
-  "campaign.deleted": "Campaign deleted",
-  "autopilot.created": "Autopilot created",
-  "autopilot.deleted": "Autopilot deleted",
-  "pixel.created": "Website tracking pixel created",
-  "pixel.deleted": "Website tracking pixel deleted",
-  // Workspace and billing
-  "org.settings.changed": "Workspace settings changed",
-  "billing.checkout": "Plan checkout started",
-  // Scout staff
-  "admin.login": "Scout admin sign-in",
-  "admin.logout": "Scout admin sign-out",
-  "admin.plan.changed": "Plan changed by Scout admin",
-  "admin.status.changed": "Workspace suspended or restored by Scout admin",
-  "admin.credits.changed": "Credits adjusted by Scout admin",
-  "admin.upgrade.request.status.changed": "Upgrade request updated by Scout admin",
-  "admin.tool.limit.changed": "Tool limit changed by Scout admin",
-  "admin.tools.checked": "Tools checked by Scout admin",
-};
-
-function auditActionLabel(action: string): string {
-  const key = String(action ?? "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
-  if (AUDIT_WORDS[key]) return AUDIT_WORDS[key];
-  const parts = String(action ?? "").split(/[.:/]+/).map((p) => p.replace(/[_-]+/g, " ").trim()).filter(Boolean);
-  if (parts.length === 0) return "Unknown action";
-  const head = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
-  return parts.length === 1 ? head : `${head}: ${parts.slice(1).join(" ")}`;
-}
-
-const AUDIT_ACTOR: Record<string, string> = { user: "A workspace member", api_key: "API key", admin: "Scout admin", system: "Scout (automatic)", anonymous: "Not signed in" };
-
-function auditWho(e: AuditEntry): string {
-  if (e.actorEmail) return e.actorEmail;
-  // A failed sign-in has no account behind it; the address that was tried is the only "who".
-  const tried = e.data && typeof e.data.email === "string" ? e.data.email : null;
-  const label = AUDIT_ACTOR[e.actorType ?? ""] ?? (e.actorType ? e.actorType : "Unknown");
-  return tried ? `${label} (as ${tried})` : label;
-}
-
-/** Why an action was refused or failed, where the server recorded a reason. */
-const AUDIT_REASONS: Record<string, string> = {
-  role: "Needs owner or admin",
-  locked: "Too many failed attempts - the account was temporarily locked",
-  wrong_current_password: "The current password entered was wrong",
-  verifier_mismatch: "The sign-in was not started in that browser",
-};
-
-function auditReason(e: AuditEntry): string | null {
-  if ((e.result ?? "ok") === "ok") return null;
-  const r = e.data && typeof e.data.reason === "string" ? e.data.reason : null;
-  if (!r) return null;
-  return AUDIT_REASONS[r] ?? r.replace(/[_.-]+/g, " ").replace(/^./, (c) => c.toUpperCase());
-}
-
-/**
- * The outcome. A success is the quiet case; a refusal or a failure is the reason someone
- * opens this page, so those are solid, not tinted - they have to stand out in a long list
- * of green.
- */
-function AuditResult({ result }: { result?: string | null }) {
-  const r = result ?? "ok";
-  const [cls, text] = r === "ok" ? ["bg-emerald-50 text-emerald-700", "Succeeded"] : r === "denied" ? ["bg-amber-600 text-white", "Refused"] : r === "failed" ? ["bg-red-600 text-white", "Failed"] : ["bg-black/[0.08] text-ink-200", r];
-  return <span className={`badge shrink-0 font-semibold ${cls}`}>{text}</span>;
 }
 
 const AUDIT_PAGE = 50;
@@ -801,7 +754,7 @@ function SecurityLog() {
             {entries.map((e) => {
               const bad = (e.result ?? "ok") !== "ok";
               const reason = auditReason(e);
-              const label = auditActionLabel(e.action);
+              const label = auditEntryLabel(e);
               return (
               <li key={e.id} className="py-2.5">
                 {/* The marker is on an inner block, not the <li>: the list's divide-y rule

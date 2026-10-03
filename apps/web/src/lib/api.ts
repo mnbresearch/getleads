@@ -82,6 +82,14 @@ export async function apiFetch<T = unknown>(
      * touched.
      */
     anonymous?: boolean;
+    /**
+     * This request re-confirms who is asking - it carries the password or a two-factor code
+     * along with the session (turning two-factor off, deleting the workspace). A 401 for it
+     * that is anything other than "unauthorized" means the password or code was wrong, not
+     * that the session ended: the person stays signed in and sees the reason. A session that
+     * really is gone still answers "unauthorized" and is ended as usual.
+     */
+    reconfirm?: boolean;
   },
 ): Promise<T> {
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -134,7 +142,7 @@ export async function apiFetch<T = unknown>(
       // every older token and hands this tab a fresh one; a request already in flight with
       // the old token then comes back 401, and clearing the session on that would sign the
       // user out of the one tab that is supposed to stay signed in.
-      rejectSession(sentToken);
+      if (!(opts?.reconfirm && errorCode(data) !== "unauthorized")) rejectSession(sentToken);
     }
     throw new ProspexError(res.status, errorCode(data), errorMessage(data, res.status), data);
   }
@@ -262,7 +270,7 @@ export function errorCode(data: unknown): string {
 // /login may be a full reload (Protected renders <Navigate>, but a user may also refresh).
 const EXPIRED_KEY = "gl.sessionExpired";
 const RETURN_KEY = "gl.returnPath";
-const NO_RETURN = ["/login", "/signup", "/forgot-password", "/reset-password", "/join", "/auth/google"];
+const NO_RETURN = ["/login", "/signup", "/forgot-password", "/reset-password", "/join", "/auth/google", "/verify-email"];
 
 /**
  * The server answered 401 to a request sent with `sentToken`: drop that session.
@@ -323,3 +331,9 @@ export function consumeReturnPath(fallback = "/"): string {
 
 export const fmtDate = (d: string | Date | null | undefined) => (d ? new Date(d).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" }) : "-");
 export const fmtNum = (n: number | null | undefined) => (n ?? 0).toLocaleString();
+/** A day, without the time: "10 October 2026". For dates that are deadlines, not moments. */
+export const fmtDay = (d: string | Date | null | undefined) => {
+  if (!d) return "-";
+  const t = new Date(d);
+  return Number.isNaN(t.getTime()) ? "-" : t.toLocaleDateString(undefined, { dateStyle: "long" });
+};

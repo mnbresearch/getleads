@@ -2,8 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { adminFetch, adminLogout, endAdminSession, useAdminToken } from "../lib/adminApi";
-import { expectLists, expectShape, fmtDate, fmtNum } from "../lib/api";
+import { expectLists, expectShape, fmtDate, fmtDay, fmtNum } from "../lib/api";
 import { plural } from "../lib/plural";
+import { SecurityTab } from "./AdminSecurity";
 
 type PlanLimits = Record<string, number | boolean>;
 type OrgRow = {
@@ -19,8 +20,12 @@ type OrgRow = {
   ownerEmail: string | null;
   ownerName: string | null;
   limits: PlanLimits;
+  /** When the owner has asked for the workspace to be deleted: the date it is due to go. */
+  pendingDeletionAt?: string | null;
 };
-type OrgUser = { id: string; email: string; name: string; role: string; lastLoginAt: string | null; createdAt: string };
+// `twoFactorEnabled` is absent on an older server: no badge and no reset button, rather
+// than a guess either way.
+type OrgUser = { id: string; email: string; name: string; role: string; lastLoginAt: string | null; createdAt: string; twoFactorEnabled?: boolean };
 // `overrides` (the limits that differ from the plan's own) is sent by newer servers, at the
 // top level or on the org; older ones send neither and it is worked out here (overridesOf).
 type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> | null; overrides?: Record<string, unknown> | null }; overrides?: Record<string, unknown> | null; users: OrgUser[]; usage: Record<string, number>; period: string };
@@ -201,6 +206,8 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
   const [creditForm, setCreditForm] = useState({ metric: "premiumLeads", action: "grant" as "grant" | "set", amount: "" });
   const [creditErr, setCreditErr] = useState<string | null>(null);
   const [confirmingStatus, setConfirmingStatus] = useState<string | null>(null);
+  // The user whose two-factor reset is waiting on "Confirm".
+  const [confirmingReset, setConfirmingReset] = useState<string | null>(null);
   /**
    * These three operations change a customer's plan, deactivate their workspace and grant
    * them credits. All three used to be try/finally with no catch: a failure re-enabled the
@@ -322,6 +329,20 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
     if (saved) setCreditForm((f) => ({ ...f, amount: "" }));
   };
 
+  /**
+   * Turn two-factor sign-in off for one user who has lost their phone and their recovery
+   * codes. It removes a protection from someone else's account, so it is a two-step action
+   * like deactivating a workspace, and the result is said in words.
+   */
+  const resetTwoFactor = async (u: OrgUser) => {
+    setConfirmingReset(null);
+    await run(
+      `Two-factor reset for ${u.email}`,
+      () => adminFetch<{ changed?: boolean; note?: string }>("POST", `/v1/admin/orgs/${orgId}/users/${u.id}/reset-2fa`, {}),
+      () => `Two-factor sign-in is off for ${u.email}. They can sign in with their password and set it up again in Settings.`,
+    );
+  };
+
   const usedNow = detail.usage[creditForm.metric] ?? 0;
   const usageLine = CREDIT_METRICS.filter(([id]) => detail.usage[id] !== undefined).map(([id, label, key]) => {
     const lim = org.limits?.[key];
@@ -334,6 +355,7 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
         <div className="min-w-0 [overflow-wrap:anywhere]">
           <h2 className="font-semibold text-ink-50" data-testid="org-panel-heading">{org.name}</h2>
           <div className="text-xs text-ink-400">{org.slug}</div>
+          {org.pendingDeletionAt && <div className="mt-1"><span className="badge bg-red-50 text-red-700" data-testid="org-panel-deletion">Deletion scheduled {fmtDay(org.pendingDeletionAt)}</span><div className="mt-1 text-xs text-ink-400">The owner asked for this workspace to be deleted. Its campaigns are paused; the owner can cancel until that date.</div></div>}
         </div>
         <button className={`${TAP} shrink-0 text-sm text-ink-400 hover:text-ink-50 max-lg:hidden`} onClick={onClose}>Close</button>
       </div>
@@ -461,7 +483,27 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
       <div>
         <div className="label">Users ({detail.users.length})</div>
         <ul className="space-y-1 text-sm text-ink-300 [overflow-wrap:anywhere]">
-          {detail.users.map((u) => <li key={u.id}>{u.name || u.email} <span className="text-ink-500">· {u.email} · {u.role}</span></li>)}
+          {detail.users.map((u) => (
+            <li key={u.id} data-user-row={u.id}>
+              {u.name || u.email} <span className="text-ink-500">· {u.email} · {u.role}</span>
+              {u.twoFactorEnabled === true && (
+                <>
+                  {" "}<span className="badge bg-emerald-50 text-emerald-700" title="This user signs in with a password and a code from an authenticator app">2FA on</span>
+                  {confirmingReset === u.id ? (
+                    <div className="mt-1 flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 p-2 text-xs text-amber-800">
+                      <span className="min-w-0 flex-1 basis-40">Turn two-factor off for {u.email}? Only do this once you are sure it is really them asking - their password alone will then be enough to sign in. It is recorded in their security log.</span>
+                      <button className="btn-secondary py-1 text-xs max-lg:min-h-[40px]" disabled={busy} onClick={() => void resetTwoFactor(u)}>Confirm reset</button>
+                      <button className={`${TAP} text-ink-400 hover:text-ink-50`} onClick={() => setConfirmingReset(null)}>Cancel</button>
+                    </div>
+                  ) : (
+                    <>
+                      {" "}<button className={`${TAP} text-xs text-brand-600 hover:underline`} disabled={busy} onClick={() => setConfirmingReset(u.id)}>Reset two-factor</button>
+                    </>
+                  )}
+                </>
+              )}
+            </li>
+          ))}
         </ul>
       </div>
     </div>
@@ -540,7 +582,7 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
                 onClick={() => onSelect(o.id)}
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(o.id); } }}
               >
-                <td className="td"><div className="font-medium text-ink-50">{o.name}</div><div className="text-xs text-ink-400">{o.ownerEmail ?? "-"}</div></td>
+                <td className="td"><div className="font-medium text-ink-50">{o.name}</div><div className="text-xs text-ink-400">{o.ownerEmail ?? "-"}</div>{o.pendingDeletionAt && <span className="badge mt-1 whitespace-nowrap bg-red-50 text-red-700" data-deletion-badge>Deletion scheduled {fmtDay(o.pendingDeletionAt)}</span>}</td>
                 <td className="td">{planCell(o.plan)}</td>
                 <td className="td"><StatusBadge status={o.status} /></td>
                 <td className="td whitespace-nowrap">{usedOf(o.leadsUsed, o.limits?.leadsPerMonth, "leadsPerMonth")}</td>
@@ -1128,8 +1170,8 @@ function CreditsTab() {
   );
 }
 
-type Tab = "orgs" | "leads" | "tools" | "credits" | "plans";
-const TABS: readonly (readonly [Tab, string])[] = [["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"]];
+type Tab = "orgs" | "leads" | "tools" | "credits" | "plans" | "security";
+const TABS: readonly (readonly [Tab, string])[] = [["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"], ["security", "Security"]];
 
 export function AdminDashboardPage() {
   const token = useAdminToken();
@@ -1197,6 +1239,7 @@ export function AdminDashboardPage() {
         {tab === "tools" && <ToolsTab />}
         {tab === "credits" && <CreditsTab />}
         {tab === "plans" && <PlansTab plans={plans} loading={plansLoading} error={plansErr} onRetry={loadPlans} />}
+        {tab === "security" && <SecurityTab onViewOrg={(id) => { setSelectedOrg(id); setTab("orgs"); }} />}
       </main>
     </div>
   );

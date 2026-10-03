@@ -1,7 +1,7 @@
-import { randomBytes } from "node:crypto";
-import { and, campaignContacts, clientLeadDeliveries, clients, eq, getDb, icps, inArray, leads, organizations, sql, type Client } from "@prospex/db";
+import { and, campaignContacts, clientLeadDeliveries, clients, eq, getDb, icps, inArray, leads, or, organizations, sql, type Client } from "@prospex/db";
 import { scoreLeadRules, type IcpCriteria, type LeadForScoring } from "@prospex/core";
 import { badRequest, notFound } from "../lib/errors.js";
+import { hashLinkToken, migrateClientShareToken, newShareToken, openShareToken, shareTokenColumns } from "../lib/linkTokens.js";
 
 /**
  * Client workspaces: every lead belongs to a client, or sits in the pool waiting for one.
@@ -210,10 +210,19 @@ export async function clientOverview(orgId: string, opts: { includeArchived?: bo
   };
 }
 
-/** The share token is a credential: it is returned only by the routes that manage it. */
+/** Does this client have a report link, wherever it is stored (hashed, or a legacy plaintext row)? */
+export function hasShareLink(c: Pick<Client, "shareToken" | "shareTokenHash">): boolean {
+  return !!(c.shareTokenHash || c.shareToken);
+}
+
+/**
+ * The share token is a credential: it is returned only by the routes that manage it. None
+ * of its three columns (the legacy plaintext, the hash, the encrypted copy) is ever part of
+ * a client as the API returns it - only whether sharing is on.
+ */
 function publicClient(c: Client) {
-  const { shareToken, ...rest } = c;
-  return { ...rest, sharing: !!shareToken };
+  const { shareToken: _t, shareTokenHash: _h, shareTokenEncrypted: _e, ...rest } = c;
+  return { ...rest, sharing: hasShareLink(c) };
 }
 
 // ── CRUD ─────────────────────────────────────────────────────────────────────────────
@@ -687,9 +696,39 @@ export async function autoRoute(orgId: string, opts: { limit?: number; leadIds?:
 
 // ── Detail ───────────────────────────────────────────────────────────────────────────
 
-export async function clientDetail(orgId: string, id: string) {
+/**
+ * The report link's token for someone allowed to see it (an owner or admin).
+ *
+ * New and rotated links are stored encrypted; a link from before that is still in the
+ * legacy plaintext column and is moved out of it here, the first time it is read.
+ * `unreadable` means a link exists but its stored copy cannot be decrypted (the server's
+ * key changed): the link itself still works for whoever already has it, it just cannot be
+ * shown again - replacing it gives a new one.
+ */
+async function readableShareToken(c: Client): Promise<{ token: string | null; unreadable: boolean }> {
+  if (c.shareTokenEncrypted) {
+    try {
+      return { token: openShareToken(c.orgId, c.id, c.shareTokenEncrypted), unreadable: false };
+    } catch {
+      return { token: null, unreadable: true };
+    }
+  }
+  if (c.shareToken) {
+    await migrateClientShareToken(c).catch(() => false);
+    return { token: c.shareToken, unreadable: false };
+  }
+  return { token: null, unreadable: false };
+}
+
+/**
+ * `canSeeShareLink`: owners and admins (and API keys, which only they can create) get the
+ * report link back. A member is told that sharing is on, but not the link: it publishes the
+ * client's pipeline to whoever holds it, and handing it out is an owner/admin decision.
+ */
+export async function clientDetail(orgId: string, id: string, opts: { canSeeShareLink?: boolean } = {}) {
   const { db } = getDb();
   const c = await requireClient(orgId, id);
+  const link = opts.canSeeShareLink ? await readableShareToken(c) : { token: null, unreadable: false };
   const [statsRow] = rowsOf<StatsRow>(await db.execute(STATS_SQL(orgId, sql`l.client_id = ${id}`)));
   const stats = toStats(statsRow);
 
@@ -719,7 +758,13 @@ export async function clientDetail(orgId: string, id: string) {
   const icp = c.icpId ? await db.query.icps.findFirst({ where: and(eq(icps.id, c.icpId), eq(icps.orgId, orgId)) }) : null;
 
   return {
-    client: { ...publicClient(c), shareToken: c.shareToken },
+    client: {
+      ...publicClient(c),
+      shareToken: link.token,
+      // false: sharing may be on, but this caller is not shown the link.
+      shareLinkVisible: !!opts.canSeeShareLink,
+      ...(link.unreadable ? { shareLinkError: "This report link is still active, but it can no longer be displayed. Replace the link to get a new one you can copy." } : {}),
+    },
     icp: icp ? { id: icp.id, name: icp.name } : null,
     stats,
     attention: toAttention(statsRow),
@@ -762,15 +807,17 @@ export async function enableSharing(orgId: string, id: string) {
   const { db } = getDb();
   await requireClient(orgId, id);
   // 32 bytes of randomness: a report link is a bearer credential for this client's pipeline.
-  const token = randomBytes(32).toString("base64url");
-  await db.update(clients).set({ shareToken: token, updatedAt: new Date() }).where(and(eq(clients.id, id), eq(clients.orgId, orgId)));
+  // Stored as a hash (what a report request is looked up by) and encrypted (so an owner can
+  // copy the link again); never in plaintext. Any previous link stops working here.
+  const token = newShareToken();
+  await db.update(clients).set({ ...shareTokenColumns(orgId, id, token), updatedAt: new Date() }).where(and(eq(clients.id, id), eq(clients.orgId, orgId)));
   return { shareToken: token };
 }
 
 export async function disableSharing(orgId: string, id: string) {
   const { db } = getDb();
   await requireClient(orgId, id);
-  await db.update(clients).set({ shareToken: null, updatedAt: new Date() }).where(and(eq(clients.id, id), eq(clients.orgId, orgId)));
+  await db.update(clients).set({ shareToken: null, shareTokenHash: null, shareTokenEncrypted: null, updatedAt: new Date() }).where(and(eq(clients.id, id), eq(clients.orgId, orgId)));
   return { sharing: false };
 }
 
@@ -793,10 +840,24 @@ function isVerified(r: Record<string, unknown>): boolean {
  * Never email addresses, phone numbers or LinkedIn URLs: a link gets forwarded, and the
  * contact data is the part that must not travel with it.
  */
-export async function publicReport(token: string) {
-  if (!token || token.length < 20) return null;
+/**
+ * The client a report-link token belongs to, or null.
+ *
+ * Looked up by the token's hash - an index probe, with nothing compared against a stored
+ * secret. The second arm finds a legacy row that has no hash yet (written by the previous
+ * release while both were running); the boot-time task gives those their hash and removes
+ * the plaintext, after which only the first arm can match.
+ */
+export async function findClientByShareToken(token: string): Promise<Client | null> {
+  if (typeof token !== "string" || token.length < 20 || token.length > 200) return null;
   const { db } = getDb();
-  const c = await db.query.clients.findFirst({ where: eq(clients.shareToken, token) });
+  const c = await db.query.clients.findFirst({ where: or(eq(clients.shareTokenHash, hashLinkToken(token)), and(sql`${clients.shareTokenHash} IS NULL`, eq(clients.shareToken, token))) });
+  return c ?? null;
+}
+
+export async function publicReport(token: string) {
+  const { db } = getDb();
+  const c = await findClientByShareToken(token);
   if (!c || c.status === "archived") return null;
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, c.orgId) });
 

@@ -8,7 +8,7 @@ import { sendingHealthForAccount, systemSenderHealthForOrg } from "../services/c
 import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
 import { campaignAttribution, leadFunnel, sourcePerformance } from "../services/analytics.js";
-import { encryptJson } from "../lib/crypto.js";
+import { sealOrgJson } from "../lib/credentials.js";
 import { badRequest, notFound } from "../lib/errors.js";
 import { orgId, requireAuth, requireUser, type Env } from "../middleware.js";
 import { INTEGRATION_PROVIDERS, integrationName, validateIntegrationConfig } from "../services/integrations.js";
@@ -166,7 +166,7 @@ miscRoutes.post("/webhooks", requireAuth, ownerOrAdmin("webhook.created"), zVali
     warning = `${msg} Saved because this server runs in development mode, but deliveries to it will be skipped.`;
   }
   const { db } = getDb();
-  const fresh = newWebhookSecret();
+  const fresh = newWebhookSecret(orgId(c));
   const [row] = await db.insert(webhooks).values({ orgId: orgId(c), url, events: c.req.valid("json").events, ...fresh.columns }).returning();
   await audit(c, "webhook.created", { targetType: "webhook", targetId: row.id, data: { host: hostOf(url), events: row.events, signatureVersion: row.signatureVersion } });
   const pub = { ...publicWebhook(row), secret: fresh.secret };
@@ -190,7 +190,7 @@ miscRoutes.post("/webhooks/:id/rotate-secret", requireAuth, ownerOrAdmin("webhoo
   const { db } = getDb();
   const hook = await db.query.webhooks.findFirst({ where: and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c))) });
   if (!hook) throw notFound("Webhook");
-  const fresh = newWebhookSecret();
+  const fresh = newWebhookSecret(hook.orgId);
   await db.update(webhooks).set(fresh.columns).where(and(eq(webhooks.id, hook.id), eq(webhooks.orgId, hook.orgId)));
   await audit(c, "webhook.secret_rotated", { targetType: "webhook", targetId: hook.id, data: { host: hostOf(hook.url), fromSignatureVersion: hook.signatureVersion, signatureVersion: 2 } });
   return c.json({ id: hook.id, secret: fresh.secret, signatureVersion: 2 });
@@ -253,10 +253,12 @@ miscRoutes.put("/integrations/:provider", requireAuth, ownerOrAdmin("integration
   b.config = validated.config;
   if (JSON.stringify(b.settings ?? {}).length > 10_000) throw badRequest("Integration settings are too large.");
   const { db } = getDb();
+  // Bound to this workspace: the stored blob does not open on another workspace's row.
+  const configEncrypted = sealOrgJson(orgId(c), "integration", b.config);
   const [row] = await db
     .insert(integrations)
-    .values({ orgId: orgId(c), provider, configEncrypted: encryptJson(b.config), settings: { ...(b.settings ?? {}), autoSync: b.autoSync }, status: "active" })
-    .onConflictDoUpdate({ target: [integrations.orgId, integrations.provider], set: { configEncrypted: encryptJson(b.config), settings: { ...(b.settings ?? {}), autoSync: b.autoSync }, status: "active" } })
+    .values({ orgId: orgId(c), provider, configEncrypted, settings: { ...(b.settings ?? {}), autoSync: b.autoSync }, status: "active" })
+    .onConflictDoUpdate({ target: [integrations.orgId, integrations.provider], set: { configEncrypted, settings: { ...(b.settings ?? {}), autoSync: b.autoSync }, status: "active" } })
     .returning();
   const { configEncrypted: _x, ...pub } = row;
   // Field NAMES only: the values are the credentials.

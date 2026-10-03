@@ -45,6 +45,13 @@ services:
       # ADMIN_EMAIL / ADMIN_PASSWORD (set those in the dashboard).
       - key: ADMIN_API_TOKEN
         generateValue: true
+      # Optional second factor for the admin dashboard login. Leave it empty to keep the
+      # login as email + password. To turn it on: create a base32 secret
+      # (`openssl rand 20 | base32`), add it to an authenticator app as a time-based account,
+      # keep a copy in your password manager, and paste it here. The /admin login then asks
+      # for the 6-digit code after the password. Steps and recovery: DEPLOY.md section B9.
+      - key: ADMIN_TOTP_SECRET
+        sync: false
       # Optional, all with safe defaults (set them in the dashboard when needed; see DEPLOY.md B8):
       #   ADMIN_JWT_SECRET          signs the admin session with its own key (default: JWT_SECRET)
       #   ENCRYPTION_KEYS_OLD       previous ENCRYPTION_KEY values, needed when rotating that key

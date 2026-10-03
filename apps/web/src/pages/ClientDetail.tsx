@@ -8,7 +8,7 @@ import { useMe } from "../lib/me";
 import { plural } from "../lib/plural";
 
 interface Detail {
-  client: Omit<ClientRow, "stats" | "attention" | "target"> & { shareToken: string | null };
+  client: Omit<ClientRow, "stats" | "attention" | "target"> & { shareToken: string | null; shareLinkVisible?: boolean; shareLinkError?: string };
   icp: { id: string; name: string } | null;
   stats: ClientStats;
   attention: ClientAttention;
@@ -56,6 +56,9 @@ export function ClientDetailPage() {
 
   const c = d.client;
   const shareUrl = c.shareToken ? `${window.location.origin}/r/${c.shareToken}` : null;
+  // The link itself is only sent to owners and admins now. For everyone else the server
+  // says a link exists (`sharing`) without saying what it is - "on, ask for it", not "off".
+  const sharingHidden = c.sharing === true && !shareUrl;
   const verifiedPct = d.stats.withEmail ? Math.round((d.stats.verified / d.stats.withEmail) * 100) : null;
 
   const act = async (bucket: keyof ClientAttention) => {
@@ -228,13 +231,22 @@ export function ClientDetailPage() {
               server; a member is told so instead of being handed buttons that refuse. */}
           {!canManage ? null : c.status === "archived" ? (
             shareUrl ? <button className="btn-secondary" onClick={() => share(false)}>Turn off</button> : null
-          ) : shareUrl ? (
+          ) : shareUrl || sharingHidden ? (
             <button className="btn-secondary" onClick={() => share(false)}>Turn off</button>
           ) : (
             <button className="btn-primary" onClick={() => share(true)}>Create report link</button>
           )}
         </div>
-        {!canManage && <p className="mt-3 text-xs text-ink-400">Only owners and admins can create or change the client report link.{shareUrl && c.status !== "archived" ? " You can still copy and open the current one." : !shareUrl ? " Ask one of them to create it." : ""}</p>}
+        {!canManage && sharingHidden && c.status !== "archived" && <p className="mt-3 rounded-lg bg-black/[0.04] px-3 py-2 text-sm text-ink-200" data-testid="report-link-on">Report link is on (ask an owner or admin for the link).</p>}
+        {!canManage && <p className="mt-3 text-xs text-ink-400">Only owners and admins can create or change the client report link.{shareUrl && c.status !== "archived" ? " You can still copy and open the current one." : !shareUrl && !sharingHidden ? " Ask one of them to create it." : ""}</p>}
+        {/* An owner or admin always gets the link; if the server could not hand it over, say
+            so and offer the way out rather than showing a report that looks switched off. */}
+        {canManage && sharingHidden && c.status !== "archived" && (
+          <div className="mt-3 flex flex-wrap items-center gap-2 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status">
+            <span className="min-w-0 flex-1 basis-64">{c.shareLinkError || "A report link is on, but it could not be shown. Reload the page; if it still does not appear, issue a new link (the old one stops working)."}</span>
+            <button className="btn-secondary" onClick={() => share(true)}>New link</button>
+          </div>
+        )}
         <label className={`mt-3 flex items-center gap-2 text-sm text-ink-300 ${canManage ? "" : "opacity-60"}`}>
           <input
             type="checkbox"

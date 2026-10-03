@@ -19,6 +19,8 @@ import { runMonitor } from "./services/monitors.js";
 import { runAutopilot } from "./services/autopilot.js";
 import { blockedByProvidersNote, plural } from "./services/notes.js";
 import { sendMail } from "./lib/mailer.js";
+import { purgeDueWorkspaces } from "./services/accountDeletion.js";
+import { migrateLegacyLinkTokens } from "./lib/linkTokens.js";
 
 /** Org's plan, for the plan-gated AI factory. A missing org is treated as free. */
 async function planOf(db: Db, orgId: string | null | undefined): Promise<string> {
@@ -52,6 +54,16 @@ function foreign(job: Pick<Job, "orgId">, rowOrgId: string | null | undefined): 
 }
 const ORG_MISMATCH = { skipped: "org mismatch" } as const;
 const isUuid = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+/** scheme://host of a URL: what may be said about a webhook address where others can read it. */
+function originOf(url: string): string {
+  try {
+    const u = new URL(url);
+    return `${u.protocol}//${u.host}`;
+  } catch {
+    return "";
+  }
+}
 
 /** How much of a webhook endpoint's response is read before the rest is discarded. */
 const WEBHOOK_MAX_RESPONSE_BYTES = 64 * 1024;
@@ -91,7 +103,7 @@ async function refundJobCharge(db: Db, job: Job, orgId: string, metric: "verific
 const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
 
 /**
- * The six self-perpetuating schedulers, and how long each waits before its next run.
+ * The self-perpetuating schedulers, and how long each waits before its next run.
  *
  * Named in one place so the boot seeder, the periodic re-seeder and the handlers cannot
  * drift apart - a scheduler missing from any one of the three stops running with no error.
@@ -106,6 +118,9 @@ export const RECURRING_JOBS: Record<string, number> = {
   // more often would spend credits to learn the same thing.
   "jobchanges.tick": 24 * 3600_000,
   "system.cleanup": 6 * 3600_000,
+  // Daily: reminds the owners of a workspace that is about to be deleted, and deletes the
+  // ones whose grace period has ended (services/accountDeletion.ts).
+  "org.purge": 24 * 3600_000,
 };
 
 /**
@@ -551,7 +566,10 @@ export const handlers: Record<string, JobHandler> = {
           console.warn(`[webhooks] disabled ${hook.id} (${safeUrl}) for org ${hook.orgId}: ${row!.failures} consecutive deliveries failed`);
           // Recorded where the org can see it. The hook is inactive now, so this event
           // is not delivered to it.
-          await emitEvent(hook.orgId, "webhook.disabled", { webhookId: hook.id, url: hook.url, consecutiveFailures: row!.failures, lastError }).catch(() => {});
+          // The event goes to the workspace's OTHER webhooks and into its event feed. A hook's
+          // address is often itself a credential (a token in the path or query, a password
+          // in the userinfo), so only its origin is named; `webhookId` identifies the hook.
+          await emitEvent(hook.orgId, "webhook.disabled", { webhookId: hook.id, url: originOf(hook.url), consecutiveFailures: row!.failures, lastError }).catch(() => {});
         }
       }
     };
@@ -565,7 +583,7 @@ export const handlers: Record<string, JobHandler> = {
     try {
       // The hook's own secret and scheme. A hook with no usable secret cannot be signed, and
       // an unsigned (or empty-key) delivery is worse than a failed one.
-      const secret = webhookSecret(hook);
+      const secret = webhookSecret(hook, { upgrade: true });
       const signature = hook.signatureVersion >= 2 ? `v2=${hmacSignV2(secret, `${ts}.${body}`)}` : hmacSign(secret, `${ts}.${body}`);
       // A customer-supplied URL, called from inside our network, carrying event data.
       // fetchPublic refuses a private address both by name and at connect time (so a public
@@ -1049,6 +1067,21 @@ export const handlers: Record<string, JobHandler> = {
     return { results: results.length, fresh, providerFailures, note, clientClaim };
   },
 
+  /**
+   * Workspace deletion, once a day: remind the owners of workspaces about to be deleted and
+   * delete the ones that are due. The rules (a reminder always precedes a deletion by a day,
+   * a cancelled request is never acted on) live in services/accountDeletion.ts.
+   */
+  "org.purge": async (job, ctx) => {
+    const { db } = ctx;
+    return withReschedule(db, job, "org.purge", async () => {
+      const r = await purgeDueWorkspaces();
+      if (r.purged.length || r.reminded.length || r.failed.length) ctx.log(`org.purge: ${r.purged.length} deleted, ${r.reminded.length} reminded, ${r.failed.length} failed`);
+      // Counts only: the ids of deleted workspaces are on the audit trail, not in a job result.
+      return { purged: r.purged.length, reminded: r.reminded.length, waiting: r.waiting.length, failed: r.failed.length };
+    });
+  },
+
   /** Housekeeping: prune old done jobs, reset nothing else. */
   "system.cleanup": async (job, ctx) => {
     const { db } = ctx;
@@ -1066,6 +1099,10 @@ export const handlers: Record<string, JobHandler> = {
       // longer than successes, because they are what someone reads when diagnosing.
       await db.execute(sql`DELETE FROM jobs WHERE status = 'failed' AND updated_at < now() - interval '30 days'`);
       await db.execute(sql`DELETE FROM events WHERE created_at < now() - interval '90 days'`);
+      // Link tokens still in plaintext are moved out of it at server start; repeated here
+      // for deployments with no long-running server process (the job runner endpoint) and
+      // for rows an older instance wrote during a rolling deploy. Does nothing once done.
+      await migrateLegacyLinkTokens().catch((e) => console.warn(`[jobs] could not finish moving link tokens out of plaintext: ${(e as Error).name}`));
       return {};
     });
   },

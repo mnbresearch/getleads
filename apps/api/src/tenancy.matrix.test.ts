@@ -372,6 +372,8 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "GET /v1/auth/google/callback": pub(),
     "POST /v1/auth/join": pub(),
     "POST /v1/auth/google/exchange": pub("one-time code exchange; covered by security.auth.test.ts"),
+    "POST /v1/auth/2fa/verify": pub("second step of a two-factor sign-in; covered by security.account.test.ts"),
+    "POST /v1/auth/verify/confirm": pub("the emailed token is the credential; covered by security.account.test.ts"),
     "GET /v1/public/clients/report/:token": pub(),
     "GET /px/:file": pub(),
     "OPTIONS /px/:key/collect": pub(),
@@ -403,10 +405,18 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "GET /v1/admin/tools": { cls: "admin", cases: [X("customer credential", "/v1/admin/tools")] },
     "POST /v1/admin/tools/check": { cls: "admin", cases: [X("customer credential", "/v1/admin/tools/check", {})] },
     "PATCH /v1/admin/tools/:provider": { cls: "admin", cases: [X("customer credential", "/v1/admin/tools/hunter", { usageLimit: 0 })] },
+    "POST /v1/admin/orgs/:id/users/:userId/reset-2fa": { cls: "admin", cases: [X("reset A's two-factor", `/v1/admin/orgs/${a.org}/users/${a.owner}/reset-2fa`, {})] },
+    "GET /v1/admin/audit-log": { cls: "admin", cases: [X("customer credential", "/v1/admin/audit-log")] },
+    "GET /v1/admin/security/summary": { cls: "admin", cases: [X("customer credential", "/v1/admin/security/summary")] },
 
     // ── auth / org / keys ──
     "POST /v1/auth/password/change": noref("acts on the calling user only; session behaviour covered by security.auth.test.ts"),
     "POST /v1/auth/logout-all": noref("acts on the calling user only (it would end the session this sweep runs on)"),
+    "POST /v1/auth/2fa/setup": noref("acts on the calling user only; covered by security.account.test.ts"),
+    "POST /v1/auth/2fa/enable": noref("acts on the calling user only; covered by security.account.test.ts"),
+    "POST /v1/auth/2fa/disable": noref("acts on the calling user only; covered by security.account.test.ts"),
+    "POST /v1/auth/2fa/recovery-codes": noref("acts on the calling user only; covered by security.account.test.ts"),
+    "POST /v1/auth/verify/resend": noref("mails the calling user's own address only; covered by security.account.test.ts"),
     "GET /v1/auth/me": list("/v1/auth/me"),
     // The caller's own audit trail. It legitimately contains ids the caller itself sent in
     // refused requests (that is what a `denied` row records), so those are not a disclosure.
@@ -415,6 +425,20 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "GET /v1/auth/api-keys": list("/v1/auth/api-keys"),
     "POST /v1/auth/api-keys": noref("mints a key for the caller's own org; role gate covered by security.auth.test.ts"),
     "DELETE /v1/auth/api-keys/:id": E("path :id", X("revoke A's key", `/v1/auth/api-keys/${a.apiKey}`)),
+
+    // ── workspace export / deletion (owner session only, re-confirmed; security.data.test.ts) ──
+    // The export is the caller's own workspace and nothing else. B's owner really runs one
+    // here (the member and the API key are refused): it carries B's audit trail, which holds
+    // ids B itself sent in refused requests - an echo, as with GET /v1/audit-log.
+    "GET /v1/account/export": E(
+      "none (the session's workspace)",
+      X("no confirmation", "/v1/account/export"),
+      { ...X("B's own full export", "/v1/account/export", undefined, true), headers: { "x-confirm-password": B.ownerPassword }, echoesOwnHistory: true },
+    ),
+    "POST /v1/account/export": E("none; body tries to name another org", X("body names org A, no confirmation", "/v1/account/export", { orgId: a.org, id: a.org })),
+    "GET /v1/account/deletion": list("/v1/account/deletion"),
+    "POST /v1/account/delete": E("none in path; body tries to name another org", X("confirm with A's workspace name", "/v1/account/delete", { confirmName: `${A.tag} Org`, password: B.ownerPassword, orgId: a.org, id: a.org })),
+    "POST /v1/account/delete/cancel": E("none; body tries to name another org", X("nothing pending; body names org A", "/v1/account/delete/cancel", { orgId: a.org }, true)),
 
     // ── leads ──
     "GET /v1/leads": E("query listId, clientId, icpId, tag, companyDomain, q, attention", ...leadFilters.map((f) => X(`filter ${f || "(none)"}`, `/v1/leads${f}`, undefined, true))),

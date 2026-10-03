@@ -2,11 +2,12 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions, type EmailAccount } from "@prospex/db";
-import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPublicHost, isSsrfBlocked } from "@prospex/core";
+import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPublicHost, isSsrfBlocked, redact } from "@prospex/core";
 import { aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
-import { encryptJson, randomToken } from "../lib/crypto.js";
+import { randomToken } from "../lib/crypto.js";
+import { sealOrgJson } from "../lib/credentials.js";
 import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
@@ -20,6 +21,8 @@ import { addressOf, safeDisplayName, stripControl } from "../lib/sanitize.js";
 import { orgMemberEmail, orgOwnerEmail } from "../lib/members.js";
 import { ownerOrAdmin } from "../lib/roles.js";
 import { canonicalEmail } from "../services/leads.js";
+import { requireVerifiedEmail, workspaceEmailVerified } from "../lib/emailVerification.js";
+import { pendingDeletion } from "../services/accountDeletion.js";
 
 export const campaignRoutes = new Hono<Env>();
 campaignRoutes.use("*", requireAuth);
@@ -96,7 +99,8 @@ async function testSender(row: EmailAccount, opts: { retest?: boolean } = {}): P
   if (!resolved.ok) return { kind: "unreadable" };
   const raw = await testMailer(resolved.mailer);
   if (raw.ok) return { kind: "tested", test: { ok: true } };
-  console.warn(`[campaigns] email account ${row.id} test failed: ${raw.error}`);
+  // The driver's text can echo what was typed into the form (a username, a key in a URL): redacted before it is logged.
+  console.warn(`[campaigns] email account ${row.id} test failed: ${redact(String(raw.error ?? "unknown error"), { max: 300 })}`);
   const error =
     raw.refused && raw.error
       ? raw.error
@@ -122,6 +126,10 @@ campaignRoutes.post("/email-accounts", ownerOrAdmin("sender.created"), zValidato
     console.warn("[campaigns] platform sender requested but no system email provider is configured (RESEND_API_KEY or SMTP_*)");
     throw badRequest("The platform sender isn't available on this workspace yet. Connect your own Resend or SMTP account, or contact support.");
   }
+  // The shared platform sender sends from Scout's own address. An account that has not yet
+  // confirmed its email address does not get to add it (it can still connect its own
+  // Resend or SMTP account). A no-op when verification is not available.
+  if (b.provider === "system") await requireVerifiedEmail(c);
   if (b.provider === "resend" && !b.config?.apiKey) throw badRequest("config.apiKey required for Resend");
   if (b.provider === "smtp" && !b.config?.host) throw badRequest("config.host required for SMTP");
   if (b.provider === "smtp") {
@@ -158,7 +166,7 @@ campaignRoutes.post("/email-accounts", ownerOrAdmin("sender.created"), zValidato
   }
   const [row] = await db
     .insert(emailAccounts)
-    .values({ orgId: oid, provider: b.provider, fromName: b.fromName, fromEmail, replyTo, signature: b.signature, dailyLimit: b.dailyLimit, configEncrypted: b.config ? encryptJson(b.config) : null })
+    .values({ orgId: oid, provider: b.provider, fromName: b.fromName, fromEmail, replyTo, signature: b.signature, dailyLimit: b.dailyLimit, configEncrypted: b.config ? sealOrgJson(oid, "email-account", b.config) : null })
     .returning();
   const tested = await testSender(row);
   // Freshly encrypted a moment ago, so "unreadable" cannot happen here; treated as a failed test if it somehow does.
@@ -394,6 +402,11 @@ campaignRoutes.post("/:id/start", async (c) => {
   const { db } = getDb();
   const cp = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, oid)) });
   if (!cp) throw notFound("Campaign");
+  // A workspace that is scheduled for deletion does not start (or restart) outreach.
+  const deletion = await pendingDeletion(oid);
+  if (deletion) {
+    throw new ApiError(409, `This workspace is scheduled for deletion on ${deletion.scheduledFor.toISOString().slice(0, 10)}, so campaigns cannot be started. An owner can cancel the deletion under Settings > Workspace.`, "workspace_deletion_pending");
+  }
   const steps = await db.select().from(sequenceSteps).where(eq(sequenceSteps.campaignId, cp.id));
   if (!steps.length) throw badRequest("Add at least one sequence step");
   if (steps.some((s) => s.channel === "email") && !cp.emailAccountId) throw badRequest("Attach a sender account first - this sequence has email steps.");
@@ -485,7 +498,9 @@ campaignRoutes.get("/:id/messages", async (c) => {
     .where(and(eq(messages.campaignId, cp.id), eq(messages.orgId, oid)))
     .orderBy(desc(messages.createdAt))
     .limit(200);
-  return c.json({ messages: rows.map((r) => ({ ...r.message, bodyHtml: undefined, lead: r.lead ? { id: r.lead.id, fullName: r.lead.fullName, title: r.lead.title } : null })) });
+  // `trackingToken` is what the open / click / unsubscribe links of a message are keyed on;
+  // it has no use in a list and is not part of one.
+  return c.json({ messages: rows.map((r) => ({ ...r.message, bodyHtml: undefined, trackingToken: undefined, lead: r.lead ? { id: r.lead.id, fullName: r.lead.fullName, title: r.lead.title } : null })) });
 });
 
 /** Preview AI-personalized copy for a lead without sending. */
@@ -709,6 +724,10 @@ campaignRoutes.post(
     if (account.status !== "active") {
       throw badRequest(`The sender ${account.fromEmail} failed its connection test, so the reply was not sent. Use "Test again" on that sender under Campaigns (or attach another sender to the campaign), then send the reply.`);
     }
+
+    // The shared platform sender is not available to a workspace whose owner has not
+    // confirmed their email address yet (when verification is available at all).
+    if (account.provider === "system" && !(await workspaceEmailVerified(oid))) throw new ApiError(403, "The shared platform sender cannot be used until the workspace owner has confirmed their email address. Ask the owner to open the link in the verification email, or send this reply from your own connected sender.", "email_unverified");
 
     const resolved = resolveMailer(account);
     if (!resolved.ok) throw badRequest(`The sender ${account.fromEmail} cannot be used: its saved settings can no longer be read. Remove that sender and add it again under Campaigns, then send the reply.`);

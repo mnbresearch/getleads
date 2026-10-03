@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   adjustUsage,
   and,
+  auditLog,
   currentPeriod,
   desc,
   effectiveLimits,
@@ -12,6 +13,7 @@ import {
   getToolsSummary,
   ilike,
   inArray,
+  isNull,
   isPlanId,
   limitsFor,
   MAX_PLAN_LIMIT,
@@ -28,15 +30,19 @@ import {
   upgradeRequests,
   usage,
   users,
+  workspaceDeletionRequests,
 } from "@prospex/db";
 import { checkAllBalances, checkAllProviders, UNTESTED_PROVIDERS } from "@prospex/core";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { env } from "../env.js";
-import { issueAdminJwt, revokeAdminJwt } from "../lib/auth.js";
+import { claimAdminTotpStep, issueAdminJwt, revokeAdminJwt } from "../lib/auth.js";
 import { ApiError, badRequest, notFound } from "../lib/errors.js";
 import { clientIp, rateLimit, requireAdmin, type Env } from "../middleware.js";
 import { audit } from "../lib/audit.js";
-import { ADMIN_LOCK_POLICY, attemptQueue, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
+import { ADMIN_LOCK_POLICY, attemptQueue, isNewAddressFor, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
+import { isValidTotpSecret, verifyTotp } from "../lib/totp.js";
+import { clearTwoFactor, twoFactorEnabled } from "../lib/twoFactor.js";
+import { notifySecurity } from "../lib/securityMail.js";
 
 export const adminRoutes = new Hono<Env>();
 
@@ -50,13 +56,26 @@ export const adminRoutes = new Hono<Env>();
 // fifty failures in fifteen minutes. The lock is on the password form only - the
 // server-to-server ADMIN_API_TOKEN header is not affected, and neither is a dashboard session
 // that is already signed in.
+//
+// Second factor (optional): with ADMIN_TOTP_SECRET set, the form also needs the current
+// 6-digit code from the operator's authenticator app.
+//   - no `code` in the request: 401 `totp_required`, whatever the password was. The answer is
+//     the same for a right and a wrong password, so asking for the code gives nothing away
+//     (a wrong password is still counted and logged);
+//   - a wrong, expired or already-used code with the right password: 401 `invalid_totp`,
+//     counted towards the lock like a wrong password;
+//   - the server-to-server token header is a different credential and is not affected.
+// Unset, the form works exactly as it did.
 const ADMIN_SUBJECT = "admin";
+const adminTotpOn = () => !!env.adminTotpSecret;
 adminRoutes.post(
   "/login",
   rateLimit({ perMinute: 10 }),
-  zValidator("json", z.object({ email: z.string().max(254).email(), password: z.string().min(1).max(4096) })),
+  zValidator("json", z.object({ email: z.string().max(254).email(), password: z.string().min(1).max(4096), code: z.string().max(20).optional() })),
   async (c) => {
     const { email, password } = c.req.valid("json");
+    const code = c.req.valid("json").code?.trim() || undefined;
+    const ip = clientIp(c);
     if (!env.adminEmail || !env.adminPassword) throw badRequest("Admin login is not configured (set ADMIN_EMAIL and ADMIN_PASSWORD)");
     // One queue per address: every address has its own allowance here, and a stranger filling
     // a shared queue must not be able to make the operator's attempt bounce off it.
@@ -72,14 +91,39 @@ adminRoutes.post(
       const same = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
       const emailOk = same(email.toLowerCase(), env.adminEmail);
       const passwordOk = same(password, env.adminPassword);
+      /** Count a failure; when it is the one that locks the form, tell the operator by email. */
+      const failed = async (data: Record<string, unknown>) => {
+        await recordAttempt(ADMIN_SUBJECT, ip, false);
+        await audit(c, "admin.login", { orgId: null, actorType: "anonymous", result: "failed", data });
+        const now = await lockState(ADMIN_SUBJECT, ip, ADMIN_LOCK_POLICY).catch(() => null);
+        if (now?.locked) void notifySecurity(null, "admin_locked", { ip, retryAfterSeconds: now.retryAfterSeconds });
+      };
+      const codeRequired = () => new ApiError(401, "Enter the 6-digit code from your authenticator app.", "totp_required");
       if (!(emailOk && passwordOk)) {
-        await recordAttempt(ADMIN_SUBJECT, clientIp(c), false);
         // The address tried is recorded (it says who is knocking); the password never is.
-        await audit(c, "admin.login", { orgId: null, actorType: "anonymous", result: "failed", data: { email: email.toLowerCase().slice(0, 254) } });
+        await failed({ email: email.toLowerCase().slice(0, 254) });
+        if (adminTotpOn() && !code) throw codeRequired();
         throw badRequest("Invalid admin credentials");
       }
-      await recordAttempt(ADMIN_SUBJECT, clientIp(c), true);
-      await audit(c, "admin.login", { orgId: null, actorType: "admin", result: "ok" });
+      if (adminTotpOn()) {
+        if (!code) throw codeRequired();
+        // Set but unusable: nothing can match it. Refuse (the operator asked for a second
+        // factor; quietly skipping it would be the wrong way to fail) and say what to fix.
+        if (!isValidTotpSecret(env.adminTotpSecret)) {
+          throw new ApiError(503, "Admin two-factor sign-in is misconfigured: ADMIN_TOTP_SECRET is not a valid base32 secret. Fix it or remove it on the server.", "not_configured");
+        }
+        const step = verifyTotp(env.adminTotpSecret, code);
+        // A step is claimed once: the same code a second time is refused like a wrong one.
+        if (step === null || !(await claimAdminTotpStep(step))) {
+          await failed({ email: email.toLowerCase().slice(0, 254), reason: "invalid_totp" });
+          throw new ApiError(401, "That code is not correct. Enter the current 6-digit code from your authenticator app.", "invalid_totp");
+        }
+      }
+      // Asked before the success is recorded: afterwards this address is known by definition.
+      const newAddress = await isNewAddressFor(ADMIN_SUBJECT, ip).catch(() => false);
+      await recordAttempt(ADMIN_SUBJECT, ip, true);
+      await audit(c, "admin.login", { orgId: null, actorType: "admin", result: "ok", data: { ...(adminTotpOn() ? { secondFactor: "totp" } : {}), ...(newAddress ? { newAddress: true } : {}) } });
+      if (newAddress) void notifySecurity(null, "admin_new_signin", { ip });
       return c.json({ token: await issueAdminJwt() });
     });
   },
@@ -102,7 +146,8 @@ async function adminAudit(c: Context<Env>, action: string, orgId: string | null,
   await audit(c, action, { orgId, actorType: "admin", actorUserId: null, targetType: entry.targetType, targetId: entry.targetId, result: "ok", data: { ...(entry.data ?? {}), via } });
 }
 
-adminRoutes.get("/session", (c) => c.json({ ok: true }));
+/** `totpEnabled`: whether the admin login asks for an authenticator code (ADMIN_TOTP_SECRET is set). */
+adminRoutes.get("/session", (c) => c.json({ ok: true, totpEnabled: adminTotpOn() }));
 
 /**
  * Sign the admin session out, for real.
@@ -180,6 +225,20 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().max(200).o
         .where(and(inArray(usage.orgId, orgIds), eq(usage.period, period)))
     : [];
 
+  // Workspaces whose owner has asked for deletion: the date the data goes, while the request
+  // is still pending (not cancelled, not carried out).
+  const pendingDeletions = orgIds.length
+    ? await db
+        .select({ orgId: workspaceDeletionRequests.orgId, scheduledFor: workspaceDeletionRequests.scheduledFor })
+        .from(workspaceDeletionRequests)
+        .where(and(inArray(workspaceDeletionRequests.orgId, orgIds), isNull(workspaceDeletionRequests.cancelledAt), isNull(workspaceDeletionRequests.completedAt)))
+    : [];
+  const deletionByOrg = new Map<string, Date>();
+  for (const d of pendingDeletions) {
+    const seen = deletionByOrg.get(d.orgId);
+    if (!seen || d.scheduledFor.getTime() < seen.getTime()) deletionByOrg.set(d.orgId, d.scheduledFor);
+  }
+
   const usersByOrg = new Map<string, typeof allUsers>();
   for (const u of allUsers) {
     const list = usersByOrg.get(u.orgId) ?? [];
@@ -214,6 +273,8 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().max(200).o
       // Always numbers and booleans, whatever is stored: the list showed "3/NaN" for a
       // workspace whose stored limit was a string.
       limits: effectiveLimits(o),
+      // When this workspace's data is due to be deleted at its owner's request, or null.
+      pendingDeletionAt: deletionByOrg.get(o.id) ?? null,
     };
   });
 
@@ -224,18 +285,211 @@ adminRoutes.get("/orgs/:id", async (c) => {
   const { db } = getDb();
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, c.req.param("id")) });
   if (!org) throw notFound("Org");
-  const orgUsers = await db.select({ id: users.id, email: users.email, name: users.name, role: users.role, lastLoginAt: users.lastLoginAt, createdAt: users.createdAt }).from(users).where(eq(users.orgId, org.id));
+  // twoFactorEnabled / emailVerified are yes-or-no answers: the secret itself never leaves the database.
+  const orgUsers = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      role: users.role,
+      lastLoginAt: users.lastLoginAt,
+      createdAt: users.createdAt,
+      twoFactorEnabled: sql<boolean>`(${users.totpEnabledAt} IS NOT NULL AND ${users.totpSecretEncrypted} IS NOT NULL)`,
+      emailVerified: sql<boolean>`(${users.emailVerifiedAt} IS NOT NULL)`,
+    })
+    .from(users)
+    .where(eq(users.orgId, org.id));
+  const [pendingDeletion] = await db
+    .select({ scheduledFor: workspaceDeletionRequests.scheduledFor })
+    .from(workspaceDeletionRequests)
+    .where(and(eq(workspaceDeletionRequests.orgId, org.id), isNull(workspaceDeletionRequests.cancelledAt), isNull(workspaceDeletionRequests.completedAt)))
+    .orderBy(workspaceDeletionRequests.scheduledFor)
+    .limit(1);
   const period = currentPeriod();
   const usageRows = await db.select().from(usage).where(and(eq(usage.orgId, org.id), eq(usage.period, period)));
   // What an operator set for this workspace on top of its plan: the limits that differ from
   // the plan's defaults. Nothing showed these before, so an override was invisible once made.
   const overrides = planOverrides(org);
   return c.json({
-    org: { ...org, limits: effectiveLimits(org), overrides },
+    org: { ...org, limits: effectiveLimits(org), overrides, pendingDeletionAt: pendingDeletion?.scheduledFor ?? null },
     overrides,
     users: orgUsers,
     usage: Object.fromEntries(usageRows.map((r) => [r.metric, r.count])),
     period,
+  });
+});
+
+/**
+ * Turn a user's two-factor sign-in off, for support.
+ *
+ * This is the only way back in for someone who has lost both their authenticator and their
+ * recovery codes: after it, their password alone signs them in, and they can set two-factor
+ * up again. The operator should be satisfied that the person asking is the account's owner
+ * BEFORE doing this - it removes the protection the owner chose. It is written to the
+ * workspace's security log (the customer can see that support did it) and the user is told
+ * by email, so a reset nobody asked for is noticed.
+ *
+ * Nothing else changes: not the password, not the sessions, not the API keys.
+ */
+adminRoutes.post("/orgs/:id/users/:userId/reset-2fa", async (c) => {
+  const { db } = getDb();
+  const user = await db.query.users.findFirst({ where: and(eq(users.id, c.req.param("userId")), eq(users.orgId, c.req.param("id"))) });
+  if (!user) throw notFound("User");
+  const wasEnabled = twoFactorEnabled(user);
+  // Nothing set up and nothing half set up: nothing to reset, and nothing to log.
+  if (!user.totpSecretEncrypted && !user.totpEnabledAt) {
+    return c.json({ userId: user.id, twoFactorEnabled: false, changed: false, note: "Two-factor sign-in was not on for this user." });
+  }
+  await clearTwoFactor(user.id);
+  await adminAudit(c, "admin.2fa_reset", user.orgId, { targetType: "user", targetId: user.id, data: { email: user.email, wasEnabled } });
+  if (wasEnabled) void notifySecurity(user, "twofa_reset_by_support", {});
+  return c.json({ userId: user.id, twoFactorEnabled: false, changed: true });
+});
+
+// ── Platform security view ──
+
+/** An empty query value (`?orgId=&action=`) means "no filter", not "an invalid value". */
+const blank = <T extends z.ZodTypeAny>(schema: T) => z.preprocess((v) => (v === "" ? undefined : v), schema.optional());
+const AUDIT_QUERY = z.object({
+  orgId: blank(z.string().uuid()),
+  /** Exact action name, or a prefix ending in `*` ("auth.*", "admin.*"). */
+  action: blank(z.string().max(100)),
+  result: blank(z.enum(["ok", "denied", "failed"])),
+  actorType: blank(z.enum(["user", "api_key", "admin", "system", "anonymous"])),
+  limit: blank(z.coerce.number().int().min(1).max(200)),
+  before: blank(z.string().max(40)),
+});
+
+/**
+ * GET /v1/admin/audit-log - the security log across EVERY workspace, newest first.
+ *
+ * The same rows a workspace's owner sees under /v1/audit-log, plus the ones that belong to
+ * no workspace (admin sign-ins, sign-in attempts against the admin form), with the
+ * workspace's name and the acting user's email joined in. Unlike the customer's view, the
+ * address is shown on every row: this is the operator's own record.
+ *
+ * Filters combine (AND). Paginate by passing the previous page's `nextBefore` as `before`.
+ */
+adminRoutes.get("/audit-log", zValidator("query", AUDIT_QUERY), async (c) => {
+  const q = c.req.valid("query");
+  const limit = q.limit ?? 50;
+  // Validated as a date here, compared in Postgres at full (microsecond) precision: a
+  // millisecond cursor would skip rows written in the same millisecond as the last one shown.
+  const before = q.before?.trim() || null;
+  if (before && (!/^\d{4}-\d{2}-\d{2}T[\d:.]+(Z|[+-]\d{2}:?\d{2})$/.test(before) || Number.isNaN(new Date(before).getTime()))) {
+    throw badRequest("`before` must be an ISO 8601 timestamp (use the previous page's nextBefore).");
+  }
+  const action = q.action?.trim();
+  const { db } = getDb();
+  // One extra row tells us whether there is another page without a second query.
+  const rows = await db
+    .select({
+      id: auditLog.id,
+      orgId: auditLog.orgId,
+      orgName: organizations.name,
+      action: auditLog.action,
+      actorType: auditLog.actorType,
+      actorEmail: users.email,
+      targetType: auditLog.targetType,
+      targetId: auditLog.targetId,
+      result: auditLog.result,
+      ip: auditLog.ip,
+      createdAt: auditLog.createdAt,
+      data: auditLog.data,
+      cursor: sql<string>`to_char(${auditLog.createdAt} at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+    })
+    .from(auditLog)
+    .leftJoin(organizations, eq(organizations.id, auditLog.orgId))
+    .leftJoin(users, eq(users.id, auditLog.actorUserId))
+    .where(
+      and(
+        q.orgId ? eq(auditLog.orgId, q.orgId) : undefined,
+        action ? (action.endsWith("*") ? sql`${auditLog.action} LIKE ${`${escapeLike(action.slice(0, -1))}%`}` : eq(auditLog.action, action)) : undefined,
+        q.result ? eq(auditLog.result, q.result) : undefined,
+        q.actorType ? eq(auditLog.actorType, q.actorType) : undefined,
+        before ? sql`${auditLog.createdAt} < ${before}::timestamptz` : undefined,
+      ),
+    )
+    .orderBy(desc(auditLog.createdAt), desc(auditLog.id))
+    .limit(limit + 1);
+  const page = rows.slice(0, limit);
+  const hasMore = rows.length > limit;
+  return c.json({
+    entries: page.map((r) => ({
+      id: r.id,
+      orgId: r.orgId ?? null,
+      orgName: r.orgName ?? null,
+      action: r.action,
+      actorType: r.actorType,
+      actorEmail: r.actorEmail ?? null,
+      targetType: r.targetType ?? null,
+      targetId: r.targetId ?? null,
+      result: r.result,
+      ip: r.ip ?? null,
+      createdAt: r.createdAt,
+      data: r.data ?? {},
+    })),
+    hasMore,
+    nextBefore: hasMore && page.length ? page[page.length - 1].cursor : null,
+  });
+});
+
+/**
+ * GET /v1/admin/security/summary - the last 24 hours at a glance.
+ *
+ *   failedLogins      sign-in attempts that failed (customer accounts and the admin form)
+ *   lockedAccounts    accounts whose sign-in was refused because of a lock ("admin" counts as one)
+ *   deniedActions     actions refused by a permission check (a role, a read-only key, a lock)
+ *   adminLogins       successful admin console sign-ins
+ *   newWorkspaces     workspaces created
+ *   exports           data exports (lead exports and whole-workspace exports)
+ *   bulkDeletes       bulk deletions
+ *   pendingDeletions  workspaces currently waiting out the grace period before deletion (not limited to 24 hours)
+ *   topFailingIps     the five addresses with the most failed sign-ins
+ *
+ * Five aggregate queries, each over an indexed time range, run together.
+ */
+adminRoutes.get("/security/summary", async (c) => {
+  const { db } = getDb();
+  const one = async <T extends Record<string, unknown>>(q: ReturnType<typeof sql>): Promise<T> => ((await db.execute(q)) as unknown as T[])[0];
+  // Wrong guesses at a signed-in user's own password or code are kept under their own
+  // subjects (`pwchange:<id>`, `2fa:<id>`); they are not sign-in attempts.
+  const signIn = sql`subject NOT LIKE 'pwchange:%' AND subject NOT LIKE '2fa:%'`;
+  const [audits, attempts, topIps, orgs, deletions] = await Promise.all([
+    one<{ denied: number; admin_logins: number; exports: number; bulk_deletes: number; locked: number }>(sql`
+      SELECT
+        count(*) FILTER (WHERE result = 'denied')::int AS denied,
+        count(*) FILTER (WHERE action = 'admin.login' AND result = 'ok')::int AS admin_logins,
+        count(*) FILTER (WHERE action LIKE '%.exported' AND result = 'ok')::int AS exports,
+        count(*) FILTER (WHERE action LIKE '%bulk_deleted' AND result = 'ok')::int AS bulk_deletes,
+        count(DISTINCT CASE
+          WHEN action = 'auth.login_locked' THEN coalesce(target_id, data->>'email')
+          WHEN action = 'admin.login' AND result = 'denied' AND data->>'reason' = 'locked' THEN 'admin'
+        END)::int AS locked
+      FROM audit_log
+      WHERE created_at > now() - interval '24 hours'`),
+    one<{ failed: number }>(sql`SELECT count(*)::int AS failed FROM login_attempts WHERE NOT succeeded AND created_at > now() - interval '24 hours' AND ${signIn}`),
+    db.execute(sql`
+      SELECT ip, count(*)::int AS count
+      FROM login_attempts
+      WHERE NOT succeeded AND created_at > now() - interval '24 hours' AND ip IS NOT NULL AND ip <> 'unknown' AND ${signIn}
+      GROUP BY ip
+      ORDER BY count(*) DESC, ip
+      LIMIT 5`) as unknown as Promise<{ ip: string; count: number }[]>,
+    one<{ created: number }>(sql`SELECT count(*)::int AS created FROM organizations WHERE created_at > now() - interval '24 hours'`),
+    one<{ pending: number }>(sql`SELECT count(*)::int AS pending FROM workspace_deletion_requests WHERE cancelled_at IS NULL AND completed_at IS NULL`),
+  ]);
+  return c.json({
+    window: "24h",
+    failedLogins: attempts?.failed ?? 0,
+    lockedAccounts: audits?.locked ?? 0,
+    deniedActions: audits?.denied ?? 0,
+    adminLogins: audits?.admin_logins ?? 0,
+    newWorkspaces: orgs?.created ?? 0,
+    exports: audits?.exports ?? 0,
+    bulkDeletes: audits?.bulk_deletes ?? 0,
+    pendingDeletions: deletions?.pending ?? 0,
+    topFailingIps: [...topIps].map((r) => ({ ip: r.ip, count: Number(r.count) })),
   });
 });
 

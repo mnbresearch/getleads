@@ -3,6 +3,7 @@ import { getDb, runMigrations, startWorker } from "@prospex/db";
 import { env } from "./env.js";
 import { createApp } from "./app.js";
 import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.js";
+import { migrateLegacyLinkTokens } from "./lib/linkTokens.js";
 
 // One bad job or a stray promise must never take the process down: Node's default for an
 // unhandled rejection is to exit, which turned a single failing webhook into a restart loop.
@@ -15,6 +16,15 @@ async function main() {
   const app = createApp();
   const { db } = getDb();
   await ensureRecurringJobs();
+  // Report-link tokens still stored in plaintext are encrypted (and their plaintext column
+  // cleared) once the schema is in place. Idempotent and safe with several instances; a
+  // failure here must not stop the server from starting - legacy links keep working as they
+  // are and the next start tries again.
+  await migrateLegacyLinkTokens()
+    .then((r) => {
+      if (r.clientLinks || r.inviteHashes) console.log(`[api] link tokens: ${r.clientLinks} report link(s) moved out of plaintext, ${r.inviteHashes} invite(s) given a lookup hash`);
+    })
+    .catch((e) => console.warn(`[api] could not finish moving link tokens out of plaintext (will retry on next start): ${(e as Error).name}`));
 
   // In single-process deployments (Render free tier: one web service), run the worker in-process too.
   let stop: (() => Promise<void>) | null = null;

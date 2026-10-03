@@ -72,10 +72,19 @@ Rollback: redeploy the previous build; the old code runs on the upgraded databas
 
 Optional settings and the full notes are in DEPLOY.md section B8.
 
+### Account security (migration 0019)
+
+Also applied on boot, and also additive. It brings opt-in two-factor sign-in for customers, an email confirmation link for new signups, read-only API keys, security emails (password changed, two-factor changed, new API key, sign-in from a new address) and a Security tab in the admin dashboard. Existing customers are not asked for anything.
+
+- The confirmation link and the security emails need the platform mail provider from Step 4. Without one they are not sent and nobody is restricted.
+- **Turn on the admin second factor:** create a base32 secret (`openssl rand 20 | base32`), add it to an authenticator app as a time-based account ("Enter a setup key"), keep a copy in your password manager, and set it as `ADMIN_TOTP_SECRET` on the API service. The `/admin` login then asks for the 6-digit code after the password. Step-by-step, and what to do when a phone is lost, in DEPLOY.md section B9.
+- A customer who has lost both their phone and their recovery codes can only be let back in by you: Admin > the workspace > the user > "Reset two-factor". Confirm it is really them first.
+- Rolling back: read-only API keys are treated as full-access keys by the old code - revoke them first if you roll back for long. Details in DEPLOY.md section B9.
+
 ## Operating
 
 - Admin: the dashboard at `/admin` (sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`), or `GET /v1/admin/orgs` and `PATCH /v1/admin/orgs/:id/plan` with header `x-admin-token: $ADMIN_API_TOKEN` to list orgs and change plans/limits. `INTERNAL_TOKEN` is only the job runner's token and does not open the admin API. Every admin change is recorded in the workspace's security log.
-- Secrets: `JWT_SECRET` at least 32 random characters; keep `ENCRYPTION_KEY` set, and when rotating it list the previous value in `ENCRYPTION_KEYS_OLD` or every saved sender/integration credential becomes unreadable; optional `ADMIN_JWT_SECRET` signs the admin session separately. If `INTERNAL_TOKEN` was ever used in a URL, rotate it in the Render dashboard. Full table in DEPLOY.md section A8.
+- Secrets: `JWT_SECRET` at least 32 random characters; keep `ENCRYPTION_KEY` set, and when rotating it list the previous value in `ENCRYPTION_KEYS_OLD` or every saved sender/integration credential becomes unreadable; optional `ADMIN_JWT_SECRET` signs the admin session separately; optional (recommended) `ADMIN_TOTP_SECRET` adds an authenticator code to the admin login. If `INTERNAL_TOKEN` was ever used in a URL, rotate it in the Render dashboard. Full table in DEPLOY.md section A8.
 - Invite-only signup: set `PILOT_INVITE_CODE`.
 - Logs: Render dashboard. Job failures are stored on the `jobs` row (`error`, `attempts`) and retried with backoff.
 - Backups: Neon retains point-in-time recovery even on the free tier for a few days; for longer retention, a free `pg_dump` cron job is the zero-cost option.
