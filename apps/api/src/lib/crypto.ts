@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { env } from "../env.js";
 
 function key() {
@@ -49,4 +49,16 @@ export function safeEqual(a: string, b: string) {
 
 export function hmacSign(secret: string, payload: string) {
   return createHash("sha256").update(`${secret}.${payload}`).digest("hex");
+}
+
+/**
+ * Webhook signature v2: a real HMAC-SHA256.
+ *
+ * `hmacSign` above is sha256(secret + "." + payload), which is not an HMAC and is open to
+ * length extension - a holder of one valid signature can forge one for payload+suffix
+ * without the secret. It stays for hooks created before v2 (changing it would break every
+ * customer's existing verifier); new and rotated hooks use this.
+ */
+export function hmacSignV2(secret: string, payload: string) {
+  return createHmac("sha256", secret).update(payload).digest("hex");
 }

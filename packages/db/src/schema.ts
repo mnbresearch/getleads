@@ -48,6 +48,10 @@ export const users = pgTable(
     name: text("name").notNull().default(""),
     role: text("role").notNull().default("owner"),
     emailVerifiedAt: ts("email_verified_at"),
+    /** Bumped on password change/reset and "sign out everywhere"; a JWT carries the value it was issued at. */
+    tokenVersion: integer("token_version").notNull().default(0),
+    /** Google account subject this user is bound to (unique when set). */
+    googleSub: text("google_sub"),
     lastLoginAt: ts("last_login_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
   },
@@ -437,7 +441,11 @@ export const webhooks = pgTable("webhooks", {
   orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
   url: text("url").notNull(),
   events: text("events").array().notNull().default(["*"]),
-  secret: text("secret").notNull(),
+  /** Legacy plaintext secret (v1 hooks created before encryption). New hooks use secretEncrypted. */
+  secret: text("secret"),
+  secretEncrypted: text("secret_encrypted"),
+  /** 1 = legacy sha256(secret.payload); 2 = HMAC-SHA256, header value "v2=<hex>". */
+  signatureVersion: integer("signature_version").notNull().default(1),
   active: boolean("active").notNull().default(true),
   failures: integer("failures").notNull().default(0),
   createdAt: ts("created_at").notNull().defaultNow(),
@@ -1049,3 +1057,46 @@ export const passwordResetTokens = pgTable("password_reset_tokens", {
   usedAt: ts("used_at"),
   createdAt: ts("created_at").notNull().defaultNow(),
 });
+
+/** Per-account login attempts, for lockout independent of the caller's IP. */
+export const loginAttempts = pgTable(
+  "login_attempts",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    subject: text("subject").notNull(),
+    ip: text("ip"),
+    succeeded: boolean("succeeded").notNull().default(false),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ idx: index("login_attempts_subject_idx").on(t.subject, t.createdAt) }),
+);
+
+/** One-time codes handing a Google sign-in back to the web app. Hashes only. */
+export const oauthExchangeCodes = pgTable("oauth_exchange_codes", {
+  codeHash: text("code_hash").primaryKey(),
+  userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+  verifierHash: text("verifier_hash").notNull(),
+  expiresAt: ts("expires_at").notNull(),
+  usedAt: ts("used_at"),
+  createdAt: ts("created_at").notNull().defaultNow(),
+});
+
+/** Security audit log: who did what, from where, and whether it was allowed. */
+export const auditLog = pgTable(
+  "audit_log",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").references(() => organizations.id, { onDelete: "cascade" }),
+    actorType: text("actor_type").notNull().default("user"),
+    actorUserId: uuid("actor_user_id"),
+    action: text("action").notNull(),
+    targetType: text("target_type"),
+    targetId: text("target_id"),
+    result: text("result").notNull().default("ok"),
+    ip: text("ip"),
+    requestId: text("request_id"),
+    data: jsonb("data").$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ orgIdx: index("audit_log_org_idx").on(t.orgId, t.createdAt), actionIdx: index("audit_log_action_idx").on(t.action, t.createdAt) }),
+);
