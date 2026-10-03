@@ -15,7 +15,9 @@ export async function resolveLinkedinUrl(url: string): Promise<PersonCandidate |
   if (!li) return null;
   const slug = li.split("/in/")[1];
   // 1) Public profile page (LinkedIn serves a limited public view with og:title "Name - Title - Company | LinkedIn")
-  const html = await fetchText(li, { timeoutMs: 10_000 });
+  // `li` is rebuilt by normalizeLinkedinUrl as https://www.linkedin.com/..., so the first
+  // hop is fixed; publicOnly + hostAllow keep every redirect on LinkedIn as well.
+  const html = await fetchText(li, { timeoutMs: 10_000, publicOnly: true, hostAllow: isLinkedinHost });
   if (html && !/authwall|login/i.test(html.slice(0, 2000)) && html.includes("og:title")) {
     const $ = cheerio.load(html);
     const og = $('meta[property="og:title"]').attr("content") ?? $("title").text();
@@ -83,9 +85,58 @@ async function findLinkedinUrlInner(
   return null;
 }
 
-/** Best-effort public LinkedIn post engagers (only works when LinkedIn serves the public post page). */
-export async function linkedinPostEngagers(postUrl: string): Promise<{ people: PersonCandidate[]; postText?: string; reactions?: number; comments?: number; publicPage: boolean }> {
-  const html = await fetchText(postUrl, { timeoutMs: 12_000 });
+/** linkedin.com itself, or one of its subdomains (www, the country sites, m). */
+function isLinkedinHost(hostname: string): boolean {
+  return hostname === "linkedin.com" || /^[a-z0-9-]{1,20}\.linkedin\.com$/.test(hostname);
+}
+
+/**
+ * Turn what a customer pasted as "a LinkedIn post" into the URL we will fetch, or null.
+ *
+ * A post monitor's target is a free-text field. It used to be handed to `fetch` exactly as
+ * typed, redirects followed, every tick - so a monitor "watching" http://169.254.169.254/
+ * or an internal service was a scheduled request to it from inside our network. The rule
+ * now: it must be a LinkedIn URL, and it is always fetched over https on the default port.
+ *
+ * Forgiving about how it was pasted (no scheme, http://, a country subdomain such as
+ * in.linkedin.com, a trailing fragment), strict about where it points.
+ */
+export function normalizeLinkedinPostUrl(input: string): string | null {
+  if (typeof input !== "string") return null;
+  const raw = input.trim();
+  if (!raw || raw.length > 2000 || /\s/.test(raw)) return null;
+  let u: URL;
+  try {
+    u = new URL(/^[a-z][a-z0-9+.-]*:/i.test(raw) ? raw : `https://${raw}`);
+  } catch {
+    return null;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return null;
+  // Credentials in the URL mean the host is not the part that reads like one.
+  if (u.username || u.password) return null;
+  if (u.port && !(u.protocol === "https:" && u.port === "443") && !(u.protocol === "http:" && u.port === "80")) return null;
+  const host = u.hostname.replace(/\.$/, "").toLowerCase();
+  if (!isLinkedinHost(host)) return null;
+  u.protocol = "https:";
+  u.port = "";
+  u.hostname = host;
+  u.hash = "";
+  return u.toString();
+}
+
+/**
+ * Best-effort public LinkedIn post engagers (only works when LinkedIn serves the public post page).
+ *
+ * `refused` is set, and nothing is fetched, when `postUrl` is not a LinkedIn URL. That is a
+ * different outcome from `publicPage: false` (LinkedIn answered with its login wall) and a
+ * caller must not report the two the same way.
+ */
+export async function linkedinPostEngagers(postUrl: string): Promise<{ people: PersonCandidate[]; postText?: string; reactions?: number; comments?: number; publicPage: boolean; refused?: string }> {
+  const url = normalizeLinkedinPostUrl(postUrl);
+  if (!url) return { people: [], publicPage: false, refused: "This is not a LinkedIn post URL, so it was not fetched. Paste the post's link from linkedin.com (it starts with https://www.linkedin.com/)." };
+  // publicOnly: every hop goes through the guarded dispatcher. hostAllow: a redirect that
+  // leaves LinkedIn ends the fetch rather than being followed.
+  const html = await fetchText(url, { timeoutMs: 12_000, publicOnly: true, hostAllow: isLinkedinHost });
   if (!html || /authwall/i.test(html.slice(0, 3000))) return { people: [], publicPage: false };
   const $ = cheerio.load(html);
   const postText = $('meta[property="og:description"]').attr("content")?.slice(0, 500);

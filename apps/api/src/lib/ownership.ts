@@ -1,5 +1,7 @@
+import type { Context } from "hono";
 import { and, eq, getDb } from "@prospex/db";
 import { notFound } from "./errors.js";
+import { audit } from "./audit.js";
 
 /**
  * Assert that a referenced row belongs to this org, before it is stored or used.
@@ -19,12 +21,18 @@ import { notFound } from "./errors.js";
  *
  * It answers 404 rather than 403 on purpose: a tenant should not be able to learn whether
  * an id exists in someone else's workspace.
+ *
+ * When the request context is passed, a refusal is also written to the audit log as
+ * `reference.denied`. A request naming an id that is not this workspace's is either a stale
+ * link or someone trying ids, and after an incident that difference is read off this log.
+ * (The row says the reference was not found in this workspace - never whose it is.)
  */
 export async function assertOwned(
   table: { id: unknown; orgId: unknown },
   id: string | null | undefined,
   orgId: string,
   what: string,
+  c?: Context,
 ): Promise<void> {
   if (!id) return;
   const { db } = getDb();
@@ -33,5 +41,8 @@ export async function assertOwned(
     .from(table as never)
     .where(and(eq(table.id as never, id), eq(table.orgId as never, orgId)))
     .limit(1);
-  if (!rows.length) throw notFound(what);
+  if (!rows.length) {
+    if (c) await audit(c, "reference.denied", { result: "denied", targetType: what.toLowerCase(), targetId: String(id).slice(0, 64), data: { method: c.req.method, path: c.req.path } });
+    throw notFound(what);
+  }
 }

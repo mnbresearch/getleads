@@ -3,6 +3,7 @@ import type { CompanyProfile, PersonCandidate } from "../types.js";
 import { fetchText, pMap } from "../util/http.js";
 import { rootDomain } from "../util/domain.js";
 import { isPublicHost } from "../util/publicHost.js";
+import { assertPublicHost, isSsrfBlocked } from "../util/egress.js";
 import { splitName } from "../util/names.js";
 
 const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
@@ -74,6 +75,28 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
     profile.crawlFailed = true;
     profile.crawlRefused = `${target.split("/")[0]} is not a public web address, so it was not fetched`;
     return profile;
+  }
+  /**
+   * The check above reads the STRING. A name can look public and resolve to loopback, a
+   * private range or the cloud metadata address (`127.0.0.1.nip.io` is the textbook case),
+   * and a crawl of one stored an internal service's response on the company record. Every
+   * request below is refused at connect time for such a name regardless - that is what
+   * `publicOnly` now enforces - so this lookup is not the guard. It is here so the result
+   * says WHY nothing was fetched, instead of an empty profile that reads like a dead site.
+   * A name that simply does not resolve is left to fail as an ordinary unreachable site.
+   */
+  if (!opts.allowPrivateHosts) {
+    try {
+      await assertPublicHost(target);
+    } catch (e) {
+      if (isSsrfBlocked(e)) {
+        profile.pagesAttempted = 0;
+        profile.pagesFetched = 0;
+        profile.crawlFailed = true;
+        profile.crawlRefused = `${target.split("/")[0]} does not resolve to a public web address, so it was not fetched`;
+        return profile;
+      }
+    }
   }
 
   // publicOnly so the guard applies to every redirect hop, not just the address we were

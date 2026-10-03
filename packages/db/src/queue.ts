@@ -118,8 +118,35 @@ export async function completeJob(db: Db, id: string, result?: Record<string, un
   return rows.length > 0;
 }
 
+/**
+ * Mask credentials in a job's error before it is stored or logged.
+ *
+ * `jobs.error` is read back by tenants for some job types (a search, an agent run), and an
+ * error is whatever the failing call threw: an upstream body that echoes the API key it was
+ * given, a request URL with `?api_key=` in it, a connection string. This package cannot
+ * depend on @prospex/core (which has the fuller `redact`), so the same rules live here in
+ * small: configured secrets by value, then the shapes credentials take.
+ */
+const SECRET_ENV_NAME = /(_API_KEY|_KEY|_SECRET|_TOKEN|_PASS|_PASSWORD|^JWT_SECRET|^ENCRYPTION_KEY|^DATABASE_URL)$/;
+export function redactJobError(text: unknown): string {
+  let out = String(text ?? "");
+  if (!out) return "";
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v && v.length >= 8 && SECRET_ENV_NAME.test(k) && out.includes(v)) out = out.split(v).join(`[${k}]`);
+  }
+  return out
+    .replace(/([?&;\s](?:api_?key|apikey|key|token|access_token|refresh_token|api_token|auth|password|passwd|pass|secret|client_secret|signature|sig)=)[^&\s"'<>]+/gi, "$1[redacted]")
+    .replace(/((?:authorization|proxy-authorization|x-api-key|api-key)["']?\s*[:=]\s*["']?(?:bearer\s+|basic\s+|zoho-oauthtoken\s+)?)[^\s"',}]+/gi, "$1[redacted]")
+    .replace(/\b(bearer\s+)(?!\[redacted\])[A-Za-z0-9._~+/=-]{8,}/gi, "$1[redacted]")
+    .replace(/\/\/([^/\s:@]+):([^/\s@]+)@/g, "//$1:[redacted]@")
+    .replace(/\b(?:org|proj|acct)[_-][A-Za-z0-9]{8,}\b/g, (m) => (/[0-9]/.test(m) ? "[provider-account-id]" : m))
+    .replace(/\b(?:sk|pk|rk|px)_(?:live|test)_[A-Za-z0-9_-]{8,}|\bre_[A-Za-z0-9_]{16,}|\b(?:sk|pk|rk)-[A-Za-z0-9_-]{16,}|\bkey-[A-Za-z0-9_-]{16,}|\bgsk_[A-Za-z0-9]{20,}|\bAKIA[0-9A-Z]{16}\b|\bAIza[0-9A-Za-z_-]{30,}|\bgh[pousr]_[A-Za-z0-9]{30,}|\bxox[abprs]-[A-Za-z0-9-]{10,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{6,}/g, "[redacted-key]")
+    .replace(/\b[a-fA-F0-9]{32,}\b/g, "[redacted-hex]")
+    .replace(/[A-Za-z0-9+_-]{40,}={0,2}/g, (m) => (/[0-9]/.test(m) && /[A-Za-z]/.test(m) ? "[redacted-token]" : m));
+}
+
 export async function failJob(db: Db, job: Job, err: unknown) {
-  const message = err instanceof Error ? `${err.message}` : String(err);
+  const message = redactJobError(err instanceof Error ? `${err.message}` : String(err));
   const retry = job.attempts < job.maxAttempts;
   const backoffMs = Math.min(60_000 * 2 ** (job.attempts - 1), 30 * 60_000);
   // A final failure leaves run_at alone. Writing job.runAt back used to crash the whole
@@ -265,7 +292,7 @@ export async function runJob(db: Db, job: Job, handlers: Record<string, JobHandl
       const owned = await completeJob(db, job.id, result ?? undefined, job.lockedBy);
       ctx.log(owned ? `done in ${Date.now() - started}ms` : `finished in ${Date.now() - started}ms, but the job had been reaped and reclaimed; result not recorded`);
     } else {
-      ctx.log(`failed: ${failure instanceof Error ? failure.message : String(failure)}`);
+      ctx.log(`failed: ${redactJobError(failure instanceof Error ? failure.message : String(failure))}`);
       await failJob(db, job, failure);
     }
   } catch (e) {

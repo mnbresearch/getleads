@@ -7,10 +7,18 @@
  *
  * The parts that carry real risk, and how each is handled:
  *
- * CSRF. The `state` parameter is an HMAC of a nonce and an expiry, signed with JWT_SECRET
- * and valid for ten minutes. An attacker cannot mint one, and a stale one is refused. It is
- * stateless on purpose - a database round trip per redirect buys nothing here, and a signed
- * value cannot be forged without the secret.
+ * CSRF / login fixation. The `state` parameter is a signed, ten-minute token with its own
+ * audience ("oauth_state"), and it is BOUND TO THE BROWSER that started the flow: /start puts
+ * the state's nonce in an HttpOnly cookie and /callback refuses a state whose nonce is not in
+ * the cookie. A signature alone was not enough - any state we had ever signed (and, before
+ * audiences, any session token) was accepted from any browser, so an attacker could finish
+ * their own sign-in in a victim's browser.
+ *
+ * Handoff to the web app. The session is not put in the redirect URL. The callback mints a
+ * one-time code (60 seconds, single use, only its hash stored) tied to a verifier hash the
+ * web app chose before the flow started (`cv`); the web app trades code + verifier for the
+ * session over POST. A link carrying somebody else's code is useless in a browser that does
+ * not hold the matching verifier.
  *
  * Token trust. The id_token is fetched server-to-server from Google's token endpoint over
  * TLS, in exchange for a one-time code plus the client secret. Because it arrives directly
@@ -22,12 +30,21 @@
  * password account by email means anyone who can make Google assert an email could seize
  * that account - so `email_verified` must be true, and an unverified Google email is
  * refused outright rather than being allowed to create or link anything.
+ *
+ * Pre-hijack, the mirror image. Password signup does not prove the address is yours, so
+ * someone can register a victim's address first and wait for the victim to "Sign in with
+ * Google" into the account they still hold a password, a session and an API key for. See
+ * resolveGoogleUser: an account whose address was never proved is CLAIMED for the Google
+ * identity (old password, sessions and keys die) instead of being quietly shared.
  */
 
 import { sign, verify } from "hono/jwt";
-import { eq, getDb, users, type User } from "@prospex/db";
+import { createHash } from "node:crypto";
+import { and, apiKeys, eq, events, getDb, isNull, sql, users, type User } from "@prospex/db";
 import { env } from "../env.js";
 import { ApiError } from "./errors.js";
+import { hasUsablePassword, unusablePasswordHash } from "./auth.js";
+import { randomToken, safeEqual } from "./crypto.js";
 
 const GOOGLE_AUTH_URL = "https://accounts.google.com/o/oauth2/v2/auth";
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -48,7 +65,26 @@ export function googleRedirectUri(): string {
 export interface StatePayload {
   /** Where to send the user in the app afterwards. Validated as a same-site path, never a URL. */
   next: string;
+  /** Random value also held in the browser's `g_state` cookie; the two must match at the callback. */
   nonce: string;
+  /** base64url(sha256(verifier)) chosen by the web app; the one-time code is only redeemable with that verifier. */
+  cv: string;
+}
+
+/** Cookie that binds an OAuth state to the browser that started the flow. */
+export const STATE_COOKIE = "g_state";
+export const STATE_COOKIE_PATH = "/v1/auth/google";
+export const STATE_TTL = STATE_TTL_SECONDS;
+
+/** base64url of a SHA-256 digest: 43 characters, no padding. */
+const CV_RE = /^[A-Za-z0-9_-]{43}$/;
+export function isValidCodeChallenge(cv: unknown): cv is string {
+  return typeof cv === "string" && CV_RE.test(cv);
+}
+
+/** base64url(sha256(verifier)) - what the web app sends as `cv` and what is stored with the code. */
+export function challengeFor(verifier: string): string {
+  return createHash("sha256").update(verifier).digest("base64url");
 }
 
 /**
@@ -56,22 +92,37 @@ export interface StatePayload {
  *
  * `next` is carried inside the signed blob rather than as a separate query parameter, so a
  * tampered redirect target invalidates the signature instead of quietly redirecting
- * elsewhere - an open redirect is the classic way this flow gets abused.
+ * elsewhere - an open redirect is the classic way this flow gets abused. The audience claim
+ * makes it a state and nothing else: it is not a session, and a session is not a state.
  */
-export async function makeState(next: string): Promise<string> {
+export async function makeState(next: string, cv: string, nonce: string = randomToken(24)): Promise<{ state: string; nonce: string }> {
   const now = Math.floor(Date.now() / 1000);
-  return sign({ next: safeNext(next), nonce: crypto.randomUUID(), iat: now, exp: now + STATE_TTL_SECONDS }, env.jwtSecret);
+  const state = await sign({ aud: "oauth_state", next: safeNext(next), nonce, cv, iat: now, exp: now + STATE_TTL_SECONDS }, env.jwtSecret);
+  return { state, nonce };
 }
 
-export async function readState(state: string | undefined): Promise<StatePayload> {
+/**
+ * Verify a state. `cookieNonce` is the value of the browser's g_state cookie: a state is only
+ * good in the browser that started the flow, so a missing or different cookie is refused the
+ * same way a forged signature is.
+ */
+export async function readState(state: string | undefined, cookieNonce: string | undefined): Promise<StatePayload> {
   if (!state) throw new ApiError(400, "Missing state", "oauth_state_missing");
+  const invalid = () => new ApiError(400, "This sign-in link has expired or is invalid. Please try again.", "oauth_state_invalid");
+  let p: { aud?: unknown; next?: unknown; nonce?: unknown; cv?: unknown };
   try {
-    const p = (await verify(state, env.jwtSecret, "HS256")) as unknown as StatePayload;
-    return { next: safeNext(p.next), nonce: p.nonce };
+    p = (await verify(state, env.jwtSecret, "HS256")) as typeof p;
   } catch {
     // Covers forged, tampered and expired states alike. The user simply starts again.
-    throw new ApiError(400, "This sign-in link has expired or is invalid. Please try again.", "oauth_state_invalid");
+    throw invalid();
   }
+  // Must be a state: a session or admin token signed with the same secret is not one.
+  if (p.aud !== "oauth_state") throw invalid();
+  if (typeof p.nonce !== "string" || p.nonce.length < 16 || !isValidCodeChallenge(p.cv)) throw invalid();
+  if (!cookieNonce || !safeEqual(cookieNonce, p.nonce)) {
+    throw new ApiError(400, "This sign-in was started in a different browser or has expired. Please try again.", "oauth_state_mismatch");
+  }
+  return { next: safeNext(typeof p.next === "string" ? p.next : "/"), nonce: p.nonce, cv: p.cv };
 }
 
 /**
@@ -159,16 +210,124 @@ export async function exchangeCode(code: string): Promise<GoogleIdentity> {
   };
 }
 
+export type GoogleMatch =
+  /** No account for this identity: the caller creates one (bound to the subject from the start). */
+  | "none"
+  /** The account already bound to this Google subject. */
+  | "matched_sub"
+  /** An account with this address whose ownership was already established; now bound to the subject. */
+  | "linked"
+  /** An account somebody registered with a password for this address and never proved they own; taken over by the Google identity. */
+  | "claimed_unverified";
+
+export interface GoogleResolution {
+  user: User | null;
+  match: GoogleMatch;
+  /** Only for "claimed_unverified": what was done, for the audit log. Never contains secrets. */
+  claim?: { soleUser: boolean; apiKeysRevoked: number; otherUsers: number };
+}
+
 /**
- * Find the user this Google identity belongs to, if any.
+ * Was this account created by "Sign in with Google" before the no-password marker existed?
+ * Those rows hold a random bcrypt hash, indistinguishable from a chosen password, but their
+ * workspace's `org.created` event recorded `via: "google"` with the same address.
+ */
+async function createdByGoogle(user: User): Promise<boolean> {
+  const { db } = getDb();
+  try {
+    const [row] = await db
+      .select({ id: events.id })
+      .from(events)
+      .where(and(eq(events.orgId, user.orgId), eq(events.type, "org.created"), sql`${events.data}->>'via' = 'google'`, sql`lower(${events.data}->>'email') = ${user.email.toLowerCase()}`))
+      .limit(1);
+    return !!row;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Resolve a verified Google identity to an account, binding the account to the Google subject.
  *
- * Matching on a verified email links a Google sign-in to an existing password account, which
- * is what people expect: the same person, one account, whichever door they came through.
- * That convenience is only safe because the caller has already refused unverified emails -
- * without that check this function would be an account takeover.
+ * Order matters:
+ *
+ * 1. By Google subject. Once bound, the subject is the identity - not the email, which can be
+ *    re-assigned to somebody else.
+ * 2. By email, when the row is not bound yet:
+ *    - bound to a DIFFERENT subject: refused. Two Google accounts do not share one login.
+ *    - ownership of the address already established (email verified by a password reset, or
+ *      the account was created by Google in the first place): bind and continue. This is the
+ *      "same person, either door" convenience. An accepted team invite does NOT count: the
+ *      invite link is also shown to the inviter, so accepting it proves nothing about the
+ *      mailbox.
+ *    - ownership never established and the row has a password someone chose: CLAIM it. The
+ *      Google user has just proved they own the address; whoever typed it into the signup
+ *      form never did. Their password stops working, every session they hold is revoked
+ *      (token version bump) and, when they were the workspace's only user, the workspace's
+ *      API keys are revoked too - the signup response handed them one. In a workspace with
+ *      other users the keys belong to the team, so they are left alone.
+ *
+ * The honest case this costs: someone who signed up with a password, never reset it, and
+ * later clicks "Sign in with Google" loses their password (they can set a new one from
+ * Settings) and, if they work alone, their API keys. That is the price of not being able to
+ * tell them from a squatter; the audit log records it and the caller emails them.
+ */
+export async function resolveGoogleUser(identity: GoogleIdentity): Promise<GoogleResolution> {
+  if (!identity.emailVerified) throw new ApiError(400, "Your Google email address is not verified", "oauth_email_unverified");
+  if (!identity.sub) throw new ApiError(502, "Google did not return an account identifier", "oauth_bad_token");
+  const { db } = getDb();
+  const now = new Date();
+
+  const bySub = await db.query.users.findFirst({ where: eq(users.googleSub, identity.sub) });
+  if (bySub) {
+    if (!bySub.emailVerifiedAt) {
+      const [u] = await db.update(users).set({ emailVerifiedAt: now }).where(eq(users.id, bySub.id)).returning();
+      return { user: u ?? bySub, match: "matched_sub" };
+    }
+    return { user: bySub, match: "matched_sub" };
+  }
+
+  const byEmail = await db.query.users.findFirst({ where: eq(users.email, identity.email) });
+  if (!byEmail) return { user: null, match: "none" };
+
+  if (byEmail.googleSub && byEmail.googleSub !== identity.sub) {
+    throw new ApiError(409, "This email address is already linked to a different Google account. Sign in with your password, or contact support.", "oauth_account_mismatch");
+  }
+
+  const established = !!byEmail.emailVerifiedAt || !hasUsablePassword(byEmail.passwordHash) || (await createdByGoogle(byEmail));
+  if (established) {
+    // `google_sub IS NULL` in the WHERE: two callbacks racing must not both bind.
+    const [u] = await db
+      .update(users)
+      .set({ googleSub: identity.sub, emailVerifiedAt: byEmail.emailVerifiedAt ?? now })
+      .where(and(eq(users.id, byEmail.id), isNull(users.googleSub)))
+      .returning();
+    if (!u) throw new ApiError(409, "This sign-in could not be completed. Please try again.", "oauth_account_mismatch");
+    return { user: u, match: "linked" };
+  }
+
+  // Unproven password account: the Google identity takes it over.
+  const [{ n: userCount }] = await db.select({ n: sql<number>`count(*)::int` }).from(users).where(eq(users.orgId, byEmail.orgId));
+  const soleUser = userCount <= 1;
+  const unusable = await unusablePasswordHash(`google:${identity.sub}`);
+  const [u] = await db
+    .update(users)
+    .set({ googleSub: identity.sub, emailVerifiedAt: now, passwordHash: unusable, tokenVersion: sql`${users.tokenVersion} + 1` })
+    .where(and(eq(users.id, byEmail.id), isNull(users.googleSub)))
+    .returning();
+  if (!u) throw new ApiError(409, "This sign-in could not be completed. Please try again.", "oauth_account_mismatch");
+  let apiKeysRevoked = 0;
+  if (soleUser) {
+    const gone = await db.update(apiKeys).set({ revokedAt: now }).where(and(eq(apiKeys.orgId, u.orgId), isNull(apiKeys.revokedAt))).returning({ id: apiKeys.id });
+    apiKeysRevoked = gone.length;
+  }
+  return { user: u, match: "claimed_unverified", claim: { soleUser, apiKeysRevoked, otherUsers: Math.max(0, userCount - 1) } };
+}
+
+/**
+ * Find the user this Google identity belongs to, if any (see resolveGoogleUser for what
+ * "belongs to" means and what it changes). Kept under its old name for existing callers.
  */
 export async function findUserForGoogle(identity: GoogleIdentity): Promise<User | null> {
-  if (!identity.emailVerified) throw new ApiError(400, "Your Google email address is not verified", "oauth_email_unverified");
-  const { db } = getDb();
-  return (await db.query.users.findFirst({ where: eq(users.email, identity.email) })) ?? null;
+  return (await resolveGoogleUser(identity)).user;
 }

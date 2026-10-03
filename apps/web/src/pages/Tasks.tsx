@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
 import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
+import { ExtLink } from "../components/ExtLink";
 
 interface Task { id: string; type: string; title: string; body: string | null; dueAt: string; status: string; campaignId: string | null; contactId?: string | null; lead: { id: string; fullName: string | null; title: string | null; email: string | null; linkedinUrl: string | null; phone: string | null; whatsapp: string | null; company: { name: string | null; domain: string } | null } | null }
 
@@ -39,7 +40,7 @@ export function TasksPage() {
                 <span className="grid h-9 w-9 shrink-0 place-items-center rounded-lg bg-brand-50 text-xs font-bold text-brand-600">{ICON[t.type] ?? "☐"}</span>
                 <div className="min-w-0 flex-1">
                   <div className="font-medium">{t.title}</div>
-                  {t.lead && <div className="text-xs text-ink-400">{[t.lead.title, t.lead.company?.name ?? t.lead.company?.domain].filter(Boolean).join(" · ")} {t.lead.linkedinUrl && <a className="ml-2 text-brand-600" href={t.lead.linkedinUrl} target="_blank" rel="noreferrer">Open LinkedIn ↗</a>}{t.lead.phone && <span className="ml-2">{t.lead.phone}</span>}{t.type === "whatsapp" && (t.lead.whatsapp ?? t.lead.phone) && <a className="ml-2 text-emerald-600" href={`https://wa.me/${(t.lead.whatsapp ?? t.lead.phone ?? "").replace(/\D/g, "")}?text=${encodeURIComponent(t.body ?? "")}`} target="_blank" rel="noreferrer">Open WhatsApp ↗</a>}</div>}
+                  {t.lead && <div className="text-xs text-ink-400">{[t.lead.title, t.lead.company?.name ?? t.lead.company?.domain].filter(Boolean).join(" · ")} <ExtLink className="ml-2 text-brand-600" href={t.lead.linkedinUrl}>Open LinkedIn ↗</ExtLink>{t.lead.phone && <span className="ml-2">{t.lead.phone}</span>}{t.type === "whatsapp" && (t.lead.whatsapp ?? t.lead.phone) && <a className="ml-2 text-emerald-600" href={`https://wa.me/${(t.lead.whatsapp ?? t.lead.phone ?? "").replace(/\D/g, "")}?text=${encodeURIComponent(t.body ?? "")}`} target="_blank" rel="noopener noreferrer">Open WhatsApp ↗</a>}</div>}
                   {t.body && <pre className="mt-2 whitespace-pre-wrap rounded-lg bg-cream p-3 font-sans text-sm text-ink-200">{t.body}</pre>}
                   <div className="mt-1 text-xs text-ink-500">Due {fmtDate(t.dueAt)}</div>
                 </div>

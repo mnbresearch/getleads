@@ -87,7 +87,18 @@ You can start in Stripe **test mode** (test-mode keys, e.g. `sk_test_...`) to ve
 
 ### A8. Secrets I generate for you (no action needed)
 
-`JWT_SECRET`, `ENCRYPTION_KEY`, `INTERNAL_TOKEN` - I'll generate 32-byte random values at deploy time. Keep `INTERNAL_TOKEN`; it is your admin key for `/v1/admin/*`.
+`JWT_SECRET`, `ENCRYPTION_KEY`, `INTERNAL_TOKEN`, `ADMIN_API_TOKEN` - generated as long random values at deploy time (`render.yaml` does this). What each one is for:
+
+| Variable | What it guards | Notes |
+|---|---|---|
+| `JWT_SECRET` | Every customer session | At least 32 random characters (`openssl rand -hex 32`); the API warns at startup if it is shorter and refuses to start on the built-in default. Rotating it signs every user out once. |
+| `ENCRYPTION_KEY` | Stored SMTP passwords, CRM tokens, webhook secrets | Set it. Without it those are encrypted under `JWT_SECRET`. To rotate: put the new value in `ENCRYPTION_KEY` and the old one in `ENCRYPTION_KEYS_OLD` (comma-separated, newest first). Reads try every listed key; new writes use `ENCRYPTION_KEY`. Dropping the old value without listing it makes every saved sender and integration unreadable. |
+| `INTERNAL_TOKEN` | `/internal/jobs/run` only (the serverless job runner) | Sent in the `x-internal-token` header, never in the URL. It is **not** an admin credential. The Render deployment (embedded worker) does not call this endpoint at all. |
+| `ADMIN_API_TOKEN` | Server-to-server calls to `/v1/admin/*` (header `x-admin-token`) | Separate from `INTERNAL_TOKEN`. Leave it unset and the header path is off; the admin dashboard's password login still works. |
+| `ADMIN_EMAIL` / `ADMIN_PASSWORD` | The admin dashboard login | Use a long random password. Five wrong attempts in 15 minutes lock the login form for up to 15 minutes. |
+| `ADMIN_JWT_SECRET` (optional) | Signs the admin dashboard session | Falls back to `JWT_SECRET`. Setting it means a leak of `JWT_SECRET` alone cannot mint an admin session. |
+
+**If `INTERNAL_TOKEN` was ever put in a URL** (the old cron instructions said `?token=`), treat it as leaked - URLs are written to access logs and cron dashboards - and rotate it: Render → the API service → Environment → `INTERNAL_TOKEN` → generate a new value → save. Nothing else needs to change on Render.
 
 ### A9. Pilot policy decisions (tell me)
 
@@ -115,12 +126,12 @@ Paste the Neon pooled connection string into `DATABASE_URL`. Migrations run auto
 
 **Option 1 - Render (recommended, simplest genuinely-free option).** Dashboard → New → Blueprint → pick the repo; `render.yaml` is detected. Set the `sync: false` env vars from Part A. The single web service runs the API and the embedded worker (`EMBED_WORKER=true`). Add the health URL `https://<service>.onrender.com/health` to a free uptime monitor (UptimeRobot / cron-job.org, every 10 min) so the free instance does not sleep and the scheduler keeps running. Render blocks port 25: keep `SMTP_PROBE_ENABLED=false` (emails verify as `risky` = MX + pattern; add Hunter/Abstract keys for `valid`).
 
-**Option 2 - Vercel serverless (API too).** Works, but background jobs need `JOB_MODE=inline` plus an external cron hitting `GET https://<api>/internal/jobs/run?token=<INTERNAL_TOKEN>` every minute (cron-job.org). Prefer Render for the worker unless you specifically want everything on Vercel.
+**Option 2 - Vercel serverless (API too).** Works, but background jobs need `JOB_MODE=inline` plus an external cron hitting `GET https://<api>/internal/jobs/run` every minute (cron-job.org) **with the request header `x-internal-token: <INTERNAL_TOKEN>`** (cron-job.org: edit the job → Advanced → Headers → add key `x-internal-token`). The token is not accepted in the URL (`?token=` answers 403): a secret in a URL ends up in every access log on the way. Also set `TRUSTED_PROXY=xff` there (see B3a). Prefer Render for the worker unless you specifically want everything on Vercel.
 
 **Once you're paying anyway and want real SMTP-verified emails** (not the free-tier MX+pattern `risky` check): Fly.io no longer has a free tier for new accounts (pay-as-you-go from the first machine, roughly $2-3/month for a small instance), but it's worth it at that point specifically because it allows outbound port 25 on request, which Render blocks entirely.
 ```bash
 fly launch --no-deploy --copy-config
-fly secrets set DATABASE_URL=... JWT_SECRET=$(openssl rand -hex 32) ENCRYPTION_KEY=$(openssl rand -hex 32) INTERNAL_TOKEN=$(openssl rand -hex 24) \
+fly secrets set DATABASE_URL=... JWT_SECRET=$(openssl rand -hex 32) ENCRYPTION_KEY=$(openssl rand -hex 32) INTERNAL_TOKEN=$(openssl rand -hex 24) ADMIN_API_TOKEN=$(openssl rand -hex 24) TRUSTED_PROXY=xff \
   GROQ_API_KEY=... GOOGLE_CSE_API_KEY=... GOOGLE_CSE_CX=... RESEND_API_KEY=... MAIL_FROM="Prospex <hello@yourdomain>" \
   APP_URL=https://prospex.vercel.app API_URL=https://prospex-api.fly.dev SMTP_PROBE_ENABLED=true
 fly deploy
@@ -132,11 +143,22 @@ Verify: `curl https://<api>/health` → `{"ok":true,"db":"up"}`; open `https://<
 ### B4. Dashboard (Vercel)
 Import the repo → Root directory `apps/web` → Framework Vite → Env `VITE_API_URL=https://<api>`. Optionally `VITE_DEMO_VIDEO_ID=<youtube id>` to show the explainer under the hero; unset, that section is not rendered. `apps/web/vercel.json` handles SPA routing. Then set `APP_URL` on the API to the Vercel URL (CORS + links in emails).
 
+### B3a. Network settings the API needs to know about
+
+- `TRUSTED_PROXY` - which proxy header carries the visitor's real address. Rate limits and the security log use it, so a wrong value either lets one person dodge the limits or puts everyone in one bucket.
+  - `cloudflare` - use `cf-connecting-ip`. Correct on Render (its edge is Cloudflare, which overwrites the header) and for any domain proxied through Cloudflare. `render.yaml` sets this.
+  - `xff` - use the right-most `X-Forwarded-For` entry. Use on Vercel, Fly and other hosts that are not behind Cloudflare; there `cf-connecting-ip` is whatever the client typed.
+  - `none` - nothing in front of the API; headers are ignored.
+  - Unset: `cloudflare` on Render, `xff` on any other production host.
+- `CORS_EXTRA_ORIGINS` - comma-separated browser origins allowed to call the API in addition to `APP_URL` (e.g. a second dashboard domain). `CORS_ALLOW_REGEX` - a regular expression of further allowed origins; by default any `https://*.vercel.app` origin, so Vercel preview deployments keep working. Set it to `none` to turn that off. The API never allows credentialed (cookie) cross-origin requests.
+- Request size limits: 1 MB per request, 10 MB for the lead import, 256 KB for the unauthenticated endpoints (sign-in, pixel, unsubscribe). Larger bodies get `413 payload_too_large`.
+- Sign in with Google uses a short-lived cookie on the API's own domain (`g_state`) while the browser is at Google. `API_URL` must be the exact public https URL of the API, and the Google console's redirect URI must be `<API_URL>/v1/auth/google/callback`.
+
 ### B5. Domains (optional)
 CNAME `prospex.<yourdomain>` → Vercel; `api.prospex.<yourdomain>` → Render. Update `APP_URL`, `API_URL`, `VITE_API_URL`. The visitor pixel and tracking links use `API_URL`, so set it before customers install pixels.
 
 ### B6. Post-deploy checks (5 minutes)
-1. Sign up at the dashboard → you get an API key. On the production path this lands you on the `free` plan (1 seat, 50 leads) like any real customer would - bump your own test org up first so the rest of this checklist isn't blocked by free-tier limits: `curl -X POST https://<api>/v1/admin/orgs/<orgId>/plan -H "x-internal-token: $INTERNAL_TOKEN" -H 'content-type: application/json' -d '{"plan":"growth"}'`.
+1. Sign up at the dashboard → you get an API key. On the production path this lands you on the `free` plan (1 seat, 50 leads) like any real customer would - bump your own test org up first so the rest of this checklist isn't blocked by free-tier limits: `curl -X PATCH https://<api>/v1/admin/orgs/<orgId>/plan -H "x-admin-token: $ADMIN_API_TOKEN" -H 'content-type: application/json' -d '{"plan":"growth"}'` (or use the admin dashboard at `/admin`).
 2. Settings → Team → invite a colleague (email arrives if Resend/SMTP is set).
 3. Find leads → "Founders of fintech startups in Bengaluru" → 25 results in 1-2 min (needs the Google CSE key).
 4. Website visitors → New website → paste the snippet on mnbresearch.com → visit /pricing from an office IP → company appears within ~10s.
@@ -147,7 +169,7 @@ CNAME `prospex.<yourdomain>` → Vercel; `api.prospex.<yourdomain>` → Render. 
 9. Settings → Billing → click "Upgrade" on Starter with Stripe in **test mode** first → complete test checkout (card `4242 4242 4242 4242`, any future date/CVC) → confirm the org's plan flips to `starter` and the premium-leads quota shows 150 in Settings → Usage. Only then switch Stripe to live keys.
 
 ### B7. Operating
-- Admin: `GET /v1/admin/orgs`, `POST /v1/admin/orgs/:id/plan {plan, overrides}` with header `x-internal-token`.
+- Admin: `GET /v1/admin/orgs`, `PATCH /v1/admin/orgs/:id/plan {plan, overrides}` with header `x-admin-token: $ADMIN_API_TOKEN` (not `INTERNAL_TOKEN`, which only runs the job queue). Every admin change is written to the security log of the workspace it touched (Settings → Security log; table `audit_log`), with the value before and after.
 - Free-tier budget for 100 orgs: Google CSE 3k queries/month (100/day) + SerpAPI 100/month ≈ 3,000-3,500 searches/month total, no Brave spend if you skip 9b. If usage is high, lower `searchesPerMonth` in `packages/db/src/plans.ts` (pilot) or add Brave/Apollo paid keys.
 - Scaling past free: Neon Launch ~$19/mo (removes the idle-suspend behavior entirely), Render Starter $7 (always-on, no cold start), Google CSE $5/1k queries past the free 100/day. No code changes needed for infra scaling. For scaling the *business* (paid customers, not just infra), see docs/PRICING.md for provider-tier upgrades and plan restructuring - the pilot plan limits in `plans.ts` are not safe to sell at paid-provider cost. Optionally split the worker into its own process (`npm run start:worker`, set `EMBED_WORKER=false` on the web service).
 - Logs: Render dashboard. Job failures live in the `jobs` table with `error` and retry with backoff.

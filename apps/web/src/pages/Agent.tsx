@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { API_URL, apiFetch } from "../lib/api";
 import { EmailStatusBadge, Page, ScoreBar, useToast } from "../components/ui";
+import { ExtLink } from "../components/ExtLink";
 
 interface Result { leadId?: string; name: string; title?: string; company?: string; domain?: string; email?: string; emailStatus?: string; score?: number; scoreReasons?: string[]; linkedinUrl?: string; companyDescription?: string; draftEmail?: { subject: string; body: string } }
 
@@ -68,7 +69,7 @@ export function AgentPage() {
           </div>
           {gen && <div className="grid gap-2 sm:grid-cols-3"><input className="input" placeholder="Your name" value={sender.name} onChange={(e) => setSender({ ...sender, name: e.target.value })} /><input className="input" placeholder="Your company" value={sender.company} onChange={(e) => setSender({ ...sender, company: e.target.value })} /><input className="input" placeholder="Value proposition" value={sender.valueProp} onChange={(e) => setSender({ ...sender, valueProp: e.target.value })} /></div>}
         </div>
-        <div className="card min-w-0 p-4"><div className="label">Equivalent API call</div><pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-[11px] leading-relaxed text-emerald-800">{curl}</pre><div className="mt-2 text-xs text-ink-400 [overflow-wrap:anywhere]">MCP: <code>npx @prospex/mcp</code> with <code>PROSPEX_API_KEY</code>. Docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">{API_URL}/docs</a></div></div>
+        <div className="card min-w-0 p-4"><div className="label">Equivalent API call</div><pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-[11px] leading-relaxed text-emerald-800">{curl}</pre><div className="mt-2 text-xs text-ink-400 [overflow-wrap:anywhere]">MCP: <code>npx @prospex/mcp</code> with <code>PROSPEX_API_KEY</code>. Docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noopener noreferrer">{API_URL}/docs</a></div></div>
       </div>
       {res && (
         <div className="mt-6">
@@ -92,7 +93,7 @@ export function AgentPage() {
               <div key={i} className="card min-w-0 p-4 [overflow-wrap:anywhere]">
                 <div className="flex items-start justify-between gap-2"><div className="min-w-0"><div className="font-semibold">{r.name}</div><div className="text-sm text-ink-300">{r.title} {r.company && <>· {r.company}</>}</div></div><ScoreBar score={r.score} /></div>
                 <div className="mt-2 text-sm">{r.email ? <>{r.email} <EmailStatusBadge status={r.emailStatus} /></> : <span className="text-ink-500">no email found</span>}</div>
-                {r.linkedinUrl && <a className="text-xs text-brand-600" href={r.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}
+                <ExtLink className="text-xs text-brand-600" href={r.linkedinUrl}>LinkedIn ↗</ExtLink>
                 {r.companyDescription && <p className="mt-2 line-clamp-2 text-xs text-ink-400">{r.companyDescription}</p>}
                 {r.draftEmail && <div className="mt-3 rounded-lg bg-cream p-3 text-xs"><div className="font-medium">{r.draftEmail.subject}</div><pre className="mt-1 whitespace-pre-wrap font-sans">{r.draftEmail.body}</pre></div>}
               </div>

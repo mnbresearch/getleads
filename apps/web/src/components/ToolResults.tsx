@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { ExtLink } from "./ExtLink";
 
 /**
  * Readable views of the two single-object tool results (company intelligence, sender domain
@@ -36,8 +37,10 @@ function KV({ rows }: { rows: [string, ReactNode][] }) {
   );
 }
 
+// Tool output is whatever a crawled site, a search result or a news feed said. A value that
+// is not an http(s) URL is shown as text, never as a link.
 const ext = (href: string, label?: string) => (
-  <a className="text-brand-600 hover:underline" href={href} target="_blank" rel="noreferrer">{label ?? href} ↗</a>
+  <ExtLink className="text-brand-600 hover:underline" href={href} fallback={label ?? href}>{label ?? href} ↗</ExtLink>
 );
 
 const SOURCE_LABEL: Record<string, string> = { ok: "checked", unreachable: "site not reachable", failed: "lookup failed" };
@@ -62,7 +65,7 @@ export function CompanyIntelView({ data }: { data: Obj }) {
       {items.map((n, i) => (
         <li key={i} className="[overflow-wrap:anywhere]">
           {str(n.type) && n.type !== "news" && <span className="badge mr-1 bg-brand-50 capitalize text-brand-700">{String(n.type).replace(/_/g, " ")}</span>}
-          {str(n.url) ? <a className="text-ink-100 hover:underline" href={String(n.url)} target="_blank" rel="noreferrer">{str(n.title) ?? n.url as string}</a> : str(n.title)}
+          {str(n.url) ? <ExtLink className="text-ink-100 hover:underline" href={n.url} fallback={str(n.title) ?? String(n.url)}>{str(n.title) ?? String(n.url)}</ExtLink> : str(n.title)}
           <span className="ml-1 text-xs text-ink-400">{[str(n.source), n.occurredAt ? new Date(String(n.occurredAt)).toLocaleDateString() : null].filter(Boolean).join(" · ")}</span>
         </li>
       ))}

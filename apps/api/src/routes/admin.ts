@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, currentPeriod, desc, eq, getDb, getToolsSummary, ilike, inArray, limitsFor, or, organizations, PLANS, recordProviderHealth, sql, updateToolLimit, upgradeRequests, usage, users } from "@prospex/db";
@@ -7,28 +7,64 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { env } from "../env.js";
 import { issueAdminJwt } from "../lib/auth.js";
 import { badRequest, notFound } from "../lib/errors.js";
-import { rateLimit, requireAdmin, type Env } from "../middleware.js";
+import { clientIp, rateLimit, requireAdmin, type Env } from "../middleware.js";
+import { audit } from "../lib/audit.js";
+import { lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
 
 export const adminRoutes = new Hono<Env>();
 
 // ── Admin login (single shared super-admin account, ADMIN_EMAIL / ADMIN_PASSWORD) ──
+//
+// One account guards every customer's plan and status, so it gets the same per-account lock
+// as a customer login (subject "admin"): five failures in fifteen minutes, from any mix of
+// addresses, and the form answers 429 until the oldest ages out. The lock is on the password
+// form only - the server-to-server ADMIN_API_TOKEN header is not affected, and neither is a
+// dashboard session that is already signed in.
+const ADMIN_SUBJECT = "admin";
 adminRoutes.post(
   "/login",
   rateLimit({ perMinute: 10 }),
-  zValidator("json", z.object({ email: z.string().email(), password: z.string().min(1) })),
+  zValidator("json", z.object({ email: z.string().max(254).email(), password: z.string().min(1).max(4096) })),
   async (c) => {
     const { email, password } = c.req.valid("json");
     if (!env.adminEmail || !env.adminPassword) throw badRequest("Admin login is not configured (set ADMIN_EMAIL and ADMIN_PASSWORD)");
-    // Compared as fixed-length hashes in constant time: `!==` on the raw password returns as
-    // soon as a character differs, which leaks how much of a guess was right.
-    const same = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
-    const ok = same(email.toLowerCase(), env.adminEmail) && same(password, env.adminPassword);
-    if (!ok) throw badRequest("Invalid admin credentials");
-    return c.json({ token: await issueAdminJwt() });
+    return serialised(ADMIN_SUBJECT, async () => {
+      const lock = await lockState(ADMIN_SUBJECT);
+      if (lock.locked) {
+        if (shouldAuditLock(ADMIN_SUBJECT)) await audit(c, "admin.login", { orgId: null, actorType: "anonymous", result: "denied", data: { reason: "locked", retryAfterSeconds: lock.retryAfterSeconds } });
+        c.header("retry-after", String(lock.retryAfterSeconds));
+        throw lockedError(lock, "the admin account");
+      }
+      // Compared as fixed-length hashes in constant time: `!==` on the raw password returns as
+      // soon as a character differs, which leaks how much of a guess was right.
+      const same = (a: string, b: string) => timingSafeEqual(createHash("sha256").update(a).digest(), createHash("sha256").update(b).digest());
+      const emailOk = same(email.toLowerCase(), env.adminEmail);
+      const passwordOk = same(password, env.adminPassword);
+      if (!(emailOk && passwordOk)) {
+        await recordAttempt(ADMIN_SUBJECT, clientIp(c), false);
+        // The address tried is recorded (it says who is knocking); the password never is.
+        await audit(c, "admin.login", { orgId: null, actorType: "anonymous", result: "failed", data: { email: email.toLowerCase().slice(0, 254) } });
+        throw badRequest("Invalid admin credentials");
+      }
+      await recordAttempt(ADMIN_SUBJECT, clientIp(c), true);
+      await audit(c, "admin.login", { orgId: null, actorType: "admin", result: "ok" });
+      return c.json({ token: await issueAdminJwt() });
+    });
   },
 );
 
 adminRoutes.use("*", requireAdmin);
+
+/**
+ * Every change made through the admin API is recorded against the workspace it changed, with
+ * what it was before and what it is now. An admin action used to leave no trace at all: a
+ * plan could be changed, or a workspace suspended, and nothing anywhere said so.
+ * `via` says whether it came from the dashboard (signed-in session) or the token header.
+ */
+async function adminAudit(c: Context<Env>, action: string, orgId: string | null, entry: { targetType?: string; targetId?: string | null; data?: Record<string, unknown> }) {
+  const via = (c.get("adminVia" as never) as string | undefined) ?? "session";
+  await audit(c, action, { orgId, actorType: "admin", actorUserId: null, targetType: entry.targetType, targetId: entry.targetId, result: "ok", data: { ...(entry.data ?? {}), via } });
+}
 
 adminRoutes.get("/session", (c) => c.json({ ok: true }));
 
@@ -134,20 +170,26 @@ adminRoutes.patch("/orgs/:id/plan", zValidator("json", PLAN_SCHEMA), async (c) =
   const b = c.req.valid("json");
   if (!PLANS[b.plan]) throw badRequest(`Unknown plan "${b.plan}". Valid plans: ${Object.keys(PLANS).join(", ")}`);
   const { db } = getDb();
+  const before = await db.query.organizations.findFirst({ where: eq(organizations.id, c.req.param("id")) });
+  if (!before) throw notFound("Org");
   const [row] = await db
     .update(organizations)
     .set({ plan: b.plan, planLimits: { ...limitsFor(b.plan), ...(b.overrides ?? {}) } })
     .where(eq(organizations.id, c.req.param("id")))
     .returning();
   if (!row) throw notFound("Org");
+  await adminAudit(c, "admin.plan_changed", row.id, { targetType: "organization", targetId: row.id, data: { before: { plan: before.plan, limits: before.planLimits }, after: { plan: row.plan, limits: row.planLimits } } });
   return c.json({ id: row.id, plan: row.plan, limits: row.planLimits });
 });
 
 const STATUS_SCHEMA = z.object({ status: z.enum(["active", "deactivated", "revoked"]) });
 adminRoutes.patch("/orgs/:id/status", zValidator("json", STATUS_SCHEMA), async (c) => {
   const { db } = getDb();
+  const before = await db.query.organizations.findFirst({ where: eq(organizations.id, c.req.param("id")) });
+  if (!before) throw notFound("Org");
   const [row] = await db.update(organizations).set({ status: c.req.valid("json").status }).where(eq(organizations.id, c.req.param("id"))).returning();
   if (!row) throw notFound("Org");
+  await adminAudit(c, "admin.status_changed", row.id, { targetType: "organization", targetId: row.id, data: { before: { status: before.status }, after: { status: row.status } } });
   return c.json({ id: row.id, status: row.status });
 });
 
@@ -176,6 +218,7 @@ adminRoutes.patch("/orgs/:id/credits", zValidator("json", CREDITS_SCHEMA), async
     .values({ orgId: orgIdParam, period, metric: b.metric, count: nextCount })
     .onConflictDoUpdate({ target: [usage.orgId, usage.period, usage.metric], set: { count: nextCount } })
     .returning();
+  await adminAudit(c, "admin.credits_changed", orgIdParam, { targetType: "organization", targetId: orgIdParam, data: { metric: b.metric, period, action: b.action, amount: b.amount, before: { used: currentCount }, after: { used: row.count } } });
   return c.json({ metric: row.metric, period: row.period, used: row.count });
 });
 
@@ -197,8 +240,11 @@ adminRoutes.get("/upgrade-requests", zValidator("query", z.object({ status: z.st
 
 adminRoutes.patch("/upgrade-requests/:id", zValidator("json", z.object({ status: z.enum(["new", "contacted", "converted", "dismissed"]) })), async (c) => {
   const { db } = getDb();
+  const before = await db.query.upgradeRequests.findFirst({ where: eq(upgradeRequests.id, c.req.param("id")) });
+  if (!before) throw notFound("Upgrade request");
   const [row] = await db.update(upgradeRequests).set({ status: c.req.valid("json").status }).where(eq(upgradeRequests.id, c.req.param("id"))).returning();
   if (!row) throw notFound("Upgrade request");
+  await adminAudit(c, "admin.upgrade_request_status_changed", row.orgId ?? null, { targetType: "upgrade_request", targetId: row.id, data: { planId: row.planId, before: { status: before.status }, after: { status: row.status } } });
   return c.json(row);
 });
 
@@ -237,6 +283,7 @@ adminRoutes.post("/tools/check", rateLimit({ perMinute: 3 }), async (c) => {
   const registry = await getToolsSummary();
   const retired = new Set(registry.filter((t) => t.retired).map((t) => t.provider));
   const broken = results.filter((r) => r.configured && !r.ok && !retired.has(r.provider));
+  await adminAudit(c, "admin.tools_checked", null, { targetType: "tools", data: { checked: results.filter((r) => r.configured).length, broken: broken.map((b) => b.provider) } });
   return c.json({
     results,
     checkedAt: new Date().toISOString(),
@@ -257,7 +304,11 @@ const TOOL_LIMIT_SCHEMA = z.object({
 
 adminRoutes.patch("/tools/:provider", zValidator("json", TOOL_LIMIT_SCHEMA), async (c) => {
   const patch = c.req.valid("json");
-  const updated = await updateToolLimit(c.req.param("provider"), patch);
+  const provider = c.req.param("provider");
+  const pick = (t: Record<string, unknown> | null | undefined) => (t ? { usageLimit: t.usageLimit ?? null, period: t.period ?? null, alertThresholdPct: t.alertThresholdPct ?? null, notes: t.notes ?? null } : null);
+  const before = pick((await getToolsSummary().catch(() => [])).find((t) => t.provider === provider) as Record<string, unknown> | undefined);
+  const updated = await updateToolLimit(provider, patch);
   if (!updated) throw notFound("Tool");
+  await adminAudit(c, "admin.tool_limit_changed", null, { targetType: "tool", targetId: provider, data: { before, after: pick(updated as unknown as Record<string, unknown>) } });
   return c.json(updated);
 });

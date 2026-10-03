@@ -98,8 +98,8 @@ signalRoutes.post("/subscriptions", zValidator("json", subInput), async (c) => {
   const b = c.req.valid("json");
   // A subscription with autoCreateLeads enrolls into this campaign. Without this check a
   // foreign campaign id would put our leads into someone else's sequence, which emails them.
-  await assertOwned(campaigns, b.campaignId, oid, "Campaign");
-  await assertOwned(icps, b.icpId, oid, "ICP");
+  await assertOwned(campaigns, b.campaignId, oid, "Campaign", c);
+  await assertOwned(icps, b.icpId, oid, "ICP", c);
   const [row] = await db.insert(signalSubscriptions).values({ orgId: oid, ...b }).returning();
   await enqueue(db, "signals.subscription", { subscriptionId: row.id }, { orgId: row.orgId, priority: 2 });
   return c.json(row, 201);
@@ -109,8 +109,8 @@ signalRoutes.patch("/subscriptions/:id", zValidator("json", subInput.partial()),
   const oid = orgId(c);
   const b = c.req.valid("json");
   requireSomeFields(b);
-  await assertOwned(campaigns, b.campaignId, oid, "Campaign");
-  await assertOwned(icps, b.icpId, oid, "ICP");
+  await assertOwned(campaigns, b.campaignId, oid, "Campaign", c);
+  await assertOwned(icps, b.icpId, oid, "ICP", c);
   const [row] = await db.update(signalSubscriptions).set(b).where(and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, oid))).returning();
   if (!row) throw notFound("Subscription");
   return c.json(row);
@@ -129,7 +129,12 @@ signalRoutes.post("/subscriptions/:id/run", async (c) => {
 });
 
 // ── Monitors ──
-const monitorInput = z.object({ type: z.enum(["linkedin_post", "keyword", "competitor", "company_news", "jobs"]), name: z.string().min(1), target: z.string().min(1), config: z.record(z.unknown()).default({}), intervalMinutes: z.number().int().min(30).max(10080).default(360), active: z.boolean().default(true) });
+/** A monitor's free-form options: small, and without keys that reach a prototype. */
+const monitorConfig = z
+  .record(z.unknown())
+  .refine((v) => JSON.stringify(v).length <= 5000, { message: "Monitor options are too large" })
+  .transform((v) => Object.fromEntries(Object.entries(v).filter(([k]) => !["__proto__", "constructor", "prototype"].includes(k))));
+const monitorInput = z.object({ type: z.enum(["linkedin_post", "keyword", "competitor", "company_news", "jobs"]), name: z.string().min(1).max(200), target: z.string().min(1).max(2000), config: monitorConfig.default({}), intervalMinutes: z.number().int().min(30).max(10080).default(360), active: z.boolean().default(true) });
 
 signalRoutes.get("/monitors", async (c) => {
   const { db } = getDb();
@@ -162,6 +167,11 @@ signalRoutes.post("/monitors/:id/run", async (c) => {
 });
 signalRoutes.get("/monitors/:id/results", async (c) => {
   const { db } = getDb();
-  const rows = await db.select().from(monitorResults).where(and(eq(monitorResults.monitorId, c.req.param("id")), eq(monitorResults.orgId, orgId(c)))).orderBy(desc(monitorResults.foundAt)).limit(300);
+  // A monitor that is not this workspace's is a 404, like every other monitor route. It
+  // used to be a 200 with an empty list - "this monitor found nothing" about a monitor the
+  // caller cannot see.
+  const m = await db.query.monitors.findFirst({ where: and(eq(monitors.id, c.req.param("id")), eq(monitors.orgId, orgId(c))) });
+  if (!m) throw notFound("Monitor");
+  const rows = await db.select().from(monitorResults).where(and(eq(monitorResults.monitorId, m.id), eq(monitorResults.orgId, orgId(c)))).orderBy(desc(monitorResults.foundAt)).limit(300);
   return c.json({ results: rows });
 });

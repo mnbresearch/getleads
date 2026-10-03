@@ -13,7 +13,7 @@ Everything below is a genuinely free tier as of September 2026 - checked directl
 | Search | **Google Programmable Search** | 100 queries/day (~3,000/month) | The only major search API with a real, durable free tier left after Brave's Feb 2026 change. Add SerpAPI (100/month free) as a third key for extra headroom if search volume is tight. |
 | Email sending | **Resend** | 3,000 emails/month, 100/day | Needs a verified sending domain (proper SPF/DKIM from day one, which matters for deliverability); or let each customer add their own SMTP later. |
 | Email verification boost | **Hunter.io free** | 25 domain searches + 50 verifications/month | Optional - the built-in MX+SMTP check already covers most cases; this just improves confidence on borderline addresses. |
-| Cron (only if you deploy the API serverlessly) | cron-job.org | Unlimited, 1-minute resolution | Hits `/internal/jobs/run` if you run the API on Vercel instead of Render. |
+| Cron (only if you deploy the API serverlessly) | cron-job.org | Unlimited, 1-minute resolution | Hits `/internal/jobs/run` (token in the `x-internal-token` header) if you run the API on Vercel instead of Render. Not used on Render. |
 
 Search budget math for 100 pilot users: each lead search uses 2-6 queries. Google's 3,000/month free budget covers roughly 500-1,500 searches/month, about 5-15 per customer at light usage. If that's tight, add the SerpAPI key as a second free source, or lower `searchesPerMonth` in the pilot plan (`packages/db/src/plans.ts`).
 
@@ -34,7 +34,7 @@ SMTP note: Render blocks outbound port 25, so `SMTP_PROBE_ENABLED=false` there; 
 
 ## Step 2 alt - API on Vercel (serverless)
 
-`apps/api/api/index.ts` + `vercel.json` are ready. Set `JOB_MODE=inline` (long searches run inside the request, capped ~25s; `/v1/search` returns results directly). For sequences and background enrichment, schedule `GET https://<api>/internal/jobs/run?token=<INTERNAL_TOKEN>` every minute on cron-job.org. Vercel Hobby functions time out at 60s; Render is the simpler default for the worker.
+`apps/api/api/index.ts` + `vercel.json` are ready. Set `JOB_MODE=inline` (long searches run inside the request, capped ~25s; `/v1/search` returns results directly). For sequences and background enrichment, schedule `GET https://<api>/internal/jobs/run` every minute on cron-job.org, with the request header `x-internal-token: <INTERNAL_TOKEN>` (edit the job → Advanced → Headers). The token is not accepted in the URL - `?token=` answers 403 - because URLs are written to access logs. Set `TRUSTED_PROXY=xff` on Vercel (on Render it is `cloudflare`, which `render.yaml` sets). Vercel Hobby functions time out at 60s; Render is the simpler default for the worker.
 
 ## Step 3 - Dashboard on Vercel
 
@@ -62,7 +62,8 @@ Inbound replies: point a Resend inbound webhook (or a Gmail → Zapier/Make forw
 
 ## Operating
 
-- Admin: `GET /v1/admin/orgs` and `POST /v1/admin/orgs/:id/plan` with header `x-internal-token: $INTERNAL_TOKEN` to list pilot orgs and change plans/limits.
+- Admin: the dashboard at `/admin` (sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`), or `GET /v1/admin/orgs` and `PATCH /v1/admin/orgs/:id/plan` with header `x-admin-token: $ADMIN_API_TOKEN` to list orgs and change plans/limits. `INTERNAL_TOKEN` is only the job runner's token and does not open the admin API. Every admin change is recorded in the workspace's security log.
+- Secrets: `JWT_SECRET` at least 32 random characters; keep `ENCRYPTION_KEY` set, and when rotating it list the previous value in `ENCRYPTION_KEYS_OLD` or every saved sender/integration credential becomes unreadable; optional `ADMIN_JWT_SECRET` signs the admin session separately. If `INTERNAL_TOKEN` was ever used in a URL, rotate it in the Render dashboard. Full table in DEPLOY.md section A8.
 - Invite-only signup: set `PILOT_INVITE_CODE`.
 - Logs: Render dashboard. Job failures are stored on the `jobs` row (`error`, `attempts`) and retried with backoff.
 - Backups: Neon retains point-in-time recovery even on the free tier for a few days; for longer retention, a free `pg_dump` cron job is the zero-cost option.

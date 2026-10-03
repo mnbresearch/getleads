@@ -4,6 +4,7 @@ import type { EmailStatus, EmailVerification } from "../types.js";
 import { fetchJson } from "../util/http.js";
 import { meter } from "../util/meter.js";
 import { looksLikeOutOfCredit, providerRecentlyRejected, reportProviderCall } from "../providers/health.js";
+import { assertPublicHost, isSsrfBlocked } from "../util/egress.js";
 
 const FREE_PROVIDERS = new Set([
   "gmail.com", "yahoo.com", "yahoo.co.in", "hotmail.com", "outlook.com", "live.com", "icloud.com", "aol.com", "protonmail.com", "proton.me", "rediffmail.com", "zoho.com", "mail.com", "gmx.com", "yandex.com",
@@ -142,8 +143,26 @@ async function smtpProbeRaw(email: string, mxHost: string, opts: { timeoutMs?: n
   const timeoutMs = opts.timeoutMs ?? 5000;
   const helo = opts.heloDomain ?? "scout.mnbresearch.com";
   const from = opts.from ?? `verify@${helo}`;
+  /**
+   * `mxHost` comes out of the DNS of a domain somebody typed: whoever controls that zone
+   * decides where this socket goes. An MX record pointing at 10.0.0.5, or at a name that
+   * resolves there, made "verify this email" a way to open a TCP connection to port 25 of
+   * anything on our private network and read back how it answered.
+   *
+   * So the host is resolved here, every address it has must be public, and the socket is
+   * opened to the ADDRESS that was checked - not to the name, which would be resolved a
+   * second time and could answer differently.
+   */
+  let target: { address: string; family: 4 | 6 };
+  try {
+    target = await assertPublicHost(mxHost);
+  } catch (e) {
+    if (isSsrfBlocked(e)) return { result: "error", detail: "the mail server for this domain is not at a public address, so it was not probed" };
+    // Did not resolve: the same outcome a failed connect to the name used to produce.
+    return { result: "error", detail: (e as Error).message };
+  }
   return new Promise((resolve) => {
-    const socket = net.createConnection({ host: mxHost, port: 25 });
+    const socket = net.createConnection({ host: target.address, port: 25, family: target.family });
     let stage = 0;
     let buf = "";
     let done = false;

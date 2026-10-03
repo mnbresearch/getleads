@@ -17,6 +17,28 @@ for (const p of [resolve(process.cwd(), ".env"), resolve(process.cwd(), "../../.
   } catch {}
 }
 
+function resolveTrustedProxy(): "cloudflare" | "xff" | "none" {
+  const v = (process.env.TRUSTED_PROXY ?? "").trim().toLowerCase();
+  if (v === "cloudflare" || v === "xff" || v === "none") return v;
+  if (v) console.warn(`[env] TRUSTED_PROXY="${v}" is not one of cloudflare | xff | none; using the default.`);
+  if (process.env.RENDER) return "cloudflare";
+  return (process.env.NODE_ENV ?? "development") === "production" ? "xff" : "cloudflare";
+}
+
+/** Same reach as the pattern it replaces (any *.vercel.app), anchored and https-only. */
+export const DEFAULT_CORS_ALLOW_REGEX = "^https://[a-z0-9-]+(\\.[a-z0-9-]+)*\\.vercel\\.app$";
+function compileOriginRegex(src: string | undefined): RegExp | null {
+  const pattern = src === undefined ? DEFAULT_CORS_ALLOW_REGEX : src.trim();
+  if (!pattern || pattern === "none" || pattern === "off") return null;
+  try {
+    return new RegExp(pattern, "i");
+  } catch (e) {
+    // A typo here must not take the API down or, worse, silently allow everything.
+    console.warn(`[env] CORS_ALLOW_REGEX is not a valid regular expression (${(e as Error).message}); ignoring it.`);
+    return null;
+  }
+}
+
 const bool = (v: string | undefined, d = false) => (v === undefined ? d : /^(1|true|yes)$/i.test(v));
 
 export const env = {
@@ -69,6 +91,33 @@ export const env = {
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
   /** Where "upgrade me" lead-capture emails are sent. Falls back to ADMIN_EMAIL. */
   leadNotifyEmail: process.env.LEAD_NOTIFY_EMAIL ?? process.env.ADMIN_EMAIL ?? "",
+  /**
+   * Signing secret for the admin dashboard session. Optional: when unset the admin session is
+   * signed with JWT_SECRET (and kept apart from customer sessions by its `aud` claim). Setting
+   * it means a leak of JWT_SECRET alone can no longer mint an admin session.
+   */
+  adminJwtSecret: process.env.ADMIN_JWT_SECRET || process.env.JWT_SECRET || "dev-secret-change-me",
+  /**
+   * Previous ENCRYPTION_KEY values, comma-separated, newest first. Only ever used to DECRYPT:
+   * rotating ENCRYPTION_KEY without listing the old value here makes every stored sender and
+   * integration credential unreadable.
+   */
+  encryptionKeysOld: (process.env.ENCRYPTION_KEYS_OLD ?? "").split(",").map((s) => s.trim()).filter(Boolean),
+  /**
+   * Which proxy header carries the caller's address (see clientIp in middleware.ts).
+   *  - "cloudflare": cf-connecting-ip, which Cloudflare overwrites on every request. Correct on
+   *    Render (its edge is Cloudflare) and behind a Cloudflare-proxied domain; WRONG anywhere
+   *    else, where the header is whatever the client typed.
+   *  - "xff": the right-most X-Forwarded-For entry, the one our own proxy appended.
+   *  - "none": no proxy in front; headers are ignored and the socket address is used.
+   * Default: "cloudflare" on Render (RENDER is set there) and outside production, "xff" on any
+   * other production host.
+   */
+  trustedProxy: resolveTrustedProxy(),
+  /** Extra browser origins allowed to call the API, comma-separated (APP_URL is always allowed). */
+  corsExtraOrigins: (process.env.CORS_EXTRA_ORIGINS ?? "").split(",").map((s) => s.trim().replace(/\/$/, "")).filter(Boolean),
+  /** Regex of further allowed origins. Default keeps Vercel preview deployments working. */
+  corsAllowRegex: compileOriginRegex(process.env.CORS_ALLOW_REGEX),
 };
 
 /**
@@ -89,4 +138,23 @@ if (env.nodeEnv === "production" && env.jwtSecret === DEFAULT_JWT_SECRET) {
  */
 if (env.nodeEnv === "production" && !env.encryptionKey) {
   console.warn("[env] WARNING: ENCRYPTION_KEY is not set; stored credentials are encrypted with a key derived from JWT_SECRET. Rotating JWT_SECRET would make them unreadable.");
+}
+/**
+ * A short JWT_SECRET can be guessed offline from any one session token (HS256 signatures are
+ * checkable without the server). Warned about rather than refused: a deployment that already
+ * runs on a short value must keep booting, and rotating it signs every user out, so it is a
+ * decision for the operator, not something a deploy should force.
+ */
+export const MIN_JWT_SECRET_LENGTH = 32;
+if (env.nodeEnv === "production" && env.jwtSecret.length < MIN_JWT_SECRET_LENGTH) {
+  console.warn(
+    `[env] WARNING: JWT_SECRET is only ${env.jwtSecret.length} characters long. Anyone holding one session token can try to guess a short secret offline and then sign in as any user. ` +
+      `Set it to at least ${MIN_JWT_SECRET_LENGTH} random characters (openssl rand -hex 32). Rotating it signs every user out once.`,
+  );
+}
+if (env.nodeEnv === "production" && process.env.ADMIN_JWT_SECRET && process.env.ADMIN_JWT_SECRET.length < MIN_JWT_SECRET_LENGTH) {
+  console.warn(`[env] WARNING: ADMIN_JWT_SECRET is shorter than ${MIN_JWT_SECRET_LENGTH} characters; use a long random value.`);
+}
+if (env.nodeEnv === "production" && env.adminPassword && env.adminPassword.length < 12) {
+  console.warn("[env] WARNING: ADMIN_PASSWORD is shorter than 12 characters. It guards every customer's plan and status; use a long random value.");
 }

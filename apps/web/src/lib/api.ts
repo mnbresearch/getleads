@@ -25,6 +25,16 @@ export const auth = {
   },
 };
 
+// The token lives in localStorage, which every tab of this app shares - but a tab only
+// re-reads it when told to. Without this, signing out (or "Sign out of all devices") in one
+// tab left every other open tab showing the signed-in app until its next failed request.
+// `storage` fires only in the *other* tabs, which is exactly who needs telling.
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === TOKEN_KEY || e.key === null) authListeners.forEach((fn) => fn());
+  });
+}
+
 export function useAuthToken(): string | null {
   return useSyncExternalStore(auth.subscribe, () => auth.token);
 }
@@ -63,9 +73,20 @@ export async function apiFetch<T = unknown>(
   path: string,
   body?: unknown,
   raw?: { contentType: string; body: string },
-  opts?: { timeoutMs?: number },
+  opts?: {
+    timeoutMs?: number;
+    /**
+     * Send no Authorization header and leave the stored session alone whatever the answer.
+     * For calls that establish a session rather than use one (the Google code exchange): a
+     * rejected sign-in attempt must not sign out, or mark as "expired", a session it never
+     * touched.
+     */
+    anonymous?: boolean;
+  },
 ): Promise<T> {
   const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  // The token this request is sent with, kept so a 401 can be attributed to it (below).
+  const sentToken = opts?.anonymous ? null : auth.token;
   // AbortController rather than AbortSignal.timeout: the latter is not in every browser
   // this app is expected to run in, and a missing timeout is exactly the bug being fixed.
   const ctrl = new AbortController();
@@ -76,7 +97,7 @@ export async function apiFetch<T = unknown>(
   try {
     res = await fetch(`${API_URL}${path}`, {
       method,
-      headers: { ...(raw ? { "content-type": raw.contentType } : { "content-type": "application/json" }), ...(auth.token ? { authorization: `Bearer ${auth.token}` } : {}) },
+      headers: { ...(raw ? { "content-type": raw.contentType } : { "content-type": "application/json" }), ...(sentToken ? { authorization: `Bearer ${sentToken}` } : {}) },
       body: raw ? raw.body : body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
     });
@@ -98,12 +119,16 @@ export async function apiFetch<T = unknown>(
     data = JSON.parse(text);
   } catch {}
   if (!res.ok) {
-    if (res.status === 401 && auth.token) {
+    if (res.status === 401) {
       // A token we held was rejected: the session ended. Say so on the login page and come
       // back here afterwards, instead of dropping the user on a blank login form with no idea
       // why. (A 401 with no token is a wrong password on /login - not an expiry.)
-      markSessionExpired();
-      auth.set(null);
+      //
+      // Only when the rejected token is still the one in use. Changing the password retires
+      // every older token and hands this tab a fresh one; a request already in flight with
+      // the old token then comes back 401, and clearing the session on that would sign the
+      // user out of the one tab that is supposed to stay signed in.
+      rejectSession(sentToken);
     }
     throw new ProspexError(res.status, errorCode(data), errorMessage(data, res.status), data);
   }
@@ -150,6 +175,21 @@ export function errorCode(data: unknown): string {
 const EXPIRED_KEY = "gl.sessionExpired";
 const RETURN_KEY = "gl.returnPath";
 const NO_RETURN = ["/login", "/signup", "/forgot-password", "/reset-password", "/join", "/auth/google"];
+
+/**
+ * The server answered 401 to a request sent with `sentToken`: drop that session.
+ *
+ * Exported for the few requests that cannot go through apiFetch (a file download needs the
+ * raw Response) - they must end a dead session the same way, or a rejected token stays in
+ * storage and the app keeps presenting it.
+ *
+ * Does nothing unless `sentToken` is still the stored token; see the note in apiFetch.
+ */
+export function rejectSession(sentToken: string | null | undefined) {
+  if (!sentToken || auth.token !== sentToken) return;
+  markSessionExpired();
+  auth.set(null);
+}
 
 function markSessionExpired() {
   try {

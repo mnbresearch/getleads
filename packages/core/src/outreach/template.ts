@@ -17,21 +17,34 @@ export function leadVars(lead: {
   company?: { name?: string | null; domain?: string | null; industry?: string | null; description?: string | null } | null;
   custom?: Record<string, unknown> | null;
 }, sender: { name?: string; company?: string; signature?: string } = {}) {
+  const custom = (lead.custom ?? {}) as Record<string, unknown>;
+  /**
+   * A lead's own field wins; a custom column of the same name only fills a gap. (Before, a
+   * custom column always won, whatever it was called.)
+   */
+  const own = (key: string, value: string | null | undefined): string => {
+    if (value) return value;
+    const c = custom[key];
+    return typeof c === "string" || typeof c === "number" ? String(c) : "";
+  };
+  // Custom (CSV / CRM) columns FIRST, so the reserved names below always win. Spread last, a
+  // CSV column called "sender_name" or "signature" replaced the sender's own identity in
+  // every email sent to that lead. The three sender variables never come from lead data.
   return {
-    first_name: lead.firstName ?? lead.fullName?.split(" ")[0] ?? "",
-    last_name: lead.lastName ?? "",
-    full_name: lead.fullName ?? [lead.firstName, lead.lastName].filter(Boolean).join(" "),
-    title: lead.title ?? "",
+    ...custom,
+    first_name: own("first_name", lead.firstName ?? lead.fullName?.split(" ")[0]),
+    last_name: own("last_name", lead.lastName),
+    full_name: own("full_name", lead.fullName ?? [lead.firstName, lead.lastName].filter(Boolean).join(" ")),
+    title: own("title", lead.title),
     email: lead.email ?? "",
-    location: lead.location ?? "",
-    company: lead.company?.name ?? lead.company?.domain ?? "",
-    company_domain: lead.company?.domain ?? "",
-    industry: lead.company?.industry ?? "",
-    company_description: lead.company?.description ?? "",
+    location: own("location", lead.location),
+    company: own("company", lead.company?.name ?? lead.company?.domain),
+    company_domain: own("company_domain", lead.company?.domain),
+    industry: own("industry", lead.company?.industry),
+    company_description: own("company_description", lead.company?.description),
     sender_name: sender.name ?? "",
     sender_company: sender.company ?? "",
     signature: sender.signature ?? "",
-    ...(lead.custom ?? {}),
   };
 }
 

@@ -7,6 +7,8 @@ import { authenticate } from "../lib/auth.js";
 import { badRequest } from "../lib/errors.js";
 import { sendMail } from "../lib/mailer.js";
 import { rateLimit, type Env } from "../middleware.js";
+import { emailField } from "../lib/fields.js";
+import { safeHeaderText } from "../lib/sanitize.js";
 
 /** Public "I'm interested, upgrade me" lead capture from the pricing page. No Stripe: this
  * just records the lead and emails the admin so they can close the sale manually, then use
@@ -15,7 +17,8 @@ export const leadCaptureRoutes = new Hono<Env>();
 
 const BODY_SCHEMA = z.object({
   name: z.string().min(1).max(120),
-  email: z.string().email(),
+  // One canonical address: it is stored, and used as the Reply-To of the notification.
+  email: emailField,
   mobile: z.string().min(5).max(30),
   country: z.string().min(1).max(80),
   planId: z.string().min(1),
@@ -33,7 +36,7 @@ leadCaptureRoutes.post("/upgrade-requests", rateLimit({ perMinute: 5 }), zValida
 
   const [row] = await db
     .insert(upgradeRequests)
-    .values({ orgId: auth?.org.id ?? null, name: b.name, email: b.email.toLowerCase(), mobile: b.mobile, country: b.country, planId: b.planId, message: b.message })
+    .values({ orgId: auth?.org.id ?? null, name: b.name, email: b.email, mobile: b.mobile, country: b.country, planId: b.planId, message: b.message })
     .returning();
 
   const plan = PLANS[b.planId];
@@ -42,7 +45,8 @@ leadCaptureRoutes.post("/upgrade-requests", rateLimit({ perMinute: 5 }), zValida
       from: env.mailFrom,
       to: env.leadNotifyEmail,
       replyTo: b.email,
-      subject: `Upgrade request: ${b.name} wants ${plan.name} ($${plan.priceUsd}/mo)`,
+      // A public form: the name is a stranger's text in the subject of a mail to the admin.
+      subject: `Upgrade request: ${safeHeaderText(b.name, 80, "Someone")} wants ${plan.name} ($${plan.priceUsd}/mo)`,
       text: [
         `New upgrade request from the pricing page.`,
         ``,

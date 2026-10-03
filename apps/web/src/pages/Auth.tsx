@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, Navigate, useNavigate, useSearchParams } from "react-router-dom";
-import { apiFetch, auth, API_URL, consumeReturnPath, sessionExpiredNotice } from "../lib/api";
+import { apiFetch, auth, consumeReturnPath, sessionExpiredNotice } from "../lib/api";
+import { googleStartUrl } from "../lib/googleSignIn";
 import { Logo, BRAND_NAME, BRAND_TAGLINE } from "../components/Logo";
 
 /** Google's four-colour mark, drawn inline so the button needs no external request. */
@@ -49,6 +50,31 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
     const e = params.get("error");
     if (e) setErr(e);
   }, [params]);
+  // Google sign-in leaves the page, so it is a navigation rather than a fetch - but not a
+  // plain link any more: the browser first makes the one-time verifier that the callback
+  // page has to present (see lib/googleSignIn.ts for why).
+  const [googleBusy, setGoogleBusy] = useState(false);
+  const startGoogle = async () => {
+    if (googleBusy) return;
+    setGoogleBusy(true);
+    setErr(null);
+    try {
+      window.location.assign(await googleStartUrl({ next: "/" }));
+      // No reset on success: the page is on its way out, and re-enabling the button would
+      // invite a second click that replaces the verifier mid-flight.
+    } catch (e) {
+      setErr((e as Error).message);
+      setGoogleBusy(false);
+    }
+  };
+  // Pressing Back from Google's page restores this one from the browser's page cache with
+  // its state intact - including a disabled "Opening Google…" button that would never
+  // re-enable. `pageshow` with persisted=true is that restore.
+  useEffect(() => {
+    const onShow = (e: PageTransitionEvent) => { if (e.persisted) setGoogleBusy(false); };
+    window.addEventListener("pageshow", onShow);
+    return () => window.removeEventListener("pageshow", onShow);
+  }, []);
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
@@ -118,11 +144,11 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
               or
               <span className="h-px flex-1 bg-black/10" />
             </div>
-            {/* A plain link, not fetch: OAuth is a full-page browser redirect by design. */}
-            <a className="btn-secondary w-full justify-center gap-2" href={`${API_URL}/v1/auth/google/start?next=${encodeURIComponent("/")}`}>
+            {/* type="button": this sits inside the form and must not submit it. */}
+            <button type="button" className="btn-secondary w-full justify-center gap-2" onClick={startGoogle} disabled={googleBusy}>
               <GoogleMark />
-              Continue with Google
-            </a>
+              {googleBusy ? "Opening Google…" : "Continue with Google"}
+            </button>
           </>
         )}
         <div className="text-center text-sm text-ink-400">

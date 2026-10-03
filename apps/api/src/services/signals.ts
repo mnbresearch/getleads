@@ -91,10 +91,11 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
   let created = 0;
   let stoppedBecause: string | null = null;
   const ids: string[] = [];
-  const icp = sub.icpId ? await db.query.icps.findFirst({ where: (t, { eq: e }) => e(t.id, sub.icpId!) }) : null;
+  // The subscription org's own ICP, not merely a row with that id.
+  const icp = sub.icpId ? await db.query.icps.findFirst({ where: (t, { eq: e, and: a }) => a(e(t.id, sub.icpId!), e(t.orgId, sub.orgId)) }) : null;
   for (const p of people) {
     const score = icp ? scoreLeadRules({ title: p.title, location: p.location, company: { name: companyName } }, icp.criteria as IcpCriteria).score : 70;
-    const { lead, created: c } = await upsertLead(sub.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName, companyDomain: domain, source: `signal:${type}`, tags: [`signal:${type}`, `sub:${sub.id.slice(0, 8)}`], icpId: sub.icpId, score, custom: { signalId } }, { fillOnly: true });
+    const { lead, created: c } = await upsertLead(sub.orgId, { firstName: p.firstName, lastName: p.lastName, fullName: p.fullName, title: p.title, linkedinUrl: p.linkedinUrl, location: p.location, companyName, companyDomain: domain, source: `signal:${type}`, tags: [`signal:${type}`, `sub:${sub.id.slice(0, 8)}`], icpId: icp?.id ?? null, score, custom: { signalId } }, { fillOnly: true });
     // Charged for a lead the org did not already have. A subscription re-reads the same
     // people whenever a signal matches again; billing before the upsert charged for those
     // repeats, which produce nothing.

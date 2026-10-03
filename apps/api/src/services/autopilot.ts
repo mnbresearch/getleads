@@ -1,6 +1,7 @@
-import { and, autopilots, campaigns, eq, getDb, listLeads, organizations, remainingPremiumBudget, type Autopilot } from "@prospex/db";
-import { createAiProviderForPlan, runLeadPipelineDetailed, type IcpCriteria } from "@prospex/core";
+import { and, autopilots, campaigns, eq, getDb, icps, listLeads, lists, organizations, remainingPremiumBudget, type Autopilot } from "@prospex/db";
+import { clampLeadQuery, createAiProviderForPlan, runLeadPipelineDetailed, type IcpCriteria } from "@prospex/core";
 import { env } from "../env.js";
+import { clampSearchQuery } from "../lib/searchQuery.js";
 import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertLead } from "./leads.js";
 import { enrollEligibleLeads } from "./campaigns.js";
 import { emitEvent } from "../lib/events.js";
@@ -15,7 +16,11 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
   const { db } = getDb();
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, ap.orgId) });
   if (!org || org.status !== "active") return { skipped: "organization not active" };
-  const icp = ap.icpId ? await db.query.icps.findFirst({ where: (t, { eq: e }) => e(t.id, ap.icpId!) }) : null;
+  // The ICP and the list are this org's own, not merely rows with those ids: a reference
+  // written across a workspace boundary before the ownership checks existed must not be
+  // followed (another org's criteria scored our leads; our leads landed on their list).
+  const icp = ap.icpId ? await db.query.icps.findFirst({ where: and(eq(icps.id, ap.icpId), eq(icps.orgId, ap.orgId)) }) : null;
+  const list = ap.listId ? await db.query.lists.findFirst({ where: and(eq(lists.id, ap.listId), eq(lists.orgId, ap.orgId)), columns: { id: true } }) : null;
   // A plan limit skips the run; a database fault is a fault and is thrown, not filed as
   // the customer's quota.
   const search = await tryConsume(db, ap.orgId, "searches", 1);
@@ -27,7 +32,12 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
   if (!search.ok) throw new Error(`could not record search usage: ${search.message}`);
   // Ask for extra so filtering by score/email still yields dailyLeads
   const providerBudget = await remainingPremiumBudget(db, ap.orgId);
-  const { leads: results, providerFailures } = await runLeadPipelineDetailed({ ...(ap.query as Record<string, unknown>), limit: Math.min(200, ap.dailyLeads * 3), findEmails: true }, {
+  // The stored query is tenant-written jsonb. It is re-clamped on every run (known keys
+  // only, companyDomains <= 50, ten of each list) and supplies the pipeline INPUT alone;
+  // every option in the second argument is built here.
+  const stored = clampSearchQuery(ap.query);
+  const input = clampLeadQuery({ ...stored, limit: Math.min(200, Math.max(1, ap.dailyLeads * 3)), findEmails: true });
+  const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, {
     // The plan decides the engine: free workspaces never reach the paid model.
     ai: createAiProviderForPlan(org.plan),
     verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
@@ -47,7 +57,7 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
     const existing = await findExistingLead(ap.orgId, { email: r.email, linkedinUrl: r.linkedinUrl });
     if (existing) {
       // Still merged (fill-only), never counted: only fresh leads count.
-      await upsertLead(ap.orgId, pipelineLeadToInput(r, { icpId: ap.icpId, tags: ["autopilot", `ap:${ap.id.slice(0, 8)}`], source: r.source }), { fillOnly: true });
+      await upsertLead(ap.orgId, pipelineLeadToInput(r, { icpId: icp?.id ?? null, tags: ["autopilot", `ap:${ap.id.slice(0, 8)}`], source: r.source }), { fillOnly: true });
       continue;
     }
     const charge = await chargeNewLead(ap.orgId, r.source);
@@ -55,11 +65,11 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
       stoppedBecause = charge.reason === "quota" ? `Stopped at your plan's lead limit: ${charge.message}` : `Stopped: could not record lead usage (${charge.message})`;
       break;
     }
-    const { lead, created } = await upsertLead(ap.orgId, pipelineLeadToInput(r, { icpId: ap.icpId, tags: ["autopilot", `ap:${ap.id.slice(0, 8)}`], source: r.source }), { fillOnly: true });
+    const { lead, created } = await upsertLead(ap.orgId, pipelineLeadToInput(r, { icpId: icp?.id ?? null, tags: ["autopilot", `ap:${ap.id.slice(0, 8)}`], source: r.source }), { fillOnly: true });
     if (!created) continue;
     saved++;
     ids.push(lead.id);
-    if (ap.listId) await db.insert(listLeads).values({ listId: ap.listId, leadId: lead.id }).onConflictDoNothing();
+    if (list) await db.insert(listLeads).values({ listId: list.id, leadId: lead.id }).onConflictDoNothing();
   }
   let enrolled = 0;
   let enrollNote: Record<string, number> = {};

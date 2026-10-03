@@ -1,5 +1,6 @@
 import { classifyHttp, classifyThrown, reportProviderCall } from "../providers/health.js";
-import { isPublicHost } from "./publicHost.js";
+import { guardedDispatcher, isSsrfBlocked } from "./egress.js";
+import { isPublicHost, parseHttpUrl } from "./publicHost.js";
 
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ScoutBot/1.0 (+https://scout.mnbresearch.com)";
@@ -27,8 +28,43 @@ export interface FetchOpts extends RequestInit {
    * express that, which is how a test of this guard came to pass without exercising it.
    */
   allowFirstHop?: boolean;
-  /** How many redirects fetchPublic will follow before giving up. Default 5. */
+  /**
+   * How many redirects fetchPublic will follow before giving up. Default 5.
+   *
+   * `0` means "do not follow redirects at all", and is the one case where a redirect is
+   * handed back instead of refused: the 3xx response is returned (status and headers
+   * intact, body discarded), so the caller can report "this endpoint redirects" rather
+   * than a bare failure. Webhook-style deliveries use this - a POST carrying a tenant's
+   * lead is never re-sent to wherever a 3xx points. With any other value, running out of
+   * hops returns null, as it always has.
+   */
   maxRedirects?: number;
+  /**
+   * fetchPublic: accept `user:pass@` in the URL of the FIRST hop, sending it as HTTP Basic.
+   *
+   * For a URL a customer typed into their own settings (a self-hosted webhook secured with
+   * Basic auth). The host behind the credentials is still judged. Never honoured on a
+   * redirect hop, and never for a crawl target, where userinfo means the string is not the
+   * host it appears to be.
+   */
+  allowUserinfo?: boolean;
+  /**
+   * fetchPublic: an extra rule every hop's hostname must pass (lower-case, no brackets).
+   * For a fetch that should only ever talk to one site - a LinkedIn post, say - so that a
+   * redirect cannot carry it somewhere else, public or not.
+   */
+  hostAllow?: (hostname: string) => boolean;
+  /**
+   * Do not add the crawler's browser-like default headers (user-agent, accept,
+   * accept-language). For API-style calls - a webhook delivery is not a page view.
+   */
+  noDefaultHeaders?: boolean;
+  /**
+   * The undici dispatcher to send through. fetchPublic sets this itself (to
+   * `guardedDispatcher()`, or to nothing when `allowPrivateHosts` permits the hop), and
+   * overrides whatever is passed here.
+   */
+  dispatcher?: unknown;
 }
 
 /**
@@ -58,7 +94,7 @@ export async function fetchWithTimeout(url: string, opts: FetchOpts = {}) {
       // object: an array of pairs becomes {"0": [...]} and a Headers instance becomes {},
       // because its entries live in internal slots. That second case silently threw away
       // every header fetchPublic had carefully stripped credentials out of.
-      headers: mergeHeaders({ "user-agent": UA, accept: "text/html,application/json,*/*", "accept-language": "en" }, opts.headers),
+      headers: mergeHeaders(opts.noDefaultHeaders ? {} : { "user-agent": UA, accept: "text/html,application/json,*/*", "accept-language": "en" }, opts.headers),
       // `?? "follow"`, not a hardcoded "follow". Spread order made this override the
       // caller's choice, so fetchPublic's `redirect: "manual"` never took effect and its
       // entire per-hop SSRF check was dead code - while both of its tests passed, because
@@ -108,16 +144,32 @@ export async function readCapped(res: Response, max: number): Promise<Uint8Array
 }
 
 /**
- * Fetch a URL that came from a user, checking every hop.
+ * Fetch a URL that came from a tenant, a user or third-party content - checking every hop,
+ * and checking the address each hop actually connects to.
  *
- * `isPublicHost` is a pre-flight check on the address we were given, and on its own it is
- * defeated by one redirect: a host the guard allows answers `302 Location:
- * http://169.254.169.254/...`, undici follows it because `redirect: "follow"` is the
- * default here, and the metadata response is what gets parsed, stored on the company
- * record and shown back in the UI.
+ * Three things are enforced on EVERY hop, the first and each redirect:
  *
- * So redirects are followed by hand, and the guard runs against each new location. A
- * redirect to a private address ends the walk rather than being followed.
+ *   - the URL is http(s), carries no credentials (unless `allowUserinfo`, first hop only)
+ *     and its host passes `isPublicHost` - the literal check, which catches an IP written
+ *     any way a URL parser accepts;
+ *   - the connection goes out through `guardedDispatcher()`, which resolves the name once,
+ *     refuses if any address it resolves to is not public, and connects to the address it
+ *     vetted - so a public-looking name that points at 127.0.0.1 or the metadata endpoint
+ *     is refused, and DNS rebinding has no second lookup to win;
+ *   - redirects are followed here, by hand, never by the client, so both of the above run
+ *     again for each `Location`.
+ *
+ * Returns the Response, or **null when the request was refused** (not public, not http(s),
+ * redirect limit reached). Network failures still throw, as fetch does. One exception to
+ * "null on a redirect we will not follow": `maxRedirects: 0` returns the 3xx response
+ * itself - see FetchOpts.maxRedirects.
+ *
+ * `maxBytes`, when given, caps how much of the response body can be read from the returned
+ * Response, so `await res.text()` on a hostile endpoint cannot buffer without limit.
+ *
+ * This calls the GLOBAL fetch (with a `dispatcher`), so a test that stubs global fetch
+ * still intercepts it. `allowPrivateHosts` - tests and local development only - skips the
+ * address checks and uses the default, unguarded dispatcher.
  */
 /** True only for a body that cannot be sent twice. */
 function isSingleUseBody(body: BodyInit | null | undefined): boolean {
@@ -152,6 +204,38 @@ function stripCredentials(headers: HeadersInit | undefined): HeadersInit | undef
   return plain;
 }
 
+/** Response -> same response, whose body ends after `max` bytes. */
+function capBody(res: Response, max: number): Response {
+  if (!res.body) return res;
+  const reader = res.body.getReader();
+  let total = 0;
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      if (total >= max) {
+        controller.close();
+        await reader.cancel().catch(() => {});
+        return;
+      }
+      const { done, value } = await reader.read();
+      if (done) return controller.close();
+      if (!value) return;
+      const take = Math.min(value.byteLength, max - total);
+      total += take;
+      controller.enqueue(take === value.byteLength ? value : value.subarray(0, take));
+    },
+    cancel(reason) {
+      return reader.cancel(reason).catch(() => {});
+    },
+  });
+  const headers = new Headers(res.headers);
+  // The body has already been decoded and may now be shorter than these claim.
+  headers.delete("content-length");
+  headers.delete("content-encoding");
+  const out = new Response(body, { status: res.status, statusText: res.statusText, headers });
+  Object.defineProperty(out, "url", { value: res.url });
+  return out;
+}
+
 export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Response | null> {
   const max = opts.maxRedirects ?? 5;
   let current = url;
@@ -159,17 +243,48 @@ export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Re
   let body = opts.body;
   for (let hop = 0; hop <= max; hop++) {
     const permitted = (opts.allowPrivateHosts ?? false) || (hop === 0 && (opts.allowFirstHop ?? false));
-    if (!permitted && !isPublicHost(current)) return null;
+    // http(s) only, no fragment, and credentials only where the caller said to expect them.
+    const target = parseHttpUrl(current, { allowUserinfo: hop === 0 && (opts.allowUserinfo ?? false) });
+    if (!target) return null;
+    if (!permitted && !isPublicHost(target.href, { allowUserinfo: true })) return null;
+    if (opts.hostAllow && !opts.hostAllow(target.hostname.replace(/^\[|\]$/g, "").replace(/\.$/, "").toLowerCase())) return null;
     // Credentials are dropped on a cross-origin hop, as a client following redirects for
     // us would do. This loop forwards `opts` verbatim, so without this an Authorization or
     // Cookie header set by the caller would be handed to whatever host the redirect names.
-    const headers = hop === 0 || sameOrigin(url, current) ? opts.headers : stripCredentials(opts.headers);
-    const res = await fetchWithTimeout(current, { ...opts, headers, method, body, redirect: "manual" });
-    if (res.status < 300 || res.status >= 400) return res;
-    const location = res.headers.get("location");
-    if (!location) return res;
+    let headers = hop === 0 || sameOrigin(url, current) ? opts.headers : stripCredentials(opts.headers);
+    // fetch refuses a URL with credentials outright, so they travel as the header they
+    // stand for. An Authorization header the caller set explicitly wins.
+    if (target.username || target.password) {
+      const h = new Headers(headers);
+      if (!h.has("authorization")) h.set("authorization", `Basic ${Buffer.from(`${safeDecode(target.username)}:${safeDecode(target.password)}`).toString("base64")}`);
+      const plain: Record<string, string> = {};
+      h.forEach((v, k) => {
+        plain[k] = v;
+      });
+      headers = plain;
+      target.username = "";
+      target.password = "";
+    }
+    let res: Response;
+    try {
+      res = await fetchWithTimeout(target.toString(), { ...opts, headers, method, body, redirect: "manual", dispatcher: permitted ? undefined : guardedDispatcher() });
+    } catch (e) {
+      // The connect-time guard refused the address this name resolved to. That is a
+      // refusal, the same as failing the literal check, not a network fault.
+      if (isSsrfBlocked(e)) return null;
+      throw e;
+    }
+    const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+    if (!location) return opts.maxBytes !== undefined ? capBody(res, opts.maxBytes) : res;
     // Cancel the redirect body so the connection is not left hanging.
     await res.body?.cancel().catch(() => {});
+    // "Do not follow redirects": hand the redirect back, without its body, so the caller
+    // can say what happened. The Location is the caller's to report, never to follow blind.
+    if (max === 0) {
+      const bare = new Response(null, { status: res.status, statusText: res.statusText, headers: res.headers });
+      Object.defineProperty(bare, "url", { value: res.url });
+      return bare;
+    }
     // 301, 302 and 303 turn into a GET with no body, as the spec requires and as every
     // browser does; 307 and 308 preserve both. Replaying a POST body across a 302 would
     // send the same payload somewhere the caller never addressed.
@@ -184,12 +299,20 @@ export async function fetchPublic(url: string, opts: FetchOpts = {}): Promise<Re
       return null;
     }
     try {
-      current = new URL(location, current).toString();
+      current = new URL(location, target).toString();
     } catch {
       return null;
     }
   }
   return null;
+}
+
+function safeDecode(s: string): string {
+  try {
+    return decodeURIComponent(s);
+  } catch {
+    return s;
+  }
 }
 
 export async function fetchText(url: string, opts: FetchOpts = {}): Promise<string | null> {

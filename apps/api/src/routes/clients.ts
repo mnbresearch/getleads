@@ -4,6 +4,8 @@ import { z } from "zod";
 import { and, clients, enqueue, eq, getDb, getUsage, listLeads, lists, organizations } from "@prospex/db";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { notFound } from "../lib/errors.js";
+import { audit } from "../lib/audit.js";
+import { ownerOrAdmin } from "../lib/roles.js";
 import {
   assignLeads,
   attentionLeadIds,
@@ -50,7 +52,11 @@ clientRoutes.get("/", zValidator("query", z.object({ includeArchived: z.enum(["t
   c.json(await clientOverview(orgId(c), { includeArchived: c.req.valid("query").includeArchived === "true" })),
 );
 
-clientRoutes.post("/", zValidator("json", clientInput), async (c) => c.json(await createClient(orgId(c), c.req.valid("json")), 201));
+clientRoutes.post("/", zValidator("json", clientInput), async (c) => {
+  const created = await createClient(orgId(c), c.req.valid("json"));
+  await audit(c, "client.created", { targetType: "client", targetId: created.id, data: { name: created.name } });
+  return c.json(created, 201);
+});
 
 // ── Pool routing ──
 clientRoutes.get("/routing", zValidator("query", z.object({ limit: z.coerce.number().min(1).max(1000).default(200) })), async (c) =>
@@ -85,7 +91,12 @@ clientRoutes.get("/:id", async (c) => c.json(await clientDetail(orgId(c), c.req.
 
 clientRoutes.patch("/:id", zValidator("json", clientInput.partial()), async (c) => c.json(await updateClient(orgId(c), c.req.param("id"), c.req.valid("json"))));
 
-clientRoutes.delete("/:id", async (c) => c.json(await deleteClient(orgId(c), c.req.param("id"))));
+clientRoutes.delete("/:id", async (c) => {
+  const before = await requireClient(orgId(c), c.req.param("id"));
+  const r = await deleteClient(orgId(c), c.req.param("id"));
+  await audit(c, "client.deleted", { targetType: "client", targetId: before.id, data: { name: before.name, leadsReturnedToPool: r.leadsReturnedToPool, hadShareLink: !!before.shareToken } });
+  return c.json(r);
+});
 
 clientRoutes.post("/:id/assign", zValidator("json", leadIdsInput.extend({ move: z.boolean().default(false) })), async (c) => {
   const b = c.req.valid("json");
@@ -119,8 +130,22 @@ clientRoutes.post(
 );
 
 // ── Sharing ──
-clientRoutes.post("/:id/share", async (c) => c.json(await enableSharing(orgId(c), c.req.param("id"))));
-clientRoutes.delete("/:id/share", async (c) => c.json(await disableSharing(orgId(c), c.req.param("id"))));
+// Owner/admin only. A share link is an unauthenticated, forwardable view of a client's
+// pipeline; turning one on (or replacing it) is publishing data outside the workspace, and
+// each change is on the audit trail. The token itself is never written there.
+clientRoutes.post("/:id/share", ownerOrAdmin("client.share_enabled"), async (c) => {
+  const before = await requireClient(orgId(c), c.req.param("id"));
+  const r = await enableSharing(orgId(c), c.req.param("id"));
+  // POST on a client that already has a link replaces it: the old link stops working.
+  await audit(c, before.shareToken ? "client.share_rotated" : "client.share_enabled", { targetType: "client", targetId: before.id, data: { name: before.name } });
+  return c.json(r);
+});
+clientRoutes.delete("/:id/share", ownerOrAdmin("client.share_disabled"), async (c) => {
+  const before = await requireClient(orgId(c), c.req.param("id"));
+  const r = await disableSharing(orgId(c), c.req.param("id"));
+  await audit(c, "client.share_disabled", { targetType: "client", targetId: before.id, data: { name: before.name, hadShareLink: !!before.shareToken } });
+  return c.json(r);
+});
 
 async function act(oid: string, clientId: string | null, bucket: (typeof BUCKETS)[number], action: "enrich" | "verify" | "list") {
   const { db } = getDb();

@@ -4,6 +4,8 @@
  */
 import type { AiProvider, CompanyProfile, LeadSearchQuery, PersonCandidate } from "./types.js";
 import { completeJson, hasAi } from "./ai/provider.js";
+import { redact } from "./ai/redact.js";
+import { UNTRUSTED_RULE, fenceBlock, stringList } from "./ai/untrusted.js";
 import { findCompanies, resolveCompanyDomain } from "./discovery/companies.js";
 import { findPeople } from "./discovery/people.js";
 import { crawlCompanyWebsite } from "./enrich/website.js";
@@ -62,21 +64,32 @@ export async function parseQueryDetailed(ai: AiProvider | undefined, q: LeadSear
   if (!q.query || (q.titles?.length && q.industries?.length)) return { query: q, note: null };
   let note: string | null = null;
   if (ai && hasAi(ai)) {
-    const res = await completeJson<{ titles: string[]; industries: string[]; locations: string[]; keywords: string[]; companySizes: string[] }>(ai, [
-      { role: "system", content: 'Extract B2B lead search filters from text. JSON {"titles":[], "industries":[], "locations":[], "keywords":[], "companySizes":[]}. Titles are job titles to search on LinkedIn (max 4). Keep arrays short.' },
-      { role: "user", content: q.query },
+    const res = await completeJson<Record<string, unknown>>(ai, [
+      {
+        role: "system",
+        content:
+          'Extract B2B lead search filters from the search text in the query block. JSON {"titles":[], "industries":[], "locations":[], "keywords":[], "companySizes":[]}. Titles are job titles to search on LinkedIn (max 4). Keep arrays short. ' +
+          UNTRUSTED_RULE,
+      },
+      { role: "user", content: `${fenceBlock("query", q.query, 2000)}\nReturn JSON only.` },
     ], { maxTokens: 300, temperature: 0 }).catch((e) => {
-      note = `AI query parsing failed (${((e as Error).message ?? String(e)).slice(0, 160)}); used the keyword parser instead`;
+      // The reason is kept for the operator; the upstream body never reaches the note verbatim.
+      note = `AI query parsing failed (${redact((e as Error).message ?? String(e), { max: 160 })}); used the keyword parser instead`;
       return null;
     });
-    if (res) {
+    if (res && typeof res === "object") {
+      // Shape-checked: each filter is a short list of short strings or it is nothing. A
+      // model that answers {"titles": "CEO; DROP"} or {"industries": {"a": 1}} used to have
+      // that value passed straight into the provider queries.
+      const list = (v: unknown, max: number) => stringList(v, max, 100);
+      const sizes = list(res.companySizes, 7).filter((x) => /^(?:\d{1,6}-\d{1,6}|\d{1,6}\+)$/.test(x));
       return { note: null, query: {
         ...q,
-        titles: q.titles?.length ? q.titles : res.titles ?? [],
-        industries: q.industries?.length ? q.industries : res.industries ?? [],
-        locations: q.locations?.length ? q.locations : res.locations ?? [],
-        keywords: q.keywords?.length ? q.keywords : res.keywords ?? [],
-        companySizes: q.companySizes?.length ? q.companySizes : res.companySizes ?? [],
+        titles: q.titles?.length ? q.titles : list(res.titles, 6),
+        industries: q.industries?.length ? q.industries : list(res.industries, 10),
+        locations: q.locations?.length ? q.locations : list(res.locations, 10),
+        keywords: q.keywords?.length ? q.keywords : list(res.keywords, 10),
+        companySizes: q.companySizes?.length ? q.companySizes : sizes,
       } };
     }
     note ??= "AI query parsing returned nothing usable; used the keyword parser instead";
@@ -106,8 +119,57 @@ export interface PipelineOutcome {
   webSearch: { searches: number; failed: number };
 }
 
+/** Hard bounds on a search, whoever asked for it. The interactive route validates to the same numbers. */
+export const LEAD_QUERY_LIMITS = { limit: 200, companyDomains: 50, list: 10, keywords: 20, queryChars: 2000, itemChars: 200 } as const;
+
+/**
+ * Reduce anything query-shaped to a bounded LeadSearchQuery.
+ *
+ * The interactive search route validates its input, but saved searches and autopilots store
+ * a query as free jsonb and replay it later from a job - where `limit: 100000` and ten
+ * thousand company domains were passed straight through, each domain costing a crawl and a
+ * web search. This is applied where the pipeline STARTS, so no caller can skip it: unknown
+ * keys are dropped (a stored query can never supply an option), lists are capped and must be
+ * lists of strings, and the limit is 1..200.
+ */
+export function clampLeadQuery(raw: unknown): LeadSearchQuery {
+  const r = (raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {}) as Record<string, unknown>;
+  const L = LEAD_QUERY_LIMITS;
+  const list = (v: unknown, max: number): string[] | undefined => {
+    if (!Array.isArray(v)) return undefined;
+    const out: string[] = [];
+    for (const x of v) {
+      if (typeof x !== "string") continue;
+      const s = x.trim().slice(0, L.itemChars);
+      if (s) out.push(s);
+      if (out.length >= max) break;
+    }
+    return out;
+  };
+  const out: LeadSearchQuery = {};
+  if (typeof r.query === "string" && r.query.trim()) out.query = r.query.slice(0, L.queryChars);
+  const titles = list(r.titles, L.list);
+  const industries = list(r.industries, L.list);
+  const locations = list(r.locations, L.list);
+  const companySizes = list(r.companySizes, L.list);
+  const keywords = list(r.keywords, L.keywords);
+  const companyDomains = list(r.companyDomains, L.companyDomains);
+  if (titles) out.titles = titles;
+  if (industries) out.industries = industries;
+  if (locations) out.locations = locations;
+  if (companySizes) out.companySizes = companySizes;
+  if (keywords) out.keywords = keywords;
+  if (companyDomains) out.companyDomains = companyDomains;
+  const n = typeof r.limit === "number" ? r.limit : typeof r.limit === "string" ? Number(r.limit) : NaN;
+  if (Number.isFinite(n)) out.limit = Math.min(L.limit, Math.max(1, Math.floor(n)));
+  if (typeof r.findEmails === "boolean") out.findEmails = r.findEmails;
+  return out;
+}
+
 /** The pipeline, with what went wrong alongside what came back. */
-export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: PipelineOptions = {}): Promise<PipelineOutcome> {
+export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: PipelineOptions = {}): Promise<PipelineOutcome> {
+  // Bounded here, at the one place every search passes through.
+  const query = clampLeadQuery(rawQuery);
   const progress = opts.onProgress ?? (() => {});
   const cache = opts.companyCache ?? new Map<string, CompanyProfile>();
   const limit = query.limit ?? 25;
@@ -136,11 +198,13 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
     // pipeline rather than swallowed into [].
     const r = await searchProvidersDetailed({ titles: q.titles, locations: q.locations, industries: q.industries, keywords: q.keywords, companyDomains: q.companyDomains, companySizes: q.companySizes, limit: Math.min(limit, providerBudget) }).catch((e) => ({
       people: [] as ProviderPerson[],
-      failures: [{ provider: "providers", message: (e as Error).message?.slice(0, 200) ?? "threw" }],
+      failures: [{ provider: "providers", message: (e as Error).message ?? "threw" }],
       answered: [] as string[],
     }));
     providerRows = r.people.slice(0, providerBudget);
-    providerFailures.push(...r.failures);
+    // These messages are shown to the customer as the reason a search came back empty, and
+    // they are built from upstream error text - so credentials and account ids are masked.
+    providerFailures.push(...r.failures.map((f) => ({ provider: f.provider, message: redact(f.message, { max: 300 }) })));
   }
 
   // 1) People discovery
@@ -175,7 +239,7 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
   // Carried in providerFailures because that is what callers already turn into a search
   // error when the run comes back empty.
   const webFailure = summarizeWebSearchFailures(searchOutcomes);
-  if (webFailure) providerFailures.push({ provider: "web_search", message: webFailure });
+  if (webFailure) providerFailures.push({ provider: "web_search", message: redact(webFailure, { max: 300 }) });
   progress(40, `found ${people.length} people`);
 
   // 2) Company resolution + enrichment
@@ -202,7 +266,7 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
     },
     4,
   );
-  if (enrichErrors.length) notes.push(`${enrichErrors.length} company lookup(s) failed: ${enrichErrors.slice(0, 3).join("; ").slice(0, 300)}`);
+  if (enrichErrors.length) notes.push(`${enrichErrors.length} company lookup(s) failed: ${redact(enrichErrors.slice(0, 3).join("; "), { max: 300 })}`);
   progress(65, "enriched companies");
 
   // 3) Email find + verify
@@ -235,7 +299,7 @@ export async function runLeadPipelineDetailed(query: LeadSearchQuery, opts: Pipe
       },
       3,
     );
-    if (emailErrors.length) notes.push(`email lookup failed for ${emailErrors.length} lead(s): ${emailErrors[0].slice(0, 200)}`);
+    if (emailErrors.length) notes.push(`email lookup failed for ${emailErrors.length} lead(s): ${redact(emailErrors[0], { max: 200 })}`);
     progress(90, "verified emails");
   }
 

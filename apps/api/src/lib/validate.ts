@@ -1,6 +1,7 @@
 import { zValidator as baseValidator } from "@hono/zod-validator";
 import type { Context } from "hono";
-import type { ZodError } from "zod";
+import { z, type ZodError, type ZodTypeAny } from "zod";
+import { stripNulDeep } from "./sanitize.js";
 
 /** Path segments that only group fields; naming them adds nothing ("Settings daily limit"). */
 const CONTAINERS = new Set(["body", "query", "settings", "criteria", "data", "payload", "filters", "params", "config", "options", "credentials"]);
@@ -75,7 +76,10 @@ export function validationFailure(c: Context, error: ZodError, target: string) {
 export const zValidator = ((target: never, schema: never, hook?: never) =>
   baseValidator(
     target,
-    schema,
+    // U+0000 is removed from every string before validation. Postgres text columns cannot
+    // hold it, so one NUL in a name used to travel all the way to the INSERT and come back
+    // as a 500 - with the whole statement, parameters included, in the log.
+    z.preprocess((v) => stripNulDeep(v), schema as ZodTypeAny) as never,
     hook ??
       (((result: { success: boolean; error?: ZodError }, c: Context) => {
         if (!result.success && result.error) return validationFailure(c, result.error, String(target));

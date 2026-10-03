@@ -31,7 +31,7 @@ export function openapi(apiUrl: string) {
       title: "Scout API",
       version: "1.0.0",
       description:
-        "Lead generation infrastructure for sales teams and AI agents: real-time B2B discovery, company enrichment, email finding + verification, ICP lookalike scoring, AI-personalized outreach, sequences, tracking, webhooks and CRM sync.\n\nAuthenticate with `x-api-key: px_live_...` (recommended for agents) or `Authorization: Bearer <jwt>`.\n\nLong-running operations return `202` with a `jobId`; poll `GET /v1/search/{id}` or `GET /v1/search/jobs/{jobId}`.",
+        "Lead generation infrastructure for sales teams and AI agents: real-time B2B discovery, company enrichment, email finding + verification, ICP lookalike scoring, AI-personalized outreach, sequences, tracking, webhooks and CRM sync.\n\nAuthenticate with `x-api-key: px_live_...` (recommended for agents) or `Authorization: Bearer <jwt>`.\n\nLong-running operations return `202` with a `jobId`; poll `GET /v1/search/{id}` or `GET /v1/search/jobs/{jobId}`.\n\nRequest bodies are limited to 1 MB (10 MB for `POST /v1/leads/import`); larger ones get `413 payload_too_large`.",
     },
     servers: [{ url: apiUrl }],
     components: {
@@ -43,10 +43,15 @@ export function openapi(apiUrl: string) {
     security: sec,
     paths: {
       "/v1/auth/signup": { post: { tags: ["Auth"], security: [], summary: "Create workspace + user; returns JWT and an API key", requestBody: j(obj({ email: str, password: str, name: str, orgName: str, inviteCode: str }, ["email", "password"])), responses: ok() } },
-      "/v1/auth/login": { post: { tags: ["Auth"], security: [], summary: "Login", requestBody: j(obj({ email: str, password: str }, ["email", "password"])), responses: ok() } },
+      "/v1/auth/login": { post: { tags: ["Auth"], security: [], summary: "Login. After 5 failed attempts for one account in 15 minutes: 429 too_many_attempts with a Retry-After header", requestBody: j(obj({ email: str, password: str }, ["email", "password"])), responses: ok() } },
       "/v1/auth/password/forgot": { post: { tags: ["Auth"], security: [], summary: "Email a password-reset link. Always 200 {ok:true}, whether or not the address has an account", requestBody: j(obj({ email: str }, ["email"])), responses: ok(obj({ ok: bool })) } },
       "/v1/auth/password/reset": { post: { tags: ["Auth"], security: [], summary: "Set a new password from an emailed token (1 hour, single use); returns the same body as /v1/auth/login", requestBody: j(obj({ token: str, password: { ...str, minLength: 8 } }, ["token", "password"])), responses: ok() } },
-      "/v1/auth/password/change": { post: { tags: ["Auth"], summary: "Change your password. currentPassword is required unless the account has never had one (Google sign-up)", requestBody: j(obj({ currentPassword: str, newPassword: { ...str, minLength: 8 } }, ["newPassword"])), responses: ok(obj({ ok: bool })) } },
+      "/v1/auth/password/change": { post: { tags: ["Auth"], summary: "Change your password. currentPassword is required unless the account has never had one (Google sign-up). Signs out every other session; the response carries a fresh `token` that replaces the caller's", requestBody: j(obj({ currentPassword: str, newPassword: { ...str, minLength: 8 } }, ["newPassword"])), responses: ok(obj({ ok: bool, token: str, sessionsRevoked: bool })) } },
+      "/v1/auth/logout-all": { post: { tags: ["Auth"], summary: "Sign out everywhere: every session token for this user stops working, including the caller's. API keys are not affected", security: [{ bearerAuth: [] }], responses: ok(obj({ ok: bool })) } },
+      "/v1/auth/google/status": { get: { tags: ["Auth"], security: [], summary: "Whether Sign in with Google is available", responses: ok(obj({ enabled: bool })) } },
+      "/v1/auth/google/start": { get: { tags: ["Auth"], security: [], summary: "Browser redirect to Google. `cv` is base64url(SHA-256(verifier)) for a random verifier the web app keeps; `next` is a path in the app", parameters: [{ name: "cv", in: "query", required: true, schema: str }, { name: "next", in: "query", schema: str }], responses: { "302": { description: "Redirect to Google" } } } },
+      "/v1/auth/google/exchange": { post: { tags: ["Auth"], security: [], summary: "Trade the one-time code from the Google callback (60 seconds, single use) plus the verifier for a session; same body as /v1/auth/login", requestBody: j(obj({ code: str, verifier: str }, ["code", "verifier"])), responses: ok() } },
+      "/v1/audit-log": { get: { tags: ["Account"], summary: "Security log for the workspace, newest first (owner/admin session only): sign-ins, password changes, API keys, admin changes", security: [{ bearerAuth: [] }], parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 50, maximum: 200 } }, { name: "before", in: "query", schema: str, description: "nextBefore from the previous page" }], responses: ok(obj({ entries: arr(obj({ id: str, action: str, actorType: str, actorEmail: str, targetType: str, targetId: str, result: { ...str, enum: ["ok", "denied", "failed"] }, ip: str, createdAt: str, data: { type: "object" } })), hasMore: bool, nextBefore: str })) } },
       "/v1/tools/team/invites/{id}": { delete: { tags: ["Team"], summary: "Revoke a pending invite (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/tools/team/invites/{id}/resend": { post: { tags: ["Team"], summary: "Re-send a pending invite and renew its 14-day expiry (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/webhooks/{id}/test": { post: { tags: ["Webhooks"], summary: "Deliver a webhook.test event to this webhook only, regardless of its event filter", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
@@ -141,10 +146,34 @@ export function openapi(apiUrl: string) {
   };
 }
 
-export const docsHtml = (specUrl: string) => `<!doctype html>
-<html><head><meta charset="utf-8"><title>Scout API Docs</title>
-<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"></head>
+/**
+ * Swagger UI, pinned to one exact release with Subresource Integrity.
+ *
+ * The page used to load `swagger-ui-dist@5` - whatever the CDN served for "5" that day - with
+ * no integrity check, on the API's own origin. A changed or compromised file there would have
+ * run with access to anything a visitor typed into the "Authorize" box. Now the browser
+ * refuses the file unless it is byte-for-byte the one hashed here, and the page's
+ * Content-Security-Policy (set in app.ts) allows these two URLs and nothing else.
+ *
+ * To upgrade: change the version, then recompute both hashes with
+ *   curl -s <url> | openssl dgst -sha384 -binary | openssl base64 -A
+ */
+const SWAGGER_UI_VERSION = "5.33.1";
+export const SWAGGER_UI = {
+  version: SWAGGER_UI_VERSION,
+  css: `https://cdn.jsdelivr.net/npm/swagger-ui-dist@${SWAGGER_UI_VERSION}/swagger-ui.css`,
+  cssIntegrity: "sha384-Ov4/wv3j2bmct8cDc5X4ngJZohVPzEmc6uDPH8WeljUxO5vtoykvMEfbu9Vh6RaW",
+  js: `https://cdn.jsdelivr.net/npm/swagger-ui-dist@${SWAGGER_UI_VERSION}/swagger-ui-bundle.js`,
+  jsIntegrity: "sha384-ZPehFMQommnnuaZ4rpxgkgTT2DKFVp4hZC/7pLit+9Lek9T1YGSo23eHFbvNkXkw",
+} as const;
+
+/** JSON for embedding inside a <script>: `<` escaped so a value can never close the tag. */
+const scriptJson = (v: unknown) => JSON.stringify(v).replace(/</g, "\\u003c");
+
+export const docsHtml = (specUrl: string, nonce = "") => `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="referrer" content="no-referrer"><title>Scout API Docs</title>
+<link rel="stylesheet" href="${SWAGGER_UI.css}" integrity="${SWAGGER_UI.cssIntegrity}" crossorigin="anonymous"></head>
 <body><div id="ui"></div>
-<script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui-bundle.js"></script>
-<script>SwaggerUIBundle({url:${JSON.stringify(specUrl)},dom_id:'#ui',persistAuthorization:true})</script>
+<script src="${SWAGGER_UI.js}" integrity="${SWAGGER_UI.jsIntegrity}" crossorigin="anonymous"></script>
+<script${nonce ? ` nonce="${nonce}"` : ""}>SwaggerUIBundle({url:${scriptJson(specUrl)},dom_id:'#ui',persistAuthorization:true,validatorUrl:null})</script>
 </body></html>`;

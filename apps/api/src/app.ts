@@ -1,7 +1,8 @@
-import { Hono, type Context } from "hono";
+import { Hono, type Context, type MiddlewareHandler } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
-import { logger } from "hono/logger";
 import { secureHeaders } from "hono/secure-headers";
+import { randomBytes } from "node:crypto";
 import { getDb } from "@prospex/db";
 import { env } from "./env.js";
 import { errorHandler } from "./lib/errors.js";
@@ -23,23 +24,208 @@ import { joinRoutes, toolRoutes } from "./routes/tools.js";
 import { adminRoutes } from "./routes/admin.js";
 import { leadCaptureRoutes } from "./routes/leadCapture.js";
 import { visibilityRoutes } from "./routes/visibility.js";
-import { docsHtml, openapi } from "./openapi.js";
+import { docsHtml, openapi, SWAGGER_UI } from "./openapi.js";
 import { runMaintenanceTick } from "./jobs.js";
 import { emailEventRoutes } from "./routes/emailEvents.js";
+import { auditRoutes } from "./routes/audit.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
 
-export function createApp() {
+// ── Access log ──
+
+/** Query parameters whose VALUE is a credential (or stands in for one) and must never be logged. */
+const SECRET_QUERY_KEYS = new Set([
+  "token", "u", "code", "state", "key", "api_key", "apikey", "cv", "verifier", "access_token", "id_token", "refresh_token", "secret", "password", "signature", "sig", "authorization", "x-internal-token", "x-admin-token", "x-api-key",
+]);
+const REDACTED = "[redacted]";
+
+/**
+ * A request path + query string that is safe to write to a log.
+ *
+ * Several URLs on this API carry their credential IN the URL: tracking and unsubscribe links
+ * (/t/o|c|u/<token>), the client report (/v1/public/clients/report/<token>), the visitor
+ * pixel (/px/<key>), and the OAuth callback (?code=&state=). hono's logger printed all of
+ * them verbatim, so the access log was a list of working links - and of INTERNAL_TOKEN, back
+ * when the job runner accepted it as ?token=.
+ *
+ * `path` should be the decoded path (so /%74/o/<token> is recognised too); `rawQuery` is the
+ * query string as sent, without the leading "?".
+ */
+export function redactRequestLine(path: string, rawQuery = ""): string {
+  let p = path;
+  p = p.replace(/^\/t\/([^/]+)\/.+$/s, (_m, kind: string) => `/t/${kind.slice(0, 8)}/${REDACTED}`);
+  p = p.replace(/^\/v1\/public\/clients\/report\/.+$/s, `/v1/public/clients/report/${REDACTED}`);
+  p = p.replace(/^\/px\/.+$/s, (m: string) => `/px/${REDACTED}${m.endsWith("/collect") ? "/collect" : m.endsWith(".js") ? ".js" : ""}`);
+  // Anything else in a path is a route name or a UUID. Control characters could forge extra
+  // log lines, so they never reach the log.
+  p = p.replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 300);
+  if (!rawQuery) return p;
+  const parts = rawQuery
+    .slice(0, 2000)
+    .split("&")
+    .filter(Boolean)
+    .map((pair) => {
+      const eq = pair.indexOf("=");
+      const rawKey = eq === -1 ? pair : pair.slice(0, eq);
+      let key = rawKey;
+      try {
+        key = decodeURIComponent(rawKey.replace(/\+/g, " "));
+      } catch {
+        // An undecodable key cannot be checked against the list, so its value is not trusted.
+        return `${REDACTED}=${REDACTED}`;
+      }
+      const safeKey = key.replace(/[^\w.\-[\]]/g, "_").slice(0, 40);
+      if (eq === -1) return safeKey;
+      if (SECRET_QUERY_KEYS.has(key.trim().toLowerCase())) return `${safeKey}=${REDACTED}`;
+      return `${safeKey}=${pair.slice(eq + 1).replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 200)}`;
+    });
+  return parts.length ? `${p}?${parts.join("&")}` : p;
+}
+
+/**
+ * Request log: method, redacted path, status, time. Never headers (so never Authorization,
+ * x-api-key or a cookie) and never a body.
+ */
+function accessLog(print: (line: string) => void): MiddlewareHandler {
+  return async (c, next) => {
+    const url = c.req.url;
+    const q = url.indexOf("?");
+    const line = redactRequestLine(c.req.path, q === -1 ? "" : url.slice(q + 1));
+    const method = c.req.method;
+    print(`<-- ${method} ${line}`);
+    const start = Date.now();
+    await next();
+    const ms = Date.now() - start;
+    print(`--> ${method} ${line} ${c.res.status} ${ms < 1000 ? `${ms}ms` : `${Math.round(ms / 1000)}s`}`);
+  };
+}
+
+// ── Request body limits ──
+
+const KB = 1024;
+const MB = 1024 * KB;
+export const BODY_LIMITS = { default: 1 * MB, leadImport: 10 * MB, publicPost: 256 * KB } as const;
+
+/** Unauthenticated endpoints: anyone on the internet can POST to these, so they get the smallest allowance. */
+const PUBLIC_POST_PREFIXES = ["/px/", "/v1/auth/", "/t/", "/v1/email-events/", "/v1/public/", "/internal/"];
+const PUBLIC_POST_PATHS = new Set(["/v1/upgrade-requests", "/v1/admin/login"]);
+
+/**
+ * How large a body this request may carry.
+ *
+ * There was no limit anywhere: a 50 MB body was read into memory in full on any endpoint,
+ * signed in or not, and a 20 MB CSV import took a 512 MB instance down. Now:
+ *   - 10 MB for the lead import (5,000 leads of CSV or JSON fit several times over);
+ *   - 256 KB for POSTs that need no authentication (sign-in forms, the visitor pixel,
+ *     unsubscribe, provider event hooks) - none of them has a legitimate body near that;
+ *   - 1 MB for everything else, including the Stripe webhook: its events are normally a few
+ *     KB, but an invoice with many lines is larger and a refused event is a missed payment.
+ */
+export function bodyLimitFor(method: string, path: string): number {
+  if (method === "POST" && path === "/v1/leads/import") return BODY_LIMITS.leadImport;
+  if (method === "POST" && (PUBLIC_POST_PATHS.has(path) || PUBLIC_POST_PREFIXES.some((p) => path.startsWith(p)))) return BODY_LIMITS.publicPost;
+  return BODY_LIMITS.default;
+}
+
+const humanSize = (n: number) => (n >= MB ? `${n / MB} MB` : `${n / KB} KB`);
+
+/**
+ * hono's bodyLimit does the two things that matter: a declared Content-Length over the limit
+ * is refused before a byte of the body is read, and a body with no declared length (chunked)
+ * is read only up to the limit and then cut off. One limiter per size, picked per request.
+ */
+function requestBodyLimit(): MiddlewareHandler {
+  const limiters = new Map<number, MiddlewareHandler>();
+  const limiter = (maxSize: number) => {
+    let l = limiters.get(maxSize);
+    if (!l) {
+      l = bodyLimit({
+        maxSize,
+        onError: (c) => c.json({ error: { code: "payload_too_large", message: `The request body is too large. This endpoint accepts at most ${humanSize(maxSize)}.` } }, 413),
+      });
+      limiters.set(maxSize, l);
+    }
+    return l;
+  };
+  return (c, next) => limiter(bodyLimitFor(c.req.method, c.req.path))(c, next);
+}
+
+// ── Response security headers ──
+
+/** Nothing this API returns should load anything, be framed, or be treated as a document. */
+const CSP_API = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'";
+/** The unsubscribe / link pages: inline styles and a form that posts back to this origin. Nothing else. */
+const CSP_PAGES = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+
+function docsCsp(nonce: string): string {
+  const api = (() => {
+    try {
+      return new URL(env.apiUrl).origin;
+    } catch {
+      return "";
+    }
+  })();
+  return [
+    "default-src 'none'",
+    // Exactly the pinned bundle (which also carries an SRI hash) and the one inline bootstrap.
+    `script-src ${SWAGGER_UI.js} 'nonce-${nonce}'`,
+    `style-src ${SWAGGER_UI.css} 'unsafe-inline'`,
+    "img-src 'self' data:",
+    "font-src data:",
+    `connect-src 'self'${api ? ` ${api}` : ""}`,
+    "frame-ancestors 'none'",
+    "base-uri 'none'",
+    "form-action 'none'",
+  ].join("; ");
+}
+
+const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+/**
+ * Which browser origins may call the API: the web app (APP_URL), anything listed in
+ * CORS_EXTRA_ORIGINS, localhost (development against a deployed API), and whatever
+ * CORS_ALLOW_REGEX matches - by default any https *.vercel.app origin, which keeps Vercel
+ * preview deployments working. (*.netlify.app and *.pages.dev used to be reflected as well;
+ * nothing of ours is hosted there. Add them through CORS_ALLOW_REGEX if that changes.)
+ */
+export function corsOriginAllowed(origin: string): boolean {
+  return origin === env.appUrl || env.corsExtraOrigins.includes(origin) || LOCALHOST_ORIGIN.test(origin) || !!env.corsAllowRegex?.test(origin);
+}
+
+export interface AppOptions {
+  /**
+   * Where request-log lines go. Default: console.log, except under NODE_ENV=test where the
+   * log is off. Pass a function to capture the lines (tests do), or false to turn it off.
+   */
+  accessLog?: ((line: string) => void) | false;
+}
+
+export function createApp(opts: AppOptions = {}) {
   wireToolMeter();
   const app = new Hono<Env>();
   app.onError(errorHandler);
   app.use("*", secureHeaders({ crossOriginResourcePolicy: false }));
-  if (env.nodeEnv !== "test") app.use("*", logger());
+  const print = opts.accessLog === false ? null : opts.accessLog ?? (env.nodeEnv !== "test" ? (line: string) => console.log(line) : null);
+  if (print) app.use("*", accessLog(print));
+  app.use("*", async (c, next) => {
+    await next();
+    // Set after the handler so the document routes below can supply their own policy.
+    if (!c.res.headers.has("content-security-policy")) c.res.headers.set("content-security-policy", c.req.path.startsWith("/t/") ? CSP_PAGES : CSP_API);
+    // Sign-in and admin responses carry tokens; no cache anywhere should keep one.
+    const p = c.req.path;
+    if ((p.startsWith("/v1/auth/") || p.startsWith("/v1/admin/") || p.startsWith("/internal/")) && !c.res.headers.has("cache-control")) c.res.headers.set("cache-control", "no-store");
+  });
+  // Before anything reads a body.
+  app.use("*", requestBodyLimit());
   app.use("/px/*", cors({ origin: "*", allowMethods: ["POST", "GET", "OPTIONS"], allowHeaders: ["content-type"] }));
   app.use(
     "/v1/*",
     cors({
-      origin: (o) => (!o || o === env.appUrl || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(o) || /\.vercel\.app$/.test(o) || /\.netlify\.app$/.test(o) || /\.pages\.dev$/.test(o) ? o ?? "*" : env.appUrl),
-      allowHeaders: ["authorization", "content-type", "x-api-key", "x-internal-token"],
+      // `credentials` is deliberately NOT set. Authentication is a bearer token or an API key
+      // in a header, never a cookie, so a page on another origin has nothing to ride on. The
+      // one cookie this API sets (g_state, during Google sign-in) is read only on top-level
+      // navigations to /v1/auth/google/*; it must never become readable to cross-origin
+      // fetches, which is what turning credentials on would do.
+      origin: (o) => (!o ? "*" : corsOriginAllowed(o) ? o : env.appUrl),
+      allowHeaders: ["authorization", "content-type", "x-api-key", "x-internal-token", "x-admin-token"],
       allowMethods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
       exposeHeaders: ["x-ratelimit-limit", "x-ratelimit-remaining", "retry-after"],
       maxAge: 86400,
@@ -57,7 +243,12 @@ export function createApp() {
     }
   });
   app.get("/openapi.json", (c) => c.json(openapi(env.apiUrl)));
-  app.get("/docs", (c) => c.html(docsHtml(`${env.apiUrl}/openapi.json`)));
+  app.get("/docs", (c) => {
+    // A fresh nonce per response: the only inline script the page may run is the one we wrote.
+    const nonce = randomBytes(16).toString("base64");
+    c.header("content-security-policy", docsCsp(nonce));
+    return c.html(docsHtml(`${env.apiUrl}/openapi.json`, nonce));
+  });
 
   app.route("/v1/auth", authRoutes);
   app.route("/v1/leads", leadRoutes);
@@ -79,6 +270,7 @@ export function createApp() {
   app.route("/v1", miscRoutes);
   app.route("/v1", leadCaptureRoutes);
   app.route("/v1/admin", adminRoutes);
+  app.route("/v1/audit-log", auditRoutes);
   app.route("/t", trackRoutes);
   // Provider delivery events (bounces, complaints). Authenticated by the provider signature, not a session.
   app.route("/v1/email-events", emailEventRoutes);
@@ -87,7 +279,9 @@ export function createApp() {
    * Serverless job runner: call from an external cron (cron-job.org is free) when JOB_MODE=inline.
    * It also revives the recurring schedulers and reaps dead jobs, which a serverless deploy has
    * no long-lived worker to do. The token check fails closed: with INTERNAL_TOKEN unset the
-   * endpoint is disabled rather than open.
+   * endpoint is disabled rather than open. The token goes in the `x-internal-token` request
+   * header, never in the URL. (The Render deployment runs an embedded worker and does not
+   * call this endpoint at all.)
    */
   const runJobs = async (c: Context<Env>) => {
     const maxMs = Math.min(Math.max(Number(c.req.query("maxMs") ?? 25_000) || 25_000, 1_000), 55_000);

@@ -13,12 +13,19 @@ import { randomToken } from "../lib/crypto.js";
 import { ApiError, badRequest, forbidden, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
 import { sendMail } from "../lib/mailer.js";
-import { orgId, rateLimit, requireAuth, requireRole, requireUser, type Env } from "../middleware.js";
-import { findExistingLead, upsertCompany, upsertLead } from "../services/leads.js";
+import { orgId, rateLimit, requireAuth, requireUser, type Env } from "../middleware.js";
+import { companyDomainOrNull, findExistingLead, upsertCompany, upsertLead } from "../services/leads.js";
 import { advanceContact } from "../services/campaigns.js";
 import { runAutopilot } from "../services/autopilot.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
+import { audit } from "../lib/audit.js";
+import { emailField } from "../lib/fields.js";
+import { storedSearchQuerySchema } from "../lib/searchQuery.js";
+import { safeHeaderText } from "../lib/sanitize.js";
+import { enforceWindows } from "../lib/rateWindow.js";
+import { orgMemberEmail } from "../lib/members.js";
+import { roleGate } from "../lib/roles.js";
 
 export const toolRoutes = new Hono<Env>();
 toolRoutes.use("*", requireAuth);
@@ -39,7 +46,7 @@ const PERSONAS: Record<string, string[]> = {
 toolRoutes.get("/personas", (c) => c.json({ personas: PERSONAS }));
 
 /** LinkedIn URL(s) → person + work email. */
-toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ urls: z.array(z.string()).min(1).max(25), save: z.boolean().default(false) })), async (c) => {
+toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ urls: z.array(z.string().max(500)).min(1).max(25), save: z.boolean().default(false) })), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
@@ -114,7 +121,7 @@ function splitFullName(full: string): { firstName?: string; lastName?: string } 
 }
 
 /** Email(s) → LinkedIn URL + name/title. */
-toolRoutes.post("/email-to-linkedin", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ emails: z.array(z.string().email()).min(1).max(25) })), async (c) => {
+toolRoutes.post("/email-to-linkedin", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ emails: z.array(emailField).min(1).max(25) })), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
@@ -145,7 +152,7 @@ toolRoutes.post("/email-to-linkedin", rateLimit({ perMinute: 30 }), zValidator("
 });
 
 /** Colleagues of a lead (same company, optional titles). */
-toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ leadId: z.string().uuid().optional(), companyDomain: z.string().optional(), titles: z.array(z.string()).optional(), limit: z.number().int().min(1).max(25).default(10), save: z.boolean().default(false) })), async (c) => {
+toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ leadId: z.string().uuid().optional(), companyDomain: z.string().max(300).optional(), titles: z.array(z.string().max(200)).max(25).optional(), limit: z.number().int().min(1).max(25).default(10), save: z.boolean().default(false) })), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
@@ -153,7 +160,7 @@ toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", 
   let name: string | undefined;
   if (b.leadId) {
     const l = await db.query.leads.findFirst({ where: and(eq(leads.id, b.leadId), eq(leads.orgId, oid)) });
-    const co = l?.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, l.companyId) }) : null;
+    const co = l?.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, l.companyId), eq(companies.orgId, oid)) }) : null;
     domain = co?.domain ?? domain;
     name = co?.name ?? undefined;
   }
@@ -179,7 +186,7 @@ toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", 
 });
 
 /** Decision makers at a company by persona. */
-toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ companyDomain: z.string().optional(), companyName: z.string().optional(), personas: z.array(z.string()).default(["CEO / Founder", "Sales leader", "CMO / Marketing"]), limit: z.number().int().min(1).max(20).default(6), findEmails: z.boolean().default(true), save: z.boolean().default(true) })), async (c) => {
+toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("json", z.object({ companyDomain: z.string().max(300).optional(), companyName: z.string().max(200).optional(), personas: z.array(z.string().max(200)).max(25).default(["CEO / Founder", "Sales leader", "CMO / Marketing"]), limit: z.number().int().min(1).max(20).default(6), findEmails: z.boolean().default(true), save: z.boolean().default(true) })), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
@@ -232,16 +239,18 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
 });
 
 /** Company intelligence: hiring + recent news signals + firmographics, persisted. */
-toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json", z.object({ domain: z.string() })), async (c) => {
+toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json", z.object({ domain: z.string().max(300) })), async (c) => {
   const oid = orgId(c);
-  const domain = extractDomain(c.req.valid("json").domain);
+  // A public company domain only: this crawls it, and writes what it finds to the company.
+  const domain = companyDomainOrNull(c.req.valid("json").domain);
   if (!domain) throw badRequest("Invalid domain");
   const { db } = getDb();
   let company = await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) });
   if (!company || !company.enrichedAt) {
     const { crawlCompanyWebsite } = await import("@prospex/core");
     const prof = await crawlCompanyWebsite(domain).catch(() => null);
-    company = await upsertCompany(oid, domain, prof ?? {});
+    // The name comes from the company's own site, so it may replace a placeholder one.
+    company = await upsertCompany(oid, domain, prof ?? {}, { rename: true });
   }
   // Both lookups can fail, and both used to collapse failure into empty. `intentScore` and
   // `signalsCount` were then ASSIGNED from those empties, so one news-search outage wrote
@@ -292,7 +301,7 @@ toolRoutes.post("/company-intel", rateLimit({ perMinute: 20 }), zValidator("json
 });
 
 /** Sender domain health (SPF/DKIM/DMARC/MX). */
-toolRoutes.get("/domain-health", zValidator("query", z.object({ domain: z.string() })), async (c) => {
+toolRoutes.get("/domain-health", zValidator("query", z.object({ domain: z.string().max(300) })), async (c) => {
   const domain = extractDomain(c.req.valid("query").domain);
   if (!domain) throw badRequest("Invalid domain");
   return c.json(await checkDomainHealth(domain));
@@ -303,7 +312,7 @@ toolRoutes.post("/batch-enrich", zValidator("json", z.object({ leadIds: z.array(
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
-  await assertOwned(lists, b.listId, oid, "List");
+  await assertOwned(lists, b.listId, oid, "List", c);
   let ids: string[];
   let requested: number;
   if (b.leadIds?.length) {
@@ -323,7 +332,7 @@ toolRoutes.post("/batch-enrich", zValidator("json", z.object({ leadIds: z.array(
 });
 
 /** Quick verify of arbitrary emails with CSV-ish output convenience. */
-toolRoutes.post("/verify-batch", zValidator("json", z.object({ emails: z.array(z.string()).min(1).max(500) })), async (c) => {
+toolRoutes.post("/verify-batch", zValidator("json", z.object({ emails: z.array(z.string().max(320)).min(1).max(500) })), async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const b = c.req.valid("json");
@@ -338,15 +347,38 @@ toolRoutes.get("/saved-searches", async (c) => {
   const { db } = getDb();
   return c.json({ savedSearches: await db.select().from(savedSearches).where(eq(savedSearches.orgId, orgId(c))).orderBy(desc(savedSearches.createdAt)) });
 });
-toolRoutes.post("/saved-searches", zValidator("json", z.object({ name: z.string().min(1).max(200), query: z.record(z.unknown()), alert: z.boolean().default(false), alertEmail: z.string().email().optional(), listId: z.string().uuid().optional(), clientId: z.string().uuid().optional() })), async (c) => {
+/**
+ * `query` is the search this will run, on a schedule, with nobody watching. It is validated
+ * with the same schema as POST /v1/search (see lib/searchQuery.ts): the same ceilings, and
+ * unknown keys dropped. It used to be `z.record(z.unknown())`, and the job spread it into
+ * the pipeline as stored.
+ */
+toolRoutes.post("/saved-searches", zValidator("json", z.object({ name: z.string().min(1).max(200), query: storedSearchQuerySchema, alert: z.boolean().default(false), alertEmail: emailField.optional(), listId: z.string().uuid().optional(), clientId: z.string().uuid().optional() })), async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const { clientId, ...b } = c.req.valid("json");
   // Every id is checked against this workspace: the scheduled run writes into the list (and,
   // via the query, uses the ICP and client) by id alone, with no org predicate of its own.
-  await assertOwned(lists, b.listId, oid, "List");
-  const q = b.query as { icpId?: unknown; clientId?: unknown; listId?: unknown };
-  if (typeof q.icpId === "string") await assertOwned(icps, q.icpId, oid, "ICP");
+  await assertOwned(lists, b.listId, oid, "List", c);
+  const q = b.query;
+  if (q.icpId) await assertOwned(icps, q.icpId, oid, "ICP", c);
+  if (q.listId) await assertOwned(lists, q.listId, oid, "List", c);
+  /**
+   * Alerts go to people in this workspace.
+   *
+   * The alert is sent by Scout, from Scout's address, with the search's name in the subject.
+   * `alertEmail` took any address, so a saved search named "URGENT: verify your account at
+   * https://..." was a way to have the platform email a stranger that sentence. It must now
+   * be the address of a member; with alerts on and no address given, it is the creator's.
+   */
+  let alertEmail: string | undefined = b.alertEmail;
+  if (alertEmail) {
+    const member = await orgMemberEmail(oid, alertEmail);
+    if (!member) throw badRequest("Alerts can only be sent to a member of this workspace. Use the email address of someone on your team (invite them first if needed).");
+    alertEmail = member;
+  } else if (b.alert) {
+    alertEmail = c.get("auth").user?.email?.toLowerCase();
+  }
   // A saved search can run for a client. There is no column for it, so it travels in the
   // query - which is what the scheduled run reads - whether sent top-level or inside it.
   const cid = clientId ?? (typeof q.clientId === "string" ? q.clientId : undefined);
@@ -355,7 +387,7 @@ toolRoutes.post("/saved-searches", zValidator("json", z.object({ name: z.string(
     const client = await requireClient(oid, cid);
     if (client.status === "archived") throw badRequest("That client is archived. Reactivate it before saving searches for it.");
   }
-  const [row] = await db.insert(savedSearches).values({ orgId: oid, ...b, query: { ...b.query, ...(cid ? { clientId: cid } : {}) } }).returning();
+  const [row] = await db.insert(savedSearches).values({ orgId: oid, ...b, alertEmail, query: { ...b.query, ...(cid ? { clientId: cid } : {}) } }).returning();
   return c.json({ ...row, clientId: cid ?? null }, 201);
 });
 toolRoutes.delete("/saved-searches/:id", async (c) => {
@@ -391,7 +423,7 @@ toolRoutes.get("/tasks", zValidator("query", z.object({ status: z.string().defau
 toolRoutes.post("/tasks", zValidator("json", z.object({ leadId: z.string().uuid().optional(), type: z.string().default("task"), title: z.string().min(1), body: z.string().optional(), dueAt: z.string().datetime().optional() })), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
-  await assertOwned(leads, b.leadId, orgId(c), "Lead");
+  await assertOwned(leads, b.leadId, orgId(c), "Lead", c);
   const [row] = await db.insert(tasks).values({ orgId: orgId(c), leadId: b.leadId, type: b.type, title: b.title, body: b.body, dueAt: b.dueAt ? new Date(b.dueAt) : new Date(), assigneeUserId: c.get("auth").user?.id }).returning();
   return c.json(row, 201);
 });
@@ -432,13 +464,37 @@ async function seatUsage(orgIdValue: string) {
 /** Send (or re-send) an invite email. Reports whether it actually went, rather than assuming. */
 async function sendInviteEmail(a: { orgName: string; inviter: string }, email: string, token: string) {
   const link = `${env.appUrl}/join?token=${token}`;
+  // Both names are tenant-chosen text going into a platform email to an address the tenant
+  // picked. Control characters and anything link-shaped are removed and the length capped,
+  // so the subject cannot be made to read as (or link to) something else.
+  const orgName = safeHeaderText(a.orgName, 80, "a workspace");
+  const inviter = safeHeaderText(a.inviter, 80, "A teammate");
   const r = await sendMail(null, {
     from: env.mailFrom,
     to: email,
-    subject: `${a.inviter} invited you to ${a.orgName} on Scout`,
-    text: `${a.inviter} invited you to join ${a.orgName} on Scout.\n\nAccept the invite: ${link}\n\nThis link expires in 14 days.`,
+    subject: `${inviter} invited you to ${orgName} on Scout`,
+    text: `${inviter} invited you to join ${orgName} on Scout.\n\nAccept the invite: ${link}\n\nThis link expires in 14 days.`,
   }).catch((e) => ({ ok: false, error: (e as Error).message }));
   return { link, emailed: r.ok, emailError: r.ok ? undefined : r.error };
+}
+
+/**
+ * Invitation emails per hour: 20 from one workspace, 3 to one address (from anyone).
+ *
+ * Creating and re-sending an invite both send mail from the platform to an address the
+ * workspace chose, and neither was limited: one invite re-sent 60 times was 60 emails to a
+ * stranger. The per-address count is across all workspaces, so a fresh signup does not
+ * reset it.
+ */
+const INVITE_WINDOW_MS = 3_600_000;
+function limitInviteMail(orgIdValue: string, email: string) {
+  enforceWindows(
+    [
+      { key: `invite:org:${orgIdValue}`, limit: 20, message: "This workspace has sent 20 invitation emails in the last hour. Wait a while before sending more." },
+      { key: `invite:to:${email.toLowerCase()}`, limit: 3, message: "That address has already been sent 3 invitations in the last hour. Share the invite link with them directly, or try again later." },
+    ],
+    INVITE_WINDOW_MS,
+  );
 }
 
 toolRoutes.get("/team", requireUser, async (c) => {
@@ -453,12 +509,12 @@ toolRoutes.get("/team", requireUser, async (c) => {
   const shaped = pending.map(({ token: _t, ...i }) => ({ ...i, expiresAt: inviteExpiry(i), expired: inviteExpiry(i).getTime() <= now }));
   return c.json({ members, invites: shaped, seats: { used: members.length, pending: shaped.filter((i) => !i.expired).length, limit: limits.seats } });
 });
-toolRoutes.post("/team/invite", requireUser, requireRole("owner", "admin"), zValidator("json", z.object({ email: z.string().email(), role: z.enum(["admin", "member"]).default("member") })), async (c) => {
+toolRoutes.post("/team/invite", requireUser, roleGate("team.invited", "owner", "admin"), zValidator("json", z.object({ email: emailField, role: z.enum(["admin", "member"]).default("member") })), async (c) => {
   const a = c.get("auth");
   if (!["owner", "admin"].includes(a.user!.role)) throw forbidden("Only owners/admins can invite");
   const { db } = getDb();
   const b = c.req.valid("json");
-  const email = b.email.toLowerCase();
+  const email = b.email;
   const existingUser = await db.query.users.findFirst({ where: eq(users.email, email) });
   if (existingUser) {
     throw new ApiError(409, existingUser.orgId === a.org.id ? `${email} is already a member of this workspace.` : `${email} already has a Scout account in another workspace, so it cannot be invited here. They would need to use a different email address.`, "already_registered");
@@ -470,12 +526,15 @@ toolRoutes.post("/team/invite", requireUser, requireRole("owner", "admin"), zVal
   if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) {
     throw badRequest(`Seat limit reached (${limits.seats}: ${seats.members} member(s) and ${seats.pending} pending invite(s)). Revoke a pending invite or upgrade the plan to add more.`);
   }
+  // Checked last, so only an invite that is actually about to be sent uses the allowance.
+  limitInviteMail(a.org.id, email);
   const token = randomToken(24);
   const [inv] = await db.insert(invites).values({ orgId: a.org.id, email, role: b.role, token, invitedBy: a.user!.id, expiresAt: new Date(Date.now() + INVITE_TTL_MS) }).returning();
   // sendMail answers { ok: false } rather than throwing; that used to be ignored, so the UI
   // said "Invite sent" for mail that never left. The link is returned either way so it can
   // be shared by hand.
   const sent = await sendInviteEmail({ orgName: a.org.name, inviter: a.user!.name || a.user!.email }, email, token);
+  await audit(c, "team.invited", { targetType: "invite", targetId: inv.id, data: { email, role: inv.role, emailed: sent.emailed } });
   return c.json({ id: inv.id, email: inv.email, role: inv.role, link: sent.link, expiresAt: inv.expiresAt, emailed: sent.emailed, emailError: sent.emailError }, 201);
 });
 
@@ -486,8 +545,9 @@ async function revokeInvite(c: import("hono").Context<Env>) {
     .update(invites)
     .set({ revokedAt: new Date() })
     .where(and(eq(invites.id, c.req.param("id")!), eq(invites.orgId, orgId(c)), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`))
-    .returning({ id: invites.id });
+    .returning({ id: invites.id, email: invites.email });
   if (!row) throw notFound("Pending invite");
+  await audit(c, "team.invite_revoked", { targetType: "invite", targetId: row.id, data: { email: row.email } });
   return c.json({ ok: true, id: row.id });
 }
 
@@ -503,33 +563,40 @@ async function resendInvite(c: import("hono").Context<Env>) {
     const seats = await seatUsage(a.org.id);
     if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) throw badRequest(`Seat limit reached (${limits.seats}). Revoke another invite or upgrade the plan first.`);
   }
+  limitInviteMail(a.org.id, inv.email);
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
   await db.update(invites).set({ expiresAt }).where(eq(invites.id, inv.id));
   const sent = await sendInviteEmail({ orgName: a.org.name, inviter: a.user?.name || a.user?.email || a.org.name }, inv.email, inv.token);
+  await audit(c, "team.invite_resent", { targetType: "invite", targetId: inv.id, data: { email: inv.email, emailed: sent.emailed } });
   return c.json({ id: inv.id, email: inv.email, link: sent.link, expiresAt, emailed: sent.emailed, emailError: sent.emailError });
 }
 
 // Registered before /team/:userId. Different segment counts, so no capture today - but a
 // static path above a param path is the rule this codebase now follows everywhere.
-toolRoutes.delete("/team/invites/:id", requireUser, requireRole("owner", "admin"), revokeInvite);
-toolRoutes.post("/team/invites/:id/resend", requireUser, requireRole("owner", "admin"), resendInvite);
+toolRoutes.delete("/team/invites/:id", requireUser, roleGate("team.invite_revoked", "owner", "admin"), revokeInvite);
+toolRoutes.post("/team/invites/:id/resend", requireUser, roleGate("team.invite_resent", "owner", "admin"), resendInvite);
 // Short aliases.
-toolRoutes.delete("/invites/:id", requireUser, requireRole("owner", "admin"), revokeInvite);
-toolRoutes.post("/invites/:id/resend", requireUser, requireRole("owner", "admin"), resendInvite);
+toolRoutes.delete("/invites/:id", requireUser, roleGate("team.invite_revoked", "owner", "admin"), revokeInvite);
+toolRoutes.post("/invites/:id/resend", requireUser, roleGate("team.invite_resent", "owner", "admin"), resendInvite);
 
 toolRoutes.delete("/team/:userId", requireUser, async (c) => {
   const a = c.get("auth");
-  if (a.user!.role !== "owner") throw forbidden("Only the owner can remove members");
+  if (a.user!.role !== "owner") {
+    await audit(c, "team.member_removed", { result: "denied", targetType: "user", targetId: c.req.param("userId").slice(0, 64), data: { reason: "role", role: a.user!.role } });
+    throw forbidden("Only the owner can remove members");
+  }
   if (a.user!.id === c.req.param("userId")) throw badRequest("Cannot remove yourself");
   const { db } = getDb();
-  const gone = await db.delete(users).where(and(eq(users.id, c.req.param("userId")), eq(users.orgId, a.org.id))).returning({ id: users.id });
+  const gone = await db.delete(users).where(and(eq(users.id, c.req.param("userId")), eq(users.orgId, a.org.id))).returning({ id: users.id, email: users.email, role: users.role });
   if (!gone.length) throw notFound("Member");
+  await audit(c, "team.member_removed", { targetType: "user", targetId: gone[0].id, data: { email: gone[0].email, role: gone[0].role } });
   return c.json({ ok: true });
 });
 
 // ── Autopilot ──
 // References are nullable: GET returns null for an unset one, and PATCH null detaches it.
-const apInput = z.object({ name: z.string().min(1).max(200), query: z.record(z.unknown()), icpId: z.string().uuid().nullish(), listId: z.string().uuid().nullish(), campaignId: z.string().uuid().nullish(), dailyLeads: z.number().int().min(1).max(200).default(10), minScore: z.number().int().min(0).max(100).default(60), requireValidEmail: z.boolean().default(true), autoEnroll: z.boolean().default(false), active: z.boolean().default(true), runHourUtc: z.number().int().min(0).max(23).default(3) });
+// `query` runs unattended every night: validated like POST /v1/search (lib/searchQuery.ts).
+const apInput = z.object({ name: z.string().min(1).max(200), query: storedSearchQuerySchema, icpId: z.string().uuid().nullish(), listId: z.string().uuid().nullish(), campaignId: z.string().uuid().nullish(), dailyLeads: z.number().int().min(1).max(200).default(10), minScore: z.number().int().min(0).max(100).default(60), requireValidEmail: z.boolean().default(true), autoEnroll: z.boolean().default(false), active: z.boolean().default(true), runHourUtc: z.number().int().min(0).max(23).default(3) });
 toolRoutes.get("/autopilots", async (c) => {
   const { db } = getDb();
   return c.json({ autopilots: await db.select().from(autopilots).where(eq(autopilots.orgId, orgId(c))).orderBy(desc(autopilots.createdAt)) });
@@ -539,33 +606,36 @@ toolRoutes.get("/autopilots", async (c) => {
  * id, every night, with no org predicate in the job. Each id must belong to this workspace -
  * a foreign campaign id would have enrolled our leads into someone else's sequence.
  */
-async function assertAutopilotRefs(oid: string, b: { icpId?: string | null; listId?: string | null; campaignId?: string | null; query?: Record<string, unknown> }) {
-  await assertOwned(icps, b.icpId, oid, "ICP");
-  await assertOwned(lists, b.listId, oid, "List");
-  await assertOwned(campaigns, b.campaignId, oid, "Campaign");
-  const qc = b.query?.clientId;
-  if (typeof qc === "string") await assertOwned(clients, qc, oid, "Client");
+async function assertAutopilotRefs(c: import("hono").Context<Env>, oid: string, b: { icpId?: string | null; listId?: string | null; campaignId?: string | null; query?: { clientId?: string; icpId?: string; listId?: string } }) {
+  await assertOwned(icps, b.icpId, oid, "ICP", c);
+  await assertOwned(lists, b.listId, oid, "List", c);
+  await assertOwned(campaigns, b.campaignId, oid, "Campaign", c);
+  await assertOwned(clients, b.query?.clientId, oid, "Client", c);
+  await assertOwned(icps, b.query?.icpId, oid, "ICP", c);
+  await assertOwned(lists, b.query?.listId, oid, "List", c);
 }
 toolRoutes.post("/autopilots", zValidator("json", apInput), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
-  await assertAutopilotRefs(orgId(c), b);
+  await assertAutopilotRefs(c, orgId(c), b);
   const [row] = await db.insert(autopilots).values({ orgId: orgId(c), ...b }).returning();
+  await audit(c, "autopilot.created", { targetType: "autopilot", targetId: row.id, data: { name: row.name, dailyLeads: row.dailyLeads, autoEnroll: row.autoEnroll, campaignId: row.campaignId } });
   return c.json(row, 201);
 });
 toolRoutes.patch("/autopilots/:id", zValidator("json", apInput.partial()), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
   requireSomeFields(b);
-  await assertAutopilotRefs(orgId(c), b);
+  await assertAutopilotRefs(c, orgId(c), b);
   const [row] = await db.update(autopilots).set(b).where(and(eq(autopilots.id, c.req.param("id")), eq(autopilots.orgId, orgId(c)))).returning();
   if (!row) throw notFound("Autopilot");
   return c.json(row);
 });
 toolRoutes.delete("/autopilots/:id", async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(autopilots).where(and(eq(autopilots.id, c.req.param("id")), eq(autopilots.orgId, orgId(c)))).returning({ id: autopilots.id });
+  const gone = await db.delete(autopilots).where(and(eq(autopilots.id, c.req.param("id")), eq(autopilots.orgId, orgId(c)))).returning({ id: autopilots.id, name: autopilots.name });
   if (!gone.length) throw notFound("Autopilot");
+  await audit(c, "autopilot.deleted", { targetType: "autopilot", targetId: gone[0].id, data: { name: gone[0].name } });
   return c.json({ ok: true });
 });
 toolRoutes.post("/autopilots/:id/run", async (c) => {
@@ -580,7 +650,7 @@ toolRoutes.post("/autopilots/:id/run", async (c) => {
 toolRoutes.post("/leads/:id/status", zValidator("json", z.object({ status: z.enum(["new", "contacted", "engaged", "replied", "qualified", "customer", "lost"]), ownerUserId: z.string().uuid().optional() })), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
-  await assertOwned(users, b.ownerUserId, orgId(c), "User");
+  await assertOwned(users, b.ownerUserId, orgId(c), "User", c);
   const [row] = await db.update(leads).set({ status: b.status, ...(b.ownerUserId ? { ownerUserId: b.ownerUserId } : {}), updatedAt: new Date() }).where(and(eq(leads.id, c.req.param("id")), eq(leads.orgId, orgId(c)))).returning();
   if (!row) throw notFound("Lead");
   await emitEvent(row.orgId, "lead.status_changed", { leadId: row.id, status: b.status }, { type: "lead", id: row.id });
@@ -589,7 +659,7 @@ toolRoutes.post("/leads/:id/status", zValidator("json", z.object({ status: z.enu
 
 // ── Public: accept invite (mounted separately without auth) ──
 export const joinRoutes = new Hono();
-joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.object({ token: z.string(), password: z.string().min(8), name: z.string().optional() })), async (c) => {
+joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.object({ token: z.string().max(200), password: z.string().min(8).max(200), name: z.string().max(80).optional() })), async (c) => {
   const b = c.req.valid("json");
   const { db } = getDb();
   const inv = await db.query.invites.findFirst({ where: eq(invites.token, b.token) });
@@ -607,6 +677,7 @@ joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.obje
   if (limits.seats > 0 && m >= limits.seats) return c.json({ error: { code: "seat_limit", message: `${org.name} has no free seats (${limits.seats}). Ask an owner to upgrade or free a seat.` } }, 400);
   const [user] = await db.insert(users).values({ orgId: inv.orgId, email: inv.email, passwordHash: await hashPassword(b.password), name: b.name ?? "", role: inv.role, lastLoginAt: new Date() }).returning();
   await db.update(invites).set({ acceptedAt: new Date() }).where(eq(invites.id, inv.id));
+  await audit(c, "team.joined", { orgId: inv.orgId, actorType: "user", actorUserId: user.id, targetType: "invite", targetId: inv.id, data: { email: user.email, role: user.role, invitedBy: inv.invitedBy } });
   return c.json({ token: await issueJwt(user), user: { id: user.id, email: user.email, name: user.name, role: user.role } });
 });
 

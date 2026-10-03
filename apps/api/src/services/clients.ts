@@ -542,7 +542,9 @@ export async function routeSuggestions(orgId: string, opts: { limit?: number; le
   const active = await db
     .select({ client: clients, icp: icps })
     .from(clients)
-    .leftJoin(icps, eq(clients.icpId, icps.id))
+    // Scoped join: a client whose icp_id points at another workspace's ICP is treated as
+    // having none, rather than being routed with that workspace's criteria.
+    .leftJoin(icps, and(eq(clients.icpId, icps.id), eq(icps.orgId, orgId)))
     .where(and(eq(clients.orgId, orgId), eq(clients.status, "active")));
 
   // Positive criteria only. An ICP made of nothing but exclusions leaves the scorer with a
@@ -761,6 +763,18 @@ export async function disableSharing(orgId: string, id: string) {
 }
 
 /**
+ * "Verified", as told to a client: the status says valid AND something checked it.
+ *
+ * `email_status` alone is not evidence. It can be set by hand through PATCH /v1/leads/:id,
+ * and the report then told the agency's client that an address nobody had tested was
+ * verified. `verified_at` / `email_verified_by` are only written when a verifier or the
+ * SMTP probe answered (and are cleared when a status is set by hand), so both are required.
+ */
+function isVerified(r: Record<string, unknown>): boolean {
+  return r.email_status === "valid" && (r.verified_at != null || (typeof r.email_verified_by === "string" && r.email_verified_by !== ""));
+}
+
+/**
  * What a client sees through their report link.
  *
  * Names, titles, companies and stage - enough to see the pipeline being built for them.
@@ -776,13 +790,18 @@ export async function publicReport(token: string) {
 
   const [statsRow] = rowsOf<StatsRow>(await db.execute(STATS_SQL(c.orgId, sql`l.client_id = ${c.id}`)));
   const stats = toStats(statsRow);
+  // The report's own "verified" figure: addresses a verifier actually checked (see
+  // isVerified), counted with the same rule as the per-lead flag below so the two agree.
+  const [{ n: verifiedChecked }] = rowsOf<{ n: number }>(
+    await db.execute(sql`SELECT count(*)::int AS n FROM leads l WHERE l.org_id = ${c.orgId} AND l.client_id = ${c.id} AND l.email_status = 'valid' AND (l.verified_at IS NOT NULL OR l.email_verified_by IS NOT NULL)`),
+  );
   const funnel = rowsOf<{ status: string; n: number }>(
     await db.execute(sql`SELECT status, count(*)::int AS n FROM leads WHERE org_id = ${c.orgId} AND client_id = ${c.id} GROUP BY status`),
   );
   const list = rowsOf<Record<string, unknown>>(
     await db.execute(sql`
-      SELECT l.full_name, l.title, l.status, l.email_status, l.client_assigned_at, co.name AS company, co.industry
-      FROM leads l LEFT JOIN companies co ON co.id = l.company_id
+      SELECT l.full_name, l.title, l.status, l.email_status, l.verified_at, l.email_verified_by, l.client_assigned_at, co.name AS company, co.industry
+      FROM leads l LEFT JOIN companies co ON co.id = l.company_id AND co.org_id = l.org_id
       WHERE l.org_id = ${c.orgId} AND l.client_id = ${c.id} AND l.status <> 'lost'
       ORDER BY coalesce(l.client_assigned_at, l.created_at) DESC
       LIMIT 200`),
@@ -795,7 +814,7 @@ export async function publicReport(token: string) {
     stats: {
       leads: stats.leads,
       deliveredThisMonth: stats.deliveredThisMonth,
-      verified: stats.verified,
+      verified: n(verifiedChecked),
       contacted: stats.contacted,
       replied: stats.replied,
       qualified: stats.qualified,
@@ -810,7 +829,7 @@ export async function publicReport(token: string) {
       company: (r.company as string) ?? null,
       industry: (r.industry as string) ?? null,
       stage: String(r.status ?? "new"),
-      emailVerified: r.email_status === "valid",
+      emailVerified: isVerified(r),
       deliveredAt: r.client_assigned_at ? new Date(String(r.client_assigned_at)).toISOString() : null,
     })),
     shownLeads: list.length,

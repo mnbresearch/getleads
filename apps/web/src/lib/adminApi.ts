@@ -24,6 +24,13 @@ export const adminAuth = {
   },
 };
 
+// Signing out of the admin console in one tab signs out the others (see lib/api.ts).
+if (typeof window !== "undefined") {
+  window.addEventListener("storage", (e) => {
+    if (e.key === TOKEN_KEY || e.key === null) listeners.forEach((fn) => fn());
+  });
+}
+
 export function useAdminToken(): string | null {
   return useSyncExternalStore(adminAuth.subscribe, () => adminAuth.token);
 }
@@ -43,10 +50,11 @@ export async function adminFetch<T = unknown>(method: string, path: string, body
   const timer = setTimeout(() => ctrl.abort(), ADMIN_TIMEOUT_MS);
   let res: Response;
   let text: string;
+  const sentToken = adminAuth.token;
   try {
     res = await fetch(`${API_URL}${path}`, {
       method,
-      headers: { "content-type": "application/json", ...(adminAuth.token ? { authorization: `Bearer ${adminAuth.token}` } : {}) },
+      headers: { "content-type": "application/json", ...(sentToken ? { authorization: `Bearer ${sentToken}` } : {}) },
       body: body === undefined ? undefined : JSON.stringify(body),
       signal: ctrl.signal,
     });
@@ -62,7 +70,9 @@ export async function adminFetch<T = unknown>(method: string, path: string, body
     data = JSON.parse(text);
   } catch {}
   if (!res.ok) {
-    if (res.status === 401) adminAuth.set(null);
+    // A rejected admin token is dropped at once rather than left in storage. Only if it is
+    // still the stored one: a slow 401 for an old token must not wipe a newer sign-in.
+    if (res.status === 401 && adminAuth.token === sentToken) adminAuth.set(null);
     throw new AdminApiError(res.status, errorMessage(data, res.status), errorCode(data));
   }
   return data as T;

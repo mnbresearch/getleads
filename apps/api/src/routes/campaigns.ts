@@ -15,6 +15,12 @@ import { orgId, requireAuth, type Env } from "../middleware.js";
 import { enrollLeads, experimentForStep, mailerFromAccount, markReplied, resumeContact, tickCampaign } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
+import { audit } from "../lib/audit.js";
+import { emailField } from "../lib/fields.js";
+import { addressOf, safeDisplayName, stripControl } from "../lib/sanitize.js";
+import { orgMemberEmail, orgOwnerEmail } from "../lib/members.js";
+import { ownerOrAdmin } from "../lib/roles.js";
+import { canonicalEmail } from "../services/leads.js";
 
 export const campaignRoutes = new Hono<Env>();
 campaignRoutes.use("*", requireAuth);
@@ -22,13 +28,23 @@ campaignRoutes.use("*", requireAuth);
 // ── Email accounts (senders) ──
 const accountInput = z.object({
   provider: z.enum(["resend", "smtp", "system"]),
-  fromName: z.string().min(1),
-  fromEmail: z.string().email(),
-  replyTo: z.string().email().optional(),
-  signature: z.string().optional(),
+  // The display name of a From header. `< > " , ;` and control characters end the name and
+  // start another mailbox or another header, so they are removed before it is stored.
+  fromName: z
+    .string()
+    .min(1)
+    .max(200)
+    .transform((v) => safeDisplayName(v))
+    .refine((v) => v.length > 0, { message: "Enter a sender name using letters or digits" }),
+  fromEmail: emailField,
+  replyTo: emailField.optional(),
+  signature: z.string().max(5000).optional(),
   dailyLimit: z.number().int().min(1).max(2000).default(50),
-  config: z.object({ apiKey: z.string().optional(), host: z.string().optional(), port: z.number().optional(), user: z.string().optional(), pass: z.string().optional(), secure: z.boolean().optional() }).optional(),
+  config: z.object({ apiKey: z.string().max(500).optional(), host: z.string().max(253).optional(), port: z.number().int().min(1).max(65535).optional(), user: z.string().max(320).optional(), pass: z.string().max(1000).optional(), secure: z.boolean().optional() }).optional(),
 });
+
+/** The platform's own sending address (the address part of MAIL_FROM). */
+const platformFromAddress = () => addressOf(env.mailFrom);
 
 campaignRoutes.get("/email-accounts", async (c) => {
   const { db } = getDb();
@@ -54,16 +70,44 @@ async function assertPublicSmtpHost(host: string) {
   if (addrs.some((a) => !isPublicHost(a.address))) throw bad();
 }
 
-campaignRoutes.post("/email-accounts", zValidator("json", accountInput), async (c) => {
+// Owner/admin only: a sender is the identity the workspace's outreach goes out under.
+campaignRoutes.post("/email-accounts", ownerOrAdmin("sender.created"), zValidator("json", accountInput), async (c) => {
   const b = c.req.valid("json");
+  const oid = orgId(c);
   const { db } = getDb();
   if (b.provider === "system" && !systemMailerConfig() && env.nodeEnv === "production") throw badRequest("No system email provider configured on the server (RESEND_API_KEY or SMTP_*)");
   if (b.provider === "resend" && !b.config?.apiKey) throw badRequest("config.apiKey required for Resend");
   if (b.provider === "smtp" && !b.config?.host) throw badRequest("config.host required for SMTP");
   if (b.provider === "smtp") await assertPublicSmtpHost(b.config!.host!);
+
+  /**
+   * The platform sender sends from the PLATFORM'S address.
+   *
+   * With provider "system" the mail leaves through Scout's own mail account, and `fromEmail`
+   * was whatever the tenant typed: any workspace could send as billing@<our domain>, or as
+   * anyone else's address, with our DKIM signature and our reputation behind it. For this
+   * provider the From address is now always the platform's (MAIL_FROM); the tenant chooses
+   * the display name. Replies go to a person in the workspace: the Reply-To must be a
+   * member's address, and defaults to the address they asked to send from when that is a
+   * member's, otherwise to the person adding the sender.
+   */
+  let fromEmail = b.fromEmail;
+  let replyTo = b.replyTo;
+  let note: string | undefined;
+  if (b.provider === "system") {
+    if (replyTo) {
+      const member = await orgMemberEmail(oid, replyTo);
+      if (!member) throw badRequest("For the platform sender, Reply-To must be the email address of a member of this workspace. Leave it empty to use your own address, or connect your own Resend or SMTP account to use any address.");
+      replyTo = member;
+    } else {
+      replyTo = (await orgMemberEmail(oid, b.fromEmail)) ?? canonicalEmail(c.get("auth").user?.email) ?? (await orgOwnerEmail(oid)) ?? undefined;
+    }
+    fromEmail = platformFromAddress();
+    if (b.fromEmail !== fromEmail) note = `The platform sender always sends from ${fromEmail}. Your sender name is shown to recipients and replies go to ${replyTo ?? "the workspace owner"}. To send from ${b.fromEmail}, connect your own Resend or SMTP account.`;
+  }
   const [row] = await db
     .insert(emailAccounts)
-    .values({ orgId: orgId(c), provider: b.provider, fromName: b.fromName, fromEmail: b.fromEmail, replyTo: b.replyTo, signature: b.signature, dailyLimit: b.dailyLimit, configEncrypted: b.config ? encryptJson(b.config) : null })
+    .values({ orgId: oid, provider: b.provider, fromName: b.fromName, fromEmail, replyTo, signature: b.signature, dailyLimit: b.dailyLimit, configEncrypted: b.config ? encryptJson(b.config) : null })
     .returning();
   const raw = b.provider === "system" ? { ok: true } : await testMailer(mailerFromAccount(row)!);
   // The driver's own error text distinguishes "connection refused" from "timed out" from
@@ -83,13 +127,16 @@ campaignRoutes.post("/email-accounts", zValidator("json", accountInput), async (
       };
   if (!test.ok) await db.update(emailAccounts).set({ status: "error" }).where(eq(emailAccounts.id, row.id));
   const { configEncrypted: _c, ...pub } = row;
-  return c.json({ emailAccount: { ...pub, status: test.ok ? "active" : "error" }, test }, 201);
+  // No credentials: the provider, the visible identity and whether the test passed.
+  await audit(c, "sender.created", { targetType: "email_account", targetId: row.id, data: { provider: row.provider, fromEmail: row.fromEmail, replyTo: row.replyTo, dailyLimit: row.dailyLimit, testOk: test.ok } });
+  return c.json({ emailAccount: { ...pub, status: test.ok ? "active" : "error" }, test, ...(note ? { note } : {}) }, 201);
 });
 
-campaignRoutes.delete("/email-accounts/:id", async (c) => {
+campaignRoutes.delete("/email-accounts/:id", ownerOrAdmin("sender.deleted"), async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(emailAccounts).where(and(eq(emailAccounts.id, c.req.param("id")), eq(emailAccounts.orgId, orgId(c)))).returning({ id: emailAccounts.id });
+  const gone = await db.delete(emailAccounts).where(and(eq(emailAccounts.id, c.req.param("id")), eq(emailAccounts.orgId, orgId(c)))).returning({ id: emailAccounts.id, provider: emailAccounts.provider, fromEmail: emailAccounts.fromEmail });
   if (!gone.length) throw notFound("Email account");
+  await audit(c, "sender.deleted", { targetType: "email_account", targetId: gone[0].id, data: { provider: gone[0].provider, fromEmail: gone[0].fromEmail } });
   return c.json({ ok: true });
 });
 
@@ -143,10 +190,10 @@ campaignRoutes.post("/", zValidator("json", campaignInput), async (c) => {
   const b = c.req.valid("json");
   const { db } = getDb();
   // Every id in the body names a row this org must actually own. See lib/ownership.ts.
-  await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account");
-  await assertOwned(icps, b.icpId, oid, "ICP");
-  await assertOwned(lists, b.listId, oid, "List");
-  await assertOwned(clients, b.clientId, oid, "Client");
+  await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account", c);
+  await assertOwned(icps, b.icpId, oid, "ICP", c);
+  await assertOwned(lists, b.listId, oid, "List", c);
+  await assertOwned(clients, b.clientId, oid, "Client", c);
   const [row] = await db.insert(campaigns).values({ orgId: oid, name: b.name, icpId: b.icpId ?? null, listId: b.listId ?? null, emailAccountId: b.emailAccountId ?? null, clientId: b.clientId ?? null, settings: b.settings ?? {} }).returning();
   if (b.steps?.length) await db.insert(sequenceSteps).values(b.steps.map(({ id: _id, ...s }, i) => ({ campaignId: row.id, stepNo: i + 1, ...s })));
   return c.json(await fullCampaign(oid, row.id), 201);
@@ -164,10 +211,10 @@ campaignRoutes.patch("/:id", zValidator("json", campaignInput.partial()), async 
   const { db } = getDb();
   const existing = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, oid)) });
   if (!existing) throw notFound("Campaign");
-  await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account");
-  await assertOwned(icps, b.icpId, oid, "ICP");
-  await assertOwned(lists, b.listId, oid, "List");
-  await assertOwned(clients, b.clientId, oid, "Client");
+  await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account", c);
+  await assertOwned(icps, b.icpId, oid, "ICP", c);
+  await assertOwned(lists, b.listId, oid, "List", c);
+  await assertOwned(clients, b.clientId, oid, "Client", c);
   requireSomeFields(b);
   await db
     .update(campaigns)
@@ -216,8 +263,9 @@ async function syncSteps(campaignId: string, steps: z.infer<typeof stepInput>[])
 
 campaignRoutes.delete("/:id", async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(campaigns).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c)))).returning({ id: campaigns.id });
+  const gone = await db.delete(campaigns).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c)))).returning({ id: campaigns.id, name: campaigns.name, status: campaigns.status });
   if (!gone.length) throw notFound("Campaign");
+  await audit(c, "campaign.deleted", { targetType: "campaign", targetId: gone[0].id, data: { name: gone[0].name, status: gone[0].status } });
   return c.json({ ok: true });
 });
 
@@ -278,6 +326,7 @@ campaignRoutes.post("/:id/start", async (c) => {
   if (steps.some((s) => s.channel === "email") && !cp.emailAccountId) throw badRequest("Attach an email account first (the sequence has email steps)");
   await db.update(campaigns).set({ status: "active", updatedAt: new Date() }).where(eq(campaigns.id, cp.id));
   await emitEvent(oid, "campaign.started", { campaignId: cp.id }, { type: "campaign", id: cp.id });
+  await audit(c, "campaign.started", { targetType: "campaign", targetId: cp.id, data: { name: cp.name, steps: steps.length, emailAccountId: cp.emailAccountId } });
   const tick = await tickCampaign(cp.id);
   // Starting an empty campaign is allowed (contacts can be enrolled later), but it must not
   // look like sending has begun.
@@ -287,8 +336,9 @@ campaignRoutes.post("/:id/start", async (c) => {
 
 campaignRoutes.post("/:id/pause", async (c) => {
   const { db } = getDb();
-  const [row] = await db.update(campaigns).set({ status: "paused", updatedAt: new Date() }).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c)))).returning({ id: campaigns.id });
+  const [row] = await db.update(campaigns).set({ status: "paused", updatedAt: new Date() }).where(and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, orgId(c)))).returning({ id: campaigns.id, name: campaigns.name });
   if (!row) throw notFound("Campaign");
+  await audit(c, "campaign.paused", { targetType: "campaign", targetId: row.id, data: { name: row.name } });
   return c.json({ status: "paused" });
 });
 
@@ -316,27 +366,43 @@ campaignRoutes.post("/:id/contacts/:contactId/resume", zValidator("json", z.obje
   return c.json(r);
 });
 
+/**
+ * A campaign id that is not this workspace's answers 404 on these two, like every other
+ * campaign route. They used to answer 200 with an empty list, which reads as "this campaign
+ * has no contacts" - a statement about a campaign the caller was never shown.
+ */
+async function ownCampaign(c: import("hono").Context<Env>) {
+  const { db } = getDb();
+  const cp = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, c.req.param("id")!), eq(campaigns.orgId, orgId(c))) });
+  if (!cp) throw notFound("Campaign");
+  return cp;
+}
+
 campaignRoutes.get("/:id/contacts", async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
+  const cp = await ownCampaign(c);
   const rows = await db
     .select({ contact: campaignContacts, lead: leads, company: companies })
     .from(campaignContacts)
     .innerJoin(leads, eq(campaignContacts.leadId, leads.id))
-    .leftJoin(companies, eq(leads.companyId, companies.id))
-    .where(and(eq(campaignContacts.campaignId, c.req.param("id")), eq(leads.orgId, oid)))
+    .leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid)))
+    .where(and(eq(campaignContacts.campaignId, cp.id), eq(leads.orgId, oid)))
     .orderBy(desc(campaignContacts.updatedAt))
     .limit(500);
   return c.json({ contacts: rows.map((r) => ({ ...r.contact, lead: { ...r.lead, company: r.company } })) });
 });
 
 campaignRoutes.get("/:id/messages", async (c) => {
+  const oid = orgId(c);
   const { db } = getDb();
+  const cp = await ownCampaign(c);
   const rows = await db
     .select({ message: messages, lead: leads })
     .from(messages)
-    .leftJoin(leads, eq(messages.leadId, leads.id))
-    .where(and(eq(messages.campaignId, c.req.param("id")), eq(messages.orgId, orgId(c))))
+    // Scoped join: a message row pointing at another workspace's lead shows no lead.
+    .leftJoin(leads, and(eq(messages.leadId, leads.id), eq(leads.orgId, oid)))
+    .where(and(eq(messages.campaignId, cp.id), eq(messages.orgId, oid)))
     .orderBy(desc(messages.createdAt))
     .limit(200);
   return c.json({ messages: rows.map((r) => ({ ...r.message, bodyHtml: undefined, lead: r.lead ? { id: r.lead.id, fullName: r.lead.fullName, title: r.lead.title } : null })) });
@@ -353,8 +419,8 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
   if (!step) throw notFound("Step");
   const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, b.leadId), eq(leads.orgId, oid)) });
   if (!lead) throw notFound("Lead");
-  const company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
-  const account = cp.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, cp.emailAccountId) }) : null;
+  const company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, oid)) }) : null;
+  const account = cp.emailAccountId ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, cp.emailAccountId), eq(emailAccounts.orgId, oid)) }) : null;
   const s = cp.settings as Record<string, unknown>;
   if (step.aiPersonalize) await consume(db, oid, "aiMessages", 1);
   const out = await generateOutreach(step.aiPersonalize ? aiFor(c.get("auth")) : NO_AI, {
@@ -384,7 +450,7 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   if (b.leadId) {
     const l = await db.query.leads.findFirst({ where: and(eq(leads.id, b.leadId), eq(leads.orgId, oid)) });
     if (!l) throw notFound("Lead");
-    const co = l.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, l.companyId) }) : null;
+    const co = l.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, l.companyId), eq(companies.orgId, oid)) }) : null;
     lead = { firstName: l.firstName ?? undefined, lastName: l.lastName ?? undefined, fullName: l.fullName ?? undefined, title: l.title ?? undefined, company: co ? { name: co.name ?? undefined, domain: co.domain, industry: co.industry ?? undefined, description: co.description ?? undefined } : undefined };
   }
   if (!lead) throw badRequest("lead or leadId required");
@@ -405,11 +471,42 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
 /** Positive-signal intents worth drafting an AI follow-up for. */
 const REPLY_WORTHY_INTENTS = new Set(["interested", "referral", "question"]);
 
+/** Every intent the classifier may return. Anything else is stored as "other". */
+const REPLY_INTENTS = ["interested", "not_interested", "out_of_office", "unsubscribe", "referral", "question", "bounce", "other"] as const;
+type ReplyIntent = (typeof REPLY_INTENTS)[number];
+const asIntent = (v: unknown): ReplyIntent => (typeof v === "string" && (REPLY_INTENTS as readonly string[]).includes(v) ? (v as ReplyIntent) : "other");
+
+/**
+ * The sender's address out of a From value - strictly.
+ *
+ * This used to be "the first thing in the string that looks like an email". A From header
+ * is `"display name" <address>`, and the display name is whatever the sender typed, so
+ * `"ceo@bigprospect.test" <attacker@evil.example>` was read as a reply FROM the CEO: the
+ * attacker's "unsubscribe" suppressed someone else's lead and stopped their sequence.
+ *
+ * The address is what is inside the LAST `<...>`. With no angle brackets the whole value
+ * must be one bare address. Anything else is null, and the request is refused.
+ */
+export function parseSender(from: string): string | null {
+  const s = stripControl(from).trim();
+  if (!s || s.length > 1000) return null;
+  const open = s.lastIndexOf("<");
+  if (open !== -1) {
+    const close = s.indexOf(">", open);
+    // The mailbox must be the END of the value: nothing but whitespace may follow it.
+    if (close === -1 || s.slice(close + 1).trim() !== "") return null;
+    return canonicalEmail(s.slice(open + 1, close));
+  }
+  if (s.includes(">")) return null;
+  return canonicalEmail(s);
+}
+
 /** Inbound reply ingestion (Resend inbound webhook, Gmail/Zapier forward, or manual). Stops sequences + classifies intent. */
-campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), text: z.string().default(""), subject: z.string().optional() })), async (c) => {
+campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().max(1000), text: z.string().max(200_000).default(""), subject: z.string().max(1000).optional() })), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
-  const email = (b.from.match(/[\w.+-]+@[\w-]+\.[\w.-]+/)?.[0] ?? b.from).toLowerCase();
+  const email = parseSender(b.from);
+  if (!email) throw badRequest("`from` must be the sender's address: either a bare address (jane@example.com) or Name <jane@example.com>.");
   const { db } = getDb();
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
   const ai = aiFor(c.get("auth"));
@@ -417,20 +514,37 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
   // rule-based path - because marking the reply (which stops the sequence) must never depend
   // on the AI budget. The response says which path was taken.
   const clsCharge = await tryConsume(db, oid, "aiMessages", 1);
-  const cls = await classifyReply(clsCharge.ok ? ai : NO_AI, `${b.subject ?? ""}\n${b.text}`);
-  let aiSkipped: string | undefined = clsCharge.ok ? undefined : clsCharge.reason === "quota" ? "quota" : "error";
+  const replyText = `${b.subject ?? ""}\n${b.text}`;
+  /**
+   * Nor on the AI provider being up. A provider error (a 429, a timeout) used to escape
+   * from here as a 500: the reply was dropped, nothing was marked, and the sequence kept
+   * emailing someone who had just answered - or asked to be removed. Any failure falls
+   * back to the rule-based classifier, which needs nothing but the text.
+   */
+  let aiFailed = false;
+  const raw = await classifyReply(clsCharge.ok ? ai : NO_AI, replyText).catch(async (e) => {
+    aiFailed = true;
+    console.warn(`[campaigns] reply classification failed, using rules: ${(e as Error)?.name ?? "Error"}`);
+    return classifyReply(NO_AI, replyText).catch(() => ({ intent: "other", confidence: 0 }) as Awaited<ReturnType<typeof classifyReply>>);
+  });
+  // The intent is model output: it is written to messages.intent and into a lead tag
+  // (`replied:<intent>`), so it is held to the known set before it is stored anywhere.
+  const cls = { ...raw, intent: asIntent(raw?.intent), confidence: typeof raw?.confidence === "number" && Number.isFinite(raw.confidence) ? Math.min(1, Math.max(0, raw.confidence)) : 0 };
+  let aiSkipped: string | undefined = clsCharge.ok ? (aiFailed ? "ai_unavailable" : undefined) : clsCharge.reason === "quota" ? "quota" : "error";
   // The message itself goes along so an out-of-office auto-reply is not taken for a real one.
   const matched = await markReplied(oid, email, cls.intent, { subject: b.subject, text: b.text });
   if (matched) {
     const lead = await db.query.leads.findFirst({ where: and(eq(leads.orgId, oid), eq(leads.email, email)) });
-    const company = lead?.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
+    const company = lead?.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, oid)) }) : null;
 
     // Reuse the sender identity from the most recent outbound message to this lead, if any.
     const prevOutbound = lead
       ? await db.query.messages.findFirst({ where: and(eq(messages.orgId, oid), eq(messages.leadId, lead.id), eq(messages.direction, "outbound")), orderBy: desc(messages.createdAt) })
       : null;
-    const campaign = prevOutbound?.campaignId ? await db.query.campaigns.findFirst({ where: eq(campaigns.id, prevOutbound.campaignId) }) : null;
-    const account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: eq(emailAccounts.id, campaign.emailAccountId) }) : null;
+    // Both scoped to this workspace: the sender identity (name, signature) read here goes
+    // into the AI draft, and must never be another tenant's.
+    const campaign = prevOutbound?.campaignId ? await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, prevOutbound.campaignId), eq(campaigns.orgId, oid)) }) : null;
+    const account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, campaign.emailAccountId), eq(emailAccounts.orgId, oid)) }) : null;
     const cs = (campaign?.settings ?? {}) as Record<string, unknown>;
 
     let draftReply: { subject: string; body: string } | null = null;
@@ -463,14 +577,14 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string(), 
       leadId: lead?.id,
       direction: "inbound",
       toEmail: email,
-      subject: b.subject ?? "(reply)",
+      subject: (b.subject ?? "(reply)").slice(0, 500),
       bodyText: b.text.slice(0, 20000),
       status: "received",
       intent: cls.intent,
       draftReply: draftReply ?? undefined,
     });
   }
-  return c.json({ matched, intent: cls.intent, confidence: cls.confidence, ...(aiSkipped ? { skipped: aiSkipped, note: aiSkipped === "quota" ? "AI quota reached: the reply was classified with rules only and no draft was written." : "Could not record AI usage, so the AI steps were skipped." } : {}) });
+  return c.json({ matched, intent: cls.intent, confidence: cls.confidence, ...(aiSkipped ? { skipped: aiSkipped, note: aiSkipped === "quota" ? "AI quota reached: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_unavailable" ? "The AI engine did not answer: the reply was classified with rules only and no draft was written." : "Could not record AI usage, so the AI steps were skipped." } : {}) });
 });
 
 /** Send (or edit-and-send) the AI-drafted follow-up for an inbound message. */
@@ -513,9 +627,9 @@ campaignRoutes.post(
       .returning();
 
     const res = await sendMail(mailer, {
-      from: `${account.fromName} <${account.fromEmail}>`,
+      from: `${safeDisplayName(account.fromName) || "Sender"} <${account.provider === "system" ? platformFromAddress() : account.fromEmail}>`,
       to: lead.email,
-      subject,
+      subject: stripControl(subject).slice(0, 500),
       text: bodyText,
       replyTo: account.replyTo ?? account.fromEmail,
       headers: { "X-Prospex-Message": msg.id },

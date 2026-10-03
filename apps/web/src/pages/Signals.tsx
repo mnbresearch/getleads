@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch, fmtDate } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
+import { ExtLink } from "../components/ExtLink";
 
 interface Signal { id: string; type: string; companyName: string | null; companyDomain: string | null; title: string; summary: string | null; url: string; source: string | null; amountUsd: number | null; round: string | null; confidence: number; occurredAt: string | null; createdAt: string; match: { status: string; leadsCreated: number } | null }
 interface Sub { id: string; name: string; types: string[]; keywords: string[]; industries: string[]; locations: string[]; targetTitles: string[]; autoCreateLeads: boolean; active: boolean; lastRunAt: string | null; stats: Record<string, number> }
@@ -120,11 +121,7 @@ export function SignalsPage() {
                   {/* Linkified only when there is somewhere to go. A job change has no
                       source article - its `url` is an internal identity string - and an
                       anchor with a non-http href renders as a link that goes nowhere. */}
-                  {/^https?:\/\//.test(s.url ?? "") ? (
-                    <a className="text-sm text-ink-300 hover:underline" href={s.url} target="_blank" rel="noreferrer">{s.title}</a>
-                  ) : (
-                    <div className="text-sm text-ink-300">{s.title}</div>
-                  )}
+                  <ExtLink className="text-sm text-ink-300 hover:underline" href={s.url} fallback={<div className="text-sm text-ink-300">{s.title}</div>}>{s.title}</ExtLink>
                   <div className="text-xs text-ink-500">{s.source} · {fmtDate(s.occurredAt ?? s.createdAt)} {s.match && <span className="ml-2 badge bg-brand-50 text-brand-700">matched{s.match.leadsCreated ? ` · ${s.match.leadsCreated} leads` : ""}</span>}</div>
                 </div>
                 {s.companyName && <button className="btn-secondary py-1 text-xs" onClick={() => apiFetch<{ people: { leadId?: string }[]; skipped?: string; saveStopped?: string }>("POST", "/v1/tools/decision-makers", { companyName: s.companyName, companyDomain: s.companyDomain ?? undefined, limit: 4 }).then((r) => toast(dmSummary(r))).catch((e) => toast((e as Error).message, "err"))}>Find decision makers</button>}
@@ -188,7 +185,7 @@ export function SignalsPage() {
       <MonitorModal open={monOpen} onClose={() => setMonOpen(false)} onDone={() => { setMonOpen(false); load(); }} toast={toast} />
       <Modal open={!!results} onClose={() => setResults(null)} title={results?.m.name ?? ""} wide>
         <div className="max-h-[60vh] divide-y divide-slate-100 overflow-y-auto text-sm">
-          {results?.rows.map((r) => <div key={r.id} className="py-2"><span className="badge mr-2 bg-black/[0.05] text-ink-300">{r.kind}</span>{r.url && !r.url.startsWith("job:") ? <a className="hover:underline" href={r.url} target="_blank" rel="noreferrer">{r.title}</a> : r.title}{r.leadId && <span className="ml-2 badge bg-emerald-50 text-emerald-700">lead</span>}<div className="text-xs text-ink-400">{r.snippet}</div></div>)}
+          {results?.rows.map((r) => <div key={r.id} className="py-2"><span className="badge mr-2 bg-black/[0.05] text-ink-300">{r.kind}</span><ExtLink className="hover:underline" href={r.url} fallback={r.title}>{r.title}</ExtLink>{r.leadId && <span className="ml-2 badge bg-emerald-50 text-emerald-700">lead</span>}<div className="text-xs text-ink-400">{r.snippet}</div></div>)}
           {results?.rows.length === 0 && <div className="py-6 text-center text-ink-400">No results yet.</div>}
         </div>
       </Modal>

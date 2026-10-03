@@ -2,37 +2,114 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, clients, companies, consume, desc, enqueue, eq, getDb, icps, ilike, inArray, isNull, leads, listLeads, lists, or, QuotaExceededError, signals, sql, suppressions } from "@prospex/db";
-import { verifyEmail, findEmail, extractDomain, computeLeadPriority } from "@prospex/core";
+import { verifyEmail, findEmail, computeLeadPriority } from "@prospex/core";
 import { env } from "../env.js";
-import { badRequest, notFound, requireSomeFields } from "../lib/errors.js";
+import { ApiError, badRequest, describeError, isClientDataError, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
-import { csvCell, parseCsv } from "../lib/csv.js";
+import { CSV_MAX_COLUMNS, csvCell, parseCsv, parseCsvRecords } from "../lib/csv.js";
+import { describeIssues } from "../lib/validate.js";
+import { audit } from "../lib/audit.js";
+import { stripNulDeep } from "../lib/sanitize.js";
+import { emailField, profileUrlField } from "../lib/fields.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { findExistingLead, leadWithCompany, upsertCompany, upsertLead, verifierOf } from "../services/leads.js";
+import { canonicalEmail, companyDomainOrNull, findExistingLead, leadWithCompany, upsertCompany, upsertLead, verifierOf } from "../services/leads.js";
 import { emitEvent } from "../lib/events.js";
 
 export const leadRoutes = new Hono<Env>();
 leadRoutes.use("*", requireAuth);
 
-const leadInput = z.object({
+// ── The lead DTO ──
+// One set of field rules, used by POST, PATCH and - row by row - by the import. The import
+// used to bypass all of it (it had its own two-line check), which is how a 1 MB title, a
+// `javascript:` LinkedIn URL and a three-recipient "email" got into the leads table.
+
+/** Custom fields per lead, and the size of each value (as JSON). */
+export const CUSTOM_MAX_KEYS = 100;
+export const CUSTOM_MAX_VALUE_CHARS = 2000;
+const CUSTOM_MAX_KEY_CHARS = 100;
+/** Keys that are never stored: they are how a later object merge reaches Object.prototype. */
+const FORBIDDEN_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+const customField = z.record(z.unknown()).transform((obj, ctx) => {
+  const out: Record<string, unknown> = {};
+  let n = 0;
+  for (const [k, v] of Object.entries(obj)) {
+    if (FORBIDDEN_KEYS.has(k)) continue;
+    if (k.length > CUSTOM_MAX_KEY_CHARS) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `A custom field name is too long (${k.length} characters; the limit is ${CUSTOM_MAX_KEY_CHARS}).` });
+      return z.NEVER;
+    }
+    const size = typeof v === "string" ? v.length : (JSON.stringify(v) ?? "").length;
+    if (size > CUSTOM_MAX_VALUE_CHARS) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Custom field "${k.slice(0, 40)}" is too long (${size.toLocaleString("en-US")} characters; the limit is ${CUSTOM_MAX_VALUE_CHARS.toLocaleString("en-US")}).` });
+      return z.NEVER;
+    }
+    out[k] = v;
+    n++;
+  }
+  if (n > CUSTOM_MAX_KEYS) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: `Too many custom fields (${n}; the limit is ${CUSTOM_MAX_KEYS} per lead).` });
+    return z.NEVER;
+  }
+  return out;
+});
+
+const leadFields = {
   // Limits generous enough for real imported data, tight enough that a pasted paragraph is
   // refused rather than stored as a name.
-  firstName: z.string().max(200).optional(),
-  lastName: z.string().max(200).optional(),
-  fullName: z.string().max(200).optional(),
-  title: z.string().max(300).optional(),
-  email: z.string().email().optional(),
-  linkedinUrl: z.string().url().optional(),
-  phone: z.string().optional(),
-  location: z.string().optional(),
-  country: z.string().optional(),
-  companyDomain: z.string().optional(),
-  companyName: z.string().max(200).optional(),
+  firstName: z.string().max(200),
+  lastName: z.string().max(200),
+  fullName: z.string().max(200),
+  title: z.string().max(300),
+  email: emailField,
+  linkedinUrl: profileUrlField,
+  phone: z.string().max(100),
+  location: z.string().max(300),
+  country: z.string().max(100),
+  companyDomain: z.string().max(300),
+  companyName: z.string().max(200),
+  tags: z.array(z.string().max(100)).max(50),
+  custom: customField,
+  source: z.string().max(100),
+};
+
+const leadInput = z.object({
+  firstName: leadFields.firstName.optional(),
+  lastName: leadFields.lastName.optional(),
+  fullName: leadFields.fullName.optional(),
+  title: leadFields.title.optional(),
+  email: leadFields.email.optional(),
+  linkedinUrl: leadFields.linkedinUrl.optional(),
+  phone: leadFields.phone.optional(),
+  location: leadFields.location.optional(),
+  country: leadFields.country.optional(),
+  companyDomain: leadFields.companyDomain.optional(),
+  companyName: leadFields.companyName.optional(),
   icpId: z.string().uuid().optional(),
-  tags: z.array(z.string()).optional(),
-  custom: z.record(z.unknown()).optional(),
-  source: z.string().optional(),
+  tags: leadFields.tags.optional(),
+  custom: leadFields.custom.optional(),
+  source: leadFields.source.optional(),
 });
+
+/** One import row, after its columns have been mapped. Same rules as `leadInput`. */
+const importRow = z.object({
+  firstName: leadFields.firstName.optional(),
+  lastName: leadFields.lastName.optional(),
+  fullName: leadFields.fullName.optional(),
+  title: leadFields.title.optional(),
+  email: leadFields.email.optional(),
+  linkedinUrl: leadFields.linkedinUrl.optional(),
+  phone: leadFields.phone.optional(),
+  location: leadFields.location.optional(),
+  country: leadFields.country.optional(),
+  companyDomain: leadFields.companyDomain.optional(),
+  companyName: leadFields.companyName.optional(),
+  tags: leadFields.tags.optional(),
+  custom: leadFields.custom.optional(),
+});
+
+/** The statuses a verifier can give. A hand-set status is one of these or it is refused. */
+const EMAIL_STATUSES = ["valid", "risky", "invalid", "catch_all", "unknown"] as const;
 
 /**
  * The PATCH shape. GET returns null for every empty column, so a client that edits a lead by
@@ -40,23 +117,26 @@ const leadInput = z.object({
  * "clear this field"; absent means "leave it".
  */
 const leadPatch = z.object({
-  firstName: z.string().max(200).nullish(),
-  lastName: z.string().max(200).nullish(),
-  fullName: z.string().max(200).nullish(),
-  title: z.string().max(300).nullish(),
-  email: z.string().email().nullish(),
-  linkedinUrl: z.string().url().nullish(),
-  phone: z.string().nullish(),
-  location: z.string().nullish(),
-  country: z.string().nullish(),
-  companyDomain: z.string().nullish(),
-  companyName: z.string().max(200).nullish(),
+  firstName: leadFields.firstName.nullish(),
+  lastName: leadFields.lastName.nullish(),
+  fullName: leadFields.fullName.nullish(),
+  title: leadFields.title.nullish(),
+  email: leadFields.email.nullish(),
+  linkedinUrl: leadFields.linkedinUrl.nullish(),
+  phone: leadFields.phone.nullish(),
+  location: leadFields.location.nullish(),
+  country: leadFields.country.nullish(),
+  companyDomain: leadFields.companyDomain.nullish(),
+  companyName: leadFields.companyName.nullish(),
   icpId: z.string().uuid().nullish(),
-  tags: z.array(z.string()).optional(),
-  custom: z.record(z.unknown()).optional(),
-  source: z.string().optional(),
-  emailStatus: z.string().optional(),
-  score: z.number().optional(),
+  tags: leadFields.tags.optional(),
+  custom: leadFields.custom.optional(),
+  source: leadFields.source.optional(),
+  emailStatus: z.enum(EMAIL_STATUSES).optional(),
+  // A score is 0-100 everywhere it is read (the hot list, the ICP filter, the report), so
+  // an out-of-range one is brought into range rather than stored: -5000 sorted a lead out
+  // of every view, and 1e39 overflowed the column.
+  score: z.number().finite().transform((n) => Math.min(100, Math.max(0, Math.round(n)))).optional(),
 });
 
 /** Signals visible to an org: the shared feed plus its own private ones (job changes). */
@@ -123,7 +203,9 @@ leadRoutes.get("/", zValidator("query", listQuery), async (c) => {
   const rows = await db
     .select({ lead: leads, company: companies })
     .from(leads)
-    .leftJoin(companies, eq(leads.companyId, companies.id))
+    // The join is scoped as well as the WHERE: a lead whose company_id points at another
+    // workspace's company must come back with no company, not with theirs.
+    .leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid)))
     .where(where)
     .orderBy(q.order === "asc" ? asc(sortCol) : desc(sortCol))
     .limit(q.limit)
@@ -133,14 +215,21 @@ leadRoutes.get("/", zValidator("query", listQuery), async (c) => {
 });
 
 leadRoutes.get("/export.csv", zValidator("query", listQuery), async (c) => {
-  const q = { ...c.req.valid("query"), limit: 5000, offset: 0 };
+  const filters = c.req.valid("query");
+  const q = { ...filters, limit: 5000, offset: 0 };
+  const oid = orgId(c);
   const { db } = getDb();
-  const rows = await db.select({ lead: leads, company: companies }).from(leads).leftJoin(companies, eq(leads.companyId, companies.id)).where(await buildWhere(orgId(c), q)).orderBy(desc(leads.score)).limit(5000);
+  const rows = await db.select({ lead: leads, company: companies }).from(leads).leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid))).where(await buildWhere(oid, q)).orderBy(desc(leads.score)).limit(5000);
   const cols = ["first_name", "last_name", "title", "email", "email_status", "email_confidence", "linkedin_url", "phone", "location", "company", "company_domain", "industry", "company_size", "score", "tags", "created_at"];
   const esc = csvCell;
   const lines = [cols.join(",")];
   for (const { lead: l, company: co } of rows) lines.push([l.firstName, l.lastName, l.title, l.email, l.emailStatus, l.emailConfidence, l.linkedinUrl, l.phone, l.location, co?.name, co?.domain, co?.industry, co?.size, l.score, l.tags.join(";"), l.createdAt.toISOString()].map(esc).join(","));
-  c.header("content-type", "text/csv");
+  // An export is the bulk exit for contact data, so every one is on the audit trail: who,
+  // from where, how many rows, and which filters selected them.
+  const { limit: _l, offset: _o, sort: _s, order: _or, ...applied } = filters;
+  await audit(c, "leads.exported", { targetType: "lead", data: { rows: rows.length, format: "csv", truncated: rows.length === 5000, filters: applied } });
+  c.header("content-type", "text/csv; charset=utf-8");
+  c.header("x-content-type-options", "nosniff");
   c.header("content-disposition", `attachment; filename="leads-${Date.now()}.csv"`);
   return c.body(lines.join("\n"));
 });
@@ -149,7 +238,8 @@ leadRoutes.post("/", zValidator("json", leadInput), async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const b = c.req.valid("json");
-  await assertOwned(icps, b.icpId, oid, "ICP");
+  await assertOwned(icps, b.icpId, oid, "ICP", c);
+  if (b.companyDomain !== undefined && !companyDomainOrNull(b.companyDomain)) throw badRequest(`companyDomain "${b.companyDomain.slice(0, 80)}" is not a public company domain (for example acme.com).`);
   // Charged only when this creates a lead. Posting someone the workspace already has is an
   // update, and billing it as a new lead charged customers for their own duplicates.
   if (!(await findExistingLead(oid, b))) await consume(db, oid, "leads", 1);
@@ -157,13 +247,29 @@ leadRoutes.post("/", zValidator("json", leadInput), async (c) => {
   return c.json(r, r.created ? 201 : 200);
 });
 
-/** Bulk import: JSON array or CSV text (auto-detects headers). */
+/** Most rows in one import. */
+const IMPORT_MAX_ROWS = 5000;
+
+/**
+ * Bulk import: JSON array or CSV text (auto-detects headers).
+ *
+ * Every row goes through the same field rules as POST /v1/leads. A row that fails them is
+ * not imported and is listed in `skippedRows` with the reason in plain words; the rest of
+ * the file carries on. `errors` is for rows that passed validation and then could not be
+ * saved (out of quota, a database fault) - its text is ours, never the database's.
+ */
 leadRoutes.post("/import", async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const ct = c.req.header("content-type") ?? "";
   let items: Record<string, unknown>[] = [];
-  if (ct.includes("json")) {
+  const warnings: string[] = [];
+  /** 0-based index of the row a never-closed quote swallowed the rest of the file into. */
+  let unterminated = -1;
+  /** 0-based indexes of rows that were wider than the column limit. */
+  const overWide = new Set<number>();
+  const format = ct.includes("json") ? "json" : "csv";
+  if (format === "json") {
     // Malformed JSON, `null`, or an object without `leads` was a 500 (a TypeError reading
     // `.leads` of null). The caller sent something unusable, so say what was expected.
     let body: unknown;
@@ -174,13 +280,24 @@ leadRoutes.post("/import", async (c) => {
     }
     const arr = Array.isArray(body) ? body : body && typeof body === "object" && Array.isArray((body as { leads?: unknown }).leads) ? (body as { leads: unknown[] }).leads : null;
     if (!arr) throw badRequest("Expected an array of leads, or { \"leads\": [...] }.");
+    if (arr.length > IMPORT_MAX_ROWS) throw badRequest(`Max ${IMPORT_MAX_ROWS} leads per import`);
     items = arr.filter((x): x is Record<string, unknown> => !!x && typeof x === "object" && !Array.isArray(x));
     if (items.length < arr.length) throw badRequest(`Every lead must be an object; ${arr.length - items.length} entr${arr.length - items.length === 1 ? "y is" : "ies are"} not.`);
+    items.forEach((it, i) => {
+      if (Object.keys(it).length > CSV_MAX_COLUMNS) overWide.add(i);
+    });
   } else {
-    items = parseCsv(await c.req.text());
+    const parsed = parseCsvRecords(await c.req.text());
+    items = parsed.records;
+    parsed.overWide.forEach((i) => overWide.add(i));
+    if (parsed.unterminatedQuote) {
+      warnings.push("The file ends inside a quoted cell (a \" that is never closed), so everything after that quote was read as one cell. Check the last rows of the file.");
+      // That last "row" is the rest of the file glued into one cell. It is never a lead.
+      if (items.length) unterminated = items.length - 1;
+    }
   }
   if (items.length === 0) throw badRequest("No leads provided");
-  if (items.length > 5000) throw badRequest("Max 5000 leads per import");
+  if (items.length > IMPORT_MAX_ROWS) throw badRequest(`Max ${IMPORT_MAX_ROWS} leads per import`);
   let created = 0;
   let updated = 0;
   let stopped: string | undefined;
@@ -188,7 +305,25 @@ leadRoutes.post("/import", async (c) => {
   const errors: { row: number; error: string }[] = [];
   const skippedRows: { row: number; reason: string }[] = [];
   for (let i = 0; i < items.length; i++) {
-    const it = normalizeImportRow(items[i]);
+    if (i === unterminated) {
+      skippedRows.push({ row: i + 1, reason: "This row opens a quote (\") that is never closed, so the rest of the file was read as part of it. Close the quote and import again." });
+      continue;
+    }
+    if (overWide.has(i)) {
+      skippedRows.push({ row: i + 1, reason: `This row has more than ${CSV_MAX_COLUMNS} columns. Remove the columns you do not need and import it again.` });
+      continue;
+    }
+    const mapped = mapImportRow(items[i]);
+    if (!mapped.ok) {
+      skippedRows.push({ row: i + 1, reason: mapped.reason });
+      continue;
+    }
+    const checked = importRow.safeParse(mapped.row);
+    if (!checked.success) {
+      skippedRows.push({ row: i + 1, reason: describeIssues(checked.error) });
+      continue;
+    }
+    const it = checked.data;
     // A row that names nobody (only a title, say) became a blank lead nobody could find,
     // contact or dedupe. It is skipped and reported, and the import carries on.
     const hasName = [it.fullName, it.firstName, it.lastName].some((v) => typeof v === "string" && v.trim());
@@ -203,16 +338,26 @@ leadRoutes.post("/import", async (c) => {
       const r = await upsertLead(oid, { ...it, source: "import" });
       r.created ? created++ : updated++;
     } catch (e) {
-      errors.push({ row: i + 1, error: (e as Error).message });
+      // What the caller is told is written here. The exception's own text is the SQL
+      // statement with every bound value in it, and it used to be returned as-is.
       if (e instanceof QuotaExceededError) {
+        errors.push({ row: i + 1, error: e.message });
         stopped = `Stopped at row ${i + 1} of ${items.length}: ${e.message}`;
         notProcessed = items.length - (i + 1);
         break;
       }
+      if (e instanceof ApiError) errors.push({ row: i + 1, error: e.message });
+      else if (isClientDataError(e)) errors.push({ row: i + 1, error: "A value in this row cannot be stored (for example text with unsupported characters, or a value that is too long)." });
+      else {
+        const d = describeError(e);
+        console.error(`[leads] import row ${i + 1} failed: ${d.name}${d.code ? ` [${d.code}]` : ""}: ${d.message}`);
+        errors.push({ row: i + 1, error: d.code === "23505" ? "This row conflicts with a lead that already exists." : "This row could not be saved because of a server error. It was not imported." });
+      }
     }
   }
   await emitEvent(oid, "leads.imported", { created, updated, errors: errors.length, skipped: skippedRows.length });
-  return c.json({ created, updated, errors: errors.slice(0, 50), stopped, notProcessed, skipped: skippedRows.length, skippedRows: skippedRows.slice(0, 50) });
+  await audit(c, "leads.imported", { targetType: "lead", data: { format, rows: items.length, created, updated, skipped: skippedRows.length, errors: errors.length, stopped: !!stopped } });
+  return c.json({ created, updated, errors: errors.slice(0, 50), stopped, notProcessed, skipped: skippedRows.length, skippedRows: skippedRows.slice(0, 50), ...(warnings.length ? { warnings } : {}) });
 });
 
 // ── Static paths first ──
@@ -225,10 +370,11 @@ leadRoutes.post("/bulk/delete", zValidator("json", z.object({ ids: z.array(z.str
   const { db } = getDb();
   const ids = [...new Set(c.req.valid("json").ids)];
   const gone = await db.delete(leads).where(and(inArray(leads.id, ids), eq(leads.orgId, orgId(c)))).returning({ id: leads.id });
+  await audit(c, "leads.bulk_deleted", { targetType: "lead", data: { requested: ids.length, deleted: gone.length } });
   return c.json({ ok: true, requested: ids.length, deleted: gone.length, notFound: ids.length - gone.length });
 });
 
-leadRoutes.post("/bulk/tag", zValidator("json", z.object({ ids: z.array(z.string().uuid()).min(1).max(1000), add: z.array(z.string()).optional(), remove: z.array(z.string()).optional() })), async (c) => {
+leadRoutes.post("/bulk/tag", zValidator("json", z.object({ ids: z.array(z.string().uuid()).min(1).max(1000), add: z.array(z.string().max(100)).max(50).optional(), remove: z.array(z.string().max(100)).max(50).optional() })), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
   const rows = await db.select().from(leads).where(and(inArray(leads.id, b.ids), eq(leads.orgId, orgId(c))));
@@ -265,14 +411,15 @@ leadRoutes.get("/lists/all", async (c) => {
 });
 leadRoutes.post("/lists", zValidator("json", z.object({ name: z.string().min(1).max(200), description: z.string().max(5000).optional(), clientId: z.string().uuid().optional() })), async (c) => {
   const { db } = getDb();
-  await assertOwned(clients, c.req.valid("json").clientId, orgId(c), "Client");
+  await assertOwned(clients, c.req.valid("json").clientId, orgId(c), "Client", c);
   const [row] = await db.insert(lists).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
   return c.json(row, 201);
 });
 leadRoutes.delete("/lists/:listId", async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(lists).where(and(eq(lists.id, c.req.param("listId")), eq(lists.orgId, orgId(c)))).returning({ id: lists.id });
+  const gone = await db.delete(lists).where(and(eq(lists.id, c.req.param("listId")), eq(lists.orgId, orgId(c)))).returning({ id: lists.id, name: lists.name });
   if (!gone.length) throw notFound("List");
+  await audit(c, "list.deleted", { targetType: "list", targetId: gone[0].id, data: { name: gone[0].name } });
   return c.json({ ok: true });
 });
 leadRoutes.post("/lists/:listId/leads", zValidator("json", z.object({ ids: z.array(z.string().uuid()).min(1).max(5000) })), async (c) => {
@@ -305,13 +452,16 @@ leadRoutes.get("/suppressions/all", async (c) => {
   const { db } = getDb();
   return c.json({ suppressions: await db.select().from(suppressions).where(eq(suppressions.orgId, orgId(c))).orderBy(desc(suppressions.createdAt)).limit(1000) });
 });
-leadRoutes.post("/suppressions", zValidator("json", z.object({ emails: z.array(z.string().email()).min(1), reason: z.string().optional() })), async (c) => {
+leadRoutes.post("/suppressions", zValidator("json", z.object({ emails: z.array(emailField).min(1).max(5000), reason: z.string().max(200).optional() })), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
-  const emails = [...new Set(b.emails.map((e) => e.toLowerCase()))];
+  // Stored in canonical form - the form a lead's email is stored in - so the send-time
+  // lookup `suppressions.email = lead.email` cannot miss on case or stray whitespace.
+  const emails = [...new Set(b.emails)];
   // `added` counts rows actually inserted; an address already suppressed is reported as such
   // rather than counted again.
   const inserted = await db.insert(suppressions).values(emails.map((email) => ({ orgId: orgId(c), email, reason: b.reason ?? "manual" }))).onConflictDoNothing().returning({ email: suppressions.email });
+  await audit(c, "suppression.added", { targetType: "suppression", data: { requested: emails.length, added: inserted.length, reason: b.reason ?? "manual" } });
   return c.json({ ok: true, added: inserted.length, alreadySuppressed: emails.length - inserted.length });
 });
 
@@ -329,7 +479,7 @@ leadRoutes.get("/hot/list", zValidator("query", z.object({ limit: z.coerce.numbe
   const rows = await db
     .select({ lead: leads, company: companies })
     .from(leads)
-    .leftJoin(companies, eq(leads.companyId, companies.id))
+    .leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid)))
     .where(and(eq(leads.orgId, oid), sql`${leads.status} != 'unsubscribed'`))
     .orderBy(desc(leads.score), desc(leads.engagementScore))
     .limit(500);
@@ -380,8 +530,9 @@ leadRoutes.patch("/:id", zValidator("json", leadPatch), async (c) => {
   if (!existing) throw notFound("Lead");
   const { companyDomain, companyName, email: rawEmail, ...b } = c.req.valid("json");
   requireSomeFields({ ...b, companyDomain, companyName, email: rawEmail });
-  await assertOwned(icps, b.icpId, oid, "ICP");
-  const email = rawEmail === null ? null : rawEmail?.toLowerCase();
+  await assertOwned(icps, b.icpId, oid, "ICP", c);
+  // Already canonical: the schema ran canonicalEmail.
+  const email = rawEmail;
 
   /**
    * The company is identified by its domain, so a domain moves the lead to that company
@@ -393,8 +544,10 @@ leadRoutes.patch("/:id", zValidator("json", leadPatch), async (c) => {
   let companyPatch: { companyId?: string | null } = {};
   if (companyDomain === null) companyPatch = { companyId: null };
   else if (companyDomain) {
-    const domain = extractDomain(companyDomain);
-    if (!domain) throw badRequest(`companyDomain "${companyDomain}" is not a domain`);
+    const domain = companyDomainOrNull(companyDomain);
+    if (!domain) throw badRequest(`companyDomain "${companyDomain.slice(0, 80)}" is not a domain`);
+    // Fill-only: this names a company that has no name yet. It does not rename one that
+    // does - that company row is shared by every other lead at the domain.
     const co = await upsertCompany(oid, domain, { name: companyName ?? undefined });
     companyPatch = { companyId: co.id };
   } else if (companyName) {
@@ -412,11 +565,21 @@ leadRoutes.patch("/:id", zValidator("json", leadPatch), async (c) => {
    * which is three statements that cannot all be true.
    */
   const emailChanged = email === null ? existing.email !== null : !!email && email !== (existing.email ?? "").toLowerCase();
-  const resetVerification = emailChanged ? { emailStatus: "unknown", emailConfidence: 0, verifiedAt: null } : {};
+  const resetVerification = emailChanged ? { emailStatus: "unknown", emailConfidence: 0, verifiedAt: null, emailVerifiedBy: null } : {};
+  /**
+   * A status typed in by hand is an opinion, not a verification.
+   *
+   * `emailStatus: "valid"` could be PATCHed onto any lead, and the client-facing report
+   * then showed it as a verified address - with no verifier ever having looked at it and
+   * no verification charged. The status is still the caller's to set, but the two fields
+   * that say "a verifier checked this" are cleared with it, and they are what the report
+   * (and anything else that says "verified") now requires.
+   */
+  const handSetStatus = !emailChanged && b.emailStatus !== undefined && b.emailStatus !== existing.emailStatus ? { verifiedAt: null, emailVerifiedBy: null } : {};
 
   const [row] = await db
     .update(leads)
-    .set({ ...b, ...companyPatch, ...resetVerification, ...(email !== undefined ? { email } : {}), updatedAt: new Date() })
+    .set({ ...b, ...companyPatch, ...handSetStatus, ...resetVerification, ...(email !== undefined ? { email } : {}), updatedAt: new Date() })
     .where(eq(leads.id, existing.id))
     .returning();
   return c.json(row);
@@ -462,14 +625,14 @@ leadRoutes.post("/:id/find-email", async (c) => {
   const { db } = getDb();
   const l = await db.query.leads.findFirst({ where: and(eq(leads.id, c.req.param("id")), eq(leads.orgId, oid)) });
   if (!l) throw notFound("Lead");
-  const co = l.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, l.companyId) }) : null;
-  const domain = co?.domain ?? (c.req.query("domain") ? extractDomain(c.req.query("domain")!) : null);
+  const co = l.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, l.companyId), eq(companies.orgId, oid)) }) : null;
+  const domain = co?.domain ?? (c.req.query("domain") ? companyDomainOrNull(c.req.query("domain")!) : null);
   if (!domain || !l.firstName || !l.lastName) throw badRequest("Need first name, last name and a company domain");
   await consume(db, oid, "verifications", 1);
   const r = await findEmail({ firstName: l.firstName, lastName: l.lastName, domain, knownPattern: co?.emailPattern, knownEmails: (co?.raw as { emailsFound?: string[] })?.emailsFound }, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
-  if (r.email) {
+  if (r.email && canonicalEmail(r.email)) {
     // Only stamp verifiedAt when something checked the mailbox; a pattern guess is not verified.
-    await db.update(leads).set({ email: r.email, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: r.verifiedBy ? new Date() : null, emailVerifiedBy: r.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id));
+    await db.update(leads).set({ email: canonicalEmail(r.email) ?? undefined, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: r.verifiedBy ? new Date() : null, emailVerifiedBy: r.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id));
     if (co && r.pattern && !co.emailPattern) await db.update(companies).set({ emailPattern: r.pattern }).where(eq(companies.id, co.id));
   }
   return c.json(r);
@@ -478,34 +641,110 @@ leadRoutes.post("/:id/find-email", async (c) => {
 // ── helpers ──
 export { parseCsv };
 
+// The field's own name comes first, so a JSON row shaped like the POST /v1/leads body
+// (`firstName`, `companyDomain` ...) maps the way the API reference says it does.
 const ALIASES: Record<string, string[]> = {
-  firstName: ["first_name", "firstname", "first", "given_name"],
-  lastName: ["last_name", "lastname", "last", "surname", "family_name"],
-  fullName: ["full_name", "name", "contact_name", "person"],
-  title: ["title", "job_title", "position", "role", "designation"],
+  firstName: ["firstName", "first_name", "firstname", "first", "given_name"],
+  lastName: ["lastName", "last_name", "lastname", "last", "surname", "family_name"],
+  fullName: ["fullName", "full_name", "name", "contact_name", "person"],
+  title: ["title", "job_title", "jobTitle", "position", "role", "designation"],
   email: ["email", "email_address", "work_email", "e_mail"],
-  linkedinUrl: ["linkedin", "linkedin_url", "linkedin_profile", "profile_url"],
+  linkedinUrl: ["linkedinUrl", "linkedin", "linkedin_url", "linkedin_profile", "profile_url"],
   phone: ["phone", "mobile", "phone_number", "telephone"],
   location: ["location", "city", "address"],
   country: ["country"],
-  companyName: ["company", "company_name", "organization", "organisation", "employer"],
-  companyDomain: ["domain", "company_domain", "website", "company_website", "url"],
+  companyName: ["companyName", "company", "company_name", "organization", "organisation", "employer"],
+  companyDomain: ["companyDomain", "domain", "company_domain", "website", "company_website", "url"],
 };
+const FIELD_LABELS: Record<string, string> = { firstName: "First name", lastName: "Last name", fullName: "Name", title: "Title", email: "Email", linkedinUrl: "LinkedIn URL", phone: "Phone", location: "Location", country: "Country", companyName: "Company", companyDomain: "Company domain" };
+/** Cell values that mean "nothing here". */
+const PLACEHOLDER = /^(?:n\/?a|none|null|nil|undefined|unknown|-+|\?+|\.+)$/i;
 
-export function normalizeImportRow(row: Record<string, unknown>) {
-  const out: Record<string, unknown> = { custom: {} as Record<string, unknown> };
+type MappedRow = { ok: true; row: Record<string, unknown> } | { ok: false; reason: string };
+
+/**
+ * Map one raw row (CSV record or JSON object) onto the lead fields.
+ *
+ * Mapping only - the lengths, the email and the URL are judged by the `importRow` schema
+ * afterwards, with the same rules as POST /v1/leads. What is decided here is what cannot be
+ * expressed as a field rule:
+ *  - a mapped field must be text (a phone may be a number). `String(value)` used to turn
+ *    an object into "[object Object]" and store it as a name;
+ *  - a cell that is a placeholder ("n/a", "-") is no value;
+ *  - an email cell with no "@" at all is no email (people write "none"); one that HAS an
+ *    "@" is passed on to be validated, and refused there if it is not one address;
+ *  - a LinkedIn URL without a scheme ("linkedin.com/in/x") gets https://; any other scheme
+ *    is passed on and refused;
+ *  - everything unmapped becomes a custom field, except keys that could reach a prototype.
+ */
+export function mapImportRow(input: Record<string, unknown>): MappedRow {
+  const row = stripNulDeep(input);
+  const own = (k: string) => (Object.prototype.hasOwnProperty.call(row, k) ? row[k] : undefined);
+  const out: Record<string, unknown> = {};
   const used = new Set<string>();
   for (const [key, names] of Object.entries(ALIASES)) {
     for (const n of names) {
-      if (row[n] !== undefined && row[n] !== "") {
-        out[key] = String(row[n]);
-        used.add(n);
-        break;
-      }
+      const v = own(n);
+      if (v === undefined || v === null || v === "") continue;
+      used.add(n);
+      let text: string;
+      if (typeof v === "string") text = v.trim();
+      else if (key === "phone" && typeof v === "number" && Number.isFinite(v)) text = String(v);
+      else return { ok: false, reason: `${FIELD_LABELS[key]} must be text, not ${Array.isArray(v) ? "a list" : typeof v === "object" ? "an object" : `a ${typeof v}`}.` };
+      if (!text || PLACEHOLDER.test(text)) continue;
+      out[key] = text;
+      break;
     }
   }
-  if (typeof out.companyDomain === "string") out.companyDomain = extractDomain(out.companyDomain) ?? undefined;
-  if (typeof out.email === "string" && !/^\S+@\S+\.\S+$/.test(out.email)) delete out.email;
-  for (const [k, v] of Object.entries(row)) if (!used.has(k) && v !== "" && v !== undefined) (out.custom as Record<string, unknown>)[k] = v;
-  return out as Parameters<typeof upsertLead>[1];
+  if (typeof out.email === "string") {
+    if (!out.email.includes("@")) delete out.email;
+    else if (!canonicalEmail(out.email)) return { ok: false, reason: `Email "${out.email.slice(0, 80)}" is not a single valid email address. Use one address per lead, with no name, commas or brackets around it.` };
+  }
+  if (typeof out.linkedinUrl === "string") {
+    const u = out.linkedinUrl;
+    if (!/^[a-z][a-z0-9+.-]*:/i.test(u)) {
+      // No scheme. A host/path gets https://; anything else ("ask me") is not a URL at all.
+      if (/^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[/?#]\S*)?$/i.test(u)) out.linkedinUrl = `https://${u}`;
+      else delete out.linkedinUrl;
+    } else if (!/^https?:\/\//i.test(u)) {
+      return { ok: false, reason: "LinkedIn URL must be a web address starting with http:// or https://." };
+    }
+  }
+  if (typeof out.companyDomain === "string") {
+    // A website column is a hint about the company, not about the person: one that is not a
+    // public domain (an intranet URL, an IP address) is dropped and the lead is still imported.
+    const d = companyDomainOrNull(out.companyDomain);
+    if (d) out.companyDomain = d;
+    else delete out.companyDomain;
+  }
+  // JSON rows may carry real `tags` and `custom`, as the POST body does.
+  const tags = own("tags");
+  if (Array.isArray(tags)) {
+    if (!tags.every((t) => typeof t === "string")) return { ok: false, reason: "Tags must be a list of text values." };
+    out.tags = tags;
+    used.add("tags");
+  }
+  const custom: Record<string, unknown> = {};
+  const given = own("custom");
+  if (given && typeof given === "object" && !Array.isArray(given)) {
+    for (const [k, v] of Object.entries(given as Record<string, unknown>)) if (!FORBIDDEN_KEYS.has(k) && v !== "" && v !== undefined && v !== null) custom[k] = v;
+    used.add("custom");
+  }
+  for (const [k, v] of Object.entries(row)) {
+    if (used.has(k) || FORBIDDEN_KEYS.has(k) || v === "" || v === undefined || v === null) continue;
+    custom[k] = v;
+  }
+  out.custom = custom;
+  return { ok: true, row: out };
+}
+
+/**
+ * Kept for callers that used the old helper: maps a row and returns the upsert input, with
+ * an unusable row mapped to an empty one. New code uses `mapImportRow` + the `importRow`
+ * schema, which also say WHY a row was refused.
+ */
+export function normalizeImportRow(row: Record<string, unknown>) {
+  const m = mapImportRow(row);
+  const checked = m.ok ? importRow.safeParse(m.row) : null;
+  return (checked?.success ? checked.data : { custom: {} }) as Parameters<typeof upsertLead>[1];
 }

@@ -1,22 +1,103 @@
 import { and, companies, consume, eq, getDb, leads, sql, type Company, type Lead, type NewLead } from "@prospex/db";
 import type { CompanyProfile, PipelineLead } from "@prospex/core";
-import { inferDepartment, inferSeniority, splitName } from "@prospex/core";
+import { extractDomain, inferDepartment, inferSeniority, isPublicHost, splitName } from "@prospex/core";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume, type QuotaOutcome } from "../lib/quota.js";
+import { httpUrlOrNull, stripNul } from "../lib/sanitize.js";
 
-export async function upsertCompany(orgId: string, domain: string, data: Partial<CompanyProfile> & { name?: string | null }): Promise<Company> {
+/**
+ * The one definition of "an email address we will store and later send to".
+ *
+ * POST /v1/leads validated its email with zod. The CSV/JSON import, the pipeline, the pixel
+ * and every tool that saves a lead did not - they shared a `\S+@\S+\.\S+` check or none -
+ * so `a@x.com,b@x.com,c@x.com` and `"x" <victim@x.com>` were stored as a lead's email and
+ * later handed to the mailer as the recipient: one "lead" mailed three people, and one of
+ * them could be an address on the suppression list.
+ *
+ * Returns the trimmed, lower-cased address when `raw` is exactly ONE bare `local@domain`:
+ * no whitespace, comma, semicolon, angle brackets, quotes, parentheses or display name; at
+ * most 254 characters (64 for the local part); a dotted domain of ordinary labels. Anything
+ * else - including a non-string - is null.
+ */
+const EMAIL_RE = /^(?!\.)(?!.*\.\.)[a-z0-9_'+\-.]*[a-z0-9_+\-]@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
+export function canonicalEmail(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const s = raw.trim().toLowerCase();
+  if (!s || s.length > 254) return null;
+  if (!EMAIL_RE.test(s)) return null;
+  if (s.indexOf("@") > 64) return null;
+  return s;
+}
+
+/**
+ * A company domain we are willing to create a company row for (and later crawl): a real
+ * dotted hostname. Not an IP address, not `host:port`, not a path, not an internal name.
+ * Accepts a bare domain or a URL and returns the registrable-looking host, or null.
+ */
+const DOMAIN_RE = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
+export function companyDomainOrNull(raw: unknown): string | null {
+  if (typeof raw !== "string") return null;
+  const s = stripNul(raw).trim();
+  if (!s || s.length > 300) return null;
+  const d = extractDomain(s);
+  if (!d || d.length > 253 || !DOMAIN_RE.test(d)) return null;
+  if (!isPublicHost(d)) return null;
+  return d;
+}
+
+/** http(s) URL or null. Re-exported here so every lead writer imports one module. */
+export const safeHttpUrl = httpUrlOrNull;
+
+/**
+ * A profile link as stored: http(s), or null.
+ *
+ * Scrapes and spreadsheets often carry "linkedin.com/in/jane" with no scheme; that is a web
+ * address, so it gets https://. Anything with a different scheme (`javascript:`, `data:`)
+ * or that is not a URL at all is null.
+ */
+export function profileUrlOrNull(raw: unknown, maxLength = 500): string | null {
+  if (typeof raw !== "string") return null;
+  const s = stripNul(raw).trim();
+  if (!s) return null;
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(s) && /^(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[/?#]\S*)?$/i.test(s)) return httpUrlOrNull(`https://${s}`, maxLength);
+  return httpUrlOrNull(s, maxLength);
+}
+
+export interface UpsertCompanyOptions {
+  /**
+   * Replace the company's existing name.
+   *
+   * A company row is shared by every lead at that domain, and its name used to be
+   * overwritten by whatever arrived last: one import row with `company = "RENAMED"` (or one
+   * unauthenticated pixel hit) renamed the company for every lead there. A name that
+   * arrives ON ITS OWN now only ever fills an empty one.
+   *
+   * A name that arrives as part of a crawled profile - the company's own site, read by
+   * crawlCompanyWebsite, which always carries `emailsFound`/`socials` and usually a
+   * description - is the authoritative one and may still replace a placeholder; that is
+   * detected from the data, so the enrichment jobs behave as before. Pass `rename` to say
+   * so explicitly either way.
+   */
+  rename?: boolean;
+}
+
+/** Is this the output of a crawl (or a provider's company record), not a bare typed name? */
+const isProfile = (d: Partial<CompanyProfile>) => d.description != null || d.techStack != null || d.emailsFound != null || d.socials != null || d.industry != null;
+
+export async function upsertCompany(orgId: string, domain: string, data: Partial<CompanyProfile> & { name?: string | null }, opts: UpsertCompanyOptions = {}): Promise<Company> {
   const { db } = getDb();
+  const name = typeof data.name === "string" && data.name.trim() ? stripNul(data.name).trim().slice(0, 200) : undefined;
   const values = {
     orgId,
     domain,
-    name: data.name ?? undefined,
+    name,
     description: data.description ?? undefined,
     industry: data.industry ?? undefined,
     size: data.size ?? undefined,
     location: data.location ?? undefined,
     country: data.country ?? undefined,
     website: `https://${domain}`,
-    linkedinUrl: data.linkedinUrl ?? undefined,
+    linkedinUrl: data.linkedinUrl ? httpUrlOrNull(data.linkedinUrl) ?? undefined : undefined,
     foundedYear: data.foundedYear ?? undefined,
     techStack: data.techStack ?? undefined,
     emailPattern: data.emailPattern ?? undefined,
@@ -31,13 +112,15 @@ export async function upsertCompany(orgId: string, domain: string, data: Partial
     enrichedAt: data.description || data.techStack?.length ? new Date() : undefined,
     updatedAt: new Date(),
   };
+  const set: Record<string, unknown> = Object.fromEntries(Object.entries(values).filter(([k, v]) => v !== undefined && !["orgId", "domain"].includes(k)));
+  // Fill-only unless this is a profile or the caller asked to rename: keep a name that is
+  // already there.
+  const rename = opts.rename ?? isProfile(data);
+  if (name !== undefined && !rename) set.name = sql`coalesce(nullif(${companies.name}, ''), ${name})`;
   const [row] = await db
     .insert(companies)
     .values(values)
-    .onConflictDoUpdate({
-      target: [companies.orgId, companies.domain],
-      set: Object.fromEntries(Object.entries(values).filter(([k, v]) => v !== undefined && !["orgId", "domain"].includes(k))),
-    })
+    .onConflictDoUpdate({ target: [companies.orgId, companies.domain], set })
     .returning();
   return row;
 }
@@ -89,24 +172,58 @@ export interface UpsertLeadOptions {
 /** Find the lead an upsert would update, without writing anything. */
 export async function findExistingLead(orgId: string, input: { email?: string | null; linkedinUrl?: string | null }): Promise<Lead | undefined> {
   const { db } = getDb();
-  const email = input.email?.trim().toLowerCase() || null;
+  const email = canonicalEmail(input.email);
   let existing: Lead | undefined;
   if (email) existing = await db.query.leads.findFirst({ where: and(eq(leads.orgId, orgId), eq(leads.email, email)) });
-  if (!existing && input.linkedinUrl) existing = await db.query.leads.findFirst({ where: and(eq(leads.orgId, orgId), eq(leads.linkedinUrl, input.linkedinUrl)) });
+  if (!existing && input.linkedinUrl) {
+    existing = await db.query.leads.findFirst({ where: and(eq(leads.orgId, orgId), eq(leads.linkedinUrl, input.linkedinUrl)) });
+    // Imports used to store a URL exactly as typed, often without a scheme
+    // ("linkedin.com/in/x"). The import now adds https://, so the older spelling is tried
+    // too - otherwise re-importing the same file would duplicate those leads.
+    const bare = input.linkedinUrl.replace(/^https?:\/\//i, "");
+    if (!existing && bare !== input.linkedinUrl && bare) existing = await db.query.leads.findFirst({ where: and(eq(leads.orgId, orgId), eq(leads.linkedinUrl, bare)) });
+  }
   return existing;
 }
 
-/** Idempotent lead upsert keyed on (org, email) or (org, linkedin). Emits lead.created / lead.updated. */
-export async function upsertLead(orgId: string, input: UpsertLeadInput, opts: UpsertLeadOptions = {}): Promise<{ lead: Lead; created: boolean }> {
+/** Longest value stored in each free-text lead column; anything longer is cut, not refused. */
+const FIELD_MAX = { firstName: 200, lastName: 200, fullName: 200, title: 300, phone: 100, location: 300, country: 100 } as const;
+const clip = (v: string | null | undefined, max: number): string | null | undefined => (typeof v === "string" ? stripNul(v).slice(0, max) : v);
+
+/**
+ * Idempotent lead upsert keyed on (org, email) or (org, linkedin). Emits lead.created / lead.updated.
+ *
+ * This is the last line of defence for every writer (routes, import, pipeline, pixel,
+ * tools, agents): whatever the caller did or did not validate, an email that is not one
+ * canonical address is NOT stored (the reason is kept in `raw.emailRejected` and returned
+ * as `emailRejected`), a LinkedIn URL that is not http(s) is not stored, and a company is
+ * only created for a real public domain.
+ */
+export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts: UpsertLeadOptions = {}): Promise<{ lead: Lead; created: boolean; emailRejected?: string }> {
   const { db } = getDb();
+  const input: UpsertLeadInput = {
+    ...rawInput,
+    firstName: clip(rawInput.firstName, FIELD_MAX.firstName),
+    lastName: clip(rawInput.lastName, FIELD_MAX.lastName),
+    fullName: clip(rawInput.fullName, FIELD_MAX.fullName),
+    title: clip(rawInput.title, FIELD_MAX.title),
+    phone: clip(rawInput.phone, FIELD_MAX.phone),
+    location: clip(rawInput.location, FIELD_MAX.location),
+    country: clip(rawInput.country, FIELD_MAX.country),
+  };
+  const email = canonicalEmail(input.email);
+  // Something was offered as an email and it is not one address: say so, store nothing.
+  const offered = typeof input.email === "string" ? input.email.trim() : input.email == null ? "" : String(input.email);
+  const emailRejected = offered && !email ? "not a single valid email address" : undefined;
+  const linkedin = input.linkedinUrl ? profileUrlOrNull(input.linkedinUrl, 500) : null;
+
   let companyId: string | null = null;
-  if (input.companyDomain) {
-    const c = await upsertCompany(orgId, input.companyDomain, { ...(input.companyData ?? {}), name: input.companyData?.name ?? input.companyName ?? undefined });
+  const companyDomain = input.companyDomain ? companyDomainOrNull(input.companyDomain) : null;
+  if (companyDomain) {
+    const c = await upsertCompany(orgId, companyDomain, { ...(input.companyData ?? {}), name: input.companyData?.name ?? input.companyName ?? undefined });
     companyId = c.id;
   }
   const nm = input.fullName ? splitName(input.fullName) : { firstName: input.firstName ?? undefined, lastName: input.lastName ?? undefined, fullName: [input.firstName, input.lastName].filter(Boolean).join(" ") };
-  const email = input.email?.trim().toLowerCase() || null;
-  const linkedin = input.linkedinUrl || null;
 
   const existing = await findExistingLead(orgId, { email, linkedinUrl: linkedin });
 
@@ -122,23 +239,25 @@ export async function upsertLead(orgId: string, input: UpsertLeadInput, opts: Up
     seniority: inferSeniority(input.title ?? undefined),
     department: inferDepartment(input.title ?? undefined),
     email: email ?? undefined,
-    emailStatus: input.emailStatus ?? undefined,
-    emailConfidence: input.emailConfidence ?? undefined,
-    emailVerifiedBy: input.emailVerifiedBy ?? undefined,
+    // A verdict describes an address. With the address refused, there is nothing it is about.
+    emailStatus: emailRejected ? undefined : input.emailStatus ?? undefined,
+    emailConfidence: emailRejected ? undefined : input.emailConfidence ?? undefined,
+    emailVerifiedBy: emailRejected ? undefined : input.emailVerifiedBy ?? undefined,
     linkedinUrl: linkedin ?? undefined,
     phone: input.phone ?? undefined,
     location: input.location ?? undefined,
     country: input.country ?? undefined,
     companyId: companyId ?? undefined,
     icpId: input.icpId ?? undefined,
-    score: input.score ?? undefined,
+    score: typeof input.score === "number" && Number.isFinite(input.score) ? Math.min(100, Math.max(0, Math.round(input.score))) : undefined,
     scoreReasons: input.scoreReasons ?? undefined,
     tags: input.tags ?? undefined,
     custom: input.custom ?? undefined,
     raw: input.raw ?? undefined,
-    verifiedAt: input.emailStatus && input.emailStatus !== "unknown" ? new Date() : undefined,
+    verifiedAt: !emailRejected && input.emailStatus && input.emailStatus !== "unknown" ? new Date() : undefined,
     updatedAt: new Date(),
   };
+  const rejectedNote = emailRejected ? { emailRejected: { reason: emailRejected, value: stripNul(offered).slice(0, 120), at: new Date().toISOString() } } : null;
   const clean = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined)) as Partial<NewLead>;
 
   if (existing) {
@@ -194,16 +313,18 @@ export async function upsertLead(orgId: string, input: UpsertLeadInput, opts: Up
       }
     }
 
+    if (rejectedNote) clean.raw = { ...((existing.raw as Record<string, unknown> | null) ?? {}), ...((clean.raw as Record<string, unknown> | undefined) ?? {}), ...rejectedNote };
     const [row] = await db.update(leads).set(clean).where(eq(leads.id, existing.id)).returning();
     await emitEvent(orgId, "lead.updated", { id: row.id, email: row.email, changes: Object.keys(clean) }, { type: "lead", id: row.id });
-    return { lead: row, created: false };
+    return { lead: row, created: false, ...(emailRejected ? { emailRejected } : {}) };
   }
+  if (rejectedNote) clean.raw = { ...((clean.raw as Record<string, unknown> | undefined) ?? {}), ...rejectedNote };
   const [row] = await db
     .insert(leads)
-    .values({ ...clean, orgId, source: input.source ?? "manual" } as NewLead)
+    .values({ ...clean, orgId, source: stripNul(input.source ?? "manual").slice(0, 100) } as NewLead)
     .returning();
   await emitEvent(orgId, "lead.created", { id: row.id, email: row.email, fullName: row.fullName, title: row.title, score: row.score }, { type: "lead", id: row.id });
-  return { lead: row, created: true };
+  return { lead: row, created: true, ...(emailRejected ? { emailRejected } : {}) };
 }
 
 /**
@@ -252,7 +373,7 @@ export async function leadWithCompany(orgId: string, id: string) {
   const { db } = getDb();
   const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, id), eq(leads.orgId, orgId)) });
   if (!lead) return null;
-  const company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
+  const company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, orgId)) }) : null;
   return { ...lead, company: company ?? null };
 }
 

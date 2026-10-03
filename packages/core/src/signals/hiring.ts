@@ -4,6 +4,8 @@
  */
 import * as cheerio from "cheerio";
 import { fetchText } from "../util/http.js";
+import { isPublicHost } from "../util/publicHost.js";
+import { assertPublicHost, isSsrfBlocked } from "../util/egress.js";
 import { webSearchDetailed } from "../search/index.js";
 
 const CAREER_PATHS = ["/careers", "/jobs", "/careers/", "/join-us", "/work-with-us", "/company/careers", "/about/careers", "/openings"];
@@ -38,6 +40,8 @@ export interface HiringSignal {
   reached: boolean;
   /** Why nothing was reached, when nothing was. */
   reason?: string;
+  /** Set when the domain was not fetched because it is not a public web address. */
+  refused?: string;
 }
 
 const TITLE_RE = /^(senior|junior|lead|principal|head of|vp|director|manager|associate|staff|chief)?\s*[A-Za-z][A-Za-z /&+-]{3,60}$/;
@@ -50,7 +54,22 @@ export async function detectHiring(domain: string, companyName?: string, opts: {
   // reachable - which is what separates "nobody is hiring" from "we never got through".
   let fetchedAnyPage = false;
   let searchAnswered = false;
-  for (const p of CAREER_PATHS) {
+  // The domain is tenant input (a monitor target, a company record). Each fetch below is
+  // refused at connect time if it is not a public address - `publicOnly` - so this is not
+  // the guard; it is what lets the result say the target was REFUSED rather than merely
+  // unreachable, and saves eight doomed requests.
+  let refused: string | undefined;
+  if (!allowPrivateHosts) {
+    if (!isPublicHost(domain)) refused = `${String(domain).slice(0, 120)} is not a public web address, so it was not fetched`;
+    else {
+      try {
+        await assertPublicHost(domain);
+      } catch (e) {
+        if (isSsrfBlocked(e)) refused = `${String(domain).slice(0, 120)} does not resolve to a public web address, so it was not fetched`;
+      }
+    }
+  }
+  for (const p of refused ? [] : CAREER_PATHS) {
     // Same user-supplied domain the crawler takes, and until now with no address check at
     // all - eight requests per call straight at whatever was typed.
     const html = await fetchText(`https://${domain}${p}`, { timeoutMs: 8000, publicOnly: true, allowPrivateHosts });
@@ -112,6 +131,7 @@ export async function detectHiring(domain: string, companyName?: string, opts: {
     source,
     careersUrl,
     reached,
-    reason: reached ? undefined : `no careers page on ${domain} could be fetched${companyName ? " and the job search did not answer" : ""}`,
+    reason: reached ? undefined : refused ? `${refused}${companyName ? ", and the job search did not answer" : ""}` : `no careers page on ${domain} could be fetched${companyName ? " and the job search did not answer" : ""}`,
+    ...(refused ? { refused } : {}),
   };
 }

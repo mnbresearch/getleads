@@ -155,8 +155,16 @@ describe("the guard survives a redirect", () => {
       // comment claimed otherwise. `maxRedirects: 0` is what separates them: the loop
       // refuses to take the hop at all, while a client following internally returns the
       // destination regardless of a limit it knows nothing about.
+      //
+      // With `maxRedirects: 0` the redirect itself is handed back (status and Location,
+      // no body) rather than null, so a webhook delivery can say "this endpoint redirects"
+      // instead of a bare failure. The point of this assertion is unchanged: the
+      // destination was NOT fetched.
       f.hits.length = 0;
-      expect(await fetchPublic(`${f.base}/start`, { timeoutMs: 2000, allowPrivateHosts: true, maxRedirects: 0 })).toBeNull();
+      const stopped = await fetchPublic(`${f.base}/start`, { timeoutMs: 2000, allowPrivateHosts: true, maxRedirects: 0 });
+      expect(stopped?.status).toBe(302);
+      expect(stopped?.headers.get("location")).toBe("/end");
+      expect(await stopped!.text()).toBe("");
       expect(f.hits).toEqual(["/start"]);
     } finally {
       await f.close();

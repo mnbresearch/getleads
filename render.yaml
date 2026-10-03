@@ -31,13 +31,25 @@ services:
         generateValue: true
       - key: ENCRYPTION_KEY
         generateValue: true
+      # JWT_SECRET signs every session: keep it at 32+ random characters. ENCRYPTION_KEY
+      # encrypts stored SMTP/CRM credentials: when rotating it, add ENCRYPTION_KEYS_OLD with
+      # the previous value or those credentials become unreadable.
+      #
+      # INTERNAL_TOKEN is the job runner's token (/internal/jobs/run, header x-internal-token).
+      # This service runs an embedded worker and never calls that endpoint; the token is NOT
+      # an admin credential. If it was ever used in a URL, rotate it here in the dashboard.
       - key: INTERNAL_TOKEN
         generateValue: true
-      # Optional: a separate token for server-to-server calls to /v1/admin (header
-      # x-admin-token). Until it is set, the admin API still accepts INTERNAL_TOKEN and logs a
-      # warning. Not generated here, so an existing integration using INTERNAL_TOKEN keeps working.
+      # Server-to-server access to /v1/admin (header x-admin-token). Its own credential,
+      # separate from INTERNAL_TOKEN. The admin dashboard does not use it: that signs in with
+      # ADMIN_EMAIL / ADMIN_PASSWORD (set those in the dashboard).
       - key: ADMIN_API_TOKEN
-        sync: false
+        generateValue: true
+      # Render's edge is Cloudflare, which sets cf-connecting-ip itself. Rate limits and the
+      # security log read the visitor's address from it. Use "xff" on a host that is not
+      # behind Cloudflare.
+      - key: TRUSTED_PROXY
+        value: cloudflare
       - key: APP_URL
         sync: false
       - key: API_URL

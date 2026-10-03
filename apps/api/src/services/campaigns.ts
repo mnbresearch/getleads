@@ -1,12 +1,13 @@
-import { and, asc, inArray, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, getDb, integrations, leads, lte, messages, organizations, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount, type Organization } from "@prospex/db";
-import { allocateVariant, createAiProviderForPlan, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type SendingHealth } from "@prospex/core";
+import { and, asc, inArray, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, events, getDb, integrations, leads, limitsFor, lte, messages, organizations, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount, type Organization } from "@prospex/db";
+import { allocateVariant, coerceIntent, createAiProviderForPlan, domainOfEmail, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, redact, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type GuardContext, type SendingHealth } from "@prospex/core";
 import { decryptJson as decryptCfg } from "../lib/crypto.js";
 import { consume } from "@prospex/db";
 import { env } from "../env.js";
-import { decryptJson, randomToken } from "../lib/crypto.js";
+import { decryptJsonStrict, randomToken } from "../lib/crypto.js";
 import { sendMail, type MailerConfig } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
+import { canonicalEmail } from "./leads.js";
 
 const DEFAULT_SETTINGS: Required<CampaignSettings> = {
   dailyLimit: 50,
@@ -20,6 +21,68 @@ const DEFAULT_SETTINGS: Required<CampaignSettings> = {
 
 /** Consecutive failed sends after which a contact is stopped instead of retried again. */
 export const MAX_SEND_FAILURES = 3;
+
+// ───────── outbound safety: kill switch, per-org ceiling, shared-sender cap ─────────
+
+/**
+ * The global kill switch. OUTBOUND_SENDING_ENABLED=false stops every campaign send on the
+ * platform - one setting an operator can flip during an incident (a compromised workspace,
+ * a blocklisting, a bad deploy) without touching any customer's data.
+ *
+ * Read from the environment on every call, so it takes effect on the next tick with no
+ * redeploy where the platform allows changing env at runtime. Default: enabled.
+ */
+export function outboundSendingEnabled(): boolean {
+  const v = (process.env.OUTBOUND_SENDING_ENABLED ?? "true").trim().toLowerCase();
+  return !["false", "0", "off", "no", "disabled"].includes(v);
+}
+/** What a contact and a campaign show while the switch is off. Nothing is failed or lost. */
+export const OUTBOUND_PAUSED_NOTE = "Sending is paused platform-wide by the operator. Nothing was lost: this contact is still queued and will be sent when sending resumes.";
+
+function positiveIntEnv(name: string): number | null {
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : null;
+}
+
+function monthlyEmailLimit(org: Pick<Organization, "plan" | "planLimits">): number {
+  const limits = { ...limitsFor(org.plan ?? "free"), ...(org.planLimits ?? {}) } as Record<string, unknown>;
+  const n = Number(limits.emailsPerMonth);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/**
+ * The most one workspace may send in a day, across ALL its sender accounts.
+ *
+ * Each account has its own daily cap, and nothing limited how many accounts a workspace
+ * creates - so the real ceiling was (accounts x 2000). This is the missing sum.
+ *
+ * ORG_DAILY_SEND_CEILING (default 2000) is the platform-wide number. A plan whose monthly
+ * allowance needs more than that per working day gets a twentieth of its month instead, a
+ * workspace never gets more in a day than its whole month, and `planLimits.emailsPerDay`
+ * sets it explicitly for one workspace.
+ */
+export function orgDailySendCeiling(org: Pick<Organization, "plan" | "planLimits">): number {
+  const explicit = Number((org.planLimits as unknown as Record<string, unknown> | null | undefined)?.emailsPerDay);
+  if (Number.isFinite(explicit) && explicit > 0) return Math.floor(explicit);
+  const base = positiveIntEnv("ORG_DAILY_SEND_CEILING") ?? 2000;
+  const monthly = monthlyEmailLimit(org);
+  if (monthly <= 0) return base;
+  return Math.min(monthly, Math.max(base, Math.ceil(monthly / 20)));
+}
+
+/**
+ * The most one workspace may send in a day through the SHARED platform sender (provider
+ * "system"), across all of its system accounts together.
+ *
+ * SYSTEM_SENDER_DAILY_CAP, when set, is that number for every workspace. Unset, it is 50 or
+ * a twentieth of the plan's monthly allowance, whichever is larger - so a workspace with one
+ * system account at the default limit of 50 sends exactly what it did before.
+ */
+export function systemSenderDailyCap(org: Pick<Organization, "plan" | "planLimits">): number {
+  const fixed = positiveIntEnv("SYSTEM_SENDER_DAILY_CAP");
+  if (fixed !== null) return fixed;
+  return Math.max(50, Math.ceil(monthlyEmailLimit(org) / 20));
+}
 
 export function settingsOf(c: Campaign): Required<CampaignSettings> {
   return { ...DEFAULT_SETTINGS, ...(c.settings ?? {}), sendWindow: { ...DEFAULT_SETTINGS.sendWindow, ...(c.settings?.sendWindow ?? {}) } };
@@ -191,6 +254,84 @@ export async function sendingHealthForAccount(
 }
 
 /**
+ * Deliverability verdict for the SHARED platform sender, per workspace.
+ *
+ * The warm-up ramp and the bounce halt are computed per account, which is right for a
+ * customer's own domain and wrong for ours: every "system" account sends from the
+ * platform's own reputation, so a workspace that created N of them got N fresh ramps, and a
+ * workspace halted for bounces got a clean slate by adding another. Here there is ONE
+ * verdict per workspace:
+ *
+ *   - outcomes are counted across every system account the workspace has, and across
+ *     accounts it has since deleted (deleting the account must not delete the history);
+ *   - the warm-up clock is the age of its OLDEST system account;
+ *   - the configured cap is the workspace's shared-sender cap, not one account's limit.
+ *
+ * `sentToday` is how many emails went out through the shared sender since UTC midnight,
+ * from the message log - so it also survives an account being deleted and re-created.
+ */
+export async function systemSenderHealthForOrg(
+  db: ReturnType<typeof getDb>["db"],
+  org: Pick<Organization, "id" | "plan" | "planLimits">,
+): Promise<SendingHealth & { sentToday: number; dailyCap: number }> {
+  const [m] = await db
+    .select({
+      sent: sql<number>`count(*) FILTER (WHERE ${messages.sentAt} IS NOT NULL)::int`,
+      bounced: sql<number>`count(*) FILTER (WHERE ${messages.bouncedAt} IS NOT NULL)::int`,
+      replied: sql<number>`count(*) FILTER (WHERE ${messages.repliedAt} IS NOT NULL)::int`,
+      sentToday: sql<number>`count(*) FILTER (WHERE ${messages.status} IN ('sent','sending','replied','bounced','unknown') AND ${messages.createdAt} >= date_trunc('day', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC')::int`,
+    })
+    .from(messages)
+    .innerJoin(campaigns, eq(campaigns.id, messages.campaignId))
+    .leftJoin(emailAccounts, eq(emailAccounts.id, campaigns.emailAccountId))
+    .where(
+      and(
+        eq(messages.orgId, org.id),
+        eq(messages.direction, "outbound"),
+        eq(messages.channel, "email"),
+        sql`(${emailAccounts.id} IS NULL OR ${emailAccounts.provider} = 'system')`,
+        sql`${messages.createdAt} > now() - (${HEALTH_WINDOW_DAYS} || ' days')::interval`,
+      ),
+    );
+  const [s] = await db
+    .select({
+      complained: sql<number>`count(*) FILTER (WHERE ${suppressions.reason} IN ('complaint','spam'))::int`,
+      unsubscribed: sql<number>`count(*) FILTER (WHERE ${suppressions.reason} IN ('unsubscribe','unsubscribe_link','reply'))::int`,
+    })
+    .from(suppressions)
+    .where(and(eq(suppressions.orgId, org.id), sql`${suppressions.createdAt} > now() - (${HEALTH_WINDOW_DAYS} || ' days')::interval`));
+  const [a] = await db
+    .select({ oldest: sql<Date | string | null>`min(${emailAccounts.createdAt})` })
+    .from(emailAccounts)
+    .where(and(eq(emailAccounts.orgId, org.id), eq(emailAccounts.provider, "system")));
+  const oldest = a?.oldest ? new Date(a.oldest as string).getTime() : NaN;
+  const ageDays = Number.isFinite(oldest) ? Math.floor((Date.now() - oldest) / 86_400_000) : null;
+  const dailyCap = systemSenderDailyCap(org);
+  const health = evaluateSendingHealth(
+    { sent: m?.sent ?? 0, bounced: m?.bounced ?? 0, complained: s?.complained ?? 0, unsubscribed: s?.unsubscribed ?? 0, replied: m?.replied ?? 0 },
+    { domainAgeDays: ageDays, configuredDailyCap: dailyCap },
+  );
+  return { ...health, sentToday: Number(m?.sentToday ?? 0), dailyCap };
+}
+
+/** The verdict that governs a sender: per workspace for the shared sender, per account otherwise. */
+async function senderHealth(db: ReturnType<typeof getDb>["db"], org: Organization, account: EmailAccount): Promise<SendingHealth & { sentToday?: number; dailyCap?: number }> {
+  return account.provider === "system" ? systemSenderHealthForOrg(db, org) : sendingHealthForAccount(db, org.id, account);
+}
+
+/** What the workspace has reserved today (UTC day), across every account and across its system accounts. */
+async function orgSentToday(db: ReturnType<typeof getDb>["db"], orgIdValue: string, today: string): Promise<{ all: number; system: number }> {
+  const [r] = await db
+    .select({
+      all: sql<number>`coalesce(sum(${emailAccounts.sentToday}), 0)::int`,
+      system: sql<number>`coalesce(sum(${emailAccounts.sentToday}) FILTER (WHERE ${emailAccounts.provider} = 'system'), 0)::int`,
+    })
+    .from(emailAccounts)
+    .where(and(eq(emailAccounts.orgId, orgIdValue), eq(emailAccounts.sentTodayDate, today)));
+  return { all: Number(r?.all ?? 0), system: Number(r?.system ?? 0) };
+}
+
+/**
  * Put back contacts that nothing will ever pick up again.
  *
  * tickCampaign clears nextSendAt when it hands a contact to a message.send job, and the
@@ -244,6 +385,10 @@ export async function tickCampaign(campaignId: string) {
   // A suspended workspace sends nothing. Auth already blocked its users; the scheduler
   // did not, so a deactivated org's campaigns kept emailing prospects on its behalf.
   if (!org || org.status !== "active") return { sent: 0, reason: "organization not active" };
+  if (!outboundSendingEnabled()) {
+    await noteOutboundPaused(campaign).catch(() => {});
+    return { sent: 0, reason: "sending is paused platform-wide (OUTBOUND_SENDING_ENABLED is off)", outboundPaused: true };
+  }
   const requeued = await requeueStrandedContacts(campaign.id).catch(() => 0);
   const s = settingsOf(campaign);
   if (!isValidTimezone(s.timezone)) {
@@ -268,9 +413,11 @@ export async function tickCampaign(campaignId: string) {
 
   // Deliverability gate. A domain that is already bouncing gets worse, not better, by
   // continuing to send, so a "halt" verdict stops the campaign rather than just warning.
-  let health: SendingHealth | null = null;
+  // For the shared platform sender the verdict is the WORKSPACE's (one ramp, one halt, one
+  // cap across all its system accounts); for a customer's own sender it is the account's.
+  let health: (SendingHealth & { sentToday?: number; dailyCap?: number }) | null = null;
   if (account) {
-    health = await sendingHealthForAccount(db, campaign.orgId, account);
+    health = await senderHealth(db, org, account);
     if (health.status === "halt") {
       await db.update(campaigns).set({ status: "paused", updatedAt: new Date() }).where(eq(campaigns.id, campaign.id));
       await emitEvent(
@@ -293,8 +440,24 @@ export async function tickCampaign(campaignId: string) {
   // Warm-up ramp and any degraded-deliverability throttle both bind here.
   if (health) caps.push(health.recommendedDailyCap);
   const inFlight = account ? await inFlightSends(db, account.id) : 0;
-  const budget = Math.min(...caps) - sentToday - inFlight;
+  let budget = Math.min(...caps) - sentToday - inFlight;
   if (budget <= 0) return { sent: 0, requeued, reason: health && health.status === "warn" ? "throttled for deliverability" : inFlight > 0 && sentToday < Math.min(...caps) ? "sends already queued" : "daily limit reached" };
+  // The workspace-wide limits: everything the org's accounts have sent today against its
+  // daily ceiling, and - for the shared sender - everything its system accounts have sent
+  // against the one cap they share. Estimates, like the rest of this budget; the binding
+  // check is the atomic reservation in sendStep.
+  if (account) {
+    const used = await orgSentToday(db, campaign.orgId, today);
+    const ceiling = orgDailySendCeiling(org);
+    if (used.all + inFlight >= ceiling) return { sent: 0, requeued, reason: `workspace daily sending ceiling reached (${ceiling}/day across all senders)` };
+    budget = Math.min(budget, ceiling - used.all - inFlight);
+    if (account.provider === "system") {
+      const sysCap = Math.min(health?.dailyCap ?? systemSenderDailyCap(org), health?.recommendedDailyCap ?? Infinity);
+      const sysUsed = Math.max(used.system, health?.sentToday ?? 0);
+      if (sysUsed + inFlight >= sysCap) return { sent: 0, requeued, reason: `shared sender daily limit reached (${sysCap}/day for this workspace)` };
+      budget = Math.min(budget, sysCap - sysUsed - inFlight);
+    }
+  }
 
   const due = await db
     .select()
@@ -321,12 +484,51 @@ export async function tickCampaign(campaignId: string) {
   return { sent: queued, requeued, reason: "ok" };
 }
 
+/** What a tenant is told when a sender's stored credentials cannot be used. */
+export const SENDER_CREDENTIALS_UNREADABLE = "Sender credentials could not be read - reconnect the sender";
+
+/**
+ * A sender's mailer configuration, or the reason there is none.
+ *
+ * A config that could not be decrypted used to come back as `resendApiKey: ""` or an SMTP
+ * host of `""` - and nodemailer treats an empty host as localhost, so a rotated encryption
+ * key turned every customer SMTP sender into a connection to our own machine. A blob that
+ * cannot be read, or that decrypts to something without the fields its provider needs, is
+ * now an explicit failure and nothing is connected to.
+ */
+export function resolveMailer(a: EmailAccount): { ok: true; mailer: MailerConfig } | { ok: false; reason: "unreadable" | "incomplete" | "unknown_provider" } {
+  if (a.provider === "system") return { ok: true, mailer: { provider: "system" } };
+  if (a.provider !== "resend" && a.provider !== "smtp") return { ok: false, reason: "unknown_provider" };
+  let cfg: Record<string, unknown> | null;
+  try {
+    cfg = decryptJsonStrict<Record<string, unknown>>(a.configEncrypted);
+  } catch {
+    return { ok: false, reason: "unreadable" };
+  }
+  if (!cfg || typeof cfg !== "object") return { ok: false, reason: "incomplete" };
+  if (a.provider === "resend") {
+    const apiKey = typeof cfg.apiKey === "string" ? cfg.apiKey.trim() : "";
+    if (!apiKey) return { ok: false, reason: "incomplete" };
+    return { ok: true, mailer: { provider: "resend", resendApiKey: apiKey } };
+  }
+  const host = typeof cfg.host === "string" ? cfg.host.trim() : "";
+  if (!host) return { ok: false, reason: "incomplete" };
+  const port = Number(cfg.port ?? 587);
+  return {
+    ok: true,
+    mailer: { provider: "smtp", smtp: { host, port: Number.isInteger(port) && port > 0 && port < 65536 ? port : 587, user: cfg.user ? String(cfg.user) : undefined, pass: cfg.pass ? String(cfg.pass) : undefined, secure: !!cfg.secure } },
+  };
+}
+
+/**
+ * The mailer for a sender account, or null when it has none that can be used.
+ *
+ * NEVER pass a null from here to sendMail: sendMail treats null as "use the platform's own
+ * sender". Callers must stop on null (as the reply route does) - see resolveMailer for why.
+ */
 export function mailerFromAccount(a: EmailAccount): MailerConfig | null {
-  if (a.provider === "system") return { provider: "system" };
-  const cfg = decryptJson<Record<string, unknown>>(a.configEncrypted);
-  if (a.provider === "resend") return { provider: "resend", resendApiKey: String(cfg?.apiKey ?? "") };
-  if (a.provider === "smtp") return { provider: "smtp", smtp: { host: String(cfg?.host ?? ""), port: Number(cfg?.port ?? 587), user: cfg?.user ? String(cfg.user) : undefined, pass: cfg?.pass ? String(cfg.pass) : undefined, secure: !!cfg?.secure } };
-  return null;
+  const r = resolveMailer(a);
+  return r.ok ? r.mailer : null;
 }
 
 /**
@@ -358,14 +560,14 @@ export async function recordBounce(orgIdValue: string, input: { email: string; m
   }
   await db.insert(suppressions).values({ orgId: orgIdValue, email, reason: input.kind }).onConflictDoNothing();
   const lead = msg?.leadId
-    ? await db.query.leads.findFirst({ where: eq(leads.id, msg.leadId) })
+    ? await db.query.leads.findFirst({ where: and(eq(leads.id, msg.leadId), eq(leads.orgId, orgIdValue)) })
     : await db.query.leads.findFirst({ where: and(eq(leads.orgId, orgIdValue), eq(leads.email, email)) });
   if (lead) {
     await db
       .update(campaignContacts)
       .set({ status: input.kind === "bounce" ? "bounced" : "unsubscribed", nextSendAt: null, lastError: input.kind === "bounce" ? `Bounced: ${input.detail?.slice(0, 300) ?? "permanent delivery failure"}` : "Marked our email as spam", updatedAt: new Date() })
       .where(and(eq(campaignContacts.leadId, lead.id), sql`${campaignContacts.status} IN ('queued','active')`));
-    if (input.kind === "bounce" && lead.email?.toLowerCase() === email) {
+    if (input.kind === "bounce" && (lead.email?.trim().toLowerCase() === email || canonicalEmail(lead.email) === email)) {
       const custom = { ...(lead.custom ?? {}) } as Record<string, unknown>;
       const priorBad = Array.isArray(custom.invalidEmails) ? (custom.invalidEmails as string[]) : [];
       custom.invalidEmails = [...new Set([...priorBad, email])];
@@ -444,6 +646,125 @@ async function releaseDailySlot(accountId: string, today: string) {
   await db.execute(sql`UPDATE email_accounts SET sent_today = GREATEST(0, sent_today - 1) WHERE id = ${accountId} AND sent_today_date = ${today}`);
 }
 
+/**
+ * Take one slot of the sender's daily cap AND of the workspace's limits.
+ *
+ * Three limits bind a send: the account's cap, the workspace's daily ceiling across all its
+ * accounts, and - for the shared platform sender - the one cap all of the workspace's system
+ * accounts share. The first is one row and is taken with one conditional UPDATE
+ * (reserveDailySlot). The other two are sums over several rows, which a conditional UPDATE
+ * on one row cannot hold, so they are checked AFTER the increment, with this send already
+ * counted: a send that finds the total over the limit gives its slot back and does not go.
+ *
+ * That order is what makes it safe without a lock. Every send increments before it reads,
+ * so the last of any group of concurrent sends to read sees all the others; if that one is
+ * within the limit, they all are. Two sends racing for the final slot can both back off
+ * (one slot unused until the contact is retried) but can never both go.
+ *
+ * `system.sentFloor` is the shared sender's count from the message log, which a deleted and
+ * re-created account cannot reset; the larger of it and the accounts' own counters is used.
+ */
+export async function reserveSendSlot(input: {
+  orgId: string;
+  accountId: string;
+  today: string;
+  accountCap: number;
+  orgCeiling: number;
+  system?: { cap: number; sentFloor: number } | null;
+}): Promise<{ ok: true } | { ok: false; reason: "account_cap" | "org_ceiling" | "system_cap" }> {
+  const { db } = getDb();
+  if (input.system && !(input.system.cap > 0)) return { ok: false, reason: "system_cap" };
+  if (!(input.orgCeiling > 0)) return { ok: false, reason: "org_ceiling" };
+  if (!(await reserveDailySlot(input.accountId, input.today, input.accountCap))) return { ok: false, reason: "account_cap" };
+  try {
+    const used = await orgSentToday(db, input.orgId, input.today);
+    const reason = used.all > input.orgCeiling ? ("org_ceiling" as const) : input.system && Math.max(used.system, input.system.sentFloor + 1) > input.system.cap ? ("system_cap" as const) : null;
+    if (!reason) return { ok: true };
+    await releaseDailySlot(input.accountId, input.today);
+    return { ok: false, reason };
+  } catch (e) {
+    // The slot was taken and the check could not run: give it back before reporting the fault.
+    await releaseDailySlot(input.accountId, input.today).catch(() => {});
+    throw e;
+  }
+}
+
+/**
+ * While the kill switch is off: say so where the customer looks - on the due contacts and,
+ * once a day, as an event - instead of leaving a campaign that silently sends nothing.
+ */
+async function noteOutboundPaused(campaign: Campaign) {
+  const { db } = getDb();
+  await db.execute(sql`
+    UPDATE campaign_contacts SET last_error = ${OUTBOUND_PAUSED_NOTE}
+    WHERE campaign_id = ${campaign.id} AND status IN ('queued','active') AND next_send_at <= now() AND last_error IS DISTINCT FROM ${OUTBOUND_PAUSED_NOTE}
+  `);
+  const recent = await db
+    .select({ id: events.id })
+    .from(events)
+    .where(and(eq(events.orgId, campaign.orgId), eq(events.type, "campaign.sending_paused"), eq(events.entityId, campaign.id), sql`${events.createdAt} > now() - interval '24 hours'`))
+    .limit(1);
+  if (!recent.length) await emitEvent(campaign.orgId, "campaign.sending_paused", { campaignId: campaign.id, reason: OUTBOUND_PAUSED_NOTE }, { type: "campaign", id: campaign.id });
+}
+
+/** A display name that cannot add a header or a second mailbox to From. */
+function safeDisplayName(name: string | null | undefined): string {
+  return String(name ?? "").replace(/[\u0000-\u001F\u007F"<>,;:\\]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+/** A subject is one line. */
+function oneLineSubject(subject: string): string {
+  return subject.replace(/[\u0000-\u001F\u007F]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 300);
+}
+
+/**
+ * What a tenant is told about a failed send. A category, never the upstream text: provider
+ * errors echo credentials and account ids, and this lands in a field tenants read over the API.
+ */
+export function sendFailureCategory(error: string | null | undefined): string {
+  const e = String(error ?? "");
+  // An SMTP reply code (421, 450-455, 500-559) - not a port number that happens to be in the text.
+  const code = /\b(421|45[0-5]|5[0-5]\d)\b/.exec(e)?.[1];
+  if (code && /^5/.test(code) && isHardBounce(e)) return `Recipient address rejected (SMTP ${code})`;
+  if (/\b(?:535|534|401|403)\b|auth\w* (?:failed|failure|required|error|unsuccessful)|invalid (?:login|credentials?|api[ _-]?key)|unauthori[sz]ed|forbidden|api[ _-]?key/i.test(e)) return "Sender rejected our credentials - reconnect the sender";
+  if (/timed? ?out|ETIMEDOUT|ESOCKETTIMEDOUT/i.test(e)) return "The sending server timed out";
+  if (/ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket|network|getaddrinfo/i.test(e)) return "Could not reach the sending server";
+  if (/\brate.?limit|too many|\b429\b|quota|daily (?:sending )?limit/i.test(e)) return "Sending provider rate limit reached";
+  if (/No email provider configured/i.test(e)) return "No email provider is configured on the server";
+  if (code) return `Sender rejected the message (SMTP ${code})`;
+  return "The sending provider rejected the message";
+}
+
+/**
+ * What an AI draft for this send may link to and mention: the tenant's own domains (the
+ * sender address, its reply-to, the workspace website when one is saved) and the addresses
+ * that belong in the conversation. generateOutreach adds every host and address already in
+ * the step's own template and the sender's own text.
+ */
+function outreachGuardContext(org: Organization, account: EmailAccount | null, to: string | null, leadDomain: string | null): GuardContext {
+  const st = (org.settings ?? {}) as Record<string, unknown>;
+  const hosts: string[] = [];
+  for (const d of [domainOfEmail(account?.fromEmail), domainOfEmail(account?.replyTo)]) if (d) hosts.push(d);
+  for (const k of ["website", "domain", "url", "companyWebsite", "senderWebsite"]) {
+    const v = st[k];
+    if (typeof v !== "string" || !v.trim()) continue;
+    try {
+      hosts.push(new URL(/^https?:\/\//i.test(v) ? v : `https://${v.trim()}`).hostname.toLowerCase().replace(/^www\./, ""));
+    } catch {
+      // not a URL; nothing to allow
+    }
+  }
+  return { allowedHosts: hosts, allowedEmails: [account?.fromEmail, account?.replyTo, to], leadDomain };
+}
+
+/** One phone number, or nothing: digits (after the usual punctuation) and nothing else. */
+function singlePhone(raw: string | null | undefined): string | null {
+  const s = String(raw ?? "").trim();
+  if (!/^\+?[\d\s().-]{7,24}$/.test(s)) return null;
+  const digits = s.replace(/\D/g, "");
+  return digits.length >= 8 && digits.length <= 15 ? s : null;
+}
+
 /** Workspace-level sender defaults (Settings - Defaults for AI-drafted emails). */
 function orgSenderDefaults(org: Organization | null | undefined) {
   const o = (org?.settings ?? {}) as Record<string, unknown>;
@@ -470,6 +791,12 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   const cc = await db.query.campaignContacts.findFirst({ where: eq(campaignContacts.id, contactId) });
   const step = await db.query.sequenceSteps.findFirst({ where: eq(sequenceSteps.id, stepId) });
   if (!campaign || !cc || !step) return { skipped: "missing" };
+  // The three rows are loaded independently by id, so they are checked against each other
+  // before anything is read or written: the contact and the step must both belong to THIS
+  // campaign. Without it, a contact id from another campaign - another org's - was sent
+  // this campaign's step, and its lead became readable through this campaign's messages.
+  // Nothing is changed: the foreign row is not ours to touch.
+  if (cc.campaignId !== campaign.id || step.campaignId !== campaign.id) return { skipped: "org mismatch" };
   // Only a contact still in the sequence. "reassigned" (moved to another client),
   // "completed" and "failed" used to fall through and be sent to.
   if (cc.status !== "active" && cc.status !== "queued") return { skipped: cc.status };
@@ -480,10 +807,22 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     await requeueContact(cc.id, new Date());
     return { skipped: campaign.status !== "active" ? "campaign not active" : "organization not active" };
   }
+  // The global kill switch, for every channel. Requeued, not failed: nothing is lost, and
+  // the contact says why it has not gone out.
+  if (!outboundSendingEnabled()) {
+    await requeueContact(cc.id, new Date(Date.now() + 15 * 60_000), OUTBOUND_PAUSED_NOTE);
+    return { skipped: "outbound sending disabled" };
+  }
   const lead = await db.query.leads.findFirst({ where: eq(leads.id, cc.leadId) });
   if (!lead) {
     await stopContact(cc.id, "failed", "The lead was deleted");
     return { skipped: "lead missing" };
+  }
+  // The lead must be the campaign org's own. The contact row is this campaign's, so it is
+  // stopped (visibly) rather than left to be requeued forever; the lead is not touched.
+  if (lead.orgId !== campaign.orgId) {
+    await stopContact(cc.id, "failed", "This lead does not belong to this workspace");
+    return { skipped: "org mismatch" };
   }
   // A client campaign speaks for that client only. A lead moved to another client (or back
   // to the pool) since enrolment must not be emailed on the old client's behalf.
@@ -491,14 +830,16 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     await stopContact(cc.id, "reassigned", "This lead no longer belongs to the campaign's client");
     return { skipped: "lead belongs to another client" };
   }
-  const company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
+  const company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, campaign.orgId)) }) : null;
   const defaults = orgSenderDefaults(org);
 
   if (step.channel === "whatsapp") {
-    const phone = lead.whatsapp ?? lead.phone;
+    // One number or a person decides: a field holding several numbers, or text, is not
+    // something to hand to the provider as a recipient.
+    const phone = singlePhone(lead.whatsapp) ?? singlePhone(lead.phone);
     if (!phone) {
-      await createStepTask(campaign, cc.id, lead.id, step, 0); // no number → hand to a human
-      return { skipped: "no phone, task created" };
+      await createStepTask(campaign, cc.id, lead.id, step, 0); // no usable number → hand to a human
+      return { skipped: lead.whatsapp || lead.phone ? "phone is not a single valid number, task created" : "no phone, task created" };
     }
     const os = campaign.settings as Record<string, unknown>;
     const vars = leadVars({ ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, { name: String(os.senderName ?? defaults.senderName ?? ""), company: String(os.senderCompany ?? defaults.senderCompany ?? "") });
@@ -540,14 +881,17 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     const r = await wa.send(phone, text);
     await db
       .update(messages)
-      .set({ status: r.ok ? "sent" : "failed", providerMessageId: r.messageId, error: r.error, sentAt: r.ok ? new Date() : null })
+      .set({ status: r.ok ? "sent" : "failed", providerMessageId: r.messageId, error: r.ok ? null : redact(r.error ?? "send failed", { max: 500 }), sentAt: r.ok ? new Date() : null })
       .where(eq(messages.id, wm.id));
     if (!r.ok) {
       // Requeued with a backoff, stopped after MAX_SEND_FAILURES - not thrown. A throw
       // retried the job three times and then left the contact active with no next send.
       await bumpStat(campaign.id, "failed");
-      const f = await recordSendFailure(cc.id, `WhatsApp: ${r.error ?? "send failed"}`);
-      return { failed: true, error: r.error, channel: "whatsapp", failures: f.failures, stopped: f.stopped };
+      // Upstream text is kept for operators (redacted, in the log); the contact gets a category.
+      console.warn(`[campaigns] WhatsApp send failed for contact ${cc.id}: ${redact(r.error ?? "send failed", { max: 300 })}`);
+      const waError = "WhatsApp: the provider rejected the message";
+      const f = await recordSendFailure(cc.id, waError);
+      return { failed: true, error: waError, channel: "whatsapp", failures: f.failures, stopped: f.stopped };
     }
     await db.update(campaignContacts).set({ lastMessageId: wm.id, sendFailures: 0, lastError: null, updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
     await advanceContact(cc.id);
@@ -559,14 +903,34 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     await stopContact(cc.id, "failed", "This lead has no email address");
     return { skipped: "no email" };
   }
+  // Exactly one bare address, or nothing is sent. A stored value like "a@x.com,b@x.com" or
+  // "<victim@x.com>" was handed to the mailer as it stood: one lead fanned out to forty
+  // recipients for one unit of quota, and a decorated spelling of a suppressed address
+  // walked past the suppression check, which compared the raw strings.
+  const to = canonicalEmail(lead.email);
+  if (!to) {
+    await stopContact(cc.id, "failed", "Lead email is not a single valid address");
+    return { skipped: "invalid recipient" };
+  }
   if (lead.emailStatus === "invalid") {
     await stopContact(cc.id, "failed", "This lead's email address is known to be invalid");
     return { skipped: "invalid email" };
   }
-  const sup = await db.query.suppressions.findFirst({ where: and(eq(suppressions.orgId, campaign.orgId), eq(suppressions.email, lead.email)) });
+  // From here on every comparison uses the canonical address: suppression, known-invalid,
+  // and the duplicate-send guard. (The stored spelling is also tried, for rows written
+  // before addresses were canonicalised.)
+  const spellings = [...new Set([to, lead.email.trim().toLowerCase()])];
+  const sup = await db.query.suppressions.findFirst({ where: and(eq(suppressions.orgId, campaign.orgId), inArray(suppressions.email, spellings)) });
   if (sup) {
     await stopContact(cc.id, "unsubscribed", `Address is on the suppression list (${sup.reason})`);
     return { skipped: "suppressed" };
+  }
+  // The same address held by ANOTHER lead row and known there to be invalid (a bounce was
+  // recorded against it) is just as undeliverable here.
+  const knownBad = await db.query.leads.findFirst({ where: and(eq(leads.orgId, campaign.orgId), eq(leads.email, to), eq(leads.emailStatus, "invalid")), columns: { id: true } });
+  if (knownBad) {
+    await stopContact(cc.id, "failed", "This lead's email address is known to be invalid");
+    return { skipped: "invalid email" };
   }
   // Scoped to the campaign's own org as well as the id. THIS is the lookup that matters:
   // it is the one whose result is handed to mailerFromAccount, which decrypts the SMTP
@@ -613,6 +977,29 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     return { skipped: "earlier attempt's outcome unknown; sequence stopped for review rather than risking a duplicate or a skipped step", messageId: prior.id };
   }
 
+  // The same step, already sent to this ADDRESS through a different lead row (two leads
+  // that are one mailbox). The guard above is keyed on the lead; this one on the recipient.
+  const priorToAddress = await db.query.messages.findFirst({
+    where: and(eq(messages.campaignId, campaign.id), eq(messages.stepId, step.id), eq(messages.direction, "outbound"), inArray(messages.toEmail, spellings), inArray(messages.status, ["sent", "sending", "replied"])),
+    columns: { id: true },
+  });
+  if (priorToAddress) {
+    await stopContact(cc.id, "failed", "This address already received this step through another lead in this campaign");
+    return { skipped: "duplicate recipient", messageId: priorToAddress.id };
+  }
+
+  // The sender's credentials, resolved BEFORE anything is charged or reserved. Credentials
+  // that cannot be read are a stop, never an attempt: an empty SMTP host is localhost to
+  // nodemailer, and a null mailer is "use the platform sender" to sendMail.
+  const resolved = resolveMailer(account);
+  if (!resolved.ok) {
+    await db.update(emailAccounts).set({ status: "error" }).where(and(eq(emailAccounts.id, account.id), eq(emailAccounts.orgId, campaign.orgId)));
+    await stopContact(cc.id, "failed", SENDER_CREDENTIALS_UNREADABLE);
+    await emitEvent(campaign.orgId, "email_account.credentials_unreadable", { emailAccountId: account.id, campaignId: campaign.id, reason: resolved.reason }, { type: "campaign", id: campaign.id }).catch(() => {});
+    return { skipped: "sender credentials unreadable", failed: true, error: SENDER_CREDENTIALS_UNREADABLE };
+  }
+  const mailer = resolved.mailer;
+
   const s = settingsOf(campaign);
   if (!isValidTimezone(s.timezone)) {
     await requeueContact(cc.id, new Date(Date.now() + 3600_000), `Campaign timezone "${s.timezone}" is not recognised`);
@@ -634,17 +1021,44 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   // Both steps run inside the refund guard: a DB fault here used to keep the charge, and
   // the job's retry charged again.
   const today = accountDay();
-  let reserved: boolean;
+  let slot: Awaited<ReturnType<typeof reserveSendSlot>>;
+  const orgCeiling = orgDailySendCeiling(org);
+  let systemCap: number | null = null;
   try {
-    const health = await sendingHealthForAccount(db, campaign.orgId, account);
+    // One verdict per workspace for the shared platform sender, per account otherwise.
+    const health = await senderHealth(db, org, account);
+    if (health.status === "halt") {
+      // Said in words, rather than as a daily limit of zero. The next tick pauses the campaign.
+      await refundQuota();
+      await requeueContact(cc.id, nextLocalDay("UTC"), `Sending is halted for deliverability: ${health.reasons[0] ?? "too many bounces or complaints"}`);
+      return { skipped: "halted for deliverability" };
+    }
     const cap = Math.min(s.dailyLimit, account.dailyLimit, health.recommendedDailyCap);
-    reserved = await reserveDailySlot(account.id, today, cap);
+    if (account.provider === "system") systemCap = Math.min(health.dailyCap ?? systemSenderDailyCap(org), health.recommendedDailyCap);
+    // The account's cap, the workspace's ceiling across all its senders, and the shared
+    // sender's one cap per workspace - checked and taken in a single serialized step.
+    slot = await reserveSendSlot({
+      orgId: campaign.orgId,
+      accountId: account.id,
+      today,
+      accountCap: cap,
+      orgCeiling,
+      system: systemCap !== null ? { cap: systemCap, sentFloor: health.sentToday ?? 0 } : null,
+    });
   } catch (e) {
     await refundQuota();
     throw e;
   }
-  if (!reserved) {
+  if (!slot.ok) {
     await refundQuota();
+    if (slot.reason === "org_ceiling") {
+      await requeueContact(cc.id, nextLocalDay("UTC"), `Workspace daily sending ceiling reached (${orgCeiling}/day across all senders); continues tomorrow`);
+      return { skipped: "org daily ceiling reached" };
+    }
+    if (slot.reason === "system_cap") {
+      await requeueContact(cc.id, nextLocalDay("UTC"), `Shared sender daily limit reached (${systemCap ?? 0}/day for this workspace); continues tomorrow. Connect your own sending domain to send more.`);
+      return { skipped: "shared sender daily limit reached" };
+    }
     await requeueContact(cc.id, nextLocalDay("UTC"));
     return { skipped: "daily limit reached" };
   }
@@ -664,7 +1078,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
       signature: account.signature ?? undefined,
       tone: ((cs?.tone ?? defaults.tone) as "friendly" | undefined) ?? "friendly",
     };
-    const prevMsg = cc.lastMessageId ? await db.query.messages.findFirst({ where: eq(messages.id, cc.lastMessageId) }) : null;
+    const prevMsg = cc.lastMessageId ? await db.query.messages.findFirst({ where: and(eq(messages.id, cc.lastMessageId), eq(messages.orgId, campaign.orgId)) }) : null;
     const leadForTpl = { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null };
 
     // Once an A/B test has a statistically clear winner, most new sends go to it instead of
@@ -676,6 +1090,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     let subject = renderTemplate(variant.subjectTemplate, vars);
     let body = renderTemplate(variant.bodyTemplate, vars);
     let aiNote: string | null = null;
+    let aiRejected: string[] | null = null;
     if (step.aiPersonalize) {
       // The plan decides the engine: free workspaces never reach the paid model.
       // An AI outage falls back to the template instead of throwing - a throw used to burn
@@ -688,11 +1103,25 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
         instructions: step.aiInstructions ?? undefined,
         stepNo: step.stepNo,
         previousSubject: prevMsg?.subject,
+        // This text is sent with nobody reading it first, so the draft must pass the output
+        // guard or the template goes out instead. The allowlist is the tenant's own: the
+        // sender's domains, the workspace website, and (inside generateOutreach) every host
+        // and address already in the step's template and the sender's own text.
+        guard: "enforce",
+        guardContext: outreachGuardContext(org, account, to, company?.domain ?? null),
       }).catch((e) => {
-        aiNote = `AI personalization failed, sent the template instead: ${(e as Error).message}`.slice(0, 500);
+        // The tenant gets a category. What the provider actually said - which can echo the
+        // platform's key and account id - goes to the operator's log, redacted.
+        console.warn(`[campaigns] AI personalization failed for contact ${cc.id}: ${redact((e as Error)?.message ?? String(e), { max: 300 })}`);
+        aiNote = "AI personalization failed (AI unavailable); sent the template instead";
         return null;
       });
       if (out) {
+        if (out.guard && !out.guard.ok) {
+          // Rejected: `out` already holds the rendered TEMPLATE, never the rejected text.
+          aiRejected = out.guard.reasons.slice(0, 8);
+          aiNote = `AI draft rejected (${aiRejected.join(", ")}); sent the template instead`.slice(0, 500);
+        }
         subject = out.subject;
         body = out.body;
         // Charged for a model call that was made, recorded even past the limit: the
@@ -701,6 +1130,8 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
       }
     }
     if (step.stepNo > 1 && prevMsg && !/^re:/i.test(subject)) subject = `Re: ${prevMsg.subject.replace(/^re:\s*/i, "")}`;
+    // One line, whatever a template variable or an earlier subject carried.
+    subject = oneLineSubject(subject);
 
     const token = randomToken(16);
     let html = textToHtml(body);
@@ -720,16 +1151,20 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
 
     const [msg] = await db
       .insert(messages)
-      .values({ orgId: campaign.orgId, campaignId: campaign.id, stepId: step.id, leadId: lead.id, toEmail: lead.email, subject, bodyText: text, bodyHtml: html, trackingToken: token, status: "queued", variant: variant.index })
+      .values({ orgId: campaign.orgId, campaignId: campaign.id, stepId: step.id, leadId: lead.id, toEmail: to, subject, bodyText: text, bodyHtml: html, trackingToken: token, status: "queued", variant: variant.index })
       .returning();
+    if (aiRejected) {
+      await emitEvent(campaign.orgId, "message.ai_rejected", { messageId: msg.id, leadId: lead.id, campaignId: campaign.id, stepId: step.id, reasons: aiRejected, sent: "template" }, { type: "message", id: msg.id }).catch(() => {});
+    }
 
     // Marked before the provider call, so a crash in between leaves evidence that this step
     // may already have gone out. See the idempotency check above.
     await db.update(messages).set({ status: "sending" }).where(eq(messages.id, msg.id));
 
-    const res = await sendMail(mailerFromAccount(account), {
-      from: `${account.fromName} <${account.fromEmail}>`,
-      to: lead.email,
+    const res = await sendMail(mailer, {
+      from: `${safeDisplayName(account.fromName) || account.fromEmail} <${account.fromEmail}>`,
+      // The canonical address and nothing else: one recipient per send.
+      to,
       subject,
       text,
       html,
@@ -756,23 +1191,29 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
         .where(eq(campaignContacts.id, cc.id));
       await bumpStat(campaign.id, "sent");
       await db.execute(sql`UPDATE leads SET status = CASE WHEN status = 'new' THEN 'contacted' ELSE status END WHERE id = ${lead.id}`);
-      await emitEvent(campaign.orgId, "message.sent", { messageId: msg.id, leadId: lead.id, campaignId: campaign.id, to: lead.email, subject, variant: variant.index }, { type: "message", id: msg.id });
-      return { sent: true, messageId: msg.id };
+      await emitEvent(campaign.orgId, "message.sent", { messageId: msg.id, leadId: lead.id, campaignId: campaign.id, to, subject, variant: variant.index, ...(aiRejected ? { aiRejected: true } : {}) }, { type: "message", id: msg.id });
+      return { sent: true, messageId: msg.id, ...(aiRejected ? { aiRejected, note: aiNote } : {}) };
     }
 
     // Not sent: give back the slot and the charge.
-    await db.update(messages).set({ status: "failed", error: res.error }).where(eq(messages.id, msg.id));
+    //
+    // What the provider said is kept for operators only (the log, redacted). Everything a
+    // tenant can read back - the message row, the contact's lastError, this job's result -
+    // carries a category: provider error text echoes API keys and account identifiers.
+    const category = sendFailureCategory(res.error);
+    console.warn(`[campaigns] send failed for contact ${cc.id} via ${account.provider}: ${redact(res.error ?? "unknown error", { max: 300 })}`);
+    await db.update(messages).set({ status: "failed", error: category }).where(eq(messages.id, msg.id));
     await releaseDailySlot(account.id, today);
     await refundQuota();
     settled = true;
     await bumpStat(campaign.id, "failed");
     if (isHardBounce(res.error)) {
       // The receiving server refused the address permanently. Never again, anywhere.
-      await recordBounce(campaign.orgId, { email: lead.email, messageId: msg.id, kind: "bounce", detail: res.error });
-      return { failed: true, bounced: true, error: res.error };
+      await recordBounce(campaign.orgId, { email: to, messageId: msg.id, kind: "bounce", detail: category });
+      return { failed: true, bounced: true, error: category };
     }
-    const f = await recordSendFailure(cc.id, `Send failed: ${res.error ?? "unknown error"}`);
-    return { failed: true, error: res.error, failures: f.failures, stopped: f.stopped };
+    const f = await recordSendFailure(cc.id, `Send failed: ${category}`);
+    return { failed: true, error: category, failures: f.failures, stopped: f.stopped };
   } catch (e) {
     // Something threw before the provider was reached (or while recording a failure):
     // return what was reserved and let the job retry. After a successful send nothing is
@@ -815,6 +1256,9 @@ const OOO_DELAY_MS = 3 * 86_400_000;
 
 export async function markReplied(orgId: string, leadEmail: string, intent: string, inbound: { subject?: string | null; text?: string | null; headers?: Record<string, string | undefined> | null } = {}) {
   const { db } = getDb();
+  // Whatever the classifier (a model) returned, only an intent from the enum is acted on or
+  // stored: it becomes a lead tag and an event field, and anything else is "other".
+  intent = coerceIntent({ intent }).intent;
   const lead = await db.query.leads.findFirst({ where: and(eq(leads.orgId, orgId), eq(leads.email, leadEmail)) });
   if (!lead) return false;
   const ccs = await db.select().from(campaignContacts).where(and(eq(campaignContacts.leadId, lead.id), sql`${campaignContacts.status} IN ('queued','active')`));
@@ -841,7 +1285,8 @@ export async function markReplied(orgId: string, leadEmail: string, intent: stri
     await bumpStat(cc.campaignId, "replied");
     if (cc.lastMessageId) await db.update(messages).set({ status: "replied", repliedAt: new Date() }).where(eq(messages.id, cc.lastMessageId));
   }
-  if (intent === "unsubscribe") await db.insert(suppressions).values({ orgId, email: leadEmail, reason: "reply" }).onConflictDoNothing();
+  // Stored canonically, so the send-side check (which compares canonical addresses) finds it.
+  if (intent === "unsubscribe") await db.insert(suppressions).values({ orgId, email: canonicalEmail(leadEmail) ?? leadEmail.trim().toLowerCase(), reason: "reply" }).onConflictDoNothing();
   await db.update(leads).set({ tags: sql`array_append(array_remove(${leads.tags}, ${"replied:" + intent}), ${"replied:" + intent})`, updatedAt: new Date() }).where(eq(leads.id, lead.id));
   await bumpEngagement(lead.id, "reply");
   await emitEvent(orgId, "lead.replied", { leadId: lead.id, email: leadEmail, intent }, { type: "lead", id: lead.id });
@@ -852,8 +1297,9 @@ export async function markReplied(orgId: string, leadEmail: string, intent: stri
 /** Manual channels (LinkedIn connect/message, call, custom task) become tasks for a human; the sequence advances when the task is completed. */
 export async function createStepTask(campaign: Campaign, contactId: string, leadId: string, step: { id: string; stepNo: number; channel: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions: string | null }, totalSteps: number) {
   const { db } = getDb();
-  const lead = await db.query.leads.findFirst({ where: eq(leads.id, leadId) });
-  const company = lead?.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
+  // The campaign org's own lead and company, not merely rows with those ids.
+  const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, leadId), eq(leads.orgId, campaign.orgId)) });
+  const company = lead?.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, campaign.orgId)) }) : null;
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, campaign.orgId) });
   const d = orgSenderDefaults(org);
   const os = campaign.settings as Record<string, unknown>;
@@ -862,7 +1308,13 @@ export async function createStepTask(campaign: Campaign, contactId: string, lead
   const vars = leadVars({ ...(lead ?? {}), company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, { name: senderName, company: senderCompany });
   let body = renderTemplate(step.bodyTemplate, vars);
   if (step.aiPersonalize && lead) {
-    const out = await generateOutreach(createAiProviderForPlan(org?.plan ?? "free"), { lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, sender: { name: senderName, company: senderCompany, valueProp: String(os.valueProp ?? d.valueProp ?? ""), tone: (os.tone ?? d.tone) as "friendly" | undefined }, bodyTemplate: step.bodyTemplate, instructions: `${step.channel === "linkedin_connect" ? "This is a LinkedIn connection note: max 280 characters, no subject." : step.channel === "linkedin_message" ? "This is a LinkedIn DM: short, casual, no subject line." : step.channel === "call" ? "Write a 60-second call opener script." : ""} ${step.aiInstructions ?? ""}`, stepNo: step.stepNo }).catch(() => null);
+    const out = await generateOutreach(createAiProviderForPlan(org?.plan ?? "free"), { lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, sender: { name: senderName, company: senderCompany, valueProp: String(os.valueProp ?? d.valueProp ?? ""), tone: (os.tone ?? d.tone) as "friendly" | undefined }, bodyTemplate: step.bodyTemplate, instructions: `${step.channel === "linkedin_connect" ? "This is a LinkedIn connection note: max 280 characters, no subject." : step.channel === "linkedin_message" ? "This is a LinkedIn DM: short, casual, no subject line." : step.channel === "call" ? "Write a 60-second call opener script." : ""} ${step.aiInstructions ?? ""}`, stepNo: step.stepNo,
+      // A task body is pasted by a person into LinkedIn or read out on a call, so the same
+      // output guard applies; these channels have no subject line. A rejected draft leaves
+      // the rendered template in place.
+      guard: "enforce",
+      guardContext: { ...(org ? outreachGuardContext(org, null, canonicalEmail(lead.email), company?.domain ?? null) : {}), requireSubject: false },
+    }).catch(() => null);
     if (out?.body) body = out.body;
   }
   const titles: Record<string, string> = { linkedin_connect: "Send LinkedIn connection request", linkedin_message: "Send LinkedIn message", call: "Call", whatsapp: "Send WhatsApp message", task: renderTemplate(step.subjectTemplate, vars) || "Task" };

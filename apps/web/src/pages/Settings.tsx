@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link, NavLink, Route, Routes } from "react-router-dom";
-import { API_URL, apiFetch, fmtDate } from "../lib/api";
+import { Link, NavLink, Route, Routes, useNavigate } from "react-router-dom";
+import { API_URL, apiFetch, auth, fmtDate } from "../lib/api";
 import { limitLabel, metricLabel } from "../lib/metrics";
+import { EXTERNAL_REL } from "../lib/safeHref";
 import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/ui";
 
 type Role = "owner" | "admin" | "member";
@@ -14,13 +15,21 @@ interface Me { user: { id: string; email: string; role: Role; hasPassword?: bool
  * and the server remains the authority.
  */
 let meCache: Me | null = null;
+// The cache is "who is signed in", so it cannot outlive the session it was read for. It used
+// to: sign out as an owner, sign in as a member in the same tab, and Settings briefly showed
+// the owner's controls from the previous account.
+auth.subscribe(() => { meCache = null; });
 function useMe() {
   const [me, setMe] = useState<Me | null>(meCache);
+  // `settled`: the role question has been answered one way or the other - the account is
+  // known (cached or just loaded) or the lookup failed. Lets a caller wait for the answer
+  // before acting on "unknown means allowed", instead of acting and then finding out.
+  const [settled, setSettled] = useState<boolean>(!!meCache);
   useEffect(() => {
-    apiFetch<Me>("GET", "/v1/auth/me").then((r) => { meCache = r; setMe(r); }).catch(() => {});
+    apiFetch<Me>("GET", "/v1/auth/me").then((r) => { meCache = r; setMe(r); }).catch(() => {}).finally(() => setSettled(true));
   }, []);
   const role = me?.user?.role;
-  return { me, role, canManage: role === undefined || role === "owner" || role === "admin", isOwner: role === undefined || role === "owner" };
+  return { me, role, settled, canManage: role === undefined || role === "owner" || role === "admin", isOwner: role === undefined || role === "owner" };
 }
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
@@ -34,7 +43,11 @@ function copyText(text: string, toast: (m: string, k?: "ok" | "err") => void) {
 }
 
 export function SettingsPage() {
-  const tabs = [["", "Workspace"], ["team", "Team"], ["api-keys", "API keys"], ["webhooks", "Webhooks"], ["integrations", "Integrations"], ["billing", "Plan & usage"]];
+  const { canManage, settled } = useMe();
+  // The security log is owner/admin only on the server; members do not get a tab that can
+  // only ever answer "forbidden". It appears once the role is known, so it does not flash
+  // up for a member and vanish.
+  const tabs = [["", "Workspace"], ["team", "Team"], ["api-keys", "API keys"], ["webhooks", "Webhooks"], ["integrations", "Integrations"], ["billing", "Plan & usage"], ...(settled && canManage ? [["security", "Security log"]] : [])];
   return (
     <Page title="Settings">
       <div className="-mx-4 mb-4 flex gap-1 overflow-x-auto whitespace-nowrap border-b border-black/10 px-4 sm:mx-0 sm:px-0">{tabs.map(([p, l]) => <NavLink key={p} to={`/settings/${p}`} end className={({ isActive }) => `shrink-0 px-3 py-2 text-sm ${isActive ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400"}`}>{l}</NavLink>)}</div>
@@ -45,6 +58,7 @@ export function SettingsPage() {
         <Route path="/webhooks" element={<Webhooks />} />
         <Route path="/integrations" element={<Integrations />} />
         <Route path="/billing" element={<Billing />} />
+        <Route path="/security" element={<SecurityLog />} />
       </Routes>
     </Page>
   );
@@ -81,6 +95,7 @@ function Workspace() {
       {canManage && <button className="btn-primary" onClick={() => apiFetch("PATCH", "/v1/auth/org", { name: f.name, settings: { senderName: f.senderName, senderCompany: f.senderCompany, valueProp: f.valueProp } }).then(() => toast("Saved")).catch((e) => toast(e.message, "err"))}>Save</button>}
     </div>
     <ChangePassword />
+    <Sessions />
     </div>
   );
 }
@@ -102,10 +117,18 @@ function ChangePassword() {
     setBusy(true);
     setMsg(null);
     try {
-      await apiFetch("POST", "/v1/auth/password/change", { currentPassword: cur || undefined, newPassword: pw });
+      const r = await apiFetch<{ token?: unknown } | null>("POST", "/v1/auth/password/change", { currentPassword: cur || undefined, newPassword: pw });
+      // Changing the password signs every other session out on the server, and this tab's
+      // old token goes with them. The response carries the replacement; storing it is what
+      // keeps the person who just changed their password signed in. (An older server sends
+      // no token and retires nothing, so there is nothing to swap.)
+      const fresh = r && typeof r.token === "string" && r.token ? r.token : null;
+      if (fresh) auth.set(fresh);
       setCur(""); setPw(""); setPw2("");
-      setMsg({ ok: true, text: hasPassword === false ? "Password set. You can now also sign in with your email and this password." : "Password changed." });
-      if (meCache?.user) meCache = { ...meCache, user: { ...meCache.user, hasPassword: true } };
+      const done = hasPassword === false ? "Password set. You can now also sign in with your email and this password." : "Password changed.";
+      setMsg({ ok: true, text: fresh ? `${done} Every other device and browser has been signed out.` : done });
+      // auth.set() above cleared the cached account; rebuild it from what this component holds.
+      if (me?.user) meCache = { ...me, user: { ...me.user, hasPassword: true } };
     } catch (e2) {
       setMsg({ ok: false, text: (e2 as Error).message });
     } finally {
@@ -127,6 +150,46 @@ function ChangePassword() {
       {msg && <div className={`rounded-lg p-2 text-sm ${msg.ok ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-600"}`} role={msg.ok ? "status" : "alert"}>{msg.text}</div>}
       <button className="btn-primary" disabled={busy || pw.length < 8 || pw !== pw2}>{busy ? "Saving…" : hasPassword === false ? "Set password" : "Change password"}</button>
     </form>
+  );
+}
+
+/**
+ * "Sign out of all devices": for a lost laptop, a shared computer, or a session token that
+ * may have been seen by someone else. The server retires every session token issued to this
+ * account so far - including this tab's - so the tab signs out too and the next sign-in is a
+ * fresh one. API keys are separate credentials and are managed on their own tab.
+ */
+function Sessions() {
+  const navigate = useNavigate();
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const signOutEverywhere = async () => {
+    if (busy) return;
+    if (!confirm("Sign out of all devices?\n\nEvery browser and device signed in to your account is signed out, including this one. You will need to sign in again. API keys keep working.")) return;
+    setBusy(true);
+    setErr(null);
+    try {
+      await apiFetch("POST", "/v1/auth/logout-all");
+    } catch (e) {
+      // 401 means the session was already gone - apiFetch has cleared it and the app is on
+      // its way to the login page. Anything else: the other devices are still signed in, so
+      // say that rather than signing out locally and implying it worked.
+      if ((e as { status?: number }).status !== 401) {
+        setErr(`Could not sign out the other devices: ${(e as Error).message}`);
+        setBusy(false);
+      }
+      return;
+    }
+    auth.set(null);
+    navigate("/login", { replace: true });
+  };
+  return (
+    <div className="card max-w-xl space-y-3 p-5">
+      <div className="font-medium">Sessions</div>
+      <p className="text-sm text-ink-300">Signed in somewhere you no longer trust - a lost phone, a shared computer? This signs your account out everywhere at once. Changing your password does the same for every device except this one.</p>
+      {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600" role="alert">{err}</div>}
+      <button type="button" className="btn-danger" disabled={busy} onClick={signOutEverywhere}>{busy ? "Signing out…" : "Sign out of all devices"}</button>
+    </div>
   );
 }
 
@@ -157,7 +220,7 @@ function ApiKeys() {
       {Toast}
       <div className="card p-5">
         <div className="mb-2 flex items-center justify-between"><div className="font-medium">API keys</div><button className="btn-primary" disabled={creating} onClick={async () => { if (creating) return; const name = prompt("Key name", "Agent") ?? ""; if (!name) return; setCreating(true); try { const r = await apiFetch<{ key: string }>("POST", "/v1/auth/api-keys", { name }); setFresh(r.key); load(); } catch (e) { toast((e as Error).message, "err"); } finally { setCreating(false); } }}>{creating ? "Creating…" : "Create key"}</button></div>
-        {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-600"><div className="mb-1 flex items-center justify-between gap-2 text-ink-100"><span>Copy now - shown once:</span><button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(fresh, toast)}>Copy</button></div><code className="break-all">{fresh}</code></div>}
+        {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-400"><div className="mb-1 flex items-center justify-between gap-2 text-white/85"><span>Copy now - shown once:</span><button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(fresh, toast)}>Copy</button></div><code className="break-all">{fresh}</code></div>}
         {loadErr && !loaded && <LoadError message={loadErr} onRetry={load} />}
         {loaded && <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
           <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-600" onClick={() => revoke(k)}>Revoke</button>}</td></tr>)}</tbody></table></div>}
@@ -165,7 +228,7 @@ function ApiKeys() {
       </div>
       <div className="card p-5 text-sm">
         <div className="mb-2 font-medium">Use with AI agents</div>
-        <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-600" href={`${API_URL}/openapi.json`} target="_blank" rel="noreferrer">{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noreferrer">/docs</a>.</p>
+        <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-600" href={`${API_URL}/openapi.json`} target="_blank" rel={EXTERNAL_REL}>{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel={EXTERNAL_REL}>/docs</a>.</p>
         <p className="mt-2 text-ink-300">MCP (Claude Desktop, Claude Code, Cursor):</p>
         <pre className="mt-1 max-w-full overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{`{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
     "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "${API_URL}" } } } }`}</pre>
@@ -174,7 +237,40 @@ function ApiKeys() {
   );
 }
 
-type Hook = { id: string; url: string; events: string[]; secret?: string; secretPrefix?: string; active: boolean; failures: number };
+/**
+ * `secret` is present only on the answer to create and rotate. The list carries a preview
+ * (`secretPreview`, the first few characters) and which signature scheme the hook uses.
+ * `secretPrefix` / `secret` on a list row are what older servers sent; they are read only as
+ * a fallback for the preview and never shown in full.
+ */
+type Hook = { id: string; url: string; events: string[]; secret?: string; secretPrefix?: string; secretPreview?: string | null; signatureVersion?: number; active: boolean; failures: number };
+
+/** What to show for a hook's secret in the list: a few leading characters, never the secret. */
+function secretPreviewOf(h: Hook): string | null {
+  if (typeof h.secretPreview === "string" && h.secretPreview) return h.secretPreview;
+  const legacy = h.secretPrefix ?? h.secret;
+  return typeof legacy === "string" && legacy ? `${legacy.slice(0, 6)}...` : null;
+}
+
+/**
+ * A signing secret, shown exactly once - after creating a webhook and after rotating one.
+ * One component for both so the two moments cannot drift apart: the same warning, the same
+ * Copy button, the same explicit dismissal.
+ */
+function SecretOnce({ fresh, onDone, toast }: { fresh: { url: string; secret: string; rotated?: boolean }; onDone: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+  return (
+    <div className="mt-3 rounded-lg bg-black p-3 text-xs text-emerald-600" role="status">
+      <div className="mb-1 flex flex-wrap items-start justify-between gap-2 text-white/85">
+        <span className="min-w-0 [overflow-wrap:anywhere]">{fresh.rotated ? "New signing secret" : "Signing secret"} for {fresh.url} - copy it now, it is not shown again{fresh.rotated ? ". The old secret no longer works; update your endpoint to verify with this one." : ":"}</span>
+        <span className="flex shrink-0 gap-2">
+          <button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(fresh.secret, toast)}>Copy</button>
+          <button type="button" className="text-white/70 hover:text-white" onClick={onDone}>Done</button>
+        </span>
+      </div>
+      <code className="break-all text-emerald-400">{fresh.secret}</code>
+    </div>
+  );
+}
 
 function Webhooks() {
   const [hooks, setHooks] = useState<Hook[]>([]);
@@ -183,22 +279,43 @@ function Webhooks() {
   const { toast, Toast } = useToast();
   const [loadErr, setLoadErr] = useState<string | null>(null);
   const [loaded, setLoaded] = useState(false);
-  // The signing secret is returned in full only by the create call; it is shown here once,
-  // with a copy button, instead of only an 8-character prefix nobody could verify against.
-  const [freshSecret, setFreshSecret] = useState<{ url: string; secret: string } | null>(null);
+  // The signing secret is returned in full only by the create and rotate calls; it is shown
+  // here once, with a copy button. The list only ever has a short preview of it.
+  const [freshSecret, setFreshSecret] = useState<{ url: string; secret: string; rotated?: boolean } | null>(null);
   const [testing, setTesting] = useState<string | null>(null);
+  const [rotating, setRotating] = useState<string | null>(null);
   const { canManage } = useMe();
   const load = () => apiFetch<{ webhooks: Hook[] }>("GET", "/v1/webhooks").then((r) => { setHooks(r.webhooks); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
   useEffect(() => { if (canManage) load(); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
   const add = async () => {
     try {
-      const r = await apiFetch<Hook & { webhook?: Hook }>("POST", "/v1/webhooks", { url, events: events.split(",").map((s) => s.trim()).filter(Boolean) });
+      const r = await apiFetch<Hook & { webhook?: Hook; warning?: unknown }>("POST", "/v1/webhooks", { url, events: events.split(",").map((s) => s.trim()).filter(Boolean) });
       const secret = r.secret ?? r.webhook?.secret;
       if (secret) setFreshSecret({ url, secret });
       setUrl("");
       load();
-      toast("Webhook added");
+      // The server may accept a hook and say why it will not fire; that outranks "added".
+      if (typeof r.warning === "string" && r.warning) toast(r.warning, "err");
+      else toast("Webhook added");
     } catch (e) { toast((e as Error).message, "err"); }
+  };
+  const rotate = async (h: Hook) => {
+    if (rotating) return;
+    const upgrade = h.signatureVersion === 1 ? "\n\nThis webhook also moves to the v2 signature (HMAC-SHA256): the header value becomes v2=<hex>, so your endpoint's verification code needs the change described under 'Verifying deliveries' on this page." : "";
+    if (!confirm(`Rotate the signing secret for ${h.url}?\n\nThe current secret stops working immediately. Deliveries are signed with the new secret from then on, so your endpoint will reject them until you update it.${upgrade}`)) return;
+    setRotating(h.id);
+    try {
+      const r = await apiFetch<{ secret?: unknown }>("POST", `/v1/webhooks/${h.id}/rotate-secret`);
+      if (typeof r?.secret === "string" && r.secret) {
+        setFreshSecret({ url: h.url, secret: r.secret, rotated: true });
+        toast("Secret rotated - copy the new one now");
+      } else {
+        // Rotated, but nothing to show: saying "done" here would leave the customer with an
+        // endpoint that rejects every delivery and no secret to fix it with.
+        toast("The secret was rotated but the server did not return it. Rotate again to get a new one.", "err");
+      }
+      load();
+    } catch (e) { toast((e as Error).message, "err"); } finally { setRotating(null); }
   };
   const test = async (h: Hook) => {
     setTesting(h.id);
@@ -225,32 +342,53 @@ function Webhooks() {
       {Toast}
       <div className="card p-5">
         <div className="mb-3 font-medium">Webhooks</div>
-        <p className="mb-3 text-sm text-ink-300">Events: <code>lead.created</code>, <code>lead.updated</code>, <code>lead.enriched</code>, <code>lead.verified</code>, <code>lead.replied</code>, <code>lead.unsubscribed</code>, <code>search.completed</code>, <code>message.sent</code>, <code>message.opened</code>, <code>message.clicked</code>, <code>campaign.started</code>, or <code>*</code>. Signed with <code>x-prospex-signature</code> = sha256(secret.timestamp.body).</p>
-        <div className="flex flex-wrap gap-2"><input className="input flex-1" placeholder="https://your-app.com/hooks/prospex" value={url} onChange={(e) => setUrl(e.target.value)} /><input className="input w-48" value={events} onChange={(e) => setEvents(e.target.value)} placeholder="* or lead.*,message.*" /><button className="btn-primary" disabled={!url} onClick={add}>Add</button></div>
-        {freshSecret && (
-          <div className="mt-3 rounded-lg bg-black p-3 text-xs text-emerald-600" role="status">
-            <div className="mb-1 flex items-center justify-between gap-2 text-ink-100">
-              <span>Signing secret for {freshSecret.url} - copy it now, it is not shown again:</span>
-              <span className="flex gap-2">
-                <button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(freshSecret.secret, toast)}>Copy</button>
-                <button type="button" className="text-ink-300 hover:text-white" onClick={() => setFreshSecret(null)}>Done</button>
-              </span>
-            </div>
-            <code className="break-all">{freshSecret.secret}</code>
-          </div>
-        )}
+        <p className="mb-3 text-sm text-ink-300 [overflow-wrap:anywhere]">Events: <code>lead.created</code>, <code>lead.updated</code>, <code>lead.enriched</code>, <code>lead.verified</code>, <code>lead.replied</code>, <code>lead.unsubscribed</code>, <code>search.completed</code>, <code>message.sent</code>, <code>message.opened</code>, <code>message.clicked</code>, <code>campaign.started</code>, or <code>*</code>. Every delivery is signed in the <code>x-prospex-signature</code> header - see "Verifying deliveries" below.</p>
+        <div className="flex flex-wrap gap-2"><input className="input min-w-0 flex-1" placeholder="https://your-app.com/hooks/prospex" value={url} onChange={(e) => setUrl(e.target.value)} /><input className="input w-48" value={events} onChange={(e) => setEvents(e.target.value)} placeholder="* or lead.*,message.*" /><button className="btn-primary" disabled={!url} onClick={add}>Add</button></div>
+        {freshSecret && <SecretOnce fresh={freshSecret} onDone={() => setFreshSecret(null)} toast={toast} />}
         {loadErr && !loaded && <div className="mt-4"><LoadError message={loadErr} onRetry={load} /></div>}
-        <ul className="mt-4 divide-y divide-slate-100 text-sm">{hooks.map((h) => (
-          <li key={h.id} className="flex flex-wrap items-center gap-2 py-2">
-            <span className={`badge ${h.active ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{h.active ? "active" : "disabled"}</span>
-            <span className="break-all font-mono text-xs">{h.url}</span>
-            <span className="text-xs text-ink-400">{h.events.join(", ")}</span>
-            {(h.secretPrefix || h.secret) && <span className="text-xs text-ink-500">secret: {(h.secretPrefix ?? h.secret ?? "").slice(0, 8)}…</span>}
-            {h.failures > 0 && <span className="text-xs text-red-600">{h.failures} failed deliveries</span>}
-            <button className="btn-secondary ml-auto" disabled={testing === h.id} onClick={() => test(h)}>{testing === h.id ? "Testing…" : "Test"}</button>
-            <button className="text-red-600" onClick={() => remove(h)}>Delete</button>
-          </li>
-        ))}{loaded && hooks.length === 0 && <li className="py-2 text-ink-400">No webhooks yet.</li>}</ul>
+        <ul className="mt-4 divide-y divide-slate-100 text-sm">{hooks.map((h) => {
+          const preview = secretPreviewOf(h);
+          return (
+            <li key={h.id} className="py-2">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className={`badge ${h.active ? "bg-emerald-50 text-emerald-700" : "bg-red-50 text-red-700"}`}>{h.active ? "active" : "disabled"}</span>
+                <span className="min-w-0 break-all font-mono text-xs">{h.url}</span>
+                <span className="text-xs text-ink-400 [overflow-wrap:anywhere]">{h.events.join(", ")}</span>
+                {preview && <span className="text-xs text-ink-500">secret: <span className="font-mono">{preview}</span></span>}
+                {h.signatureVersion !== undefined && <span className="badge bg-black/[0.05] text-ink-300">signature v{h.signatureVersion}</span>}
+                {h.failures > 0 && <span className="text-xs text-red-600">{h.failures} failed deliveries</span>}
+                <span className="ml-auto flex flex-wrap items-center gap-2">
+                  <button className="btn-secondary" disabled={testing === h.id} onClick={() => test(h)}>{testing === h.id ? "Testing…" : "Test"}</button>
+                  {/* Only where the server can do it: a hook listed without a signature
+                      version comes from a server with no rotate endpoint. */}
+                  {h.signatureVersion !== undefined && <button className="btn-secondary" disabled={rotating === h.id} onClick={() => rotate(h)}>{rotating === h.id ? "Rotating…" : "Rotate secret"}</button>}
+                  <button className="text-red-600" onClick={() => remove(h)}>Delete</button>
+                </span>
+              </div>
+              {h.signatureVersion === 1 && <p className="mt-1 text-xs text-amber-700">Legacy signature - rotate to upgrade to HMAC-SHA256 (v2).</p>}
+            </li>
+          );
+        })}{loaded && hooks.length === 0 && <li className="py-2 text-ink-400">No webhooks yet.</li>}</ul>
+      </div>
+      <div className="card p-5 text-sm">
+        <div className="mb-2 font-medium">Verifying deliveries</div>
+        {/* Kept word for word in step with webhook.deliver in apps/api/src/jobs.ts: the header
+            names, the "v2=" prefix, and the signed string `${timestamp}.${body}`. */}
+        <p className="text-ink-300 [overflow-wrap:anywhere]">Each delivery is a JSON <code>POST</code> with three headers: <code>x-prospex-signature</code>, <code>x-prospex-timestamp</code> (milliseconds since 1970, as text) and <code>x-prospex-event</code>. The signature covers the timestamp and the <strong>raw request body</strong>, byte for byte - verify it before parsing, because re-serialised JSON will not match.</p>
+        <ul className="mt-3 space-y-2 text-ink-300 [overflow-wrap:anywhere]">
+          <li><span className="badge mr-1 bg-emerald-50 text-emerald-700">v2</span> New and rotated webhooks. The header value is <code>v2=&lt;hex&gt;</code>, where <code>&lt;hex&gt;</code> is the lowercase hex of <code>HMAC-SHA256(secret, timestamp + "." + raw body)</code>. Compute the same HMAC with your secret, compare in constant time, and reject the request if they differ or if the timestamp is more than a few minutes old.</li>
+          <li><span className="badge mr-1 bg-amber-50 text-amber-700">v1</span> Legacy, for webhooks created before v2. The header value is the bare hex of <code>sha256(secret + "." + timestamp + "." + raw body)</code>, with no prefix. It keeps working so existing integrations do not break; rotate the secret to move a webhook to v2.</li>
+        </ul>
+        <pre className="mt-3 max-w-full overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-400">{`// Node.js, v2. rawBody is the request body exactly as received (a string or Buffer).
+const crypto = require("node:crypto");
+function verify(rawBody, headers, secret) {
+  const ts = headers["x-prospex-timestamp"];
+  const expected = "v2=" + crypto.createHmac("sha256", secret).update(ts + "." + rawBody).digest("hex");
+  const a = Buffer.from(headers["x-prospex-signature"] || ""), b = Buffer.from(expected);
+  const fresh = Math.abs(Date.now() - Number(ts)) < 5 * 60 * 1000;
+  return fresh && a.length === b.length && crypto.timingSafeEqual(a, b);
+}`}</pre>
+        <p className="mt-2 text-xs text-ink-400">A value that starts with <code>v2=</code> is always a v2 signature, so one endpoint can accept both during a changeover.</p>
       </div>
     </div>
   );
@@ -462,6 +600,208 @@ function Team() {
           ))}</ul>
         </div>
       )}
+    </div>
+  );
+}
+
+interface AuditEntry {
+  id: string;
+  action: string;
+  actorType?: string | null;
+  actorEmail?: string | null;
+  targetType?: string | null;
+  targetId?: string | null;
+  result?: string | null;
+  ip?: string | null;
+  createdAt: string;
+  data?: Record<string, unknown> | null;
+}
+
+/**
+ * Security-log actions in plain words. Keyed on the action with its separators normalised
+ * ("auth.password_change", "auth.password.change" and "auth:password-change" are one key),
+ * so a spelling difference on the server does not turn a row into raw identifiers. Anything
+ * not listed still reads as words through the fallback below - a new server action shows up
+ * as "Webhook: rotate secret", never as a blank.
+ */
+const AUDIT_WORDS: Record<string, string> = {
+  // Sign-in and sessions
+  "auth.login": "Sign-in",
+  "auth.login.locked": "Sign-in blocked after too many attempts",
+  "auth.google.login": "Sign-in with Google",
+  "auth.google.claimed.unverified.account": "Account taken over by its Google owner (old password turned off)",
+  "auth.signup": "Workspace created",
+  "auth.logout.all": "Signed out of all devices",
+  "auth.password.changed": "Password change",
+  "auth.password.reset": "Password reset from an emailed link",
+  "auth.password.reset.requested": "Password reset requested",
+  // Credentials
+  "apikey.created": "API key created",
+  "apikey.revoked": "API key revoked",
+  "webhook.created": "Webhook added",
+  "webhook.deleted": "Webhook deleted",
+  "webhook.secret.rotated": "Webhook secret rotated",
+  "webhook.tested": "Webhook test sent",
+  "integration.connected": "Integration connected",
+  "integration.disconnected": "Integration disconnected",
+  "integration.synced": "Leads pushed to an integration",
+  "sender.created": "Sending mailbox added",
+  "sender.deleted": "Sending mailbox removed",
+  // People
+  "team.invited": "Teammate invited",
+  "team.invite.resent": "Invite resent",
+  "team.invite.revoked": "Invite revoked",
+  "team.joined": "Teammate joined from an invite",
+  "team.member.removed": "Teammate removed",
+  // Data leaving or being destroyed
+  "leads.exported": "Leads exported",
+  "leads.imported": "Leads imported",
+  "leads.bulk.deleted": "Leads deleted in bulk",
+  "list.deleted": "List deleted",
+  "suppression.added": "Address added to the do-not-contact list",
+  "client.created": "Client created",
+  "client.deleted": "Client deleted",
+  "client.share.disabled": "Client report link turned off",
+  "campaign.started": "Campaign started",
+  "campaign.paused": "Campaign paused",
+  "campaign.deleted": "Campaign deleted",
+  "autopilot.created": "Autopilot created",
+  "autopilot.deleted": "Autopilot deleted",
+  "pixel.created": "Website tracking pixel created",
+  "pixel.deleted": "Website tracking pixel deleted",
+  "org.settings.changed": "Workspace settings changed",
+  "reference.denied": "Request for another workspace's data refused",
+  // Scout staff
+  "admin.login": "Scout admin sign-in",
+};
+
+function auditActionLabel(action: string): string {
+  const key = String(action ?? "").toLowerCase().replace(/[^a-z0-9]+/g, ".").replace(/^\.+|\.+$/g, "");
+  if (AUDIT_WORDS[key]) return AUDIT_WORDS[key];
+  const parts = String(action ?? "").split(/[.:/]+/).map((p) => p.replace(/[_-]+/g, " ").trim()).filter(Boolean);
+  if (parts.length === 0) return "Unknown action";
+  const head = parts[0].charAt(0).toUpperCase() + parts[0].slice(1);
+  return parts.length === 1 ? head : `${head}: ${parts.slice(1).join(" ")}`;
+}
+
+const AUDIT_ACTOR: Record<string, string> = { user: "A workspace member", api_key: "API key", admin: "Scout admin", system: "Scout (automatic)", anonymous: "Not signed in" };
+
+function auditWho(e: AuditEntry): string {
+  if (e.actorEmail) return e.actorEmail;
+  // A failed sign-in has no account behind it; the address that was tried is the only "who".
+  const tried = e.data && typeof e.data.email === "string" ? e.data.email : null;
+  const label = AUDIT_ACTOR[e.actorType ?? ""] ?? (e.actorType ? e.actorType : "Unknown");
+  return tried ? `${label} (as ${tried})` : label;
+}
+
+function AuditResult({ result }: { result?: string | null }) {
+  const r = result ?? "ok";
+  const [cls, text] = r === "ok" ? ["bg-emerald-50 text-emerald-700", "Succeeded"] : r === "denied" ? ["bg-amber-50 text-amber-700", "Blocked"] : r === "failed" ? ["bg-red-50 text-red-700", "Failed"] : ["bg-black/[0.05] text-ink-300", r];
+  return <span className={`badge shrink-0 ${cls}`}>{text}</span>;
+}
+
+const AUDIT_PAGE = 50;
+
+/**
+ * Security log: who signed in, from where, and what they changed that matters for access -
+ * passwords, API keys, webhooks, exports. Owners and admins only (the server enforces it).
+ *
+ * Rows are stacked blocks rather than a five-column table: on a phone a table of timestamp,
+ * action, email, IP and result either scrolls sideways or crushes every column, and an
+ * email address or an IPv6 address must be allowed to wrap.
+ */
+function SecurityLog() {
+  const { canManage, settled } = useMe();
+  const [entries, setEntries] = useState<AuditEntry[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [more, setMore] = useState(false);
+  const [moreBusy, setMoreBusy] = useState(false);
+  const [moreErr, setMoreErr] = useState<string | null>(null);
+  // The cursor for the next page. The server may hand one back; otherwise it is the
+  // timestamp of the oldest row shown.
+  const [cursor, setCursor] = useState<string | null>(null);
+
+  type AuditPage = { entries?: AuditEntry[]; nextBefore?: string | null; nextCursor?: string | null; hasMore?: boolean };
+  const fetchPage = (before: string | null) =>
+    apiFetch<AuditPage>("GET", `/v1/audit-log?limit=${AUDIT_PAGE}${before ? `&before=${encodeURIComponent(before)}` : ""}`).then((r) => {
+      // A 200 without an entries array is not "no activity" - it is an answer we cannot read.
+      if (!r || !Array.isArray(r.entries)) throw new Error("The server's answer could not be read.");
+      const rows = r.entries;
+      const next = r.nextBefore ?? r.nextCursor ?? (rows.length ? rows[rows.length - 1].createdAt : null);
+      const hasMore = typeof r.hasMore === "boolean" ? r.hasMore : rows.length >= AUDIT_PAGE;
+      return { rows, next, hasMore };
+    });
+
+  const load = useCallback(() => {
+    setErr(null);
+    setMoreErr(null);
+    fetchPage(null)
+      .then(({ rows, next, hasMore }) => { setEntries(rows); setCursor(next); setMore(hasMore && !!next); })
+      .catch((e) => setErr((e as Error).message));
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  // Waits for the role: asking first and learning "member" second would put a refused
+  // request into the very log this page shows.
+  useEffect(() => { if (settled && canManage) load(); }, [settled, canManage, load]);
+
+  const loadMore = async () => {
+    if (moreBusy || !cursor) return;
+    setMoreBusy(true);
+    setMoreErr(null);
+    try {
+      const { rows, next, hasMore } = await fetchPage(cursor);
+      // De-duplicated by id: a cursor that is inclusive, or two rows in the same millisecond,
+      // must not show the same entry twice.
+      const seen = new Set((entries ?? []).map((e) => e.id));
+      const added = rows.filter((e) => !seen.has(e.id));
+      setEntries([...(entries ?? []), ...added]);
+      setCursor(next);
+      // No new rows, or a cursor that did not move, is the end - not a button that reloads
+      // the same page forever.
+      setMore(hasMore && added.length > 0 && !!next && next !== cursor);
+    } catch (e) {
+      setMoreErr((e as Error).message);
+    } finally {
+      setMoreBusy(false);
+    }
+  };
+
+  if (settled && !canManage) return <div className="card p-5 text-sm text-ink-400">Only workspace owners and admins can see the security log.</div>;
+  if (err && !entries) return <LoadError message={err} onRetry={load} />;
+  if (!entries) return <div className="card p-5"><Spinner label="Loading…" /></div>;
+  return (
+    <div className="space-y-4">
+      <div className="card p-5">
+        <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
+          <div className="font-medium">Security log</div>
+          <button type="button" className="btn-secondary py-1 text-xs" onClick={load}>Refresh</button>
+        </div>
+        <p className="mb-3 text-sm text-ink-300">Sign-ins and changes to access in this workspace - passwords, API keys, webhooks and exports - newest first, with the address each came from. Visible to owners and admins.</p>
+        {entries.length === 0 ? (
+          <div className="py-6 text-center text-sm text-ink-400">
+            <div className="font-medium text-ink-200">Nothing recorded yet</div>
+            <div className="mt-1">Sign-ins, password changes, API key and webhook changes will appear here as they happen.</div>
+          </div>
+        ) : (
+          <ul className="divide-y divide-slate-100 text-sm">
+            {entries.map((e) => (
+              <li key={e.id} className="py-2.5">
+                <div className="flex flex-wrap items-start justify-between gap-x-3 gap-y-1">
+                  <div className="min-w-0 font-medium text-ink-100 [overflow-wrap:anywhere]">{auditActionLabel(e.action)}</div>
+                  <AuditResult result={e.result} />
+                </div>
+                <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-ink-400">
+                  <span className="min-w-0 [overflow-wrap:anywhere]">{auditWho(e)}</span>
+                  <span className="min-w-0 font-mono [overflow-wrap:anywhere]">{e.ip || "address not recorded"}</span>
+                  <time dateTime={e.createdAt}>{fmtDate(e.createdAt)}</time>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+        {moreErr && <div className="mt-3 rounded-lg bg-red-50 p-2 text-sm text-red-600" role="alert">Could not load older entries: {moreErr}</div>}
+        {more && <button type="button" className="btn-secondary mt-3 w-full justify-center" disabled={moreBusy} onClick={loadMore}>{moreBusy ? "Loading…" : "Load more"}</button>}
+        {!more && entries.length > 0 && <p className="mt-3 text-center text-xs text-ink-500">End of the log.</p>}
+      </div>
     </div>
   );
 }

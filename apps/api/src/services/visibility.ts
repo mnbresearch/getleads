@@ -9,7 +9,9 @@ import {
   visibilityGaps,
   visibilityMetrics,
   intentCoverage,
+  oneLine,
   parseGeneratedPrompts,
+  redact,
   starterPack,
   pluralRole,
   templateBrief,
@@ -107,7 +109,8 @@ export async function runVisibilityPrompt(
       { maxTokens: 1600, temperature: 0.7 },
     );
   } catch (e) {
-    error = (e as Error).message.slice(0, 500);
+    // Stored on the run and shown to the tenant: credentials and account ids are masked.
+    error = redact((e as Error).message, { max: 500 });
   }
 
   // An empty body with no exception is not the engine declining - it is the engine
@@ -182,7 +185,7 @@ export async function sampleAcrossEngines(
         // every hour while returning nothing. The row's own error field is the truth.
         results.push({ engine: provider.name, ok: !run.error, mentioned: run.mentioned, usable: run.usable, error: run.error ?? undefined });
       } catch (e) {
-        results.push({ engine: provider.name, ok: false, mentioned: false, usable: false, error: (e as Error).message?.slice(0, 200) });
+        results.push({ engine: provider.name, ok: false, mentioned: false, usable: false, error: redact((e as Error).message, { max: 200 }) });
       }
     }
   }
@@ -388,12 +391,15 @@ export async function suggestPrompts(
   // nothing better, "B2B software" reads as a real question. starterPack turns a bare
   // qualifier ("B2B", "lead generation") into a product phrase.
   const orgCategory = typeof org?.settings?.category === "string" ? (org.settings.category as string) : undefined;
+  // Each value is one bounded line before it reaches the prompt builder. They are the org's
+  // own words, but they are free text (and an ICP may have been written by a model from
+  // crawled pages), and a line break in any of them would forge a line of the brief.
   const ctx: TemplateContext = {
-    brand: cfg.brand.name,
-    category: opts.category?.trim() || criteria.keywords?.[0] || orgCategory?.trim() || "B2B software",
-    competitors: cfg.competitors.map((c) => c.name),
-    audience,
-    problem: icp?.description ?? null,
+    brand: oneLine(cfg.brand.name, 120),
+    category: oneLine(opts.category?.trim() || criteria.keywords?.[0] || orgCategory?.trim() || "B2B software", 160) || "B2B software",
+    competitors: cfg.competitors.map((c) => oneLine(c.name, 120)).filter(Boolean).slice(0, 20),
+    audience: audience ? oneLine(audience, 300) : null,
+    problem: icp?.description ? oneLine(icp.description, 600) : null,
   };
 
   const existing = await db
@@ -432,7 +438,7 @@ export async function suggestPrompts(
     );
     generated = parseGeneratedPrompts(raw);
   } catch (e) {
-    failure = (e as Error).message.slice(0, 200);
+    failure = redact((e as Error).message, { max: 200 });
   }
 
   // Model output is untrusted text: it is run through the same validation as anything a

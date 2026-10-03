@@ -16,6 +16,7 @@
  * Like `meter()`, this lives in core with no DB dependency and reports through a hook that
  * apps/api wires at boot. A reporting failure must never break the call it describes.
  */
+import { redact } from "../ai/redact.js";
 
 export type ProviderOutcome =
   /** The call succeeded. Says nothing about whether it returned any rows. */
@@ -80,7 +81,10 @@ export function setProviderHealthHook(fn: HealthHook) {
 export function reportProviderCall(call: ProviderCall) {
   try {
     noteForSkipping(call);
-    hook(call);
+    // The detail is stored (provider health, `last_detail`) and shown in the admin UI. It is
+    // built from upstream error text, which echoes keys and account ids, so it is masked at
+    // the one place every report passes through - whoever built it.
+    hook(call.detail ? { ...call, detail: redact(call.detail, { max: 300 }) } : call);
   } catch {
     // health reporting is best-effort by design
   }
@@ -134,6 +138,12 @@ function looksLikeCredentialProblem(message: string): boolean {
 
 /** Map an HTTP response to an outcome plus an explanation worth storing. */
 export function classifyHttp(status: number, body = ""): { outcome: ProviderOutcome; detail: string } {
+  const r = classifyHttpRaw(status, body);
+  // Classification reads the provider's own words; what is RETURNED has credentials masked.
+  return { outcome: r.outcome, detail: redact(r.detail, { max: 200 }) };
+}
+
+function classifyHttpRaw(status: number, body = ""): { outcome: ProviderOutcome; detail: string } {
   const summary = summarise(body);
   if (status >= 200 && status < 300) return { outcome: "ok", detail: "" };
   // Ahead of 401/403/429 on purpose: providers disagree on which code means "no credit left"
@@ -194,7 +204,8 @@ export function looksLikeOutOfCredit(message: string): boolean {
 /** Map a thrown fetch error to an outcome. Timeouts and DNS failures are not auth problems. */
 export function classifyThrown(e: unknown): { outcome: ProviderOutcome; detail: string } {
   const msg = (e as Error)?.message ?? String(e);
-  return { outcome: "network", detail: msg.slice(0, 200) };
+  // A fetch error can carry the request URL, and some providers take the key in the query.
+  return { outcome: "network", detail: redact(msg, { max: 200 }) };
 }
 
 /**

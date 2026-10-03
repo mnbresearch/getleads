@@ -7,20 +7,36 @@ import { env } from "../env.js";
 import { randomToken } from "../lib/crypto.js";
 import { notFound } from "../lib/errors.js";
 import { clientIp, orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
-import { collectHit, pixelScript } from "../services/visitors.js";
+import { cleanIdentify, collectHit, isPixelKey, pixelScript, PIXEL_LIMITS } from "../services/visitors.js";
 import { upsertLead } from "../services/leads.js";
 import { tryConsume } from "../lib/quota.js";
+import { audit } from "../lib/audit.js";
+import { stripNul } from "../lib/sanitize.js";
 
 /** Public pixel endpoints (no auth). Mounted at /px */
 export const pixelPublic = new Hono();
 
+/**
+ * The snippet. Only for something shaped like a real pixel key.
+ *
+ * The path segment was written into the JavaScript as-is, so `/px/<anything>.js` served
+ * `<anything>` back as script from our origin: a quote in it closed the string and the rest
+ * ran. The key must now match the format keys are issued in, and it is JSON-encoded into
+ * the script rather than pasted.
+ */
 pixelPublic.get("/:file", (c) => {
   const file = c.req.param("file");
   if (!file.endsWith(".js")) return c.notFound();
-  c.header("content-type", "application/javascript");
+  const key = file.slice(0, -3);
+  if (!isPixelKey(key)) return c.notFound();
+  c.header("content-type", "application/javascript; charset=utf-8");
+  c.header("x-content-type-options", "nosniff");
   c.header("cache-control", "public, max-age=3600");
-  return c.body(pixelScript(file.replace(/\.js$/, "")));
+  return c.body(pixelScript(key));
 });
+
+/** A bounded string field from a beacon body, or undefined. Longer values are cut. */
+const field = (v: unknown, max: number): string | undefined => (typeof v === "string" && v ? stripNul(v).slice(0, max) : typeof v === "number" && Number.isFinite(v) ? String(v).slice(0, max) : undefined);
 
 /** Host of an Origin or Referer header, lower-cased, or null. */
 function headerHost(v: string | undefined): string | null {
@@ -47,6 +63,9 @@ pixelPublic.options("/:key/collect", (c) => c.body(null, 204));
 // flood an org's visitor table and burn its IP-lookup budget.
 pixelPublic.post("/:key/collect", rateLimit({ perMinute: 120, name: "pixel-collect" }), async (c) => {
   const key = c.req.param("key");
+  c.header("access-control-allow-origin", "*");
+  // Anything that is not a key we could have issued is answered like an unknown key.
+  if (!isPixelKey(key)) return c.body(null, 204);
   // allowedDomains was stored and shown in settings but never enforced, so a copied snippet
   // on any site reported visits as this org's. When the list is set, the hit must come from
   // one of those sites. A missing Origin AND Referer (some privacy setups) is refused too:
@@ -72,7 +91,23 @@ pixelPublic.post("/:key/collect", rateLimit({ perMinute: 120, name: "pixel-colle
   // company's IP and so attribute a "visit" to a company that never came.
   const ip = clientIp(c);
   if (!ip || ip === "unknown") return c.json({ ok: false, error: "no ip" }, 400);
-  await collectHit({ pixelKey: key, ip, sessionId: String(body.sid ?? randomToken(8)), page: body.p ? String(body.p) : undefined, referrer: body.r ? String(body.r) : undefined, userAgent: c.req.header("user-agent"), durationMs: Number(body.d ?? 0) || 0, event: String(body.e ?? "view"), identify: typeof body.id === "object" && body.id ? (body.id as Record<string, unknown>) : undefined }).catch(() => false);
+  if (!body || typeof body !== "object" || Array.isArray(body)) body = {};
+  // Every field is bounded here, before anything is stored or queued. This endpoint takes
+  // no authentication, and a 1 MB session id or a 2 MB identify object used to be written
+  // to the visits table and into a job payload exactly as sent.
+  const event = body.e === "leave" || body.e === "identify" ? body.e : "view";
+  const duration = Number(body.d ?? 0);
+  await collectHit({
+    pixelKey: key,
+    ip,
+    sessionId: field(body.sid, PIXEL_LIMITS.sessionId) ?? randomToken(8),
+    page: field(body.p, PIXEL_LIMITS.page),
+    referrer: field(body.r, PIXEL_LIMITS.referrer),
+    userAgent: c.req.header("user-agent")?.slice(0, PIXEL_LIMITS.userAgent),
+    durationMs: Number.isFinite(duration) ? Math.min(Math.max(0, Math.round(duration)), PIXEL_LIMITS.durationMs) : 0,
+    event,
+    identify: cleanIdentify(body.id),
+  }).catch(() => false);
   c.header("access-control-allow-origin", "*");
   return c.body(null, 204);
 });
@@ -87,16 +122,18 @@ visitorRoutes.get("/pixels", async (c) => {
   return c.json({ pixels: rows.map((p) => ({ ...p, snippet: `<script async src="${env.apiUrl}/px/${p.key}.js"></script>` })) });
 });
 
-visitorRoutes.post("/pixels", zValidator("json", z.object({ name: z.string().min(1), allowedDomains: z.array(z.string()).default([]) })), async (c) => {
+visitorRoutes.post("/pixels", zValidator("json", z.object({ name: z.string().min(1).max(200), allowedDomains: z.array(z.string().max(253)).max(50).default([]) })), async (c) => {
   const { db } = getDb();
   const [row] = await db.insert(pixels).values({ orgId: orgId(c), key: `px_${randomToken(12)}`, ...c.req.valid("json") }).returning();
+  await audit(c, "pixel.created", { targetType: "pixel", targetId: row.id, data: { name: row.name, allowedDomains: row.allowedDomains } });
   return c.json({ ...row, snippet: `<script async src="${env.apiUrl}/px/${row.key}.js"></script>` }, 201);
 });
 
 visitorRoutes.delete("/pixels/:id", async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(pixels).where(and(eq(pixels.id, c.req.param("id")), eq(pixels.orgId, orgId(c)))).returning({ id: pixels.id });
+  const gone = await db.delete(pixels).where(and(eq(pixels.id, c.req.param("id")), eq(pixels.orgId, orgId(c)))).returning({ id: pixels.id, name: pixels.name });
   if (!gone.length) throw notFound("Pixel");
+  await audit(c, "pixel.deleted", { targetType: "pixel", targetId: gone[0].id, data: { name: gone[0].name } });
   return c.json({ ok: true });
 });
 
@@ -107,7 +144,7 @@ visitorRoutes.get("/", zValidator("query", z.object({ status: z.string().optiona
   const rows = await db
     .select({ v: visitorCompanies, company: companies })
     .from(visitorCompanies)
-    .leftJoin(companies, eq(visitorCompanies.companyId, companies.id))
+    .leftJoin(companies, and(eq(visitorCompanies.companyId, companies.id), eq(companies.orgId, orgId(c))))
     .where(and(eq(visitorCompanies.orgId, orgId(c)), q.status ? eq(visitorCompanies.status, q.status) : sql`true`, sql`${visitorCompanies.lastSeenAt} > now() - (${q.days} || ' days')::interval`))
     .orderBy(desc(visitorCompanies.intentScore), desc(visitorCompanies.lastSeenAt))
     .limit(q.limit);
@@ -115,20 +152,29 @@ visitorRoutes.get("/", zValidator("query", z.object({ status: z.string().optiona
   return c.json({ companies: rows.map((r) => ({ ...r.v, company: r.company })), totals });
 });
 
+// A domain this workspace has never seen answers 404 on both of these. They used to answer
+// 200 - an empty list, and "ok: true" for an update that changed nothing.
 visitorRoutes.get("/:domain/visits", async (c) => {
   const { db } = getDb();
-  const rows = await db.select().from(visits).where(and(eq(visits.orgId, orgId(c)), eq(visits.companyDomain, c.req.param("domain")))).orderBy(desc(visits.visitedAt)).limit(200);
+  const oid = orgId(c);
+  const domain = c.req.param("domain");
+  const rows = await db.select().from(visits).where(and(eq(visits.orgId, oid), eq(visits.companyDomain, domain))).orderBy(desc(visits.visitedAt)).limit(200);
+  if (!rows.length) {
+    const known = await db.query.visitorCompanies.findFirst({ where: and(eq(visitorCompanies.orgId, oid), eq(visitorCompanies.domain, domain)) });
+    if (!known) throw notFound("Visitor company");
+  }
   return c.json({ visits: rows });
 });
 
 visitorRoutes.patch("/:domain", zValidator("json", z.object({ status: z.enum(["new", "reviewed", "contacted", "ignored"]) })), async (c) => {
   const { db } = getDb();
-  await db.update(visitorCompanies).set({ status: c.req.valid("json").status }).where(and(eq(visitorCompanies.orgId, orgId(c)), eq(visitorCompanies.domain, c.req.param("domain"))));
+  const changed = await db.update(visitorCompanies).set({ status: c.req.valid("json").status }).where(and(eq(visitorCompanies.orgId, orgId(c)), eq(visitorCompanies.domain, c.req.param("domain")))).returning({ id: visitorCompanies.id });
+  if (!changed.length) throw notFound("Visitor company");
   return c.json({ ok: true });
 });
 
 /** Find decision makers at a visiting company and save them as leads. */
-visitorRoutes.post("/:domain/decision-makers", zValidator("json", z.object({ titles: z.array(z.string()).default(["CEO", "Founder", "Head of Sales", "Head of Marketing", "CTO"]), limit: z.number().int().min(1).max(20).default(5), save: z.boolean().default(true) })), async (c) => {
+visitorRoutes.post("/:domain/decision-makers", zValidator("json", z.object({ titles: z.array(z.string().max(200)).max(25).default(["CEO", "Founder", "Head of Sales", "Head of Marketing", "CTO"]), limit: z.number().int().min(1).max(20).default(5), save: z.boolean().default(true) })), async (c) => {
   const oid = orgId(c);
   const domain = c.req.param("domain");
   const b = c.req.valid("json");
@@ -136,7 +182,7 @@ visitorRoutes.post("/:domain/decision-makers", zValidator("json", z.object({ tit
   const vc = await db.query.visitorCompanies.findFirst({ where: and(eq(visitorCompanies.orgId, oid), eq(visitorCompanies.domain, domain)) });
   if (!vc) throw notFound("Visitor company");
   await consume(db, oid, "searches", 1);
-  const company = vc.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, vc.companyId) }) : null;
+  const company = vc.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, vc.companyId), eq(companies.orgId, oid)) }) : null;
   const people = await findPeople({ companyName: company?.name ?? vc.name ?? domain.split(".")[0], titles: b.titles, limit: b.limit });
   const saved: string[] = [];
   let newlyFound = 0;

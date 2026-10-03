@@ -1,7 +1,9 @@
-import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, integrations, jobs, leads, monitors, ne, organizations, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, webhooks } from "@prospex/db";
-import { buildIcpWithAi, crawlCompanyWebsite, createAiProviderForPlan, findEmail, isPublicHost, runLeadPipeline, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
+import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, inArray, integrations, jobs, leads, lists, monitors, ne, organizations, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, visits, webhooks } from "@prospex/db";
+import { buildIcpWithAi, clampLeadQuery, crawlCompanyWebsite, createAiProviderForPlan, fetchPublic, findEmail, redact, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
-import { hmacSign } from "./lib/crypto.js";
+import { hmacSign, hmacSignV2 } from "./lib/crypto.js";
+import { clampSearchQuery } from "./lib/searchQuery.js";
+import { webhookSecret } from "./lib/webhookSecret.js";
 import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead, verifierOf } from "./services/leads.js";
 import { AiNotConfiguredError, knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { sendStep, tickCampaign } from "./services/campaigns.js";
@@ -29,6 +31,27 @@ async function planOf(db: Db, orgId: string | null | undefined): Promise<string>
 async function aiFor(db: Db, orgId: string | null | undefined) {
   return createAiProviderForPlan(await planOf(db, orgId));
 }
+
+/**
+ * The second lock on every handler that loads a row by an id from its payload.
+ *
+ * The routes that enqueue these jobs check ownership first, so no tenant can name another
+ * org's id today. But the handlers then acted in the ROW's org without ever comparing it
+ * with the org the job was enqueued for - so one forgotten ownership check at any future
+ * enqueue site would have been a cross-tenant read or write (lead.verify charged and
+ * rewrote another org's lead; webhook.deliver sent one org's event to another org's hook).
+ * A job that names a row from a different org now changes nothing.
+ *
+ * Jobs with no org (system jobs, rows enqueued before orgId was recorded) are not judged.
+ */
+function foreign(job: Pick<Job, "orgId">, rowOrgId: string | null | undefined): boolean {
+  return !!job.orgId && !!rowOrgId && rowOrgId !== job.orgId;
+}
+const ORG_MISMATCH = { skipped: "org mismatch" } as const;
+const isUuid = (v: unknown): v is string => typeof v === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(v);
+
+/** How much of a webhook endpoint's response is read before the rest is discarded. */
+const WEBHOOK_MAX_RESPONSE_BYTES = 64 * 1024;
 
 /** Only orgs that are allowed to run: a suspended workspace's schedules must not fire. */
 const orgIsActive = (col: unknown) => dsql`${col} IN (SELECT id FROM organizations WHERE status = 'active')`;
@@ -142,7 +165,9 @@ async function findEmailExcluding(input: Parameters<typeof findEmail>[0], exclud
 }
 
 async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
-  let company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
+  // Same org as the lead, not just the same id: a reference written across a workspace
+  // boundary before the ownership checks existed must not be followed.
+  let company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, lead.orgId)) }) : null;
   let profile: CompanyProfile | null = null;
   if (company && (!company.enrichedAt || Date.now() - company.enrichedAt.getTime() > 30 * 86_400_000)) {
     profile = await crawlCompanyWebsite(company.domain).catch(() => null);
@@ -214,7 +239,7 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
       Object.assign(patch, { custom });
     }
   }
-  const icp = lead.icpId ? await db.query.icps.findFirst({ where: eq(icps.id, lead.icpId) }) : null;
+  const icp = lead.icpId ? await db.query.icps.findFirst({ where: and(eq(icps.id, lead.icpId), eq(icps.orgId, lead.orgId)) }) : null;
   if (icp) {
     const s = scoreLeadRules({ title: lead.title, location: lead.location, country: lead.country, emailStatus: String(patch.emailStatus ?? lead.emailStatus), company }, icp.criteria as IcpCriteria);
     Object.assign(patch, { score: s.score, scoreReasons: s.reasons });
@@ -233,10 +258,17 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const orgId = job.orgId!;
     const searchId = String(job.payload.searchId);
-    const query = job.payload.query as Parameters<typeof runLeadPipeline>[0];
-    await db.update(searches).set({ status: "running" }).where(eq(searches.id, searchId));
-    const icpId = job.payload.icpId ? String(job.payload.icpId) : null;
-    const icp = icpId ? await db.query.icps.findFirst({ where: eq(icps.id, icpId) }) : null;
+    const searchRow = await db.query.searches.findFirst({ where: eq(searches.id, searchId) });
+    if (searchRow && foreign(job, searchRow.orgId)) return ORG_MISMATCH;
+    // Only the pipeline INPUT comes from the payload, and only its known keys, bounded.
+    // Every option below is built here.
+    const query = clampLeadQuery(clampSearchQuery(job.payload.query));
+    await db.update(searches).set({ status: "running" }).where(and(eq(searches.id, searchId), eq(searches.orgId, orgId)));
+    // The ICP and the list are the job org's own or they are not used.
+    const icpRow = job.payload.icpId ? await db.query.icps.findFirst({ where: and(eq(icps.id, String(job.payload.icpId)), eq(icps.orgId, orgId)) }) : null;
+    const icp = icpRow ?? null;
+    const icpId = icpRow?.id ?? null;
+    const listRow = job.payload.listId ? await db.query.lists.findFirst({ where: and(eq(lists.id, String(job.payload.listId)), eq(lists.orgId, orgId)) }) : null;
     try {
       const providerBudget = await remainingPremiumBudget(db, orgId);
       const { leads: results, providerFailures } = await runLeadPipelineDetailed(query, {
@@ -275,9 +307,9 @@ export const handlers: Record<string, JobHandler> = {
         if (c) created++;
         ids.push(lead.id);
       }
-      if (job.payload.listId && ids.length) {
+      if (listRow && ids.length) {
         const { listLeads } = await import("@prospex/db");
-        for (const leadId of ids) await db.insert(listLeads).values({ listId: String(job.payload.listId), leadId }).onConflictDoNothing();
+        for (const leadId of ids) await db.insert(listLeads).values({ listId: listRow.id, leadId }).onConflictDoNothing();
       }
       // A search run for a client delivers to that client. People another client already
       // owns stay with that client and are counted, never silently taken.
@@ -291,7 +323,7 @@ export const handlers: Record<string, JobHandler> = {
           const { claimSearchLeads } = await import("./services/clients.js");
           clientClaim = await claimSearchLeads(db, orgId, String(job.payload.clientId), ids);
         } catch (e) {
-          clientClaim = { claimed: 0, ownedByAnotherClient: 0, error: (e as Error).message.slice(0, 200) };
+          clientClaim = { claimed: 0, ownedByAnotherClient: 0, error: redact((e as Error).message, { max: 200 }) };
           ctx.log(`client claim failed: ${clientClaim.error}`);
         }
       }
@@ -323,7 +355,7 @@ export const handlers: Record<string, JobHandler> = {
           clientClaim: clientClaim ?? undefined,
           completedAt: new Date(),
         })
-        .where(eq(searches.id, searchId));
+        .where(and(eq(searches.id, searchId), eq(searches.orgId, orgId)));
       await emitEvent(
         orgId,
         "search.completed",
@@ -332,7 +364,8 @@ export const handlers: Record<string, JobHandler> = {
       );
       return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated, clientClaim };
     } catch (e) {
-      await db.update(searches).set({ status: "failed", error: (e as Error).message, completedAt: new Date() }).where(eq(searches.id, searchId));
+      // searches.error is shown to the customer: upstream text is masked before it is stored.
+      await db.update(searches).set({ status: "failed", error: redact((e as Error).message, { max: 1000 }), completedAt: new Date() }).where(and(eq(searches.id, searchId), eq(searches.orgId, orgId)));
       throw e;
     }
   },
@@ -342,6 +375,7 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const lead = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)) });
     if (!lead) return { skipped: "missing" };
+    if (foreign(job, lead.orgId)) return ORG_MISMATCH;
     try {
       return await enrichLead(db, job, lead);
     } catch (e) {
@@ -354,6 +388,8 @@ export const handlers: Record<string, JobHandler> = {
   "lead.verify": async (job, ctx) => {
     const { db } = ctx;
     const lead = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)) });
+    // Before the charge and before any write: a lead from another org is not ours to bill or change.
+    if (lead && foreign(job, lead.orgId)) return ORG_MISMATCH;
     if (!lead?.email) return { skipped: "no email" };
     // One lookup, one charge, however many times the job is retried. A plan limit ends the
     // job (no retry does the lookup for free); a fault is thrown and retried.
@@ -382,6 +418,7 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const icp = await db.query.icps.findFirst({ where: eq(icps.id, String(job.payload.icpId)) });
     if (!icp) return { skipped: "missing" };
+    if (foreign(job, icp.orgId)) return ORG_MISMATCH;
     const seeds: { domain: string; name?: string; description?: string; industry?: string }[] = [];
     for (const d of icp.seedDomains.slice(0, 5)) {
       const p = await crawlCompanyWebsite(d, { maxPages: 2 }).catch(() => null);
@@ -412,54 +449,105 @@ export const handlers: Record<string, JobHandler> = {
     return withReschedule(db, job, "campaign.tick", async () => {
       const active = await db.select().from(campaigns).where(and(eq(campaigns.status, "active"), orgIsActive(campaigns.orgId)));
       const out: Record<string, unknown> = {};
-      for (const c of active) out[c.id] = await tickCampaign(c.id).catch((e) => ({ error: (e as Error).message }));
+      for (const c of active) out[c.id] = await tickCampaign(c.id).catch((e) => ({ error: redact((e as Error).message, { max: 300 }) }));
       return out;
     });
   },
 
-  "message.send": async (job) =>
+  "message.send": async (job, ctx) => {
+    // The campaign must be the job org's own. sendStep then checks that the contact and the
+    // step belong to that campaign, and the lead and the sender to its org.
+    const cp = await ctx.db.query.campaigns.findFirst({ where: eq(campaigns.id, String(job.payload.campaignId)), columns: { id: true, orgId: true } });
+    if (cp && foreign(job, cp.orgId)) return ORG_MISMATCH;
     // The attempt number reaches sendStep so a retried send is not billed twice.
-    sendStep(String(job.payload.campaignId), String(job.payload.contactId), String(job.payload.stepId), { attempt: job.attempts }),
+    return sendStep(String(job.payload.campaignId), String(job.payload.contactId), String(job.payload.stepId), { attempt: job.attempts });
+  },
 
-  /** Deliver one event to one webhook with HMAC signature. */
+  /**
+   * Deliver one event to one webhook, signed.
+   *
+   * v1 hooks (created before signature v2) keep the legacy scheme and header format exactly:
+   * `x-prospex-signature: <hex sha256(secret + "." + ts + "." + body)>`. v2 hooks (new and
+   * rotated) are signed with a real HMAC-SHA256 over the same `${ts}.${body}` and send
+   * `x-prospex-signature: v2=<hex>`.
+   */
   "webhook.deliver": async (job, ctx) => {
     const { db } = ctx;
     const hook = await db.query.webhooks.findFirst({ where: eq(webhooks.id, String(job.payload.webhookId)) });
     const ev = await db.query.events.findFirst({ where: eq(events.id, String(job.payload.eventId)) });
     if (!hook || !ev || !hook.active) return { skipped: true };
-    // Same reasoning as the CRM webhook: a customer-supplied URL, called from inside our
-    // network, carrying event data. A private address is ours, not theirs.
-    if (!isPublicHost(hook.url, { allowUserinfo: true })) return { skipped: `${hook.url} is not a public address` };
+    // An event is only ever delivered to a hook of the SAME org. Loaded independently by id,
+    // any hook could be paired with any event - one org's data posted to another org's URL.
+    if (hook.orgId !== ev.orgId || foreign(job, hook.orgId)) return ORG_MISMATCH;
     const body = JSON.stringify({ id: ev.id, type: ev.type, createdAt: ev.createdAt, data: ev.data, entity: { type: ev.entityType, id: ev.entityId } });
     const ts = String(Date.now());
-    const res = await fetch(hook.url, {
-      method: "POST",
-      headers: { "content-type": "application/json", "x-prospex-signature": hmacSign(hook.secret, `${ts}.${body}`), "x-prospex-timestamp": ts, "x-prospex-event": ev.type },
-      body,
-      signal: AbortSignal.timeout(10_000),
-    }).catch((e) => ({ ok: false, status: 0, statusText: (e as Error).message }));
-    if (!res.ok) {
+    const safeUrl = redact(hook.url, { max: 300 });
+
+    /** Record a delivery that will not be retried against the hook, and disable it past the limit. */
+    const countFailure = async (lastError: string) => {
+      const [row] = await db.update(webhooks).set({ failures: dsql`${webhooks.failures} + 1` }).where(eq(webhooks.id, hook.id)).returning({ failures: webhooks.failures });
+      if ((row?.failures ?? 0) >= WEBHOOK_DISABLE_AFTER) {
+        const [disabled] = await db.update(webhooks).set({ active: false }).where(and(eq(webhooks.id, hook.id), eq(webhooks.active, true))).returning({ id: webhooks.id });
+        if (disabled) {
+          ctx.log(`webhook ${hook.id} disabled after ${row!.failures} consecutive failed deliveries`);
+          console.warn(`[webhooks] disabled ${hook.id} (${safeUrl}) for org ${hook.orgId}: ${row!.failures} consecutive deliveries failed`);
+          // Recorded where the org can see it. The hook is inactive now, so this event
+          // is not delivered to it.
+          await emitEvent(hook.orgId, "webhook.disabled", { webhookId: hook.id, url: hook.url, consecutiveFailures: row!.failures, lastError }).catch(() => {});
+        }
+      }
+    };
+
+    let outcome: { ok: boolean; status: number; statusText: string };
+    let refused = false;
+    try {
+      // The hook's own secret and scheme. A hook with no usable secret cannot be signed, and
+      // an unsigned (or empty-key) delivery is worse than a failed one.
+      const secret = webhookSecret(hook);
+      const signature = hook.signatureVersion >= 2 ? `v2=${hmacSignV2(secret, `${ts}.${body}`)}` : hmacSign(secret, `${ts}.${body}`);
+      // A customer-supplied URL, called from inside our network, carrying event data.
+      // fetchPublic refuses a private address both by name and at connect time (so a public
+      // name that resolves to 10.x is refused too), and with maxRedirects: 0 a 3xx is handed
+      // back instead of followed - the payload is never re-sent to wherever a redirect points.
+      const res = await fetchPublic(hook.url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-prospex-signature": signature, "x-prospex-timestamp": ts, "x-prospex-event": ev.type },
+        body,
+        timeoutMs: 10_000,
+        maxRedirects: 0,
+        maxBytes: WEBHOOK_MAX_RESPONSE_BYTES,
+        allowUserinfo: true,
+        noDefaultHeaders: true,
+      });
+      if (!res) {
+        refused = true;
+        outcome = { ok: false, status: 0, statusText: "not a public address" };
+      } else {
+        // The response body is never needed; it is dropped rather than buffered.
+        await res.body?.cancel().catch(() => {});
+        if (res.status >= 300 && res.status < 400) outcome = { ok: false, status: res.status, statusText: "redirects are not followed" };
+        else outcome = { ok: res.ok, status: res.status, statusText: res.statusText };
+      }
+    } catch (e) {
+      outcome = { ok: false, status: 0, statusText: redact((e as Error).message, { max: 200 }) };
+    }
+
+    if (refused) {
+      // Retrying cannot help, so this attempt is final: counted against the hook (which is
+      // how the org learns of it, through webhook.disabled) and not thrown into a retry.
+      await countFailure("the URL does not point at a public address");
+      return { skipped: `${safeUrl} is not a public address` };
+    }
+    if (!outcome.ok) {
       // Only a delivery that has used up its retries counts against the hook. Counting
       // every attempt meant four events during one short outage (5 attempts each) disabled
       // a customer's webhook for good. Ten events that finally failed in a row is a dead
       // endpoint; a blip is not.
-      if (job.attempts >= job.maxAttempts) {
-        const [row] = await db.update(webhooks).set({ failures: dsql`${webhooks.failures} + 1` }).where(eq(webhooks.id, hook.id)).returning({ failures: webhooks.failures });
-        if ((row?.failures ?? 0) >= WEBHOOK_DISABLE_AFTER) {
-          const [disabled] = await db.update(webhooks).set({ active: false }).where(and(eq(webhooks.id, hook.id), eq(webhooks.active, true))).returning({ id: webhooks.id });
-          if (disabled) {
-            ctx.log(`webhook ${hook.id} disabled after ${row!.failures} consecutive failed deliveries`);
-            console.warn(`[webhooks] disabled ${hook.id} (${hook.url}) for org ${hook.orgId}: ${row!.failures} consecutive deliveries failed`);
-            // Recorded where the org can see it. The hook is inactive now, so this event
-            // is not delivered to it.
-            await emitEvent(hook.orgId, "webhook.disabled", { webhookId: hook.id, url: hook.url, consecutiveFailures: row!.failures, lastError: `${res.status} ${res.statusText}` }).catch(() => {});
-          }
-        }
-      }
-      throw new Error(`webhook ${hook.url} → ${res.status} ${res.statusText}`);
+      if (job.attempts >= job.maxAttempts) await countFailure(`${outcome.status} ${outcome.statusText}`);
+      throw new Error(`webhook ${safeUrl} → ${outcome.status} ${outcome.statusText}`);
     }
     if (hook.failures) await db.update(webhooks).set({ failures: 0 }).where(eq(webhooks.id, hook.id));
-    return { status: res.status };
+    return { status: outcome.status };
   },
 
   /** Push a lead to a CRM integration. payload: { integrationId, leadId } */
@@ -467,16 +555,31 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const integ = await db.query.integrations.findFirst({ where: and(eq(integrations.id, String(job.payload.integrationId)), eq(integrations.status, "active")) });
     if (!integ) return { skipped: "integration missing/inactive" };
+    if (foreign(job, integ.orgId)) return ORG_MISMATCH;
+    // The lead must be the integration org's own before its data is pushed to their CRM.
+    const syncLeadRow = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)), columns: { id: true, orgId: true } });
+    if (syncLeadRow && syncLeadRow.orgId !== integ.orgId) return ORG_MISMATCH;
     const r = await syncLead(integ, String(job.payload.leadId));
-    if (!r.ok) throw new Error(r.error ?? "sync failed");
+    if (!r.ok) throw new Error(redact(r.error ?? "sync failed", { max: 500 }));
     return r;
   },
 
   /** Bulk enqueue enrich for many leads. payload: { leadIds } */
   "leads.bulk_enrich": async (job, ctx) => {
-    const ids = (job.payload.leadIds as string[]) ?? [];
+    const all = Array.isArray(job.payload.leadIds) ? (job.payload.leadIds as unknown[]).filter((x): x is string => typeof x === "string") : [];
+    // Only leads of the org this job was enqueued for are fanned out. Handed any id, this
+    // used to queue an enrichment of another org's lead under the caller's org.
+    let ids = all;
+    if (job.orgId && all.length) {
+      const own = new Set<string>();
+      for (let i = 0; i < all.length; i += 500) {
+        const rows = await ctx.db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, job.orgId), inArray(leads.id, all.slice(i, i + 500).filter(isUuid))));
+        for (const r of rows) own.add(r.id);
+      }
+      ids = all.filter((id) => own.has(id));
+    }
     for (const id of ids) await enqueue(ctx.db, "lead.enrich", { leadId: id }, { orgId: job.orgId });
-    return { enqueued: ids.length };
+    return { enqueued: ids.length, ...(ids.length !== all.length ? { skippedOrgMismatch: all.length - ids.length } : {}) };
   },
 
   // ── v2 ──
@@ -485,6 +588,12 @@ export const handlers: Record<string, JobHandler> = {
     // the job row once identification is done - or once the last attempt has failed - so
     // the jobs table does not keep a log of visitors' addresses.
     const forget = () => ctx.db.execute(dsql`UPDATE jobs SET payload = payload - 'ip' WHERE id = ${job.id}`).catch(() => {});
+    const visitId = String(job.payload.visitId);
+    const visit = isUuid(visitId) ? await ctx.db.query.visits.findFirst({ where: eq(visits.id, visitId), columns: { id: true, orgId: true } }) : null;
+    if (visit && foreign(job, visit.orgId)) {
+      await forget();
+      return ORG_MISMATCH;
+    }
     try {
       const r = await identifyVisit(String(job.payload.visitId), String(job.payload.ip), (job.payload.identify as Record<string, unknown> | null) ?? null);
       await forget();
@@ -500,6 +609,7 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const co = await db.query.companies.findFirst({ where: eq(companies.id, String(job.payload.companyId)) });
     if (!co) return { skipped: true };
+    if (foreign(job, co.orgId)) return ORG_MISMATCH;
     const prof = await crawlCompanyWebsite(co.domain, { maxPages: 4 }).catch(() => null);
     const crawled = !!prof && !prof.crawlFailed;
     if (crawled) await upsertCompany(co.orgId, co.domain, { ...prof!, name: prof!.name ?? co.name ?? undefined });
@@ -526,6 +636,7 @@ export const handlers: Record<string, JobHandler> = {
   "signals.subscription": async (job, ctx) => {
     const sub = await ctx.db.query.signalSubscriptions.findFirst({ where: eq(signalSubscriptions.id, String(job.payload.subscriptionId)) });
     if (!sub || !sub.active) return { skipped: true };
+    if (foreign(job, sub.orgId)) return ORG_MISMATCH;
     return runSubscription(sub, ctx.log);
   },
 
@@ -650,6 +761,7 @@ export const handlers: Record<string, JobHandler> = {
   "monitor.run": async (job, ctx) => {
     const m = await ctx.db.query.monitors.findFirst({ where: eq(monitors.id, String(job.payload.monitorId)) });
     if (!m || !m.active) return { skipped: true };
+    if (foreign(job, m.orgId)) return ORG_MISMATCH;
     return runMonitor(m, ctx.log);
   },
 
@@ -674,6 +786,7 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const prompt = await db.query.visibilityPrompts.findFirst({ where: eq(visibilityPrompts.id, String(job.payload.promptId)) });
     if (!prompt || !prompt.active) return { skipped: true };
+    if (foreign(job, prompt.orgId)) return ORG_MISMATCH;
     const others = await knownBrands(db, prompt.orgId);
     // Every configured engine, not just the priority winner: engines disagree, so one of
     // them is not an answer to "what does AI say about us".
@@ -708,6 +821,7 @@ export const handlers: Record<string, JobHandler> = {
   "autopilot.run": async (job, ctx) => {
     const ap = await ctx.db.query.autopilots.findFirst({ where: eq(autopilots.id, String(job.payload.autopilotId)) });
     if (!ap || !ap.active) return { skipped: true };
+    if (foreign(job, ap.orgId)) return ORG_MISMATCH;
     return runAutopilot(ap, ctx.log);
   },
 
@@ -741,6 +855,14 @@ export const handlers: Record<string, JobHandler> = {
     const { db } = ctx;
     const ss = await db.query.savedSearches.findFirst({ where: eq(savedSearches.id, String(job.payload.savedSearchId)) });
     if (!ss) return { skipped: true };
+    if (foreign(job, ss.orgId)) return ORG_MISMATCH;
+    // The stored query is free jsonb written by the tenant (and, for older rows, never
+    // validated). It is re-clamped every time it runs: known keys only, limit <= 200,
+    // companyDomains <= 50, ten of each list. Only the pipeline INPUT comes from it.
+    const stored = clampSearchQuery(ss.query);
+    const input = clampLeadQuery({ ...stored, limit: stored.limit ?? 25 });
+    // The list new leads are added to must be this org's own.
+    const ssList = ss.listId ? await db.query.lists.findFirst({ where: and(eq(lists.id, ss.listId), eq(lists.orgId, ss.orgId)), columns: { id: true } }) : null;
     // Charged once per run, not once per retry, and a database fault is reported as a
     // database fault rather than as the customer's plan limit. lastRunAt is stamped below
     // either way, so misfiling this silently cancelled that day's alert digest.
@@ -750,10 +872,8 @@ export const handlers: Record<string, JobHandler> = {
       if (!charge.ok) throw new Error(`could not record search usage: ${charge.message}`);
     }
     const providerBudget = await remainingPremiumBudget(db, ss.orgId);
-    const { leads: results, providerFailures } = await runLeadPipelineDetailed(
-      { ...(ss.query as Record<string, unknown>), limit: Number((ss.query as { limit?: number }).limit ?? 25) } as Parameters<typeof runLeadPipeline>[0],
-      { ai: await aiFor(db, ss.orgId), verify: verifyOpts(), maxProviderLeads: providerBudget },
-    );
+    // Every option is built here, from server configuration and the org's plan.
+    const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, { ai: await aiFor(db, ss.orgId), verify: verifyOpts(), maxProviderLeads: providerBudget });
     let fresh = 0;
     const names: string[] = [];
     const freshIds: string[] = [];
@@ -774,9 +894,9 @@ export const handlers: Record<string, JobHandler> = {
         fresh++;
         freshIds.push(lead.id);
         names.push(`${lead.fullName ?? ""} - ${lead.title ?? ""}`);
-        if (ss.listId) {
+        if (ssList) {
           const { listLeads } = await import("@prospex/db");
-          await db.insert(listLeads).values({ listId: ss.listId, leadId: lead.id }).onConflictDoNothing();
+          await db.insert(listLeads).values({ listId: ssList.id, leadId: lead.id }).onConflictDoNothing();
         }
       }
     }
@@ -791,14 +911,14 @@ export const handlers: Record<string, JobHandler> = {
     // one-off search does - otherwise every daily re-run would pile leads into the pool.
     // claimSearchLeads re-checks the client (deleted/archived) and never steals another
     // client's lead.
-    const ssClientId = (ss.query as { clientId?: unknown }).clientId;
+    const ssClientId = stored.clientId;
     let clientClaim: Awaited<ReturnType<typeof import("./services/clients.js").claimSearchLeads>> | null = null;
     if (typeof ssClientId === "string" && freshIds.length) {
       try {
         const { claimSearchLeads } = await import("./services/clients.js");
         clientClaim = await claimSearchLeads(db, ss.orgId, ssClientId, freshIds);
       } catch (e) {
-        clientClaim = { claimed: 0, ownedByAnotherClient: 0, skipped: `error: ${(e as Error).message}` };
+        clientClaim = { claimed: 0, ownedByAnotherClient: 0, skipped: `error: ${redact((e as Error).message, { max: 200 })}` };
       }
     }
     await db.update(savedSearches).set({ lastRunAt: new Date(), lastNewCount: fresh }).where(eq(savedSearches.id, ss.id));

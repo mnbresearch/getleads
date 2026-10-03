@@ -43,7 +43,7 @@ icpRoutes.post("/", zValidator("json", icpInput), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
-  await assertOwned(clients, b.clientId, oid, "Client");
+  await assertOwned(clients, b.clientId, oid, "Client", c);
   const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description ?? null, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [], clientId: b.clientId ?? null }).returning();
   let jobId: string | null = null;
   if (b.buildWithAi && (b.description || b.seedDomains?.length)) jobId = (await enqueue(db, "icp.build", { icpId: row.id, product: b.product }, { orgId: oid })).id;
@@ -65,7 +65,7 @@ icpRoutes.patch("/:id", zValidator("json", icpInput.omit({ buildWithAi: true }).
   requireSomeFields(b);
   // clientId used to be accepted here and dropped, so moving an ICP to a client saved
   // nothing. It is applied now, after the same ownership check as on create.
-  await assertOwned(clients, b.clientId, oid, "Client");
+  await assertOwned(clients, b.clientId, oid, "Client", c);
   const [row] = await db
     .update(icps)
     .set({ ...(b.name ? { name: b.name } : {}), ...(b.description !== undefined ? { description: b.description } : {}), ...(b.criteria ? { criteria: b.criteria } : {}), ...(b.seedDomains !== undefined ? { seedDomains: b.seedDomains ?? [] } : {}), ...(b.clientId !== undefined ? { clientId: b.clientId } : {}), updatedAt: new Date() })

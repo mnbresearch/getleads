@@ -21,29 +21,26 @@ export const requireAuth: MiddlewareHandler<Env> = async (c, next) => {
  * Super-admin dashboard auth - a signed admin JWT from POST /v1/admin/login, or a shared
  * token header for server-to-server calls. Not connected to customer accounts.
  *
- * The server-to-server token is ADMIN_API_TOKEN when set. INTERNAL_TOKEN is the job-runner's
- * credential, and it is pasted into third-party cron services (it is in their URLs); letting
- * that same string open the admin API meant anyone who could read the cron config could
- * change any customer's plan. It is still accepted when ADMIN_API_TOKEN is unset, so an
- * existing integration does not break the day this ships, with a warning in the log.
+ * The server-to-server token is ADMIN_API_TOKEN and nothing else. INTERNAL_TOKEN is the job
+ * runner's credential: it is pasted into third-party cron services and used to travel in
+ * their URLs, so it ends up in access logs. It was accepted here whenever ADMIN_API_TOKEN was
+ * unset, which made every one of those log lines a key to every customer's plan and status.
+ * With ADMIN_API_TOKEN unset the header path is simply off; the dashboard's password login
+ * (which the web admin UI uses exclusively) is unaffected.
  */
-let warnedLegacyAdminToken = false;
 export const requireAdmin: MiddlewareHandler = async (c, next) => {
-  const presented = c.req.header("x-internal-token") ?? c.req.header("x-admin-token");
-  if (presented) {
-    const expected = env.adminApiToken || env.internalToken;
-    if (expected && safeEqual(presented, expected)) {
-      if (!env.adminApiToken && !warnedLegacyAdminToken) {
-        warnedLegacyAdminToken = true;
-        console.warn("[auth] admin API reached with INTERNAL_TOKEN. Set ADMIN_API_TOKEN to separate admin access from the job runner's token.");
-      }
-      await next();
-      return;
-    }
+  // `x-admin-token` is the documented header. `x-internal-token` is still read as a header
+  // NAME, for scripts written against the old docs - but its value must be ADMIN_API_TOKEN.
+  const presented = c.req.header("x-admin-token") ?? c.req.header("x-internal-token");
+  if (presented && env.adminApiToken && safeEqual(presented, env.adminApiToken)) {
+    c.set("adminVia" as never, "token" as never);
+    await next();
+    return;
   }
   const header = c.req.header("authorization");
   const token = header?.toLowerCase().startsWith("bearer ") ? header.slice(7) : undefined;
   if (token && (await verifyAdminJwt(token))) {
+    c.set("adminVia" as never, "session" as never);
     await next();
     return;
   }
@@ -54,13 +51,20 @@ export const requireAdmin: MiddlewareHandler = async (c, next) => {
  * Guard for the serverless job runner (/internal/jobs/run).
  *
  * Fails CLOSED: with INTERNAL_TOKEN unset the route answers 503 rather than running the
- * queue for anyone who finds the URL. The header is preferred; `?token=` stays supported
- * because the documented external-cron setup can only put it in the URL.
+ * queue for anyone who finds the URL.
+ *
+ * The token is read from the `x-internal-token` header ONLY. `?token=` used to be accepted
+ * too, and a secret in a URL is a secret in every access log, proxy log and cron dashboard
+ * between the caller and here. cron-job.org (the documented scheduler) supports custom
+ * request headers, so nothing needs the URL form.
  */
 export const requireInternalToken: MiddlewareHandler = async (c, next) => {
   if (!env.internalToken) throw new ApiError(503, "INTERNAL_TOKEN is not configured on the server, so the job runner endpoint is disabled.", "not_configured");
-  const presented = c.req.header("x-internal-token") ?? c.req.query("token") ?? "";
-  if (!presented || !safeEqual(presented, env.internalToken)) throw new ApiError(403, "forbidden", "forbidden");
+  const presented = c.req.header("x-internal-token") ?? "";
+  if (!presented || !safeEqual(presented, env.internalToken)) {
+    const inUrl = c.req.query("token") !== undefined;
+    throw new ApiError(403, inUrl ? "The token must be sent in the x-internal-token header, not in the URL." : "forbidden", "forbidden");
+  }
   await next();
 };
 
@@ -94,19 +98,40 @@ export const requireUser: MiddlewareHandler<Env> = async (c, next) => {
  * `x-forwarded-for` is a list the client starts and every proxy appends to, so its FIRST
  * entry is whatever the client typed. Keying a limiter on it let anyone rotate a header
  * value and get a fresh bucket on every request, which made the login and signup limits
- * decorative. Render sits behind Cloudflare, which sets `cf-connecting-ip` itself
- * (overwriting any client value); failing that, the RIGHT-most XFF entry is the one our
- * own proxy appended.
+ * decorative. The RIGHT-most XFF entry is the one our own proxy appended.
+ *
+ * `cf-connecting-ip` is only trustworthy when Cloudflare is actually in front (it overwrites
+ * the header on every request). Render's edge is Cloudflare; Fly and Vercel are not, and
+ * there the header is client-controlled - the same rotate-a-header bypass again. Which header
+ * to believe is therefore configuration (TRUSTED_PROXY, see env.ts), not a guess:
+ *
+ *   cloudflare  cf-connecting-ip, then right-most XFF, then x-real-ip
+ *   xff         right-most XFF, then x-real-ip (cf-connecting-ip ignored)
+ *   none        no proxy: the socket's remote address, headers ignored
  */
 export function clientIp(c: Context): string {
-  const cf = c.req.header("cf-connecting-ip")?.trim();
-  if (cf) return cf;
+  const mode = env.trustedProxy;
+  if (mode === "none") return socketAddress(c) ?? "unknown";
+  if (mode === "cloudflare") {
+    const cf = c.req.header("cf-connecting-ip")?.trim();
+    if (cf) return cf;
+  }
   const xff = c.req.header("x-forwarded-for");
   if (xff) {
     const parts = xff.split(",").map((p) => p.trim()).filter(Boolean);
     if (parts.length) return parts[parts.length - 1];
   }
-  return c.req.header("x-real-ip")?.trim() || "unknown";
+  return c.req.header("x-real-ip")?.trim() || socketAddress(c) || "unknown";
+}
+
+/** The TCP peer, when running under @hono/node-server (absent in tests and on serverless). */
+function socketAddress(c: Context): string | undefined {
+  try {
+    const incoming = (c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined)?.incoming;
+    return incoming?.socket?.remoteAddress || undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

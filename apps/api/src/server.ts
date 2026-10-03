@@ -27,7 +27,7 @@ async function main() {
   }
 
   const server = serve({ fetch: app.fetch, port: env.port }, (info) => {
-    console.log(`[api] Prospex API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop}`);
+    console.log(`[api] Prospex API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop} trustedProxy=${env.trustedProxy} adminTokenAccess=${env.adminApiToken ? "on" : "off"}`);
   });
   const shutdown = async () => {
     console.log("[api] shutting down");

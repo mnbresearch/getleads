@@ -1,6 +1,23 @@
 import type { AiMessage, AiProvider } from "../types.js";
 import { fetchWithTimeout } from "../util/http.js";
 import { meter } from "../util/meter.js";
+import { classifyHttp } from "../providers/health.js";
+import { redact, redactedExcerpt } from "./redact.js";
+
+/**
+ * The error thrown for a failed AI call: engine, status, a category, and at most 120
+ * redacted characters of what the provider said.
+ *
+ * The upstream body used to be included verbatim (300 characters of it). Those bodies echo
+ * the key that was used and the provider-side organisation id, and the message travelled
+ * from here into job errors, search notes and - through the campaign send path - a field
+ * tenants read over the API.
+ */
+export function aiHttpError(engine: string, status: number, body: string, extra = ""): Error {
+  const { outcome } = classifyHttp(status, body);
+  const excerpt = redactedExcerpt(body, 120);
+  return new Error(`${engine} ${status} (${outcome})${excerpt ? `: ${excerpt}` : ""}${extra}`);
+}
 
 type CompleteOpts = { maxTokens?: number; temperature?: number; json?: boolean };
 
@@ -89,22 +106,24 @@ class OpenAICompatProvider implements AiProvider {
     let res = await this.post(this.model, messages, opts);
 
     if (!res.ok) {
-      const body = (await res.text()).slice(0, 300);
-      if (!isModelNotFound(res.status, body)) throw new Error(`${this.name} ${res.status}: ${body}`);
+      const body = (await res.text()).slice(0, 2000);
+      if (!isModelNotFound(res.status, body)) throw aiHttpError(this.name, res.status, body);
 
       const available = await this.listModels();
       const next = pickChatModel(available);
       if (!next || next === this.model) {
-        throw new Error(
-          `${this.name} ${res.status}: ${body}` +
-            (available.length ? ` (no usable chat model among: ${available.slice(0, 8).join(", ")})` : " (could not list available models)"),
+        throw aiHttpError(
+          this.name,
+          res.status,
+          body,
+          available.length ? ` (no usable chat model among: ${available.slice(0, 8).join(", ")})` : " (could not list available models)",
         );
       }
       // Remember it: the original default is dead for this key, so retrying it every call
       // would double the latency and the error rate for no reason.
       this.model = next;
       res = await this.post(next, messages, opts);
-      if (!res.ok) throw new Error(`${this.name} ${res.status}: ${(await res.text()).slice(0, 300)}`);
+      if (!res.ok) throw aiHttpError(this.name, res.status, (await res.text()).slice(0, 2000));
     }
 
     const data = (await res.json()) as { choices: { message: { content: string } }[] };
@@ -145,7 +164,7 @@ class GeminiProvider implements AiProvider {
         }),
       },
     );
-    if (!res.ok) throw new Error(`gemini ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) throw aiHttpError("gemini", res.status, (await res.text()).slice(0, 2000));
     const data = (await res.json()) as { candidates?: { content?: { parts?: { text?: string }[] } }[] };
     return data.candidates?.[0]?.content?.parts?.map((p) => p.text ?? "").join("") ?? "";
   }
@@ -174,7 +193,7 @@ class AnthropicProvider implements AiProvider {
         messages: rest,
       }),
     });
-    if (!res.ok) throw new Error(`anthropic ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    if (!res.ok) throw aiHttpError("anthropic", res.status, (await res.text()).slice(0, 2000));
     const data = (await res.json()) as { content: { type: string; text?: string }[] };
     const text = data.content.map((c) => c.text ?? "").join("");
     return opts.json ? `{${text}` : text;
@@ -260,7 +279,9 @@ export class FallbackAiProvider implements AiProvider {
         if (failures.length) console.warn(`[ai] ${p.name} answered after ${failures.map((f) => `${f.provider} failed (${f.message.slice(0, 80)})`).join(", ")}`);
         return out;
       } catch (e) {
-        failures.push({ provider: p.name, message: ((e as Error).message ?? String(e)).slice(0, 300) });
+        // Redacted here too: a chain can hold engines that are not ours (tests, plugins), and
+        // a network error message can carry the request URL - Gemini's has the key in it.
+        failures.push({ provider: p.name, message: redact((e as Error).message ?? String(e), { max: 300 }) });
       }
     }
     this.lastFailures = failures;

@@ -8,10 +8,13 @@ import { sendingHealthForAccount } from "../services/campaigns.js";
 import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
 import { campaignAttribution, leadFunnel, sourcePerformance } from "../services/analytics.js";
-import { encryptJson, randomToken } from "../lib/crypto.js";
+import { encryptJson } from "../lib/crypto.js";
 import { badRequest, notFound } from "../lib/errors.js";
-import { orgId, requireAuth, requireRole, requireUser, type Env } from "../middleware.js";
-import { INTEGRATION_PROVIDERS } from "../services/integrations.js";
+import { orgId, requireAuth, requireUser, type Env } from "../middleware.js";
+import { INTEGRATION_PROVIDERS, validateIntegrationConfig } from "../services/integrations.js";
+import { audit } from "../lib/audit.js";
+import { ownerOrAdmin } from "../lib/roles.js";
+import { newWebhookSecret, publicWebhook } from "../lib/webhookSecret.js";
 /** Channel/data providers configured via the same integrations table (config-only, no lead sync). */
 const CHANNEL_PROVIDERS = ["whatsapp", "apollo", "hunter", "pdl", "ipinfo"];
 /** Credential fields each provider cannot work without (what its sync/send reads). */
@@ -131,12 +134,23 @@ miscRoutes.get("/events", requireAuth, zValidator("query", z.object({ type: z.st
 });
 
 // ── Webhooks ──
+/**
+ * The list never carries a signing secret. It used to return every hook's secret in full to
+ * any member of the workspace - people who cannot create a webhook could read the key that
+ * authenticates its deliveries. `secretPreview` (the first six characters) is enough to
+ * tell hooks apart; the secret itself is shown once, when it is created or rotated.
+ */
 miscRoutes.get("/webhooks", requireAuth, async (c) => {
   const { db } = getDb();
-  return c.json({ webhooks: await db.select().from(webhooks).where(eq(webhooks.orgId, orgId(c))).orderBy(desc(webhooks.createdAt)) });
+  const rows = await db.select().from(webhooks).where(eq(webhooks.orgId, orgId(c))).orderBy(desc(webhooks.createdAt));
+  return c.json({ webhooks: rows.map(publicWebhook) });
 });
-/** The full signing secret is in this response - shown once at creation, as with API keys. */
-miscRoutes.post("/webhooks", requireAuth, requireRole("owner", "admin"), zValidator("json", z.object({ url: z.string().url(), events: z.array(z.string()).default(["*"]) })), async (c) => {
+/**
+ * The full signing secret is in this response - shown once at creation, as with API keys.
+ * It is stored encrypted, and deliveries are signed with a real HMAC (signature v2, header
+ * `x-prospex-signature: v2=<hex>`).
+ */
+miscRoutes.post("/webhooks", requireAuth, ownerOrAdmin("webhook.created"), zValidator("json", z.object({ url: z.string().url().max(2000), events: z.array(z.string().max(100)).max(50).default(["*"]) })), async (c) => {
   const url = c.req.valid("json").url;
   // Deliveries to a non-public address are always skipped (SSRF guard in webhook.deliver),
   // so accepting one created a webhook that silently never fired. Refused up front; in local
@@ -149,15 +163,43 @@ miscRoutes.post("/webhooks", requireAuth, requireRole("owner", "admin"), zValida
     warning = `${msg} Saved because this server runs in development mode, but deliveries to it will be skipped.`;
   }
   const { db } = getDb();
-  const [row] = await db.insert(webhooks).values({ orgId: orgId(c), url, events: c.req.valid("json").events, secret: randomToken(24) }).returning();
-  return c.json(warning ? { ...row, warning } : row, 201);
+  const fresh = newWebhookSecret();
+  const [row] = await db.insert(webhooks).values({ orgId: orgId(c), url, events: c.req.valid("json").events, ...fresh.columns }).returning();
+  await audit(c, "webhook.created", { targetType: "webhook", targetId: row.id, data: { host: hostOf(url), events: row.events, signatureVersion: row.signatureVersion } });
+  const pub = { ...publicWebhook(row), secret: fresh.secret };
+  return c.json(warning ? { ...pub, warning } : pub, 201);
 });
-miscRoutes.delete("/webhooks/:id", requireAuth, requireRole("owner", "admin"), async (c) => {
+miscRoutes.delete("/webhooks/:id", requireAuth, ownerOrAdmin("webhook.deleted"), async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(webhooks).where(and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c)))).returning({ id: webhooks.id });
+  const gone = await db.delete(webhooks).where(and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c)))).returning({ id: webhooks.id, url: webhooks.url });
   if (!gone.length) throw notFound("Webhook");
+  await audit(c, "webhook.deleted", { targetType: "webhook", targetId: gone[0].id, data: { host: hostOf(gone[0].url) } });
   return c.json({ ok: true });
 });
+/**
+ * Replace a webhook's signing secret.
+ *
+ * The new secret is returned once and the old one stops working immediately. Rotating also
+ * moves a legacy hook to signature v2 (a real HMAC-SHA256, sent as `v2=<hex>`), so the
+ * receiver's verification code has to be updated together with the secret.
+ */
+miscRoutes.post("/webhooks/:id/rotate-secret", requireAuth, ownerOrAdmin("webhook.secret_rotated"), async (c) => {
+  const { db } = getDb();
+  const hook = await db.query.webhooks.findFirst({ where: and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c))) });
+  if (!hook) throw notFound("Webhook");
+  const fresh = newWebhookSecret();
+  await db.update(webhooks).set(fresh.columns).where(and(eq(webhooks.id, hook.id), eq(webhooks.orgId, hook.orgId)));
+  await audit(c, "webhook.secret_rotated", { targetType: "webhook", targetId: hook.id, data: { host: hostOf(hook.url), fromSignatureVersion: hook.signatureVersion, signatureVersion: 2 } });
+  return c.json({ id: hook.id, secret: fresh.secret, signatureVersion: 2 });
+});
+/** Host of a URL for the audit trail: never the path, query or userinfo, which can carry tokens. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).host;
+  } catch {
+    return "";
+  }
+}
 /**
  * Send a test event to THIS webhook.
  *
@@ -166,12 +208,13 @@ miscRoutes.delete("/webhooks/:id", requireAuth, requireRole("owner", "admin"), a
  * `lead.*` only. The Test button reported "queued" either way. Now it is delivered to the
  * one hook asked about, whatever its event filter.
  */
-miscRoutes.post("/webhooks/:id/test", requireAuth, requireRole("owner", "admin"), async (c) => {
+miscRoutes.post("/webhooks/:id/test", requireAuth, ownerOrAdmin("webhook.tested"), async (c) => {
   const { db } = getDb();
   const hook = await db.query.webhooks.findFirst({ where: and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c))) });
   if (!hook) throw notFound("Webhook");
   const [ev] = await db.insert(events).values({ orgId: hook.orgId, type: "webhook.test", data: { hello: "world", webhookId: hook.id } }).returning();
   const job = await enqueue(db, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { orgId: hook.orgId, maxAttempts: 1 });
+  await audit(c, "webhook.tested", { targetType: "webhook", targetId: hook.id, data: { host: hostOf(hook.url) } });
   return c.json({ queued: true, webhookId: hook.id, eventId: ev.id, jobId: job.id, active: hook.active, note: hook.active ? undefined : "This webhook is disabled (too many failures); the test is sent anyway." });
 });
 
@@ -181,7 +224,7 @@ miscRoutes.get("/integrations", requireAuth, async (c) => {
   const rows = await db.select().from(integrations).where(eq(integrations.orgId, orgId(c)));
   return c.json({ integrations: rows.map(({ configEncrypted: _x, ...r }) => r), providers: INTEGRATION_PROVIDERS, channelProviders: CHANNEL_PROVIDERS });
 });
-miscRoutes.put("/integrations/:provider", requireAuth, requireRole("owner", "admin"), zValidator("json", z.object({ config: z.record(z.string()), settings: z.record(z.unknown()).optional(), autoSync: z.boolean().default(false) })), async (c) => {
+miscRoutes.put("/integrations/:provider", requireAuth, ownerOrAdmin("integration.connected"), zValidator("json", z.object({ config: z.record(z.string().max(4000)), settings: z.record(z.unknown()).optional(), autoSync: z.boolean().default(false) })), async (c) => {
   const provider = c.req.param("provider");
   if (!INTEGRATION_PROVIDERS.includes(provider) && !CHANNEL_PROVIDERS.includes(provider)) throw badRequest(`Unknown provider. Supported: ${[...INTEGRATION_PROVIDERS, ...CHANNEL_PROVIDERS].join(", ")}`);
   const b = c.req.valid("json");
@@ -193,7 +236,14 @@ miscRoutes.put("/integrations/:provider", requireAuth, requireRole("owner", "adm
   if (missing.length) throw badRequest(`Missing ${missing.map((k) => CREDENTIAL_LABELS[k] ?? k).join(", ")}: fill in ${missing.length === 1 ? "this field" : "these fields"} to connect ${provider}.`, { missing });
   if (!required.length && !Object.values(config).some(Boolean)) throw badRequest(`Enter the credentials for ${provider} before saving the connection.`);
   if (config.url && !/^https?:\/\/[^\s]+$/i.test(config.url)) throw badRequest("URL must be a full http(s):// address.");
-  b.config = config;
+  // Per-provider rules: which keys a provider takes, and that any base URL or host in them
+  // (Zoho's apiDomain, Pipedrive's companyDomain, a webhook/Cortex/Sheets url) is a public
+  // address of the expected shape. Without it a tenant could point a sync at an internal
+  // service and read the answer back through the job's error. Unknown keys are dropped.
+  const validated = validateIntegrationConfig(provider, config);
+  if (!validated.ok) throw badRequest(validated.message);
+  b.config = validated.config;
+  if (JSON.stringify(b.settings ?? {}).length > 10_000) throw badRequest("Integration settings are too large.");
   const { db } = getDb();
   const [row] = await db
     .insert(integrations)
@@ -201,15 +251,19 @@ miscRoutes.put("/integrations/:provider", requireAuth, requireRole("owner", "adm
     .onConflictDoUpdate({ target: [integrations.orgId, integrations.provider], set: { configEncrypted: encryptJson(b.config), settings: { ...(b.settings ?? {}), autoSync: b.autoSync }, status: "active" } })
     .returning();
   const { configEncrypted: _x, ...pub } = row;
+  // Field NAMES only: the values are the credentials.
+  await audit(c, "integration.connected", { targetType: "integration", targetId: row.id, data: { provider, fields: Object.keys(b.config).sort(), autoSync: b.autoSync } });
   return c.json(pub);
 });
-miscRoutes.delete("/integrations/:provider", requireAuth, requireRole("owner", "admin"), async (c) => {
+miscRoutes.delete("/integrations/:provider", requireAuth, ownerOrAdmin("integration.disconnected"), async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(integrations).where(and(eq(integrations.provider, c.req.param("provider")), eq(integrations.orgId, orgId(c)))).returning({ id: integrations.id });
+  const gone = await db.delete(integrations).where(and(eq(integrations.provider, c.req.param("provider")), eq(integrations.orgId, orgId(c)))).returning({ id: integrations.id, provider: integrations.provider });
   if (!gone.length) throw notFound("Integration");
+  await audit(c, "integration.disconnected", { targetType: "integration", targetId: gone[0].id, data: { provider: gone[0].provider } });
   return c.json({ ok: true });
 });
-miscRoutes.post("/integrations/:provider/sync", requireAuth, zValidator("json", z.object({ leadIds: z.array(z.string().uuid()).min(1).max(500) })), async (c) => {
+// Owner/admin only: a sync pushes lead data out of the workspace into another system.
+miscRoutes.post("/integrations/:provider/sync", requireAuth, ownerOrAdmin("integration.synced"), zValidator("json", z.object({ leadIds: z.array(z.string().uuid()).min(1).max(500) })), async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const integ = await db.query.integrations.findFirst({ where: and(eq(integrations.provider, c.req.param("provider")), eq(integrations.orgId, oid)) });
@@ -219,13 +273,14 @@ miscRoutes.post("/integrations/:provider/sync", requireAuth, zValidator("json", 
   const requested = [...new Set(c.req.valid("json").leadIds)];
   const owned = (await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, requested)))).map((r) => r.id);
   for (const leadId of owned) await enqueue(db, "integration.sync", { integrationId: integ.id, leadId }, { orgId: oid, maxAttempts: 3 });
+  await audit(c, "integration.synced", { targetType: "integration", targetId: integ.id, data: { provider: integ.provider, requested: requested.length, queued: owned.length } });
   return c.json({ queued: owned.length, requested: requested.length, notFound: requested.length - owned.length }, 202);
 });
 
 // ── Billing (optional Stripe; pilot is free) ──
 miscRoutes.get("/billing/plans", (c) => c.json({ plans: Object.entries(PLANS).map(([id, p]) => ({ id, ...p })), stripeEnabled: !!env.stripe.secretKey, pilotMode: env.pilotMode }));
 
-miscRoutes.post("/billing/checkout", requireAuth, requireUser, requireRole("owner", "admin"), zValidator("json", z.object({ plan: z.string() })), async (c) => {
+miscRoutes.post("/billing/checkout", requireAuth, requireUser, ownerOrAdmin("billing.checkout"), zValidator("json", z.object({ plan: z.string().max(100) })), async (c) => {
   if (!env.stripe.secretKey) throw badRequest("Stripe is not configured");
   const stripe = new Stripe(env.stripe.secretKey);
   const a = c.get("auth");

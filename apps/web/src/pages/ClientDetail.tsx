@@ -258,7 +258,7 @@ export function ClientDetailPage() {
           <div className="mt-3 flex flex-wrap items-center gap-2">
             <input className="input flex-1 font-mono text-xs" readOnly value={shareUrl} onFocus={(e) => e.currentTarget.select()} aria-label="Report link" />
             <button className="btn-secondary" onClick={() => navigator.clipboard.writeText(shareUrl).then(() => toast("Link copied"))}>Copy</button>
-            <a className="btn-secondary" href={shareUrl} target="_blank" rel="noreferrer">Open</a>
+            <a className="btn-secondary" href={shareUrl} target="_blank" rel="noopener noreferrer">Open</a>
             <button className="btn-secondary" onClick={() => share(true)} title="Issues a new link; the old one stops working">New link</button>
           </div>
         )}

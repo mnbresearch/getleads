@@ -1,5 +1,5 @@
 import { and, agentRuns, desc, eq, getDb, leads, organizations, remainingPremiumBudget, scrapedLeads, type Db } from "@prospex/db";
-import { createAiProviderForPlan, runLeadPipelineDetailed, scoreLeadRules, type IcpCriteria, type PipelineLead } from "@prospex/core";
+import { createAiProviderForPlan, redact, runLeadPipelineDetailed, scoreLeadRules, type IcpCriteria, type PipelineLead } from "@prospex/core";
 import { chargeNewLead, upsertLead } from "../leads.js";
 import { tryConsume } from "../../lib/quota.js";
 import { emitEvent } from "../../lib/events.js";
@@ -171,7 +171,8 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
 
     return { runId: run.id, status: "completed", query, found: found.length, created, duplicates, providerFailures, quotaStopped, note };
   } catch (e) {
-    const error = (e as Error).message?.slice(0, 500) ?? "unknown error";
+    // Stored on the run and returned to the tenant: credentials and account ids are masked.
+    const error = redact((e as Error).message ?? "unknown error", { max: 500 }) || "unknown error";
     await finish({ status: "failed", error }, 0);
     return { runId: run.id, status: "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error };
   }

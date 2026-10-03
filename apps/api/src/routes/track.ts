@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import { eq, getDb, messages, suppressions, campaignContacts, and, leads, type Message } from "@prospex/db";
 import { bumpEngagement, bumpStat } from "../services/campaigns.js";
 import { emitEvent } from "../lib/events.js";
+import { canonicalEmail } from "../services/leads.js";
 
 /** Public tracking endpoints: open pixel, click redirect, unsubscribe. */
 export const trackRoutes = new Hono();
@@ -24,18 +25,71 @@ trackRoutes.get("/o/:token", async (c) => {
 });
 
 /**
- * May this tracked link redirect to `url`?
+ * Where may this tracked link redirect?
  *
  * The click redirect took any `u=` and redirected to it, with or without a valid token -
  * an open redirect on our domain, which is exactly what a phishing link wants to borrow.
- * It now redirects only to a URL that is actually in that message: the tracked href carries
- * the URL encoded, and the plain-text body carries it as-is.
+ * A first fix allowed only a URL that "is in" the message, tested with `includes()` - a
+ * substring test. `https://tenantco.co` is a substring of `https://tenantco.com`, and
+ * `https://t` of almost anything, so the redirect was still open to any host that is a
+ * PREFIX of a linked one.
+ *
+ * So the links are taken out of the stored message as whole URLs - every href in the HTML
+ * part (the original URL of a tracked href is its `u` parameter) and every URL in the text
+ * part - and the requested URL must EQUAL one of them, after both are normalised the way a
+ * browser would (`new URL().toString()`) and `&amp;` is undone. Returns the URL to
+ * redirect to, or null.
  */
-function linkInMessage(m: Pick<Message, "bodyHtml" | "bodyText">, url: string) {
-  if (!/^https?:\/\//i.test(url)) return false;
+const decodeEntities = (v: string) =>
+  v
+    .replace(/&amp;|&#0*38;|&#x0*26;/gi, "&")
+    .replace(/&quot;|&#0*34;|&#x0*22;/gi, '"')
+    .replace(/&apos;|&#0*39;|&#x0*27;/gi, "'")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">");
+
+function normalizeHttpUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw.trim());
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    return u.toString();
+  } catch {
+    return null;
+  }
+}
+
+export function linksInMessage(m: Pick<Message, "bodyHtml" | "bodyText">): Set<string> {
+  const out = new Set<string>();
+  const add = (raw: string) => {
+    const n = normalizeHttpUrl(decodeEntities(raw));
+    if (n) out.add(n);
+  };
   const html = m.bodyHtml ?? "";
-  const text = m.bodyText ?? "";
-  return html.includes(encodeURIComponent(url)) || html.includes(url) || html.includes(url.replace(/&/g, "&amp;")) || text.includes(url);
+  for (const h of html.matchAll(/href\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)) {
+    const href = decodeEntities(h[1] ?? h[2] ?? "");
+    let tracked: string | null = null;
+    try {
+      const u = new URL(href);
+      if (/\/t\/c\/[^/]+$/.test(u.pathname)) tracked = u.searchParams.get("u");
+    } catch {
+      // not an absolute URL: not a redirect target
+    }
+    add(tracked ?? href);
+  }
+  for (const t of (m.bodyText ?? "").matchAll(/https?:\/\/[^\s<>"']+/gi)) {
+    add(t[0]);
+    // "see https://example.com/pricing." - the sentence's punctuation is not the URL's.
+    const trimmed = t[0].replace(/[.,;:!?)\]]+$/, "");
+    if (trimmed !== t[0]) add(trimmed);
+  }
+  return out;
+}
+
+function redirectTarget(m: Pick<Message, "bodyHtml" | "bodyText">, url: string): string | null {
+  if (!/^https?:\/\//i.test(url)) return null;
+  const wanted = normalizeHttpUrl(decodeEntities(url));
+  if (!wanted) return null;
+  return linksInMessage(m).has(wanted) ? wanted : null;
 }
 
 const page = (title: string, body: string) =>
@@ -45,22 +99,27 @@ trackRoutes.get("/c/:token", async (c) => {
   const url = c.req.query("u") ?? "";
   const { db } = getDb();
   const m = await db.query.messages.findFirst({ where: eq(messages.trackingToken, c.req.param("token")) });
-  if (!m || !linkInMessage(m, url)) {
+  const target = m && url.length <= 4000 ? redirectTarget(m, url) : null;
+  if (!m || !target) {
     return c.html(page("Link unavailable", `<h2>This link is not available</h2><p>It may have expired or been copied incorrectly.</p>`), 404);
   }
   if (!m.clickedAt) {
     await db.update(messages).set({ clickedAt: new Date(), openedAt: m.openedAt ?? new Date(), status: "clicked" }).where(eq(messages.id, m.id));
     if (m.campaignId) await bumpStat(m.campaignId, "clicked");
     await bumpEngagement(m.leadId, "click");
-    await emitEvent(m.orgId, "message.clicked", { messageId: m.id, leadId: m.leadId, url }, { type: "message", id: m.id });
+    await emitEvent(m.orgId, "message.clicked", { messageId: m.id, leadId: m.leadId, url: target }, { type: "message", id: m.id });
   }
-  return c.redirect(url);
+  return c.redirect(target);
 });
 
 /** Unsubscribe the recipient of a message: suppression, every sequence, and the lead itself. */
 async function unsubscribe(m: Message) {
   const { db } = getDb();
-  await db.insert(suppressions).values({ orgId: m.orgId, email: m.toEmail.toLowerCase(), reason: "unsubscribe_link" }).onConflictDoNothing();
+  // Canonical form, as leads store it. A message written before recipients were validated
+  // may carry several addresses in toEmail; every one of them asked to be left alone.
+  const addresses = [...new Set(m.toEmail.split(/[\s,;<>"]+/).map((a) => canonicalEmail(a)).filter((a): a is string => !!a))];
+  const rows = (addresses.length ? addresses : [m.toEmail.trim().toLowerCase()]).map((email) => ({ orgId: m.orgId, email, reason: "unsubscribe_link" }));
+  await db.insert(suppressions).values(rows).onConflictDoNothing();
   if (m.leadId) {
     await db.update(campaignContacts).set({ status: "unsubscribed", nextSendAt: null, updatedAt: new Date() }).where(eq(campaignContacts.leadId, m.leadId));
     // The lead's own status too: the hot list and the lead filters read leads.status, so an

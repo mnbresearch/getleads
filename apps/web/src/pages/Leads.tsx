@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { API_URL, apiFetch, auth, fmtDate } from "../lib/api";
+import { API_URL, apiFetch, auth, fmtDate, rejectSession } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 import { BUCKET_COPY, type ClientAttention } from "../lib/clients";
+import { ExtLink } from "../components/ExtLink";
+import { safeHref } from "../lib/safeHref";
 
 interface Company { id: string; domain: string; name: string | null; industry: string | null; size: string | null; description: string | null; techStack: string[]; location: string | null; linkedinUrl: string | null; emailPattern: string | null }
 interface Lead { id: string; status: string; fullName: string | null; firstName: string | null; lastName: string | null; title: string | null; seniority: string | null; email: string | null; emailStatus: string; emailConfidence: number; linkedinUrl: string | null; phone: string | null; location: string | null; score: number; scoreReasons: string[]; tags: string[]; source: string; createdAt: string; company: Company | null; custom: Record<string, unknown>; clientId?: string | null }
@@ -194,7 +196,11 @@ export function LeadsPage() {
   const exportCsv = async () => {
     const qs = new URLSearchParams(Object.entries(q).filter(([k, v]) => v && !["limit", "offset"].includes(k)));
     try {
-      const res = await fetch(`${API_URL}/v1/leads/export.csv?${qs}`, { headers: { authorization: `Bearer ${auth.token}` } });
+      const sentToken = auth.token;
+      const res = await fetch(`${API_URL}/v1/leads/export.csv?${qs}`, { headers: sentToken ? { authorization: `Bearer ${sentToken}` } : {} });
+      // This request bypasses apiFetch (it needs the raw file), so it has to end a rejected
+      // session itself; otherwise the dead token stayed in storage after a 401 here.
+      if (res.status === 401) rejectSession(sentToken);
       // res.ok was never checked, so an error response was wrapped in a Blob and downloaded
       // as leads.csv. The user got a file named like a success containing {"error":...}.
       if (!res.ok) {
@@ -403,7 +409,7 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
           </div>
           <div><span className="text-ink-400">Email:</span> {lead.email ?? "-"} <EmailStatusBadge status={lead.emailStatus} /> <span className="text-xs text-ink-500">{Math.round((lead.emailConfidence ?? 0) * 100)}%</span></div>
           {lead.phone && <div><span className="text-ink-400">Phone:</span> {lead.phone}</div>}
-          {lead.linkedinUrl && <div><a className="text-brand-600 hover:underline" href={lead.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn profile ↗</a></div>}
+          {safeHref(lead.linkedinUrl) && <div><ExtLink className="text-brand-600 hover:underline" href={lead.linkedinUrl}>LinkedIn profile ↗</ExtLink></div>}
           <div><span className="text-ink-400">Location:</span> {lead.location ?? "-"}</div>
           <div><span className="text-ink-400">Source:</span> {lead.source}</div>
           <div className="flex flex-wrap gap-1">{lead.tags.map((t) => <span key={t} className="badge bg-black/[0.05] text-ink-300">{t}</span>)}</div>
@@ -412,7 +418,7 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
         <div className="min-w-0 space-y-2 text-sm">
           <div className="font-medium">{lead.company?.name ?? lead.company?.domain ?? "No company"}</div>
           {lead.company && <>
-            <div><a className="text-brand-600 hover:underline" href={`https://${lead.company.domain}`} target="_blank" rel="noreferrer">{lead.company.domain} ↗</a> {lead.company.linkedinUrl && <a className="ml-2 text-brand-600 hover:underline" href={lead.company.linkedinUrl} target="_blank" rel="noreferrer">LinkedIn ↗</a>}</div>
+            <div><ExtLink className="text-brand-600 hover:underline" href={lead.company.domain ? `https://${lead.company.domain}` : null} fallback={lead.company.domain}>{lead.company.domain} ↗</ExtLink> <ExtLink className="ml-2 text-brand-600 hover:underline" href={lead.company.linkedinUrl}>LinkedIn ↗</ExtLink></div>
             <div className="text-ink-300">{lead.company.description ?? ""}</div>
             <div className="text-xs text-ink-400">{[lead.company.industry, lead.company.size, lead.company.location].filter(Boolean).join(" · ")}</div>
             {lead.company.techStack?.length > 0 && <div className="flex flex-wrap gap-1">{lead.company.techStack.map((t) => <span key={t} className="badge bg-black/[0.05] text-ink-300">{t}</span>)}</div>}
