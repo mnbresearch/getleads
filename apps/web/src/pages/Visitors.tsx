@@ -149,6 +149,7 @@ export function VisitorsPage() {
             </div>
             <pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{p.snippet}</pre>
             <button className="btn-secondary mt-1" onClick={() => navigator.clipboard.writeText(p.snippet).then(() => toast("Copied")).catch(() => toast("Could not copy - select the snippet and copy it manually", "err"))}>Copy</button>
+            <p className="mt-2 text-xs text-ink-400">Tell your visitors about this script in your privacy notice, and get consent where your law requires it. Visitors whose browser sends a "do not track" or Global Privacy Control signal are not recorded.</p>
           </div>
         ))}
         {pixels.length === 0 && <button className="btn-primary" onClick={createPixel}>Create your first pixel</button>}

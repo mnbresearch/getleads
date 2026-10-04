@@ -10,8 +10,28 @@ import { Logo } from "../components/Logo";
  * provider or a data flow changes, this page has to change with it.
  */
 
-const LAST_UPDATED = "1 October 2026";
+const LAST_UPDATED = "4 October 2026";
 const CONTACT = "contact@mnbresearch.com";
+
+/**
+ * How long things are kept, in days. A copy of RETENTION in apps/api/src/lib/privacyRetention.ts,
+ * which is what the cleanup job actually enforces. apps/api/src/security.privacy.test.ts reads
+ * this object and fails when the two differ - change them together.
+ */
+const RETENTION = {
+  visitDays: 395,
+  loginFailureDays: 30,
+  loginSuccessDays: 90,
+  expiredTokenDays: 30,
+  closedInviteDays: 90,
+  finishedJobDays: 7,
+  failedJobDays: 30,
+  eventDays: 90,
+  auditLogDays: 730,
+  closedUpgradeRequestDays: 730,
+} as const;
+/** Days between an owner asking for a workspace to be deleted and the deletion (DELETION_GRACE_MS in the API). */
+const DELETION_GRACE_DAYS = 7;
 
 function LegalShell({ title, children }: { title: string; children: ReactNode }) {
   useEffect(() => {
@@ -80,72 +100,95 @@ export function PrivacyPage() {
         <p>Three groups of people come into contact with Scout, and we treat their data differently:</p>
         <List items={[
           <><strong>Customers</strong> - people who create a Scout account or are invited to a team workspace.</>,
-          <><strong>Prospects</strong> - people and companies whose business contact details our customers find, store or email using Scout.</>,
+          <><strong>Prospects</strong> - people and companies whose business contact details our customers find, store or contact using Scout.</>,
           <><strong>Website visitors</strong> - people who visit a customer's website where that customer has installed the Scout visitor pixel, and visitors to our own site.</>,
         ]} />
       </Section>
 
       <Section n={2} title="Information about customers">
         <List items={[
-          <><strong>Account data:</strong> name, email address, a hashed password (we never store it in plain text) or, if you sign in with Google, your Google account email and name; your workspace name, plan and role.</>,
-          <><strong>Usage data:</strong> the searches, lists, ICPs, campaigns, credits used and settings you create, plus basic logs (time, IP address, user agent) needed to run, secure and debug the service.</>,
-          <><strong>Sender and integration settings:</strong> email sender details and credentials you connect (for example an SMTP password or Resend API key), webhooks and API keys. Credentials are stored encrypted.</>,
-          <><strong>Billing and upgrade requests:</strong> the contact details you give us when you request a plan or upgrade.</>,
+          <><strong>Account data:</strong> name, email address, a hashed password (we never store it in plain text) or, if you sign in with Google, your Google account email and name; your workspace name, plan and role; and, if you turn on two-factor sign-in, an encrypted authenticator secret and hashed recovery codes.</>,
+          <><strong>Usage data:</strong> the searches, lists, ICPs, campaigns, credits used and settings you create, plus security logs (time, IP address, and what was done) needed to run, secure and debug the service.</>,
+          <><strong>Sender and integration settings:</strong> email sender details and the credentials you connect (for example an SMTP password, a Resend API key or a CRM token), webhooks and API keys. Sender and integration credentials are stored encrypted. API keys are stored only as a one-way hash, which is why a key cannot be shown again after it is created.</>,
+          <><strong>Billing and upgrade requests:</strong> the contact details you give us when you request a plan or upgrade, and, for paid plans, the payment records held by our payment provider.</>,
         ]} />
-        <p>We use this to provide and secure the service, to bill and support you, and to email you about your account (for example password resets, invites and service notices). We do not sell customer data.</p>
+        <p>We use this to provide and secure the service, to bill and support you, and to email you about your account (for example password resets, invites, security notices and service notices). We do not sell customer data.</p>
       </Section>
 
       <Section n={3} title="Prospect data: customers are in charge">
         <p>
           Customers use Scout to find, verify, enrich and contact business prospects. For that prospect data the <strong>customer is the controller</strong> (in DPDP Act terms, the Data Fiduciary): they decide whom to look up, what to keep and whom to contact. <strong>Scout processes it on the customer's behalf</strong> and only to provide the features the customer uses.
         </p>
-        <p>Prospect data can include a person's name, job title, employer, business email address, phone number, LinkedIn or company URL and public company information, along with email verification results and campaign activity (sends, opens, clicks, replies, bounces and unsubscribes).</p>
+        <p>Prospect data can include a person's name, job title, employer, business email address, phone number, LinkedIn or company URL and public company information, along with email verification results and campaign activity (sends, opens, clicks, replies, bounces and unsubscribes). Each record notes where it first came from (for example an import, a web search, or a named data provider).</p>
         <p>
-          It comes from public sources (company websites, search results, public profiles) and from the third-party data and verification providers listed in section 8. If you are a prospect and want to know why a customer contacted you, or want your data removed, contact that customer directly; you can also email us at <Mail /> and we will pass your request to the relevant customer and help them act on it.
+          It comes from public sources (company websites, search results, public profiles), from files and CRMs a customer connects, and from the third-party data and verification providers listed in section 8. A customer that works for its own clients can share a read-only report link with a client; that report shows prospects' names, job titles, companies and pipeline stage, and never email addresses, phone numbers or profile links.
+        </p>
+        <p>
+          <strong>If you are a prospect</strong> and want to know why a customer contacted you, or want your data removed, you can contact that customer directly, or email us at <Mail />. On your request we will find which customers' workspaces hold your email address, delete your records from all of them, and put your address on a platform-wide do-not-contact list. From then on no Scout customer can email you through Scout, and your address is not stored again when a customer later imports a list or runs a search that would bring it back. What remains is your address on do-not-contact lists (ours, and a customer's if you had unsubscribed from them), which is what keeps you from being contacted, and content-free records that a message was once sent (kept so sending limits and bounce protection cannot be reset by deleting records). Copies a customer already exported to their own CRM or files are outside Scout; we will tell the customer about your request.
         </p>
       </Section>
 
       <Section n={4} title="Email sending, tracking and unsubscribes">
         <p>
-          Customers send campaign emails through Scout using their own sender accounts or our shared sending provider. To report results to the customer, emails may include an open-tracking pixel and tracked links, which record when a message is opened or a link is clicked.
+          Customers send campaign emails through Scout using their own sender accounts or our shared sending provider. To report results to the customer, emails may include an open-tracking pixel and tracked links, which record when a message is opened or a link is clicked. Scout does not store the IP address or device of the person who opened or clicked.
         </p>
         <p>
-          Every campaign email carries an unsubscribe link. When a recipient uses it, their address is added to that customer's do-not-contact list and any running sequence to them is stopped; Scout will not send them further emails from that customer. Replies and bounces are recorded so sequences stop automatically.
+          Every campaign email, and every reply a customer sends from Scout, ends with an unsubscribe line and link, and carries the standard one-click unsubscribe header. Customers cannot turn this off. When a customer has entered a mailing address for their workspace, it is printed under the unsubscribe line.
+        </p>
+        <p>
+          When a recipient unsubscribes (by the link, by replying "unsubscribe", or by marking a message as spam with a provider that reports it), their address is added to that customer's do-not-contact list and every running sequence to them is stopped. Scout will not send them further emails or WhatsApp messages from that customer, and will not create follow-up tasks (such as LinkedIn messages or calls) for them. Bounces are recorded the same way, and replies stop the sequence. Scout does not send to an address it knows to be invalid. Checking addresses before sending is a tool we give customers; whether an address was checked before a campaign is the customer's choice.
         </p>
       </Section>
 
       <Section n={5} title="The website visitor pixel">
         <p>
-          A customer can install a small Scout script on their own website to learn which <strong>companies</strong> visit it. When a page loads, the script sends the page address and title, the referrer, a random session identifier (kept in the browser's session storage, not a cookie), time on page and the browser's user agent. The visitor's IP address is used at that moment to look up the organisation it belongs to.
+          A customer can install a small Scout script on their own website to learn which <strong>companies</strong> visit it. When a page loads, the script sends the page path (without its query string), the page title, the referring page's address (without its query string), a random session identifier (kept in the browser's session storage, not a cookie) and time on page; our server also receives the browser's user agent and the visitor's IP address with the request.
         </p>
         <p>
-          We do not store the raw IP address with the visit: it is stored only as a one-way hash, salted per pixel, so it cannot be read back or matched across different customers' sites. Identification is company-level - on its own the pixel does not identify individual people, and it sets no cookies. A customer can choose to call the script's "identify" function to attach details a visitor has given them (for example an email typed into their own form); in that case the customer is the one identifying the visitor. The customer installing the pixel is responsible for telling their visitors about it in their own privacy notice and for obtaining any consent their local law requires.
+          The IP address is used once, to look up the organisation it belongs to. For that lookup it is sent over an encrypted connection to an IP-lookup provider (ipapi.is, or ipinfo.io when the first does not answer) and checked against public reverse DNS. While the lookup is waiting, the address is held encrypted in our processing queue; it is removed from the queue when the lookup finishes. With the visit we store the page path, the referrer, the session identifier, time on page, the user agent, the organisation name, country and city the lookup returned, and a keyed one-way hash of the IP address that is specific to that customer's pixel. The hash cannot be matched across different customers' sites, and cannot be turned back into an address without a secret key that is held only on our servers.
+        </p>
+        <p>
+          <strong>Do-not-track signals are honoured.</strong> If the visitor's browser sends Global Privacy Control or Do Not Track, the script sends nothing, and our server discards any request that carries either signal without storing it or looking anything up.
+        </p>
+        <p>
+          Identification is company-level - on its own the pixel does not identify individual people, and it sets no cookies. A customer can choose to call the script's "identify" function with details a visitor has given them (for example an email typed into their own form). In that case the email is used only to work out which company the visitor belongs to; it is not stored with the visit. Individual visit records are deleted after {RETENTION.visitDays} days. The customer installing the pixel is responsible for telling their visitors about it in their own privacy notice and for obtaining any consent their local law requires - session storage and this kind of measurement can require consent in the EU and UK even though no cookie is set.
         </p>
       </Section>
 
       <Section n={6} title="Cookies and local storage">
         <p>
-          The Scout app does not use advertising or third-party tracking cookies. When you sign in, your session token is kept in your browser's local storage so you stay signed in, and short-lived values (such as which page to return to after a session expires) are kept in session storage. Clearing your browser storage signs you out.
+          The Scout app does not use advertising or third-party tracking cookies. When you sign in, your session token is kept in your browser's storage so you stay signed in, and short-lived values (such as which page to return to after a session expires) are kept in session storage. Clearing your browser storage signs you out. Our pages load their fonts from our own site. The demo video on our home page is served by YouTube in its privacy-enhanced mode, and nothing is loaded from YouTube until you press play.
         </p>
       </Section>
 
       <Section n={7} title="AI features">
         <p>
-          Some features send text to AI model providers: drafting and personalising emails, classifying replies, summarising research, and measuring how AI models describe a brand (the AI visibility feature). What is sent is limited to what the feature needs - for example a prospect's name, title and company for a personalised email, or a question about a brand for a visibility check. We use providers' API offerings, which under their terms do not use API inputs to train their models by default.
+          Some features send text to AI model providers: drafting and personalising emails, classifying replies and drafting answers to them, turning a search description into filters, scoring how well a lead fits an ideal customer profile, summarising company research, and measuring how AI models describe a brand (the AI visibility feature). What is sent is limited to what the feature needs - for example a prospect's name, job title, company, location and a short company description for a personalised email. Email addresses and phone numbers are not included unless the customer's own template puts them there. An inbound email is only passed to an AI model when its sender is already one of the workspace's leads; mail from anyone else is never sent to AI.
+        </p>
+        <p>
+          Depending on the plan and on which provider is available at that moment, a request may be answered by Groq, Google (Gemini) or Anthropic (Claude). We use their API services, and their published terms decide what they may do with the text. Those terms are not all the same: some API tiers we use - in particular free tiers, such as Google's free Gemini tier - allow the provider to use submitted text to improve its services and to have it read by human reviewers.
+        </p>
+        <p>
+          <strong>You can turn AI off.</strong> An owner or admin can switch off "AI assistance" for the whole workspace under Settings. From then on no lead, prospect or inbound-email content of that workspace is sent to any AI provider: emails are written from your own templates, replies are sorted by built-in rules, and searches use the keyword parser. The AI visibility feature keeps working, because it sends only the questions you wrote about your own brand.
         </p>
       </Section>
 
       <Section n={8} title="Sub-processors">
-        <p>We rely on these categories of providers to run Scout. Each receives only what it needs for its function:</p>
+        <p>These are the providers Scout can send data to. Each receives only what it needs for its function, and several are used only when a customer turns the related feature on:</p>
         <List items={[
-          <><strong>Hosting and infrastructure:</strong> Render (application servers and database), Vercel (web app hosting), Cloudflare (network, DNS and security).</>,
+          <><strong>Hosting and infrastructure:</strong> Render (application servers), Neon (database), Vercel (web app hosting), Cloudflare (network in front of the application servers).</>,
           <><strong>Email delivery:</strong> Resend, or the SMTP provider a customer connects (for example Brevo, Gmail or Zoho).</>,
-          <><strong>Data, enrichment and email verification:</strong> providers such as Apollo, Hunter, Reoon and MillionVerifier.</>,
-          <><strong>Web search:</strong> providers such as Serper and Brave Search, used to find public company and contact information.</>,
-          <><strong>AI models:</strong> Groq (Llama models), Google (Gemini) and Anthropic (Claude); a customer may also connect another OpenAI-compatible provider.</>,
+          <><strong>Messaging:</strong> Meta (WhatsApp Business), when a customer connects their WhatsApp account.</>,
+          <><strong>Contact and company data:</strong> Apollo, Hunter and People Data Labs.</>,
+          <><strong>Email verification:</strong> Hunter, Reoon, MillionVerifier and Abstract; and a direct check with the recipient's own mail server.</>,
+          <><strong>Web search and public pages:</strong> Serper, SerpAPI, Brave Search, Google Programmable Search and Google News, the public results pages of DuckDuckGo and Bing, and the public websites and LinkedIn pages of the companies and people being looked up.</>,
+          <><strong>IP lookup for the visitor pixel:</strong> ipapi.is and ipinfo.io.</>,
+          <><strong>AI models:</strong> Groq (Llama models), Google (Gemini) and Anthropic (Claude). If we add another model provider it will be named here first.</>,
+          <><strong>Customer-connected systems:</strong> the CRM, spreadsheet or webhook address a customer connects (HubSpot, Pipedrive, Zoho, Google Sheets, or their own endpoint) receives the leads and events that customer chooses to send it.</>,
+          <><strong>Payments:</strong> Stripe, for paid plans.</>,
           <><strong>Sign-in:</strong> Google, if you choose "Continue with Google".</>,
         ]} />
-        <p>The exact set changes as we add or replace providers; email us for the current list.</p>
+        <p>We update this list when we add or replace a provider.</p>
       </Section>
 
       <Section n={9} title="Where data is processed">
@@ -153,11 +196,20 @@ export function PrivacyPage() {
       </Section>
 
       <Section n={10} title="Retention">
+        <p>What a customer keeps deliberately has no time limit; everything else is removed automatically after a fixed time.</p>
         <List items={[
-          <>Account and workspace data is kept while the account is active.</>,
-          <>Prospect data, campaign history and visitor data are kept until the customer deletes them or closes their workspace.</>,
-          <>Do-not-contact (unsubscribe) records are kept for as long as the customer's workspace exists, because deleting them would allow the person to be emailed again.</>,
-          <>After an account is closed, we delete or anonymise its data within 90 days, except where we must keep records for legal, tax or security reasons, and except for copies in routine backups, which expire on their normal cycle.</>,
+          <>Account and workspace data is kept while the workspace exists.</>,
+          <>Leads, companies, lists, campaigns and messages are kept until the customer deletes them or the workspace is deleted. Deleting a lead also removes the content and the address from every message to and from that person, and the activity entries about them, within a day at the latest.</>,
+          <>Do-not-contact (unsubscribe) records are kept for as long as the customer's workspace exists, because deleting them would allow the person to be emailed again. The platform-wide do-not-contact list is kept until the person asks us to remove them from it.</>,
+          <>Individual website-visit records: {RETENTION.visitDays} days. The per-company summary built from them is kept until the workspace is deleted.</>,
+          <>The activity feed (which webhooks are delivered from): {RETENTION.eventDays} days.</>,
+          <>Sign-in attempts (email address and IP address): failed attempts up to {RETENTION.loginFailureDays} days, successful sign-ins {RETENTION.loginSuccessDays} days.</>,
+          <>Password-reset, email-confirmation and sign-in tokens: {RETENTION.expiredTokenDays} days after they expire. Team invitations: {RETENTION.closedInviteDays} days after they are accepted, revoked or expire.</>,
+          <>Background job records: {RETENTION.finishedJobDays} days once finished, {RETENTION.failedJobDays} days if they failed. A finished search keeps the list of leads it found until the workspace is deleted.</>,
+          <>The security log (who did what, from which IP address): {RETENTION.auditLogDays} days.</>,
+          <>Upgrade requests that have been closed: {RETENTION.closedUpgradeRequestDays} days.</>,
+          <>When an owner deletes a workspace, everything in it is permanently deleted no sooner than {DELETION_GRACE_DAYS} days after the request (see section 12 of the Terms for exactly what happens). We keep one record that the deletion took place - the workspace name, internal identifiers, dates and counts of what was removed - in the security log for {RETENTION.auditLogDays} days.</>,
+          <>Copies in our database provider's routine backups expire on their normal cycle. Payment records held by our payment provider are kept for as long as tax law requires.</>,
         ]} />
       </Section>
 
@@ -166,12 +218,12 @@ export function PrivacyPage() {
           Depending on where you are, you have rights over your personal data. Under India's Digital Personal Data Protection Act, 2023 you can ask for a summary of the personal data we process about you, ask us to correct, complete, update or erase it, withdraw consent where processing relies on consent, nominate someone to exercise your rights, and raise a grievance with us. Where the EU or UK GDPR applies, you can also ask for access, portability, restriction of processing, and object to processing based on legitimate interests, and you may complain to your local data protection authority.
         </p>
         <p>
-          To make a request - including a request to delete your account or your data - email <Mail /> from the address in question. We will respond within 30 days. If the data is prospect data held by one of our customers, we will forward the request to them and support them in answering it. Our grievance contact under the DPDP Act is the same address.
+          Workspace owners can download everything in their workspace, and delete the workspace, themselves under Settings. For anything else - including a request as a prospect, described in section 3 - email <Mail /> from the address in question. We will respond within 30 days. Our grievance contact under the DPDP Act is the same address.
         </p>
       </Section>
 
       <Section n={12} title="Security">
-        <p>We use encrypted connections (HTTPS), hashed passwords, encrypted storage of sender and integration credentials, and access controls within each workspace. No system is perfectly secure; if we learn of a breach affecting your data we will notify you and the relevant authorities as the law requires.</p>
+        <p>We use encrypted connections (HTTPS), hashed passwords, optional two-factor sign-in, encrypted storage of sender and integration credentials, roles within each workspace, and a security log of sign-ins and sensitive actions. No system is perfectly secure; if we learn of a breach affecting your data we will notify you and the relevant authorities as the law requires.</p>
       </Section>
 
       <Section n={13} title="Children">
@@ -219,9 +271,10 @@ export function TermsPage() {
           <>scrape, overload, probe or bypass the limits and security of the service, or share accounts to evade plan limits.</>,
         ]} />
         <p>
-          <strong>You are responsible for having a lawful basis to collect and contact each prospect</strong> (for example legitimate interest or consent, as your law requires), for including accurate sender identification and a working unsubscribe in your messages, and for honouring opt-outs. Scout adds an unsubscribe link and suppression list to help, but compliance is yours. If you install the visitor pixel, you must disclose it in your own website's privacy notice and obtain any consent your law requires.
+          <strong>You are responsible for having a lawful basis to collect and contact each prospect</strong> (for example legitimate interest or consent, as your law requires), for including accurate sender identification and a working unsubscribe in your messages, and for honouring opt-outs. Scout adds an unsubscribe line and link to every email it sends for you (this cannot be turned off), prints your mailing address under it when you have entered one under Settings, and keeps your do-not-contact list - but compliance is yours. Where the law requires a postal address in commercial email, you must enter one. Scout does not check every address before it sends: it refuses addresses it knows to be invalid, and gives you verification tools to use before a campaign. If you install the visitor pixel, you must disclose it in your own website's privacy notice and obtain any consent your law requires.
         </p>
         <p>We may suspend sending, or the account, where we see signs of abuse such as high bounce or complaint rates, to protect recipients and the deliverability of other customers.</p>
+        <p>We keep a platform-wide do-not-contact list of people who have asked us never to be contacted through Scout. Addresses on it cannot be stored in or contacted from any workspace, and when such a person asks us to erase their data we delete their records from every workspace, including yours.</p>
       </Section>
 
       <Section n={4} title="Your data">
@@ -267,11 +320,13 @@ export function TermsPage() {
         <p>You will defend and compensate us for claims, fines and costs arising from your data, your messages, or your breach of these terms or of applicable law, including anti-spam and data protection law.</p>
       </Section>
 
-      <Section n={12} title="Suspension and termination">
+      <Section n={12} title="Suspension, deletion and termination">
         <List items={[
-          <>You may stop using Scout and ask us to close your account at any time by emailing <Mail />.</>,
-          <>We may suspend or terminate an account that breaches these terms, puts recipients or other customers at risk, or fails to pay, with notice where reasonable.</>,
-          <>After termination your access ends; you can ask for an export of your data within 30 days, after which we delete it as described in the Privacy Policy.</>,
+          <>You may stop using Scout at any time. An owner can download everything in the workspace ("Export all data") and delete the workspace under Settings. Both ask for your password, or a two-factor code, again.</>,
+          <>Deleting a workspace is scheduled, not immediate: it happens no sooner than {DELETION_GRACE_DAYS} days after the request, on the first daily run after that. Until then the workspace keeps working, except that its campaigns are paused and cannot be started; every owner is emailed when the request is made and again about two days before the deletion; any owner can cancel it; and the export stays available.</>,
+          <>At that point (and only after the reminder has gone out) the workspace and everything in it is permanently deleted and cannot be restored: members and their sign-ins, leads, companies, lists, campaigns, messages, do-not-contact lists, website-visitor data, API keys, senders, integrations, webhooks, settings, the workspace's security log, its members' recorded sign-in attempts and its upgrade requests. If the workspace has a paid subscription we cancel it at the same time.</>,
+          <>What we keep after a deletion: one record that it took place (the workspace name, internal identifiers, the dates, and counts of what was removed) for {RETENTION.auditLogDays} days; invoices and payment records held by our payment provider; and copies in routine database backups until they expire. Data you exported, or sent to your own CRM or webhooks, is yours and is not affected.</>,
+          <>We may suspend or terminate an account that breaches these terms, puts recipients or other customers at risk, or fails to pay, with notice where reasonable. A suspended workspace cannot be signed in to; its data is not deleted on a timer. An owner can ask us at <Mail /> for an export or for the workspace to be deleted, and we will act on that request within 30 days.</>,
         ]} />
       </Section>
 

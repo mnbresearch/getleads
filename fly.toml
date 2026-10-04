@@ -1,6 +1,11 @@
 # Fly.io - allows outbound port 25 on request (real SMTP verification). Free allowance covers one shared-cpu-1x VM.
+# Secrets are never set here: use `fly secrets set` (DEPLOY.md, Option 3). The image runs as a
+# non-root user. On SIGTERM the server finishes requests and jobs in progress (up to 25 s).
 app = "getleads-api"
 primary_region = "sin"   # Singapore - closest to India
+# Give the server time to finish what it is doing before the machine is stopped.
+kill_signal = "SIGTERM"
+kill_timeout = 30   # seconds
 
 [build]
   dockerfile = "Dockerfile"
@@ -19,6 +24,14 @@ primary_region = "sin"   # Singapore - closest to India
   auto_stop_machines = false   # keep the worker alive
   auto_start_machines = true
   min_machines_running = 1
+
+  # Routes traffic only to a machine whose API answers and whose database is reachable.
+  [[http_service.checks]]
+    method = "GET"
+    path = "/health"
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
 
 [[vm]]
   size = "shared-cpu-1x"

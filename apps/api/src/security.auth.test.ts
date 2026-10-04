@@ -1842,9 +1842,10 @@ describe("security: startup warnings", () => {
   };
 
   it("production with a short JWT_SECRET or no ENCRYPTION_KEY starts, and says so loudly", async () => {
-    const r = await boot({ NODE_ENV: "production", JWT_SECRET: "short-secret", ENCRYPTION_KEY: undefined });
-    expect(r.env.jwtSecret).toBe("short-secret");
-    expect(r.warnings.some((w) => /JWT_SECRET is only 12 characters/.test(w))).toBe(true);
+    // Short but above the refusal line (a secret under 16 characters now stops a production start).
+    const r = await boot({ NODE_ENV: "production", JWT_SECRET: "short-secret-20chars", ENCRYPTION_KEY: undefined });
+    expect(r.env.jwtSecret).toBe("short-secret-20chars");
+    expect(r.warnings.some((w) => /JWT_SECRET is only 20 characters/.test(w))).toBe(true);
     expect(r.warnings.some((w) => /ENCRYPTION_KEY is not set/.test(w))).toBe(true);
     const fine = await boot({ NODE_ENV: "production", JWT_SECRET: "s".repeat(64), ENCRYPTION_KEY: "e".repeat(64) });
     expect(fine.warnings.filter((w) => /JWT_SECRET|ENCRYPTION_KEY/.test(w))).toEqual([]);

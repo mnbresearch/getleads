@@ -12,6 +12,8 @@ import { upsertLead } from "../services/leads.js";
 import { tryConsume } from "../lib/quota.js";
 import { audit } from "../lib/audit.js";
 import { stripNul } from "../lib/sanitize.js";
+import { asksNotToBeTracked } from "../lib/privacyVisitor.js";
+import { assertRowCap } from "../lib/limits.js";
 
 /** Public pixel endpoints (no auth). Mounted at /px */
 export const pixelPublic = new Hono();
@@ -66,6 +68,11 @@ pixelPublic.post("/:key/collect", rateLimit({ perMinute: 120, name: "pixel-colle
   c.header("access-control-allow-origin", "*");
   // Anything that is not a key we could have issued is answered like an unknown key.
   if (!isPixelKey(key)) return c.body(null, 204);
+  // A browser that says "do not track me" (Global Privacy Control, or Do Not Track) is taken
+  // at its word: nothing is stored, nothing is queued and no lookup is made. The script does
+  // not send these hits at all; this covers a cached older copy of it and anything else
+  // that posts here. Answered exactly like a stored hit, so the page cannot tell.
+  if (asksNotToBeTracked((name) => c.req.header(name))) return c.body(null, 204);
   // allowedDomains was stored and shown in settings but never enforced, so a copied snippet
   // on any site reported visits as this org's. When the list is set, the hit must come from
   // one of those sites. A missing Origin AND Referer (some privacy setups) is refused too:
@@ -124,6 +131,8 @@ visitorRoutes.get("/pixels", async (c) => {
 
 visitorRoutes.post("/pixels", zValidator("json", z.object({ name: z.string().min(1).max(200), allowedDomains: z.array(z.string().max(253)).max(50).default([]) })), async (c) => {
   const { db } = getDb();
+  // A generous ceiling on how many pixels one workspace can hold (lib/limits.ts); existing ones are untouched.
+  await assertRowCap(db, pixels, orgId(c), "pixels");
   const [row] = await db.insert(pixels).values({ orgId: orgId(c), key: `px_${randomToken(12)}`, ...c.req.valid("json") }).returning();
   await audit(c, "pixel.created", { targetType: "pixel", targetId: row.id, data: { name: row.name, allowedDomains: row.allowedDomains } });
   return c.json({ ...row, snippet: `<script async src="${env.apiUrl}/px/${row.key}.js"></script>` }, 201);
@@ -158,7 +167,10 @@ visitorRoutes.get("/:domain/visits", async (c) => {
   const { db } = getDb();
   const oid = orgId(c);
   const domain = c.req.param("domain");
-  const rows = await db.select().from(visits).where(and(eq(visits.orgId, oid), eq(visits.companyDomain, domain))).orderBy(desc(visits.visitedAt)).limit(200);
+  const found = await db.select().from(visits).where(and(eq(visits.orgId, oid), eq(visits.companyDomain, domain))).orderBy(desc(visits.visitedAt)).limit(200);
+  // The IP hash is a key for our own bookkeeping; it says nothing a customer can use, so it
+  // stays on the server.
+  const rows = found.map(({ ipHash: _ipHash, ...rest }) => rest);
   if (!rows.length) {
     const known = await db.query.visitorCompanies.findFirst({ where: and(eq(visitorCompanies.orgId, oid), eq(visitorCompanies.domain, domain)) });
     if (!known) throw notFound("Visitor company");

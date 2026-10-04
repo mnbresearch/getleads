@@ -112,6 +112,9 @@ agentRoutes.get("/capabilities", (c) =>
     version: "1.0.0",
     capabilities: ["prospect", "find_people", "find_companies", "enrich_company", "find_email", "verify_email", "score_icp", "generate_email", "run_sequence", "crm_sync", "webhooks"],
     openapi: `${env.apiUrl}/openapi.json`,
-    mcp: "npx @prospex/mcp (set PROSPEX_API_KEY, PROSPEX_API_URL)",
+    // The server lives in this repository and is not on a public package registry. The old
+    // text told people to run it with npx from an npm scope that is not ours - whoever owns
+    // that scope could have published anything under the name, to run with the reader's API key.
+    mcp: "Scout has an MCP server for AI assistants (Claude Desktop, Cursor). It is not published to a public package registry. Ask support for the package, or use the REST API and OpenAPI document with your API key.",
   }),
 );

@@ -32,6 +32,7 @@ import { beginTwoFactorSetup, checkSecondFactor, clearTwoFactor, confirmSecondFa
 import { confirmVerificationToken, emailVerificationAvailable, sendVerificationEmail, sendVerificationEmailWithin } from "../lib/emailVerification.js";
 import { notifySecurity, SECURITY_CONTACT_EMAIL } from "../lib/securityMail.js";
 import { enforceWindows, windowHit, windowRemaining } from "../lib/rateWindow.js";
+import { assertActiveApiKeyCap } from "../lib/limits.js";
 
 export const authRoutes = new Hono<Env>();
 
@@ -129,15 +130,22 @@ authRoutes.post(
     let slug = slugify(orgName);
     if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
     const plan = env.defaultPlan;
-    const [org] = await db.insert(organizations).values({ name: orgName, slug, plan, planLimits: limitsFor(plan) }).returning();
+    // Hash before the transaction so the slow step is not inside it. The workspace, its owner
+    // and the default key are then created in ONE transaction: two signups racing the same
+    // address both passed the check above, but the second's user insert hits the unique email
+    // index and the whole transaction rolls back, so it no longer leaves an owner-less
+    // workspace behind. The unique-violation surfaces as the usual 409 "already registered".
+    const passwordHash = await hashPassword(body.password);
+    const key = generateApiKey();
     // `emailVerifiedAt` is deliberately NOT set: typing an address into this form proves
     // nothing about who owns it. It is set by the emailed confirmation link (sent below), a
     // completed password reset or a Google sign-in.
-    // (Accounts that existed before migration 0018 were marked verified by that migration;
-    // that is a one-off for the existing customer base, not something signup does.)
-    const [user] = await db.insert(users).values({ orgId: org.id, email, passwordHash: await hashPassword(body.password), name: body.name ?? "", role: "owner", lastLoginAt: new Date() }).returning();
-    const key = generateApiKey();
-    await db.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash });
+    const { org, user } = await db.transaction(async (tx) => {
+      const [org] = await tx.insert(organizations).values({ name: orgName, slug, plan, planLimits: limitsFor(plan) }).returning();
+      const [user] = await tx.insert(users).values({ orgId: org.id, email, passwordHash, name: body.name ?? "", role: "owner", lastLoginAt: new Date() }).returning();
+      await tx.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash });
+      return { org, user };
+    });
     await emitEvent(org.id, "org.created", { orgId: org.id, email: user.email });
     await audit(c, "auth.signup", { orgId: org.id, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, data: { email: user.email, via: "password" } });
     // The address that chose the password is known for the account from the start, so a
@@ -845,6 +853,9 @@ authRoutes.post("/api-keys", requireAuth, requireUser, requireRole("owner", "adm
   const { db } = getDb();
   const a = c.get("auth");
   const b = c.req.valid("json");
+  // Only live keys count toward the cap: a workspace that rotates keys often is not blocked by
+  // ones it already revoked.
+  await assertActiveApiKeyCap(db, a.org.id);
   const key = generateApiKey();
   const [row] = await db.insert(apiKeys).values({ orgId: a.org.id, name: b.name, prefix: key.prefix, keyHash: key.hash, scopes: scopesFor(b.scope) }).returning();
   const scope = apiKeyScope(row);

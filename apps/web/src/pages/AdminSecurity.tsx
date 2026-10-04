@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminApiError, adminFetch } from "../lib/adminApi";
 import { expectLists, expectShape, fmtDate, fmtNum } from "../lib/api";
+import { PrivacySections } from "./AdminPrivacy";
 import { AUDIT_ACTOR, AuditResult, auditActionLabel, auditEntryLabel, auditReason, auditWho, type AuditEntry } from "../components/AuditBits";
 
 /** Same thumb-sized targets as the rest of the console (see AdminDashboard). */
@@ -377,15 +378,17 @@ function AuditSection({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
 }
 
 /**
- * Admin > Security: what happened across every workspace in the last day, and the audit log
- * behind it. The two halves load on their own - a summary that fails must not hide the log,
- * and the other way round.
+ * Admin > Security: what happened across every workspace in the last day, the audit log
+ * behind it, and (on a server that has them) the platform suppression list and the lookup
+ * for a person's data. Each part loads on its own - a summary that fails must not hide the
+ * log, and the other way round.
  */
 export function SecurityTab({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
   return (
     <div>
       <SummarySection />
       <AuditSection onViewOrg={onViewOrg} />
+      <PrivacySections onViewOrg={onViewOrg} />
     </div>
   );
 }

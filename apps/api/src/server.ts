@@ -4,15 +4,37 @@ import { env } from "./env.js";
 import { createApp } from "./app.js";
 import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.js";
 import { migrateLegacyLinkTokens } from "./lib/linkTokens.js";
+import { describeError } from "./lib/errors.js";
+import { gracefulShutdown, httpTimeouts, shutdownGraceMs } from "./shutdown.js";
+
+/** Name, code and a redacted one-line message. Never the error object: an ORM error carries the statement and every bound value. */
+const errLine = (e: unknown) => {
+  const d = describeError(e);
+  return `${d.name}${d.code ? ` [${d.code}]` : ""}: ${d.message}`;
+};
+/** Where it happened: the first few stack frames only (file and line - no message, so no data). */
+const errWhere = (e: unknown) => {
+  const stack = typeof (e as { stack?: unknown } | null)?.stack === "string" ? (e as { stack: string }).stack : "";
+  const frames = stack.split("\n").filter((l) => /^\s+at /.test(l)).slice(0, 5);
+  return frames.length ? `\n${frames.join("\n")}` : "";
+};
 
 // One bad job or a stray promise must never take the process down: Node's default for an
 // unhandled rejection is to exit, which turned a single failing webhook into a restart loop.
 process.on("unhandledRejection", (reason) => {
-  console.error("[api] unhandled rejection (kept running):", reason);
+  console.error(`[api] unhandled rejection (kept running): ${errLine(reason)}`);
+});
+// An uncaught exception still ends the process (its state can no longer be trusted) - but
+// with one safe line instead of Node's dump of the whole error object.
+process.on("uncaughtException", (e) => {
+  console.error(`[api] uncaught exception, exiting: ${errLine(e)}${errWhere(e)}`);
+  process.exit(1);
 });
 
 async function main() {
-  if (process.env.AUTO_MIGRATE !== "false") await runMigrations();
+  // MIGRATION_DATABASE_URL lets migrations run as a role that owns the schema while the
+  // application connects as one that can only read and write rows. Unset: DATABASE_URL.
+  if (process.env.AUTO_MIGRATE !== "false") await runMigrations(process.env.MIGRATION_DATABASE_URL || undefined);
   const app = createApp();
   const { db } = getDb();
   await ensureRecurringJobs();
@@ -36,21 +58,39 @@ async function main() {
     stopKeeper = startRecurringJobKeeper();
   }
 
-  const server = serve({ fetch: app.fetch, port: env.port }, (info) => {
+  const timeouts = httpTimeouts();
+  const server = serve({ fetch: app.fetch, port: env.port, serverOptions: timeouts }, (info) => {
     console.log(`[api] Prospex API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop} trustedProxy=${env.trustedProxy} adminTokenAccess=${env.adminApiToken ? "on" : "off"}`);
   });
-  const shutdown = async () => {
-    console.log("[api] shutting down");
-    server.close();
-    if (stopKeeper) stopKeeper();
-    if (stop) await stop();
-    process.exit(0);
+
+  let stopping = false;
+  const shutdown = (signal: string) => {
+    if (stopping) {
+      // A second Ctrl-C means "now". A repeated SIGTERM from a platform must not cut the drain short.
+      if (signal === "SIGINT") {
+        console.log("[api] interrupted again, exiting now");
+        process.exit(1);
+      }
+      return;
+    }
+    stopping = true;
+    const graceMs = shutdownGraceMs();
+    console.log(`[api] ${signal}: shutting down (no new connections; up to ${Math.round(graceMs / 1000)} s for requests and jobs in progress)`);
+    void gracefulShutdown({ server, stopWorker: stop, stopKeeper, graceMs })
+      .then((r) => {
+        console.log(`[api] stopped in ${r.ms} ms (requests finished: ${r.httpDrained ? "yes" : "no"}, jobs finished: ${r.jobsDrained ? "yes" : `no, ${r.jobsReleased} returned to the queue`})`);
+        process.exit(0);
+      })
+      .catch((e) => {
+        console.error(`[api] shutdown failed: ${errLine(e)}`);
+        process.exit(1);
+      });
   };
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", () => shutdown("SIGINT"));
+  process.on("SIGTERM", () => shutdown("SIGTERM"));
 }
 
 main().catch((e) => {
-  console.error(e);
+  console.error(`[api] could not start: ${errLine(e)}${errWhere(e)}`);
   process.exit(1);
 });

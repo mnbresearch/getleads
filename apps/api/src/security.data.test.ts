@@ -1250,6 +1250,7 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
         admin_revoked_tokens: "platform: admin sign-outs",
         tool_registry: "platform: provider registry",
         tool_usage: "platform: provider usage counters",
+        global_suppressions: "platform: the platform-wide do-not-contact list belongs to no workspace and must outlive every one of them",
         login_attempts: "keyed by email, no foreign key: deleted explicitly by the purge",
         upgrade_requests: "org_id is ON DELETE SET NULL (a sales lead may have no workspace): deleted explicitly by the purge",
       };

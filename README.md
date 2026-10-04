@@ -6,7 +6,7 @@ Real-time discovery from the open web and LinkedIn, company enrichment, work-ema
 
 ```
 apps/
-  api/        Hono REST API + Postgres job worker (Node 20+). Deploys to Render / Fly / Docker / Vercel.
+  api/        Hono REST API + Postgres job worker (Node 22). Deploys to Render / Fly / Docker / Vercel.
   web/        React + Vite + Tailwind dashboard. Deploys to Vercel / Netlify / Cloudflare Pages.
 packages/
   core/       The engine: search providers, discovery, crawler, email find/verify, ICP scoring, AI outreach. No DB deps.
@@ -28,7 +28,8 @@ npm run dev:api                  # http://localhost:8080  (docs at /docs), worke
 npm run dev:web                  # http://localhost:5173
 ```
 
-Login: `demo@prospex.local` / `demo1234`.
+Login: `demo@prospex.local` / `demo1234`. The seed is for local development only: it refuses to
+run with `NODE_ENV=production` (the password above is public), unless forced with `--force`.
 
 ## What is built
 
@@ -77,10 +78,22 @@ curl -X POST $API/v1/search/verify -H "x-api-key: px_live_..." -H 'content-type:
 
 ## MCP for Claude / Cursor
 
+The MCP server is not published to a public package registry. Run it from this repository:
+
+```bash
+npm install
+npm run build -w packages/sdk -w packages/mcp
+```
+
 ```json
-{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
+{ "mcpServers": { "prospex": { "command": "node", "args": ["<path-to-repo>/packages/mcp/dist/server.js"],
   "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "https://your-api.onrender.com" } } } }
 ```
+
+Do not run it with `npx` from a package name: the `@prospex` npm scope does not belong to this
+project, so a package published under that name would be someone else's code running with your
+API key. The root `.npmrc` points that scope at a registry that does not exist, so a stray
+`npm install` fails instead of fetching it.
 
 ## AI visibility (AEO/GEO)
 

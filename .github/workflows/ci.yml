@@ -1,8 +1,21 @@
 name: ci
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+
+# The workflow only reads the repository. No job needs to write to it, to packages or to
+# pull requests, so the token is read-only for all of them.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16-alpine
@@ -11,12 +24,23 @@ jobs:
         options: --health-cmd pg_isready --health-interval 5s --health-timeout 3s --health-retries 10
     steps:
       - uses: actions/checkout@v4
+        with: { persist-credentials: false }
       - uses: actions/setup-node@v4
         with: { node-version: 22, cache: npm }
       - run: npm ci
       - run: npm run build -w packages/core -w packages/db -w packages/sdk
       - run: npm run typecheck
       - run: npm test -w packages/core
+      # The API suites (sign-in, tenancy, the security regression tests) need a database and
+      # skip themselves without one - which is how they came to never run here. They get
+      # their own database so the smoke test below starts from an empty one.
+      - name: API tests
+        env:
+          TEST_DATABASE_URL: postgres://prospex:prospex@localhost:5432/prospex_test
+          PGPASSWORD: prospex
+        run: |
+          psql -h localhost -U prospex -d prospex -v ON_ERROR_STOP=1 -c 'CREATE DATABASE prospex_test'
+          npm test -w apps/api
       - name: API smoke test
         env:
           DATABASE_URL: postgres://prospex:prospex@localhost:5432/prospex
@@ -26,3 +50,15 @@ jobs:
           (cd apps/api && npx tsx src/server.ts > api.log 2>&1 &)
           for i in $(seq 1 30); do curl -sf localhost:8080/health && break; sleep 1; done
           API=http://localhost:8080 ./scripts/smoke.sh
+
+  # Known vulnerabilities in what production actually runs. Its own job, so a new advisory
+  # shows up as its own red mark instead of hiding the test results.
+  audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm audit --omit=dev --audit-level=high

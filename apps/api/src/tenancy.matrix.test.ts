@@ -408,6 +408,11 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "POST /v1/admin/orgs/:id/users/:userId/reset-2fa": { cls: "admin", cases: [X("reset A's two-factor", `/v1/admin/orgs/${a.org}/users/${a.owner}/reset-2fa`, {})] },
     "GET /v1/admin/audit-log": { cls: "admin", cases: [X("customer credential", "/v1/admin/audit-log")] },
     "GET /v1/admin/security/summary": { cls: "admin", cases: [X("customer credential", "/v1/admin/security/summary")] },
+    "GET /v1/admin/suppressions": { cls: "admin", cases: [X("customer credential", "/v1/admin/suppressions")] },
+    "POST /v1/admin/suppressions": { cls: "admin", cases: [X("customer credential", "/v1/admin/suppressions", { email: `blocked-${A.tag}@example.com` })] },
+    "DELETE /v1/admin/suppressions/:id": { cls: "admin", cases: [X("customer credential", `/v1/admin/suppressions/${randomUUID()}`)] },
+    "GET /v1/admin/data-subject": { cls: "admin", cases: [X("customer credential", `/v1/admin/data-subject?email=someone-${A.tag}%40example.com`)] },
+    "POST /v1/admin/data-subject/erase": { cls: "admin", cases: [X("erase a person everywhere", "/v1/admin/data-subject/erase", { email: `someone-${A.tag}@example.com`, confirm: `someone-${A.tag}@example.com` })] },
 
     // ── auth / org / keys ──
     "POST /v1/auth/password/change": noref("acts on the calling user only; session behaviour covered by security.auth.test.ts"),
@@ -439,6 +444,8 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "GET /v1/account/deletion": list("/v1/account/deletion"),
     "POST /v1/account/delete": E("none in path; body tries to name another org", X("confirm with A's workspace name", "/v1/account/delete", { confirmName: `${A.tag} Org`, password: B.ownerPassword, orgId: a.org, id: a.org })),
     "POST /v1/account/delete/cancel": E("none; body tries to name another org", X("nothing pending; body names org A", "/v1/account/delete/cancel", { orgId: a.org }, true)),
+    "GET /v1/account/privacy": list("/v1/account/privacy"),
+    "PATCH /v1/account/privacy": E("none; body tries to name another org", X("body names org A", "/v1/account/privacy", { aiAssist: true, orgId: a.org, id: a.org }, true)),
 
     // ── leads ──
     "GET /v1/leads": E("query listId, clientId, icpId, tag, companyDomain, q, attention", ...leadFilters.map((f) => X(`filter ${f || "(none)"}`, `/v1/leads${f}`, undefined, true))),

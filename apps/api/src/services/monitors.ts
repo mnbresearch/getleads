@@ -1,5 +1,5 @@
 import { consume, eq, getDb, monitorResults, monitors, type Monitor } from "@prospex/db";
-import { companyNews, detectHiring, fetchGoogleNews, linkedinPostEngagers, webSearch } from "@prospex/core";
+import { companyNews, detectHiring, encodeURIComponentSafe, fetchGoogleNews, linkedinPostEngagers, webSearch } from "@prospex/core";
 import { upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
@@ -90,7 +90,7 @@ export async function runMonitor(m: Monitor, log: (s: string) => void = () => {}
         return { added, error: h.refused, refused: true };
       }
     } else {
-      for (const t of h.titles) await insert("job", t, h.careersUrl ? `${h.careersUrl}#${encodeURIComponent(t)}` : `job:${m.target}:${t}`, undefined, { function: Object.entries(h.byFunction).find(() => true)?.[0] });
+      for (const t of h.titles) await insert("job", t, h.careersUrl ? `${h.careersUrl}#${encodeURIComponentSafe(t)}` : `job:${m.target}:${t}`, undefined, { function: Object.entries(h.byFunction).find(() => true)?.[0] });
       await db.update(monitors).set({ lastResult: { openRoles: h.openRoles, byFunction: h.byFunction, source: h.source, delta: h.openRoles - prev } }).where(eq(monitors.id, m.id));
       if (h.openRoles > prev && prev > 0) await emitEvent(m.orgId, "monitor.hiring_up", { monitorId: m.id, domain: m.target, openRoles: h.openRoles, delta: h.openRoles - prev });
     }

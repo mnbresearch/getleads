@@ -31,9 +31,14 @@ on:
         description: "How many leads (1-200)"
         required: false
 
+# This job calls the deployed API with an API key from the repository secrets. It never
+# touches the repository, so its token gets no permissions at all.
+permissions: {}
+
 jobs:
   discover:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
       - name: Run a discovery pass
         env:

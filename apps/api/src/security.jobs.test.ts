@@ -1024,6 +1024,12 @@ suite("security: jobs, sending, AI output", () => {
   describe("AI-personalised sends", () => {
     const TEMPLATE = { subjectTemplate: "Idea for {{company}}", bodyTemplate: "Hi {{first_name}},\n\nWe cut onboarding time 40%. Details: https://tenantco.example/demo\n\n{{sender_name}}", aiPersonalize: true };
     const RENDERED = "Hi Pat,\n\nWe cut onboarding time 40%. Details: https://tenantco.example/demo\n\nAsha";
+    // Every campaign email carries the unsubscribe footer; what is compared is the body above it.
+    const FOOTER = /\n\n--\nIf you'd rather not hear from me, reply "unsubscribe" or click: \S+\/t\/u\/[A-Za-z0-9_-]+$/;
+    const body = (t: string) => {
+      expect(t).toMatch(FOOTER);
+      return t.replace(FOOTER, "");
+    };
     async function aiSetup() {
       const s = await setup({ step: TEMPLATE, campaignPatch: { settings: { ...ALL_DAY, dailyLimit: 500, senderCompany: "TenantCo", valueProp: "INTERNAL: floor price $900; we cut onboarding time 40%", unsubscribeFooter: false, trackOpens: false, trackClicks: false } } });
       const [co] = await db.insert(schema.companies).values({ orgId: s.org.id, name: "Acme", domain: `acme-${uid()}.test`, description: "Acme builds widgets." }).returning();
@@ -1046,7 +1052,7 @@ suite("security: jobs, sending, AI output", () => {
         const sent = mail.calls[0].input;
         expect(sent.to).toBe(lead.email);
         expect(sent.subject).toBe("Idea for Acme");
-        expect(sent.text).toBe(RENDERED);
+        expect(body(sent.text)).toBe(RENDERED);
         for (const attacker of ["evil.example", "attacker@", "<script", "Bcc:", "SYSTEM PROMPT", "floor price", "[Your Name]", "[object Object]", "line one", "AAAAAAAAAA", "Sure! Here is your email", "ok body"]) {
           expect(`${sent.subject}\n${sent.text}\n${sent.html ?? ""}`).not.toContain(attacker);
         }
@@ -1055,7 +1061,7 @@ suite("security: jobs, sending, AI output", () => {
         // Stored: the same template.
         const [msg] = await messagesOf(campaign.id);
         expect(msg.subject).toBe("Idea for Acme");
-        expect(msg.bodyText).toBe(RENDERED);
+        expect(body(msg.bodyText)).toBe(RENDERED);
         expect(msg.status).toBe("sent");
 
         // Recorded: on the contact, and as an event.
@@ -1076,7 +1082,7 @@ suite("security: jobs, sending, AI output", () => {
       const seen = stubModel({ content: JSON.stringify({ subject: "Invoice overdue", body: "URGENT: your Acme invoice is overdue. Pay today at https://evil.example/pay" }) });
       vi.spyOn(console, "warn").mockImplementation(() => {});
       expect((await svc.sendStep(campaign.id, cc.id, step.id)).sent).toBe(true);
-      expect(mail.calls[0].input.text).toBe(RENDERED);
+      expect(body(mail.calls[0].input.text)).toBe(RENDERED);
       // The prompt that was actually sent: the description is fenced, the system role is ours.
       const [sys, usr] = seen[0].body.messages;
       expect(sys.content).not.toContain("NEW INSTRUCTIONS");
@@ -1086,13 +1092,13 @@ suite("security: jobs, sending, AI output", () => {
 
     it("a good draft is sent as written and billed", async () => {
       const { org, campaign, step, cc } = await aiSetup();
-      const body = "Hi Pat,\n\nSaw Acme is growing its support team. We cut onboarding time 40% for teams like yours - details at https://tenantco.example/demo.\n\nOpen to a 15-minute call next week?\n\nAsha";
-      stubModel({ content: JSON.stringify({ subject: "Idea for Acme's onboarding", body }) });
+      const draft = "Hi Pat,\n\nSaw Acme is growing its support team. We cut onboarding time 40% for teams like yours - details at https://tenantco.example/demo.\n\nOpen to a 15-minute call next week?\n\nAsha";
+      stubModel({ content: JSON.stringify({ subject: "Idea for Acme's onboarding", body: draft }) });
       const r = await svc.sendStep(campaign.id, cc.id, step.id);
       expect(r).toMatchObject({ sent: true });
       expect(r.aiRejected).toBeUndefined();
       expect(mail.calls[0].input.subject).toBe("Idea for Acme's onboarding");
-      expect(mail.calls[0].input.text).toBe(body);
+      expect(body(mail.calls[0].input.text)).toBe(draft);
       expect((await contact(cc.id)).lastError).toBeNull();
       expect(await eventsOf(org.id, "message.ai_rejected")).toHaveLength(0);
       expect(await usageOf(org.id, "aiMessages")).toBe(1);

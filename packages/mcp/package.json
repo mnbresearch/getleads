@@ -1,6 +1,7 @@
 {
   "name": "@prospex/mcp",
   "version": "0.1.0",
+  "private": true,
   "description": "MCP server exposing Prospex to AI agents (Claude Desktop, Claude Code, Cursor, Cortex...)",
   "type": "module",
   "bin": { "prospex-mcp": "./dist/server.js" },

@@ -8,23 +8,28 @@ import { scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriter
 import { ApiError, notFound, requireSomeFields } from "../lib/errors.js";
 import { aiFor } from "../lib/ai.js";
 import { assertQuotaAvailable, tryConsume } from "../lib/quota.js";
+import { assertRowCap, guardJobCapacity } from "../lib/limits.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { scoreLeadsWithLearning } from "../services/insights.js";
 
 export const icpRoutes = new Hono<Env>();
 icpRoutes.use("*", requireAuth);
 
+// Each facet is a bounded list of short terms: an ICP is a handful of each, and the lists
+// are read into search queries and rule scoring, so an unbounded one was free storage and
+// unbounded downstream work.
+const facet = z.array(z.string().max(200)).max(50);
 const criteria = z.object({
-  industries: z.array(z.string()).optional(),
-  titles: z.array(z.string()).optional(),
-  seniorities: z.array(z.string()).optional(),
-  departments: z.array(z.string()).optional(),
-  companySizes: z.array(z.string()).optional(),
-  locations: z.array(z.string()).optional(),
-  countries: z.array(z.string()).optional(),
-  keywords: z.array(z.string()).optional(),
-  excludeKeywords: z.array(z.string()).optional(),
-  techStack: z.array(z.string()).optional(),
+  industries: facet.optional(),
+  titles: facet.optional(),
+  seniorities: facet.optional(),
+  departments: facet.optional(),
+  companySizes: facet.optional(),
+  locations: facet.optional(),
+  countries: facet.optional(),
+  keywords: facet.optional(),
+  excludeKeywords: facet.optional(),
+  techStack: facet.optional(),
 });
 // description, seedDomains and clientId are nullable because GET returns null for them, and
 // the edit form sends back what it read.
@@ -44,10 +49,14 @@ icpRoutes.post("/", zValidator("json", icpInput), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
+  await assertRowCap(db, icps, oid, "icps");
   await assertOwned(clients, b.clientId, oid, "Client", c);
   const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description ?? null, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [], clientId: b.clientId ?? null }).returning();
   let jobId: string | null = null;
-  if (b.buildWithAi && (b.description || b.seedDomains?.length)) jobId = (await enqueue(db, "icp.build", { icpId: row.id, product: b.product }, { orgId: oid })).id;
+  if (b.buildWithAi && (b.description || b.seedDomains?.length)) {
+    await guardJobCapacity(db, oid, "icp.build");
+    jobId = (await enqueue(db, "icp.build", { icpId: row.id, product: b.product }, { orgId: oid })).id;
+  }
   return c.json({ icp: row, jobId }, 201);
 });
 
@@ -88,6 +97,7 @@ icpRoutes.post("/:id/build", async (c) => {
   const { db } = getDb();
   const row = await db.query.icps.findFirst({ where: and(eq(icps.id, c.req.param("id")), eq(icps.orgId, orgId(c))) });
   if (!row) throw notFound("ICP");
+  await guardJobCapacity(db, row.orgId, "icp.build");
   const job = await enqueue(db, "icp.build", { icpId: row.id }, { orgId: row.orgId });
   return c.json({ jobId: job.id }, 202);
 });

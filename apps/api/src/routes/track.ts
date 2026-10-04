@@ -7,6 +7,13 @@ import { canonicalEmail } from "../services/leads.js";
 /** Public tracking endpoints: open pixel, click redirect, unsubscribe. */
 export const trackRoutes = new Hono();
 
+// Every address under /t carries a per-message token in its path. Nothing here may be kept
+// by a browser or a shared cache unless a handler says otherwise itself.
+trackRoutes.use("*", async (c, next) => {
+  await next();
+  if (!c.res.headers.has("cache-control")) c.res.headers.set("cache-control", "no-store");
+});
+
 const GIF = Buffer.from("R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7", "base64");
 
 trackRoutes.get("/o/:token", async (c) => {

@@ -1,5 +1,5 @@
 import { and, asc, inArray, campaignContacts, campaigns, companies, emailAccounts, enqueue, eq, events, getDb, integrations, leads, limitsFor, lte, messages, organizations, sequenceSteps, suppressions, tasks, sql, type Campaign, type CampaignSettings, type EmailAccount, type Organization } from "@prospex/db";
-import { allocateVariant, coerceIntent, createAiProviderForPlan, domainOfEmail, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, redact, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type GuardContext, type SendingHealth } from "@prospex/core";
+import { allocateVariant, coerceIntent, domainOfEmail, encodeURIComponentSafe, evaluateSendingHealth, generateOutreach, leadVars, pickVariantWinner, redact, renderTemplate, textToHtml, normalizePhone, sendWhatsApp, type ExperimentResult, type GuardContext, type SendingHealth } from "@prospex/core";
 import { consume, effectiveLimits } from "@prospex/db";
 import { env } from "../env.js";
 import { addressOf } from "../lib/sanitize.js";
@@ -9,6 +9,8 @@ import { NO_PLATFORM_MAILER, sendMail, type MailerConfig } from "../lib/mailer.j
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
 import { canonicalEmail } from "./leads.js";
+import { aiForOrg } from "../lib/ai.js";
+import { contactBlock } from "../lib/privacySuppression.js";
 import { workspaceEmailVerified } from "../lib/emailVerification.js";
 import { PAUSED_FOR_DELETION, pendingDeletion } from "./accountDeletion.js";
 
@@ -535,6 +537,17 @@ export async function tickCampaign(campaignId: string) {
       await db.update(campaignContacts).set({ status: "completed", updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
       continue;
     }
+    // A manual step (LinkedIn, call, custom task) is contact too. A person who unsubscribed,
+    // or who is on the workspace's or the platform's do-not-contact list, gets no task
+    // created for them - sendStep makes the same check for email and WhatsApp.
+    if (step.channel !== "email" && step.channel !== "whatsapp") {
+      const person = await db.query.leads.findFirst({ where: and(eq(leads.id, cc.leadId), eq(leads.orgId, campaign.orgId)), columns: { email: true, status: true } });
+      const block = person ? await contactBlock(campaign.orgId, [canonicalEmail(person.email), person.email], { leadStatus: person.status }) : null;
+      if (block) {
+        await stopContact(cc.id, "unsubscribed", block.message);
+        continue;
+      }
+    }
     await db.update(campaignContacts).set({ status: "active", nextSendAt: null, updatedAt: new Date() }).where(eq(campaignContacts.id, cc.id));
     if (step.channel === "email" || step.channel === "whatsapp") {
       await enqueue(db, "message.send", { campaignId: campaign.id, contactId: cc.id, stepId: step.id }, { orgId: campaign.orgId, priority: 5 });
@@ -895,6 +908,45 @@ function orgSenderDefaults(org: Organization | null | undefined) {
 }
 
 /**
+ * The workspace's postal address for the foot of its emails, or "" when none is set.
+ *
+ * Stored as `organizations.settings.mailingAddress` (Settings > Workspace). Plain text: at
+ * most 300 characters over at most six lines, control characters removed - it is written
+ * into every email this workspace sends, so it is cleaned here as well as where it is saved.
+ */
+export function mailingAddressOf(org: { settings?: unknown } | null | undefined): string {
+  const raw = org?.settings && typeof org.settings === "object" ? (org.settings as Record<string, unknown>).mailingAddress : undefined;
+  if (typeof raw !== "string") return "";
+  return raw
+    .replace(/\r\n?/g, "\n")
+    // eslint-disable-next-line no-control-regex
+    .replace(/[\u0000-\u0009\u000B-\u001F\u007F\u0085\u2028\u2029]/g, " ")
+    .split("\n")
+    .map((l) => l.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(0, 6)
+    .join("\n")
+    .slice(0, 300);
+}
+
+const escapeHtml = (v: string) => v.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+/**
+ * The foot of every email sent to a prospect: how to stop hearing from this sender and,
+ * when the workspace has set one, the sender's postal address. One function, so a sequence
+ * email and a reply typed by hand end the same way.
+ */
+export function unsubscribeFooter(unsubUrl: string, mailingAddress = ""): { text: string; html: string } {
+  const address = mailingAddress.trim();
+  return {
+    text: `\n\n--\nIf you'd rather not hear from me, reply "unsubscribe" or click: ${unsubUrl}${address ? `\n${address}` : ""}`,
+    html:
+      `<p style="color:#888;font-size:12px;margin-top:2em">If you'd rather not hear from me, <a href="${unsubUrl}" style="color:#888">unsubscribe here</a>.` +
+      `${address ? `<br>${escapeHtml(address).replace(/\n/g, "<br>")}` : ""}</p>`,
+  };
+}
+
+/**
  * Send one step of a sequence to one contact.
  *
  * Every way this can end leaves the contact somewhere a later tick can see it: sent and
@@ -954,6 +1006,17 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
   }
   const company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, campaign.orgId)) }) : null;
   const defaults = orgSenderDefaults(org);
+
+  // Do-not-contact, for EVERY channel, before anything is rendered or sent. The check used to
+  // sit inside the email branch below, so a WhatsApp step went out to a person who had
+  // unsubscribed. Three things stop a contact: the workspace's own list, the platform-wide
+  // list (people who asked never to hear from anyone using Scout), and the lead's own
+  // "unsubscribed" status - which is what covers a lead with a phone number and no email.
+  const block = await contactBlock(campaign.orgId, [canonicalEmail(lead.email), lead.email], { leadStatus: lead.status });
+  if (block) {
+    await stopContact(cc.id, "unsubscribed", block.message);
+    return { skipped: "suppressed", list: block.list };
+  }
 
   if (step.channel === "whatsapp") {
     // One number or a person decides: a field holding several numbers, or text, is not
@@ -1225,7 +1288,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
       // The plan decides the engine: free workspaces never reach the paid model.
       // An AI outage falls back to the template instead of throwing - a throw used to burn
       // the job's retries and leave the contact stranded with no next send.
-      const out = await generateOutreach(createAiProviderForPlan(org.plan), {
+      const out = await generateOutreach(aiForOrg(org), {
         lead: leadForTpl,
         sender,
         subjectTemplate: variant.subjectTemplate,
@@ -1265,14 +1328,17 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
 
     const token = randomToken(16);
     let html = textToHtml(body);
-    if (s.trackClicks) html = html.replace(/href="(https?:\/\/[^"]+)"/g, (_, u) => `href="${env.apiUrl}/t/c/${token}?u=${encodeURIComponent(u)}"`);
+    if (s.trackClicks) html = html.replace(/href="(https?:\/\/[^"]+)"/g, (_, u) => `href="${env.apiUrl}/t/c/${token}?u=${encodeURIComponentSafe(u)}"`);
     if (s.trackOpens) html += `<img src="${env.apiUrl}/t/o/${token}.gif" width="1" height="1" alt="" style="display:none">`;
     let text = body;
     const unsub = `${env.apiUrl}/t/u/${token}`;
-    if (s.unsubscribeFooter) {
-      text += `\n\n--\nIf you'd rather not hear from me, reply "unsubscribe" or click: ${unsub}`;
-      html += `<p style="color:#888;font-size:12px;margin-top:2em">If you'd rather not hear from me, <a href="${unsub}" style="color:#888">unsubscribe here</a>.</p>`;
-    }
+    // Always. `unsubscribeFooter: false` is still accepted on a campaign (older API clients
+    // send it) and is ignored: an email with no way out in its body is the one thing a
+    // sender must not be able to configure. The workspace's mailing address follows it when
+    // one is set (Settings > Workspace).
+    const footer = unsubscribeFooter(unsub, mailingAddressOf(org));
+    text += footer.text;
+    html += footer.html;
     // RFC 8058 one-click unsubscribe. Gmail and Yahoo require it for bulk senders, and a
     // List-Unsubscribe without the -Post header is not one-click to them. The mailto goes
     // to the reply address, where an "unsubscribe" reply is already acted on.
@@ -1444,7 +1510,7 @@ export async function createStepTask(campaign: Campaign, contactId: string, lead
   const vars = leadVars({ ...(lead ?? {}), company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, { name: senderName, company: senderCompany });
   let body = renderTemplate(step.bodyTemplate, vars);
   if (step.aiPersonalize && lead) {
-    const out = await generateOutreach(createAiProviderForPlan(org?.plan ?? "free"), { lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, sender: { name: senderName, company: senderCompany, valueProp: String(os.valueProp ?? d.valueProp ?? ""), tone: (os.tone ?? d.tone) as "friendly" | undefined }, bodyTemplate: step.bodyTemplate, instructions: `${step.channel === "linkedin_connect" ? "This is a LinkedIn connection note: max 280 characters, no subject." : step.channel === "linkedin_message" ? "This is a LinkedIn DM: short, casual, no subject line." : step.channel === "call" ? "Write a 60-second call opener script." : ""} ${step.aiInstructions ?? ""}`, stepNo: step.stepNo,
+    const out = await generateOutreach(aiForOrg(org ?? { plan: "free" }), { lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, sender: { name: senderName, company: senderCompany, valueProp: String(os.valueProp ?? d.valueProp ?? ""), tone: (os.tone ?? d.tone) as "friendly" | undefined }, bodyTemplate: step.bodyTemplate, instructions: `${step.channel === "linkedin_connect" ? "This is a LinkedIn connection note: max 280 characters, no subject." : step.channel === "linkedin_message" ? "This is a LinkedIn DM: short, casual, no subject line." : step.channel === "call" ? "Write a 60-second call opener script." : ""} ${step.aiInstructions ?? ""}`, stepNo: step.stepNo,
       // A task body is pasted by a person into LinkedIn or read out on a call, so the same
       // output guard applies; these channels have no subject line. A rejected draft leaves
       // the rendered template in place.

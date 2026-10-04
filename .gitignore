@@ -6,3 +6,9 @@ dist
 .DS_Store
 .pgdata
 coverage
+# Never commit environment files, keys or certificates (the .example files are the exception).
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12

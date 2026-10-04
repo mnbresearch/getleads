@@ -1,5 +1,6 @@
 import { and, agentRuns, desc, eq, getDb, leads, organizations, remainingPremiumBudget, scrapedLeads, type Db } from "@prospex/db";
-import { createAiProviderForPlan, redact, runLeadPipelineDetailed, scoreLeadRules, type IcpCriteria, type PipelineLead } from "@prospex/core";
+import { aiForOrg } from "../../lib/ai.js";
+import { redact, runLeadPipelineDetailed, scoreLeadRules, type IcpCriteria, type PipelineLead } from "@prospex/core";
 import { chargeNewLead, upsertLead } from "../leads.js";
 import { tryConsume } from "../../lib/quota.js";
 import { emitEvent } from "../../lib/events.js";
@@ -110,7 +111,7 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
       {
         // Plan-gated engine, and the paid-provider budget passed in so the provider call
         // itself is capped. Without it a free workspace drew unlimited Apollo leads here.
-        ai: createAiProviderForPlan(org?.plan ?? "free"),
+        ai: aiForOrg(org ?? { plan: "free" }),
         icp: criteria,
         verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
         maxProviderLeads: await remainingPremiumBudget(db, orgIdValue),

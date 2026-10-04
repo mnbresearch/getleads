@@ -3,11 +3,13 @@
 set -euo pipefail
 API=${API:-http://localhost:8080}
 J='content-type: application/json'
+# A fresh, long password per run: sign-up refuses the common ones ("password123" among them).
+PW="Smoke-$(date +%s)-$RANDOM$RANDOM-ok"
 pass() { echo "  ✓ $1"; }
 fail() { echo "  ✗ $1"; echo "$2"; exit 1; }
 py() { python3 -c "import sys,json;d=json.load(sys.stdin);$1"; }
 
-R=$(curl -s -X POST $API/v1/auth/signup -H "$J" -d "{\"email\":\"v2+$RANDOM@example.com\",\"password\":\"password123\",\"name\":\"V2\",\"orgName\":\"V2 Co\"}")
+R=$(curl -s -X POST $API/v1/auth/signup -H "$J" -d "{\"email\":\"v2+$RANDOM@example.com\",\"password\":\"$PW\",\"name\":\"V2\",\"orgName\":\"V2 Co\"}")
 KEY=$(echo "$R" | py 'print(d["apiKey"])'); TOKEN=$(echo "$R" | py 'print(d["token"])')
 H=(-H "x-api-key: $KEY" -H "$J")
 
@@ -53,7 +55,7 @@ curl -sf -X POST $API/v1/tools/tasks/$TID/complete "${H[@]}" -d '{"outcome":"don
 curl -s "$API/v1/tools/team" -H "authorization: Bearer $TOKEN" | py 'print("   seats", d["seats"])' && pass "team"
 INV=$(curl -s -X POST "$API/v1/tools/team/invite" -H "authorization: Bearer $TOKEN" -H "$J" -d '{"email":"colleague@example.com"}')
 LINK=$(echo "$INV" | py 'print(d["link"])'); TOK=${LINK##*token=}
-curl -s -X POST $API/v1/auth/join -H "$J" -d "{\"token\":\"$TOK\",\"password\":\"password123\",\"name\":\"Colleague\"}" | grep -q '"token"' && pass "invite accepted → member JWT"
+curl -s -X POST $API/v1/auth/join -H "$J" -d "{\"token\":\"$TOK\",\"password\":\"$PW\",\"name\":\"Colleague\"}" | grep -q '"token"' && pass "invite accepted → member JWT"
 AP=$(curl -s -X POST $API/v1/tools/autopilots "${H[@]}" -d '{"name":"Daily fintech founders","query":{"query":"Founders of fintech startups in Bengaluru"},"dailyLeads":5}')
 echo "$AP" | grep -q '"active":true' && pass "autopilot created"
 curl -s -X POST $API/v1/tools/saved-searches "${H[@]}" -d '{"name":"Growth heads","query":{"titles":["Head of Growth"],"locations":["Mumbai"]},"alert":true,"alertEmail":"me@example.com"}' | grep -q '"alert":true' && pass "saved search with alert"

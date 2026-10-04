@@ -1,9 +1,15 @@
 /**
- * Website visitor identification (reverse IP → company), keyless.
- * Providers: ipapi.is (free 1k/day), ip-api.com (free 45/min, non-commercial), ipinfo.io (50k/mo with free token), reverse DNS.
+ * Website visitor identification (reverse IP → company).
+ * Providers, all over HTTPS: ipapi.is (free 1k/day), then ipinfo.io (50k/mo with a token, a
+ * small keyless allowance without one), then reverse DNS.
  * Consumer ISPs are filtered so only businesses surface.
+ *
+ * A visitor's address is personal data in transit to a third party, so it never travels in
+ * clear text: ip-api.com's free tier answers on plain HTTP only (and is licensed for
+ * non-commercial use), so it is no longer asked.
  */
 import { promises as dns } from "node:dns";
+import { isIP } from "node:net";
 import { fetchJson } from "../util/http.js";
 import { extractDomain, isSocialOrAggregator, rootDomain } from "../util/domain.js";
 import { meter } from "../util/meter.js";
@@ -41,6 +47,9 @@ export async function identifyIp(ip: string, opts: { ipinfoToken?: string } = {}
   const c = cache.get(ip);
   if (c && Date.now() - c.at < TTL) return c.v;
   let out: IpIdentity = { ip, isIsp: false, isHosting: false, provider: "none", resolved: false };
+  // Not an address at all (a mangled proxy header): an answer, and nothing to send anywhere.
+  // It is never placed in a provider URL, where a crafted value could add parameters.
+  if (!isIP(ip)) return { ...out, isIsp: true, provider: "invalid", resolved: true };
   if (isPrivate(ip)) {
     // A private range is a real answer arrived at without asking anyone.
     out = { ...out, isIsp: true, provider: "private", resolved: true };
@@ -49,7 +58,7 @@ export async function identifyIp(ip: string, opts: { ipinfoToken?: string } = {}
   }
   // 1) ipapi.is - free tier returns flat strings; paid returns objects. Handle both.
   meter("ipapi_is");
-  const a = await fetchJson<Record<string, unknown>>(`https://api.ipapi.is/?q=${ip}`, { timeoutMs: 6000 });
+  const a = await fetchJson<Record<string, unknown>>(`https://api.ipapi.is/?q=${encodeURIComponent(ip)}`, { timeoutMs: 6000 });
   if (a && (a.company || a.asn)) {
     const companyObj = typeof a.company === "object" && a.company ? (a.company as { name?: string; domain?: string; type?: string }) : null;
     const asnObj = typeof a.asn === "object" && a.asn ? (a.asn as { asn?: number; org?: string; type?: string }) : null;
@@ -69,19 +78,17 @@ export async function identifyIp(ip: string, opts: { ipinfoToken?: string } = {}
       provider: "ipapi.is",
       resolved: true,
     };
-  } else if (opts.ipinfoToken) {
-    meter("ipinfo");
-    const b = await fetchJson<{ org?: string; country?: string; city?: string; company?: { name?: string; domain?: string; type?: string }; privacy?: { hosting?: boolean } }>(`https://ipinfo.io/${ip}?token=${opts.ipinfoToken}`, { timeoutMs: 6000 });
-    if (b) {
-      const name = b.company?.name ?? b.org?.replace(/^AS\d+\s+/, "");
-      out = { ip, orgName: name, asn: b.org?.match(/^AS\d+/)?.[0], isIsp: b.company?.type === "isp" || (!!name && ISP_WORDS.test(name)), isHosting: !!b.privacy?.hosting || b.company?.type === "hosting", country: b.country, city: b.city, domainHint: b.company?.domain, provider: "ipinfo", resolved: true };
-    }
   } else {
-    meter("ip_api");
-    const d = await fetchJson<{ status?: string; org?: string; isp?: string; as?: string; country?: string; city?: string; hosting?: boolean; mobile?: boolean }>(`http://ip-api.com/json/${ip}?fields=status,org,isp,as,country,city,hosting,mobile`, { timeoutMs: 6000 });
-    if (d?.status === "success") {
-      const name = d.org || d.isp;
-      out = { ip, orgName: name, asn: d.as?.split(" ")[0], isIsp: !!d.mobile || (!!name && ISP_WORDS.test(name)) || (!!d.isp && d.org === d.isp && ISP_WORDS.test(d.isp)), isHosting: !!d.hosting, country: d.country, city: d.city, provider: "ip-api", resolved: true };
+    // ipinfo.io, over HTTPS. The token (when there is one) travels in a header, not in the
+    // URL, so it cannot end up in a log line or an error message that quotes the address.
+    meter("ipinfo");
+    const b = await fetchJson<{ org?: string; country?: string; city?: string; bogon?: boolean; company?: { name?: string; domain?: string; type?: string }; privacy?: { hosting?: boolean } }>(
+      `https://ipinfo.io/${encodeURIComponent(ip)}/json`,
+      { timeoutMs: 6000, headers: opts.ipinfoToken ? { authorization: `Bearer ${opts.ipinfoToken}`, accept: "application/json" } : { accept: "application/json" } },
+    );
+    if (b && (b.org || b.company || b.country || b.bogon)) {
+      const name = b.company?.name ?? b.org?.replace(/^AS\d+\s+/, "");
+      out = { ip, orgName: name, asn: b.org?.match(/^AS\d+/)?.[0], isIsp: !!b.bogon || b.company?.type === "isp" || (!!name && ISP_WORDS.test(name)), isHosting: !!b.privacy?.hosting || b.company?.type === "hosting" || (!!name && HOSTING_WORDS.test(name)), country: b.country, city: b.city, domainHint: b.company?.domain ? extractDomain(b.company.domain) ?? undefined : undefined, provider: "ipinfo", resolved: true };
     }
   }
   // 2) reverse DNS often reveals corporate domains

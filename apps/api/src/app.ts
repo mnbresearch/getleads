@@ -5,7 +5,7 @@ import { secureHeaders } from "hono/secure-headers";
 import { randomBytes } from "node:crypto";
 import { getDb } from "@prospex/db";
 import { env } from "./env.js";
-import { errorHandler } from "./lib/errors.js";
+import { describeError, errorHandler } from "./lib/errors.js";
 import { requireInternalToken, type Env } from "./middleware.js";
 import { authRoutes } from "./routes/auth.js";
 import { leadRoutes } from "./routes/leads.js";
@@ -192,12 +192,26 @@ function docsCsp(nonce: string): string {
   ].join("; ");
 }
 
+/**
+ * Health probes arrive every few seconds; while the database is down each one fails. One log
+ * line per 30 seconds says everything the hundredth would.
+ */
+let lastHealthFailureLog = 0;
+function logHealthFailure(e: unknown) {
+  const now = Date.now();
+  if (now - lastHealthFailureLog < 30_000) return;
+  lastHealthFailureLog = now;
+  const d = describeError(e);
+  console.error(`[api] health check: database unavailable: ${d.name}${d.code ? ` [${d.code}]` : ""}: ${d.message}`);
+}
+
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 /**
  * Which browser origins may call the API: the web app (APP_URL), anything listed in
  * CORS_EXTRA_ORIGINS, localhost (development against a deployed API), and whatever
  * CORS_ALLOW_REGEX matches - by default any https *.vercel.app origin, which keeps Vercel
- * preview deployments working. (*.netlify.app and *.pages.dev used to be reflected as well;
+ * preview deployments working ("none" turns the pattern off). The pattern is always matched
+ * against the whole origin (see compileOriginRegex in env.ts). (*.netlify.app and *.pages.dev used to be reflected as well;
  * nothing of ours is hosted there. Add them through CORS_ALLOW_REGEX if that changes.)
  */
 export function corsOriginAllowed(origin: string): boolean {
@@ -223,9 +237,14 @@ export function createApp(opts: AppOptions = {}) {
     await next();
     // Set after the handler so the document routes below can supply their own policy.
     if (!c.res.headers.has("content-security-policy")) c.res.headers.set("content-security-policy", c.req.path.startsWith("/t/") ? CSP_PAGES : CSP_API);
-    // Sign-in and admin responses carry tokens; no cache anywhere should keep one.
+    // Every API answer is one workspace's data, or a token, or an error about them: no cache
+    // anywhere - a browser's, a proxy's, a CDN's - should keep a copy. This used to cover only
+    // sign-in and admin responses; the public report link (the token is in the URL, so there
+    // is no Authorization header to stop a shared cache) and every list of leads were left to
+    // whatever heuristic the cache in the middle applied. A route that wants caching sets its
+    // own Cache-Control and is left alone.
     const p = c.req.path;
-    if ((p.startsWith("/v1/auth/") || p.startsWith("/v1/admin/") || p.startsWith("/internal/")) && !c.res.headers.has("cache-control")) c.res.headers.set("cache-control", "no-store");
+    if ((p.startsWith("/v1/") || p === "/v1" || p.startsWith("/internal/")) && !c.res.headers.has("cache-control")) c.res.headers.set("cache-control", "no-store");
   });
   // CORS comes BEFORE the body limit (and before every route). The limiter answers 413 itself
   // without calling the rest of the chain, so with CORS registered after it that 413 carried no
@@ -261,7 +280,12 @@ export function createApp(opts: AppOptions = {}) {
       await sql`select 1`;
       return c.json({ ok: true, db: "up", jobMode: env.jobMode, time: new Date().toISOString() });
     } catch (e) {
-      return c.json({ ok: false, db: "down", error: (e as Error).message }, 503);
+      // The driver's message names the database host, its port, or the role that was refused
+      // ("getaddrinfo ENOTFOUND <host>", "password authentication failed for user ..."). This
+      // endpoint is public, so the caller gets the state and a fixed reason; the detail goes
+      // to the log, where the operator is.
+      logHealthFailure(e);
+      return c.json({ ok: false, db: "down", error: "database unavailable" }, 503);
     }
   });
   app.get("/openapi.json", (c) => c.json(openapi(env.apiUrl)));

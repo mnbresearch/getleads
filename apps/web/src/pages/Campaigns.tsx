@@ -302,6 +302,15 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
             ))}
           </div>
         </div>
+        {/* Stated, not offered: the unsubscribe link is on every email whatever a campaign's
+            settings say, so a switch here would be a control that does nothing. */}
+        <div className="flex items-start gap-2 rounded-lg border border-black/10 bg-black/[0.02] p-3 text-sm" data-testid="unsubscribe-always">
+          <svg viewBox="0 0 20 20" className="mt-0.5 h-4 w-4 shrink-0 fill-emerald-700" aria-hidden><path d="M7.6 13.2 4.4 10l-1.1 1.1 4.3 4.3 9.1-9.1-1.1-1.1z" /></svg>
+          <div className="min-w-0">
+            <div className="font-medium text-ink-50">Unsubscribe link: always included</div>
+            <p className="mt-0.5 text-xs text-ink-400">Every email in this campaign ends with an unsubscribe link. It cannot be turned off. Anyone who uses it is added to your do-not-contact list and the sequence to them stops. If your workspace has a mailing address (<Link className="text-brand-600 hover:underline" to="/settings">Settings</Link>), it is shown there too.</p>
+          </div>
+        </div>
         <button className="btn-primary w-full justify-center" disabled={busy || !f.name || steps.length === 0} onClick={save}>{busy ? "Saving…" : "Save campaign"}</button>
       </div>
     </Modal>
@@ -400,12 +409,14 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
         <div><label className="label">From name</label><input className="input" value={f.fromName} onChange={(e) => setF({ ...f, fromName: e.target.value })} /></div>
         <div><label className="label">From email</label><input className="input" value={f.fromEmail} onChange={(e) => setF({ ...f, fromEmail: e.target.value })} /></div>
         <div><label className="label">Reply-to (optional)</label><input className="input" value={f.replyTo} onChange={(e) => setF({ ...f, replyTo: e.target.value })} /></div>
-        {f.provider === "resend" && <div><label className="label">Resend API key</label><input className="input" value={f.apiKey} onChange={(e) => setF({ ...f, apiKey: e.target.value })} /></div>}
+        {f.provider === "resend" && <div><label className="label" htmlFor="sender-resend-key">Resend API key</label><input id="sender-resend-key" className="input" autoComplete="off" spellCheck={false} value={f.apiKey} onChange={(e) => setF({ ...f, apiKey: e.target.value })} /></div>}
         {f.provider === "smtp" && <>
           <div><label className="label">SMTP host</label><input className="input" value={f.host} onChange={(e) => setF({ ...f, host: e.target.value })} placeholder="smtp-relay.brevo.com" /></div>
           <div><label className="label">Port</label><input type="number" className="input" value={f.port} onChange={(e) => setF({ ...f, port: Number(e.target.value) })} /></div>
-          <div><label className="label">Username</label><input className="input" value={f.user} onChange={(e) => setF({ ...f, user: e.target.value })} /></div>
-          <div><label className="label">Password</label><input type="password" className="input" value={f.pass} onChange={(e) => setF({ ...f, pass: e.target.value })} /></div>
+          <div><label className="label" htmlFor="sender-smtp-user">Username</label><input id="sender-smtp-user" className="input" autoComplete="off" value={f.user} onChange={(e) => setF({ ...f, user: e.target.value })} /></div>
+          {/* new-password: this is the mail server's password, not the Scout one. Without it a
+              password manager offers (and can silently fill) the person's Scout sign-in here. */}
+          <div><label className="label" htmlFor="sender-smtp-pass">Password</label><input id="sender-smtp-pass" type="password" autoComplete="new-password" className="input" value={f.pass} onChange={(e) => setF({ ...f, pass: e.target.value })} /></div>
         </>}
         <div className="sm:col-span-2"><label className="label">Signature</label><textarea className="input h-16" value={f.signature} onChange={(e) => setF({ ...f, signature: e.target.value })} /></div>
       </div>

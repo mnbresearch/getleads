@@ -1,0 +1,22 @@
+# Nothing in the image that the server does not need - above all no secrets and no history.
+.git
+.github
+**/.env
+**/.env.*
+!**/.env.example
+**/node_modules
+**/dist
+**/coverage
+**/*.log
+**/*.zip
+**/*.pem
+**/*.key
+.pgdata
+.DS_Store
+docs
+scripts
+*.md
+Dockerfile
+docker-compose.yml
+fly.toml
+render.yaml

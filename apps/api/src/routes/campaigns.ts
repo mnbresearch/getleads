@@ -3,7 +3,9 @@ import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions, type EmailAccount } from "@prospex/db";
 import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPublicHost, isSsrfBlocked, redact } from "@prospex/core";
-import { aiFor, NO_AI } from "../lib/ai.js";
+import { AI_OFF_NOTE, aiDisabled, aiFor, NO_AI } from "../lib/ai.js";
+import { contactBlock } from "../lib/privacySuppression.js";
+import { assertRowCap } from "../lib/limits.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
 import { randomToken } from "../lib/crypto.js";
@@ -12,7 +14,7 @@ import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, experimentForStep, leadsWithUsableEmail, markReplied, reserveManualSend, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, leadsWithUsableEmail, mailingAddressOf, markReplied, reserveManualSend, unsubscribeFooter, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
@@ -267,6 +269,8 @@ campaignRoutes.post("/", zValidator("json", campaignInput), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
   const { db } = getDb();
+  // A generous ceiling on how many campaigns one workspace can hold (lib/limits.ts); existing ones are untouched.
+  await assertRowCap(db, campaigns, oid, "campaigns");
   // Every id in the body names a row this org must actually own. See lib/ownership.ts.
   await assertOwned(emailAccounts, b.emailAccountId, oid, "Email account", c);
   await assertOwned(icps, b.icpId, oid, "ICP", c);
@@ -517,7 +521,10 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
   const company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, oid)) }) : null;
   const account = cp.emailAccountId ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, cp.emailAccountId), eq(emailAccounts.orgId, oid)) }) : null;
   const s = cp.settings as Record<string, unknown>;
-  if (step.aiPersonalize) await consume(db, oid, "aiMessages", 1);
+  // A workspace with AI assistance turned off gets the rendered template, is not charged
+  // for an AI message, and is told why the preview is not personalised.
+  const previewAiOff = step.aiPersonalize && aiDisabled(c.get("auth").org);
+  if (step.aiPersonalize && !previewAiOff) await consume(db, oid, "aiMessages", 1);
   const out = await generateOutreach(step.aiPersonalize ? aiFor(c.get("auth")) : NO_AI, {
     lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null },
     sender: { name: account?.fromName ?? "Me", company: String(s.senderCompany ?? ""), title: s.senderTitle ? String(s.senderTitle) : undefined, valueProp: String(s.valueProp ?? step.aiInstructions ?? ""), signature: account?.signature ?? undefined, tone: s.tone as "friendly" | undefined },
@@ -526,7 +533,7 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
     instructions: step.aiInstructions ?? undefined,
     stepNo: step.stepNo,
   });
-  return c.json(out);
+  return c.json(previewAiOff ? { ...out, aiOff: true, note: AI_OFF_NOTE } : out);
 });
 
 /** Standalone AI message generation (no campaign needed) - for agents. */
@@ -559,7 +566,7 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   return c.json({
     ...out,
     ai: personalised,
-    ...(personalised ? {} : { note: aiConfigured ? "The AI engine did not return a usable draft - this is a template, not a personalised draft." : "AI drafting isn't switched on for this workspace yet, so this is a template, not a personalised draft. Contact support to enable it." }),
+    ...(personalised ? {} : { note: aiConfigured ? "The AI engine did not return a usable draft - this is a template, not a personalised draft." : aiDisabled(c.get("auth").org) ? "AI assistance is turned off for this workspace, so this is a template, not a personalised draft. An owner or admin can turn it back on under Settings." : "AI drafting isn't switched on for this workspace yet, so this is a template, not a personalised draft. Contact support to enable it." }),
   });
 });
 
@@ -604,11 +611,25 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().m
   if (!email) throw badRequest("`from` must be the sender's address: either a bare address (jane@example.com) or Name <jane@example.com>.");
   const { db } = getDb();
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
-  const ai = aiFor(c.get("auth"));
+  /**
+   * Matched BEFORE any AI sees it.
+   *
+   * This endpoint is fed by mail forwarding, so it receives whatever lands in the mailbox -
+   * newsletters, colleagues, family. The text used to go to the AI classifier first and was
+   * only then compared with the workspace's leads, so mail from people who had nothing to do
+   * with any campaign was sent to a third party. Now the sender must be one of this
+   * workspace's leads before a model is asked anything; mail from anyone else is classified
+   * by the built-in rules (which is all it takes to honour an "unsubscribe") and goes no
+   * further. A workspace that has turned AI assistance off gets the rules for every reply.
+   */
+  const knownSender = await db.query.leads.findFirst({ where: and(eq(leads.orgId, oid), eq(leads.email, email)), columns: { id: true } });
+  const aiOff = aiDisabled(org ?? c.get("auth").org);
+  const ai = knownSender && !aiOff ? aiFor(c.get("auth")) : NO_AI;
   // Classification is an AI call and is metered like one. Over quota it still runs - on the
   // rule-based path - because marking the reply (which stops the sequence) must never depend
-  // on the AI budget. The response says which path was taken.
-  const clsCharge = await tryConsume(db, oid, "aiMessages", 1);
+  // on the AI budget. The response says which path was taken. Nothing is charged for a
+  // message no model will see.
+  const clsCharge: Awaited<ReturnType<typeof tryConsume>> = knownSender && !aiOff ? await tryConsume(db, oid, "aiMessages", 1) : { ok: true };
   const replyText = `${b.subject ?? ""}\n${b.text}`;
   /**
    * Nor on the AI provider being up. A provider error (a 429, a timeout) used to escape
@@ -625,7 +646,7 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().m
   // The intent is model output: it is written to messages.intent and into a lead tag
   // (`replied:<intent>`), so it is held to the known set before it is stored anywhere.
   const cls = { ...raw, intent: asIntent(raw?.intent), confidence: typeof raw?.confidence === "number" && Number.isFinite(raw.confidence) ? Math.min(1, Math.max(0, raw.confidence)) : 0 };
-  let aiSkipped: string | undefined = clsCharge.ok ? (aiFailed ? "ai_unavailable" : undefined) : clsCharge.reason === "quota" ? "quota" : "error";
+  let aiSkipped: string | undefined = !knownSender ? undefined : aiOff ? "ai_off" : clsCharge.ok ? (aiFailed ? "ai_unavailable" : undefined) : clsCharge.reason === "quota" ? "quota" : "error";
   // The message itself goes along so an out-of-office auto-reply is not taken for a real one.
   const matched = await markReplied(oid, email, cls.intent, { subject: b.subject, text: b.text });
   if (matched) {
@@ -679,7 +700,7 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().m
       draftReply: draftReply ?? undefined,
     });
   }
-  return c.json({ matched, intent: cls.intent, confidence: cls.confidence, ...(aiSkipped ? { skipped: aiSkipped, note: aiSkipped === "quota" ? "AI quota reached: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_unavailable" ? "The AI engine did not answer: the reply was classified with rules only and no draft was written." : "Could not record AI usage, so the AI steps were skipped." } : {}) });
+  return c.json({ matched, intent: cls.intent, confidence: cls.confidence, ...(aiSkipped ? { skipped: aiSkipped, note: aiSkipped === "quota" ? "AI quota reached: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_unavailable" ? "The AI engine did not answer: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_off" ? "AI assistance is turned off for this workspace: the reply was classified with rules only and no draft was written." : "Could not record AI usage, so the AI steps were skipped." } : {}) });
 });
 
 /** Send (or edit-and-send) the AI-drafted follow-up for an inbound message. */
@@ -706,8 +727,12 @@ campaignRoutes.post(
     if (!to) throw badRequest("This lead's email is not a single valid address, so no email was sent. Correct it on the lead first.");
     // The same gates every campaign send passes: it would otherwise email someone who had
     // unsubscribed. Compared on the canonical address and on the stored spelling.
-    const suppressed = await db.query.suppressions.findFirst({ where: and(eq(suppressions.orgId, oid), inArray(suppressions.email, [...new Set([to, lead.email.trim().toLowerCase()])])) });
-    if (suppressed || lead.status === "unsubscribed") throw new ApiError(409, `${to} has unsubscribed or is on your suppression list, so no email was sent.`, "suppressed");
+    // The workspace's own list, the lead's own "unsubscribed" status, and the platform-wide
+    // list of people who asked never to be contacted through Scout: one check, the same one
+    // a sequence send makes.
+    const block = await contactBlock(oid, [to, lead.email], { leadStatus: lead.status });
+    if (block?.list === "platform") throw new ApiError(409, `${to} has asked not to be contacted through Scout, so no email was sent.`, "suppressed");
+    if (block) throw new ApiError(409, `${to} has unsubscribed or is on your suppression list, so no email was sent.`, "suppressed");
 
     // Both scoped to the caller's org. This path also reaches mailerFromAccount, so it
     // decrypts SMTP credentials and sends from that address - exactly what the sendStep
@@ -749,7 +774,8 @@ campaignRoutes.post(
     // A reply still carries a way out, and the same one-click header a sequence email has.
     const unsubToken = randomToken(16);
     const unsub = `${env.apiUrl}/t/u/${unsubToken}`;
-    const text = `${bodyText}\n\n--\nIf you'd rather not hear from me, reply "unsubscribe" or click: ${unsub}`;
+    // The same foot as a sequence email, including the workspace's mailing address when set.
+    const text = `${bodyText}${unsubscribeFooter(unsub, mailingAddressOf(sendOrg)).text}`;
     const mailto = account.replyTo ?? (account.provider === "system" ? null : account.fromEmail);
     const [msg] = await db
       .insert(messages)
@@ -795,7 +821,9 @@ campaignRoutes.post(
         const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
         const settings = (org?.settings ?? {}) as Record<string, unknown>;
         const prior = (settings.aiReplyStyleExamples as { subject: string; body: string }[] | undefined) ?? [];
-        const next = [...prior, { subject, body: bodyText }].slice(-5);
+        // The lead is remembered with the example, so deleting that lead removes it (see
+        // lib/privacyErase.ts): an example is a copy of what was written to that person.
+        const next = [...prior, { subject, body: bodyText, leadId: lead.id }].slice(-5);
         await db.update(organizations).set({ settings: { ...settings, aiReplyStyleExamples: next } }).where(eq(organizations.id, oid)).catch(() => {});
       }
       return c.json({ sent: true, messageId: msg.id });

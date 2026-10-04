@@ -91,7 +91,7 @@ You can start in Stripe **test mode** (test-mode keys, e.g. `sk_test_...`) to ve
 
 | Variable | What it guards | Notes |
 |---|---|---|
-| `JWT_SECRET` | Every customer session | At least 32 random characters (`openssl rand -hex 32`); the API warns at startup if it is shorter and refuses to start on the built-in default. Rotating it signs every user out once. |
+| `JWT_SECRET` | Every customer session | At least 32 random characters (`openssl rand -hex 32`); the API warns at startup if it is shorter, and refuses to start in production on the built-in default, on a value published in the example files, or on fewer than 16 characters (section B10). Rotating it signs every user out once. |
 | `ENCRYPTION_KEY` | Stored SMTP passwords, CRM tokens, webhook secrets | Set it. Without it those are encrypted under `JWT_SECRET`. To rotate: put the new value in `ENCRYPTION_KEY` and the old one in `ENCRYPTION_KEYS_OLD` (comma-separated, newest first). Reads try every listed key; new writes use `ENCRYPTION_KEY`. Dropping the old value without listing it makes every saved sender and integration unreadable. |
 | `INTERNAL_TOKEN` | `/internal/jobs/run` only (the serverless job runner) | Sent in the `x-internal-token` header, never in the URL. It is **not** an admin credential. The Render deployment (embedded worker) does not call this endpoint at all. |
 | `ADMIN_API_TOKEN` | Server-to-server calls to `/v1/admin/*` (header `x-admin-token`) | Separate from `INTERNAL_TOKEN`. Leave it unset and the header path is off; the admin dashboard's password login still works. |
@@ -272,6 +272,54 @@ Redeploy the previous build; the database needs nothing undone. On the old code:
 - **Two-factor sign-in is not asked for.** Accounts that turned it on sign in with their password alone until you roll forward; their setting is kept.
 - `ADMIN_TOTP_SECRET` is ignored: the admin login is email + password again.
 - Email confirmation is not enforced and security emails are not sent.
+
+---
+
+### B10. Platform hardening in this release (read before deploying)
+
+Nothing here needs a migration. Three things are worth a minute BEFORE the deploy, because they change how the server starts and how it connects to the database.
+
+**1. Database connection security.** The server used to connect with "TLS if the other end offers it", and that setting overrode whatever `sslmode` the connection string asked for. Anyone able to sit between the API and the database could answer "no TLS" and receive the login in clear text. Now the server decides from the database host:
+
+| Database host | What happens | Same as before? |
+|---|---|---|
+| `localhost`, `127.0.0.1`, `::1` | no TLS | yes |
+| a single-label name (`db`, a platform's internal service name) or a private address | TLS when offered | yes |
+| `*.neon.tech` | TLS, **and the server's certificate is checked** (also when the string says `sslmode=require`) | stricter |
+| any other remote host | TLS required - the connection fails rather than fall back to plaintext | stricter |
+
+`sslmode=disable | require | verify-full` in `DATABASE_URL` is now honoured, and `DATABASE_SSL=disable | require | verify-full` overrides everything. For a provider that signs with its own CA (Supabase, Amazon RDS), use `DATABASE_SSL=verify-full` with `DATABASE_SSL_CA` set to that CA (PEM text, or a file path).
+
+Production is on Neon, so after this deploy the database certificate is verified. Neon's certificates are issued by a public CA and Node trusts it out of the box, so this needs no configuration. It could not be tried against Neon from the build environment, so do one of these:
+- *Check first (30 seconds):* `openssl s_client -starttls postgres -connect <your-neon-host>:5432 -servername <your-neon-host> -verify_return_error </dev/null 2>&1 | grep "Verify return code"` must print `0 (ok)`.
+- *Or deploy with a safety net:* add `DATABASE_SSL=require` in Render before deploying (the old code ignores it). The new code then encrypts without checking the certificate - already better than before. When convenient, remove the variable; the service restarts with verification on. If `/health` then reports the database as unavailable and the log says `[api] could not start` or `health check: database unavailable` with a certificate error, put the variable back and tell me.
+
+**2. The server refuses to start in production on a published or short secret.** Only two variables can do this: `JWT_SECRET` and `ENCRYPTION_KEY`, when one is a value printed in `.env.example` / these docs, is left as an unexpanded `$(openssl ...)`, or is shorter than 16 characters. `render.yaml` generates both, so a Blueprint deploy is not affected. If you ever set either by hand, check its length in Render before deploying. To replace a weak `ENCRYPTION_KEY`, put the new value in `ENCRYPTION_KEY` and the old one in `ENCRYPTION_KEYS_OLD`, or saved sender and CRM credentials become unreadable.
+
+Every other credential never stops a start. If `ADMIN_PASSWORD`, `ADMIN_API_TOKEN`, `INTERNAL_TOKEN`, `STRIPE_WEBHOOK_SECRET` or `RESEND_WEBHOOK_SECRET` is a well-known placeholder (`changeme`, `password`, an example from the docs), the one thing it guards is switched off - the admin login says it is not configured, the webhook is refused - and the log has a line starting `[env] SECURITY:` saying which and why. `ADMIN_JWT_SECRET` in that state is ignored and the admin session is signed with `JWT_SECRET`.
+
+**3. Restarts no longer drop work.** On a deploy or restart (SIGTERM) the server stops accepting connections, lets requests already in progress finish, lets running jobs finish, and waits for both for up to 25 seconds (`SHUTDOWN_GRACE_MS`). A job still running after that is handed back to the queue, so the next process picks it up immediately instead of 15 minutes later. Render allows 30 seconds before it kills the process; if you raise `SHUTDOWN_GRACE_MS`, raise the service's shutdown delay with it. The log shows one line: `[api] stopped in ... ms (requests finished: yes, jobs finished: yes)`.
+
+Other changes, none of which need action:
+- **`/health`** still answers `{"ok":false,"db":"down",...}` with 503 when the database is unreachable, but the `error` field is now the fixed text `database unavailable`. The real reason (host, port, role) is in the log only.
+- **Server timeouts** suit a server behind a proxy: idle connections are kept for 75 s (was 5 s, shorter than the proxy's own timeout, which is how a visitor gets an occasional 502), a request may take 2 minutes to arrive (was 5), headers 30 s. Overridable: `HTTP_KEEPALIVE_TIMEOUT_MS`, `HTTP_REQUEST_TIMEOUT_MS`, `HTTP_HEADERS_TIMEOUT_MS`.
+- **Every API response** under `/v1/` and `/internal/` now carries `Cache-Control: no-store` unless the route set its own.
+- **`CORS_ALLOW_REGEX`** is matched against the whole origin. A pattern written without `^` and `$` used to match any origin that merely contained it; it now has to match all of it, and the log says so once at start. The default (unset: any `https://*.vercel.app`, for Vercel previews) is unchanged; `none` allows only `APP_URL`, `CORS_EXTRA_ORIGINS` and localhost.
+- **Logs** no longer print raw error objects at start-up, on an unhandled rejection or from a failed migration: one line with the error class, code and a redacted message.
+- **MCP server:** nobody is told to run the MCP server with `npx` from a package name any more. The `@prospex` npm scope is not ours, so the name could be published by someone else and would run with the reader's API key. The server is run from this repository (README, "MCP for Claude / Cursor"). The root `.npmrc` points the scope at a registry that does not exist, so a stray install fails instead of fetching a stranger's package.
+- **Node** is pinned to 22.x (`engines` in `package.json`, `node:22-alpine` in the Dockerfile, Node 22 in CI).
+- **Docker:** the image now runs as the unprivileged `node` user, without dev dependencies, and `.dockerignore` keeps `.env` files, `.git`, `node_modules` and archives out of the build. The old Dockerfile did not copy `tsconfig.base.json`, so its build step could not succeed; that is fixed. `docker-compose.yml` publishes the database on `127.0.0.1` only and takes its password from `POSTGRES_PASSWORD` in `.env` (default unchanged for local development).
+- **`npm run db:seed`** refuses to run with `NODE_ENV=production` (it creates an owner with a password printed in the README). `--force` overrides.
+- **Optional `MIGRATION_DATABASE_URL`:** migrations can run as a role that owns the schema while `DATABASE_URL` uses a role that can only read and write rows. Unset, nothing changes. If you set it, give the application role its rights once, as the owner: `GRANT USAGE ON SCHEMA public TO <app role>; GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO <app role>; GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO <app role>; ALTER DEFAULT PRIVILEGES FOR ROLE <owner role> IN SCHEMA public GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO <app role>; ALTER DEFAULT PRIVILEGES FOR ROLE <owner role> IN SCHEMA public GRANT USAGE, SELECT ON SEQUENCES TO <app role>;` - and try it on a copy of the database first.
+- **CI** now runs the API test suite against a Postgres service and `npm audit` for production dependencies, with read-only workflow permissions.
+
+**If the API runs serverless (Option 2, Vercel):** the start-up checks above apply there too, and the job runner endpoint stays shut until `INTERNAL_TOKEN` is set. Three things differ from a long-running server and are worth setting deliberately: each instance opens its own database connections (set `DB_POOL_MAX=2`), request rate limits are counted per instance rather than platform-wide, and migrations do not run on start (run `npm run db:migrate` before each deploy).
+
+**What to watch in the logs.** There is no alerting built in, so point whatever monitor you use at these: `/health` answering 503; any line starting `[env] SECURITY:` (a credential was switched off at start); `[api] unhandled` (a request failed in a way nothing anticipated); `[shutdown]` followed by `returned to the queue` on every deploy (a job that regularly outlives the grace period).
+
+**A time limit on database statements** is not set by the server, on purpose: as a connection start-up parameter it is refused or leaked by connection poolers (Neon's pooled URL included). The safe place is the database role - run once, as the owner: `ALTER ROLE <app role> SET statement_timeout = '60s'; ALTER ROLE <app role> SET idle_in_transaction_session_timeout = '60s';`. Migrations lift the limit for their own transaction. Optional; decide the number with the longest report or export you expect in mind.
+
+**Rolling back from this release** to the previous one is safe for everything in B10: no data changes. Two things to know: the previous code connects with the old "TLS if offered" behaviour again, and `DATABASE_SSL` / `MIGRATION_DATABASE_URL` are ignored by it. (The one-way step in this line of releases is B9's: once the server has moved client report links out of plaintext, a release older than B9 can no longer resolve them.)
 
 ---
 

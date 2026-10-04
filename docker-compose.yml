@@ -1,12 +1,19 @@
+# Local development and single-host self-hosting.
+#
+# The database password below is a development default and is printed in this public file.
+# The database is therefore only published on this machine's loopback address, never on the
+# network. For anything that is not a throwaway local setup, put your own value in .env:
+#   POSTGRES_PASSWORD=<long random value>
+# and it is used for both the database and the two services' connection string.
 services:
   db:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: prospex
-      POSTGRES_PASSWORD: prospex
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-prospex}
       POSTGRES_DB: prospex
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -18,10 +25,16 @@ services:
   api:
     build: .
     command: node apps/api/dist/server.js
+    # Secrets come from .env (copy .env.example). With NODE_ENV=production in that file the
+    # server refuses to start on the example JWT_SECRET / ENCRYPTION_KEY values: generate real
+    # ones first (openssl rand -hex 32).
     env_file: .env
     environment:
-      DATABASE_URL: postgres://prospex:prospex@db:5432/prospex
+      DATABASE_URL: postgres://prospex:${POSTGRES_PASSWORD:-prospex}@db:5432/prospex
       JOB_MODE: worker
+      # If this port is reachable directly (no reverse proxy in front), set TRUSTED_PROXY=none
+      # in .env: otherwise the visitor's address is read from a header anyone can send, and
+      # rate limits can be dodged. Behind your own reverse proxy use TRUSTED_PROXY=xff.
     ports:
       - "8080:8080"
     depends_on:
@@ -33,7 +46,7 @@ services:
     command: node apps/api/dist/worker.js
     env_file: .env
     environment:
-      DATABASE_URL: postgres://prospex:prospex@db:5432/prospex
+      DATABASE_URL: postgres://prospex:${POSTGRES_PASSWORD:-prospex}@db:5432/prospex
     depends_on:
       db:
         condition: service_healthy

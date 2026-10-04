@@ -23,6 +23,56 @@ export interface EnqueueOptions {
   maxAttempts?: number;
 }
 
+/**
+ * How many jobs one workspace may have waiting or running at once.
+ *
+ * Nothing limited this: a single workspace could enqueue tens of thousands of jobs in
+ * seconds (one `enrich` per lead, a `test` per webhook, ...), which both backs up its own
+ * queue and - because every workspace shares one worker pool - slows everyone else's jobs
+ * and makes the claim query sort a huge backlog. The ceilings are far above honest use (an
+ * import of 5,000 leads enqueues one bulk job, not 5,000), so an honest workspace never
+ * meets them. Recurring schedulers and platform jobs (no org) are never counted or capped.
+ */
+export const JOB_OPEN_TOTAL_DEFAULT = 20_000;
+export const JOB_OPEN_TYPE_DEFAULT = 10_000;
+/** Read per call so an operator can tune the ceiling without a redeploy. */
+function jobCap(envName: string, dflt: number, floor: number): number {
+  const n = Number(process.env[envName]);
+  return Number.isInteger(n) && n >= floor ? n : dflt;
+}
+export const jobOpenTotalCap = () => jobCap("JOB_OPEN_TOTAL_CAP", JOB_OPEN_TOTAL_DEFAULT, 1);
+export const jobOpenTypeCap = () => jobCap("JOB_OPEN_TYPE_CAP", JOB_OPEN_TYPE_DEFAULT, 1);
+
+/** A workspace has too many jobs waiting or running. The API maps this to 429. */
+export class JobQueueFullError extends Error {
+  constructor(public readonly type: string, public readonly openForType: number, public readonly openTotal: number) {
+    super("Too much work is already queued for this workspace. Let it finish, then try again.");
+    this.name = "JobQueueFullError";
+  }
+}
+
+/** Count this workspace's jobs that are queued or running (optionally of one type). Uses jobs_org_open_idx. */
+export async function openJobCount(db: Db, orgId: string, type?: string): Promise<number> {
+  const rows = (await db.execute(dsql`
+    SELECT count(*)::int AS n FROM jobs
+    WHERE org_id = ${orgId} AND status IN ('queued','running')${type ? dsql` AND type = ${type}` : dsql``}
+  `)) as unknown as { rows?: { n: number }[] } | { n: number }[];
+  const r = (rows as { rows?: { n: number }[] }).rows ?? (rows as { n: number }[]);
+  return Number((Array.isArray(r) ? r[0]?.n : 0) ?? 0);
+}
+
+/**
+ * Throw JobQueueFullError if this workspace is already at its open-job ceiling.
+ * Platform/recurring work passes `exempt: true` and is never gated.
+ */
+export async function assertJobCapacity(db: Db, orgId: string | null | undefined, type: string, exempt = false): Promise<void> {
+  if (!orgId || exempt) return;
+  const openForType = await openJobCount(db, orgId, type);
+  if (openForType >= jobOpenTypeCap()) throw new JobQueueFullError(type, openForType, openForType);
+  const openTotal = await openJobCount(db, orgId);
+  if (openTotal >= jobOpenTotalCap()) throw new JobQueueFullError(type, openForType, openTotal);
+}
+
 export async function enqueue(db: Db, type: string, payload: Record<string, unknown>, opts: EnqueueOptions = {}) {
   const [row] = await db
     .insert(jobs)

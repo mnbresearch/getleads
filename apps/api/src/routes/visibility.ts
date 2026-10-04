@@ -4,6 +4,7 @@ import { z } from "zod";
 import { and, consume, desc, eq, getDb, organizations, visibilityPrompts, visibilityRuns } from "@prospex/db";
 import { notFound, requireSomeFields } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
+import { assertRowCap } from "../lib/limits.js";
 import { enginesForPlan, knownBrands, observationsFor, sampleAcrossEngines, saveVisibilityConfig, suggestPrompts, visibilityConfig, visibilityOverview } from "../services/visibility.js";
 
 /**
@@ -55,6 +56,8 @@ visibilityRoutes.post(
   ),
   async (c) => {
     const { db } = getDb();
+    // A generous ceiling on tracked prompts per workspace (lib/limits.ts); existing ones are untouched.
+    await assertRowCap(db, visibilityPrompts, orgId(c), "visibilityPrompts");
     const [row] = await db.insert(visibilityPrompts).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
     return c.json(row, 201);
   },
@@ -154,6 +157,7 @@ visibilityRoutes.post(
     const oid = orgId(c);
     const { db } = getDb();
     const body = c.req.valid("json");
+    await assertRowCap(db, visibilityPrompts, oid, "visibilityPrompts");
 
     // Re-check against what is already tracked. The client sends back a set it was shown
     // moments ago, and the user may have added one of them by hand in between.

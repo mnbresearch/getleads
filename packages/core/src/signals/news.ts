@@ -5,6 +5,7 @@
 import * as cheerio from "cheerio";
 import { fetchText } from "../util/http.js";
 import { extractDomain, isSocialOrAggregator } from "../util/domain.js";
+import { encodeURIComponentSafe, wellFormed } from "../util/text.js";
 
 /**
  * `job_change` is deliberately absent: everything in this union is something the news
@@ -36,7 +37,7 @@ export interface ParsedSignal {
 }
 
 export async function fetchGoogleNews(query: string, opts: { lang?: string; country?: string; days?: number } = {}): Promise<NewsItem[]> {
-  const q = opts.days ? `${query} when:${opts.days}d` : query;
+  const q = wellFormed(opts.days ? `${query} when:${opts.days}d` : query);
   const params = new URLSearchParams({ q, hl: opts.lang ?? "en-IN", gl: opts.country ?? "IN", ceid: `${opts.country ?? "IN"}:${opts.lang ?? "en"}` });
   const xml = await fetchText(`https://news.google.com/rss/search?${params}`, { timeoutMs: 15_000 });
   if (!xml) return fetchBingNews(query);
@@ -44,7 +45,7 @@ export async function fetchGoogleNews(query: string, opts: { lang?: string; coun
 }
 
 export async function fetchBingNews(query: string): Promise<NewsItem[]> {
-  const xml = await fetchText(`https://www.bing.com/news/search?q=${encodeURIComponent(query)}&format=rss`, { timeoutMs: 15_000 });
+  const xml = await fetchText(`https://www.bing.com/news/search?q=${encodeURIComponentSafe(query)}&format=rss`, { timeoutMs: 15_000 });
   return xml ? parseRss(xml) : [];
 }
 

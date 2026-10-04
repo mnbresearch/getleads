@@ -6,6 +6,12 @@
 # Growth/Scale/Enterprise) the moment STRIPE_* vars are filled in - no prepaid data-provider keys
 # required to open paid signups. Set PILOT_MODE back to "true" instead if you want the old
 # everything-free pilot behavior with no billing.
+#
+# Node: the version comes from "engines" in package.json (22.x). The server refuses to start
+# in production only for two things: JWT_SECRET or ENCRYPTION_KEY that is a published example
+# value or shorter than 16 characters. Both are generated below, so a Blueprint deploy never
+# trips that. Keys marked `sync: false` are asked for once, when the Blueprint is first
+# created; adding one to this file later does not touch a service that already exists.
 services:
   - type: web
     name: prospex-api
@@ -52,14 +58,54 @@ services:
       # for the 6-digit code after the password. Steps and recovery: DEPLOY.md section B9.
       - key: ADMIN_TOTP_SECRET
         sync: false
-      # Optional, all with safe defaults (set them in the dashboard when needed; see DEPLOY.md B8):
-      #   ADMIN_JWT_SECRET          signs the admin session with its own key (default: JWT_SECRET)
-      #   ENCRYPTION_KEYS_OLD       previous ENCRYPTION_KEY values, needed when rotating that key
-      #   LEAD_NOTIFY_EMAIL         where upgrade requests are emailed (default: ADMIN_EMAIL)
+      # The admin dashboard login (/admin). Without both, the admin login answers "not
+      # configured". Use a long random password; a short or well-known one is refused.
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
+      # Optional: sign the admin session with its own key (default: JWT_SECRET).
+      - key: ADMIN_JWT_SECRET
+        sync: false
+      # Previous ENCRYPTION_KEY values (comma-separated, newest first). Needed only while
+      # rotating that key, so credentials saved under the old one stay readable.
+      - key: ENCRYPTION_KEYS_OLD
+        sync: false
+      # Where upgrade requests are emailed (default: ADMIN_EMAIL).
+      - key: LEAD_NOTIFY_EMAIL
+        sync: false
+      # Extra browser origins allowed to call the API, comma-separated (APP_URL always is).
+      - key: CORS_EXTRA_ORIGINS
+        sync: false
+      # If set, signing up needs this code.
+      - key: PILOT_INVITE_CODE
+        sync: false
+      # Optional settings with safe defaults. They are NOT declared as keys on purpose: an
+      # empty value would replace the default. Add one in the dashboard only when needed
+      # (DEPLOY.md B8):
+      #   DATABASE_SSL              disable | require | verify-full. Unset, the server decides
+      #                             from the database host: a Neon host has its certificate
+      #                             checked; any other remote host must use TLS. See DEPLOY.md
+      #                             "Database connection security" before changing it.
+      #   DATABASE_SSL_CA           PEM text (or a file path) of the CA to check the database
+      #                             certificate against, for providers that use their own CA.
+      #   MIGRATION_DATABASE_URL    a separate, schema-owning connection used only for
+      #                             migrations (default: DATABASE_URL)
+      #   AUTO_MIGRATE              "false" stops the API applying migrations on boot
+      #   DB_POOL_MAX               database connections per process (default 10)
       #   OUTBOUND_SENDING_ENABLED  "false" pauses every campaign send platform-wide
       #   ORG_DAILY_SEND_CEILING    most one workspace may send per day (default 2000)
       #   SYSTEM_SENDER_DAILY_CAP   most one workspace may send per day through the shared sender
-      #   CORS_EXTRA_ORIGINS        extra browser origins allowed to call the API
+      #   SMTP_PORT / SMTP_SECURE   with SMTP_HOST below (defaults 587 / false)
+      #   SMTP_ALLOWED_PORTS        extra SMTP ports customers may use
+      #   CORS_ALLOW_REGEX          pattern of further allowed browser origins; unset allows
+      #                             https://*.vercel.app previews, "none" allows only the
+      #                             exact origins
+      #   AI_PROVIDER, OPENAI_COMPAT_BASE_URL / _API_KEY / _MODEL   another AI endpoint
+      #   SHUTDOWN_GRACE_MS         how long requests and jobs get to finish on a restart
+      #                             (default 25000; Render stops the process after 30 s)
+      #   HTTP_KEEPALIVE_TIMEOUT_MS / HTTP_REQUEST_TIMEOUT_MS / HTTP_HEADERS_TIMEOUT_MS
+      #                             server timeouts (defaults 75000 / 120000 / 30000)
       # Render's edge is Cloudflare, which sets cf-connecting-ip itself. Rate limits and the
       # security log read the visitor's address from it. Use "xff" on a host that is not
       # behind Cloudflare.
@@ -94,6 +140,18 @@ services:
         sync: false
       - key: MAIL_FROM
         sync: false
+      # Signing secret of the Resend webhook (Resend dashboard -> Webhooks). Without it,
+      # delivery events are refused, so bounces and spam complaints never reach the
+      # suppression list. Point the webhook at <API_URL>/v1/email-events/resend.
+      - key: RESEND_WEBHOOK_SECRET
+        sync: false
+      # Platform mail through SMTP instead of Resend (optional; SMTP_PORT defaults to 587).
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
       # Optional verification boost (free tier)
       - key: HUNTER_API_KEY
         sync: false
@@ -106,6 +164,19 @@ services:
       # Metered web search with a monthly free credit; replaces Google CSE, which is closed
       # to new customers and ends on 1 Jan 2027.
       - key: BRAVE_SEARCH_API_KEY
+        sync: false
+      # Optional data and AI providers (each is simply off when unset)
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: APOLLO_API_KEY
+        sync: false
+      - key: PDL_API_KEY
+        sync: false
+      - key: SERPAPI_KEY
+        sync: false
+      - key: ABSTRACT_EMAIL_API_KEY
+        sync: false
+      - key: IPINFO_TOKEN
         sync: false
       # Production path: paid plans open, no pre-purchased data-provider credits needed to start
       - key: PILOT_MODE

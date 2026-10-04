@@ -3,12 +3,14 @@
 set -euo pipefail
 API=${API:-http://localhost:8080}
 J='content-type: application/json'
+# A fresh, long password per run: sign-up refuses the common ones ("password123" among them).
+PW="Smoke-$(date +%s)-$RANDOM$RANDOM-ok"
 pass() { echo "  ✓ $1"; }
 fail() { echo "  ✗ $1"; echo "$2"; exit 1; }
 
 echo "1. signup"
 EMAIL="smoke+$RANDOM@example.com"
-R=$(curl -s -X POST $API/v1/auth/signup -H "$J" -d "{\"email\":\"$EMAIL\",\"password\":\"password123\",\"name\":\"Smoke\",\"orgName\":\"Smoke Co\"}")
+R=$(curl -s -X POST $API/v1/auth/signup -H "$J" -d "{\"email\":\"$EMAIL\",\"password\":\"$PW\",\"name\":\"Smoke\",\"orgName\":\"Smoke Co\"}")
 KEY=$(echo "$R" | python3 -c 'import sys,json;print(json.load(sys.stdin)["apiKey"])') || fail "signup" "$R"
 TOKEN=$(echo "$R" | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
 pass "api key $KEY"
@@ -67,8 +69,10 @@ echo "$R" | grep -q '"status":"active"' && pass "started: $R"
 sleep 4
 R=$(curl -s $API/v1/campaigns/$CAMP/messages -H "x-api-key: $KEY")
 echo "$R" | grep -q '"status":"sent"' && pass "message sent via dev mailer" || echo "  (message status: $(echo $R | head -c 300))"
-TOK=$(echo "$R" | python3 -c 'import sys,json;print(json.load(sys.stdin)["messages"][0]["trackingToken"])')
-curl -sf "$API/t/o/$TOK.gif" >/dev/null && curl -s $API/v1/campaigns/$CAMP/stats -H "x-api-key: $KEY" | grep -q '"opened":1' && pass "open tracked"
+# The tracking token is a credential (it is the open/click/unsubscribe link) and is no longer
+# returned by the API, so an open cannot be simulated from here. What can be checked: it is
+# really not in the response.
+echo "$R" | grep -q '"trackingToken"' && fail "tracking token exposed" "the message list returned a trackingToken" || pass "tracking token not exposed by the API"
 
 echo "11. inbound reply stops sequence"
 R=$(curl -s -X POST $API/v1/campaigns/inbound -H "$J" -H "x-api-key: $KEY" -d '{"from":"Satya <satya@microsoft.com>","text":"Sure, lets talk next week"}')

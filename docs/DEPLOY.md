@@ -81,6 +81,16 @@ Also applied on boot, and also additive. It brings opt-in two-factor sign-in for
 - A customer who has lost both their phone and their recovery codes can only be let back in by you: Admin > the workspace > the user > "Reset two-factor". Confirm it is really them first.
 - Rolling back: read-only API keys are treated as full-access keys by the old code - revoke them first if you roll back for long. Details in DEPLOY.md section B9.
 
+### Platform hardening (no migration)
+
+Read DEPLOY.md section B10 before deploying. In short:
+
+- **Database connection:** a Neon host now has its certificate checked, and any other remote database must use TLS (no fallback to plaintext). `sslmode` in `DATABASE_URL` is honoured; `DATABASE_SSL=disable | require | verify-full` overrides. Safety net for the first deploy: set `DATABASE_SSL=require` beforehand, remove it once the service is up.
+- **Start-up:** in production the server refuses to start only when `JWT_SECRET` or `ENCRYPTION_KEY` is a published example value or shorter than 16 characters. `render.yaml` generates both.
+- **Restarts:** requests and jobs in progress get up to 25 seconds to finish; unfinished jobs go back to the queue.
+- **`/health`** no longer returns the database error text, only `database unavailable`.
+- **MCP:** run the server from this repository (README); do not use `npx` with a package name.
+
 ## Operating
 
 - Admin: the dashboard at `/admin` (sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`), or `GET /v1/admin/orgs` and `PATCH /v1/admin/orgs/:id/plan` with header `x-admin-token: $ADMIN_API_TOKEN` to list orgs and change plans/limits. `INTERNAL_TOKEN` is only the job runner's token and does not open the admin API. Every admin change is recorded in the workspace's security log.

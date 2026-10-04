@@ -9,8 +9,16 @@ import { useState } from "react";
  * costs the visitor their privacy for a video most of them will scroll past. The facade is
  * one thumbnail; the real player is swapped in on the click that asks for it.
  *
- * The thumbnail comes from YouTube's own image host, so there is no asset to keep in sync
- * with the video.
+ * The poster is a file on this site (public/demo-poster.jpg), not YouTube's image host. It
+ * used to be loaded from i.ytimg.com on every page view, which made the sentence under the
+ * player - "Nothing loads from YouTube until you press play" - untrue: the visitor's address
+ * went to Google before they had pressed anything. Now the first request to YouTube is the
+ * one the click makes.
+ *
+ * The cost is one asset to keep in step with the video: when the video id changes, replace
+ * public/demo-poster.jpg with the new video's poster frame (1280x720). If the file is ever
+ * missing the player still works - it shows the plain dark panel and the play button, and
+ * does not fall back to a third-party image.
  */
 
 /**
@@ -22,9 +30,13 @@ import { useState } from "react";
  */
 const DEMO_VIDEO_ID = (import.meta.env.VITE_DEMO_VIDEO_ID as string | undefined) ?? "";
 
+/** The poster frame, served by this site. See the note at the top of this file. */
+const DEMO_POSTER = "/demo-poster.jpg";
+
 /** Unlisted videos work exactly the same way here - they just do not surface in search. */
 export function DemoVideo() {
   const [playing, setPlaying] = useState(false);
+  const [posterOk, setPosterOk] = useState(true);
   if (!DEMO_VIDEO_ID) return null;
 
   return (
@@ -56,17 +68,17 @@ export function DemoVideo() {
               className="group absolute inset-0 h-full w-full cursor-pointer"
               aria-label="Play the Scout explainer video"
             >
-              <img
-                src={`https://i.ytimg.com/vi/${DEMO_VIDEO_ID}/maxresdefault.jpg`}
-                alt=""
-                loading="eager"
-                decoding="async"
-                className="absolute inset-0 h-full w-full object-cover"
-                /* maxres does not exist for every upload; hqdefault always does. */
-                onError={(e) => {
-                  e.currentTarget.src = `https://i.ytimg.com/vi/${DEMO_VIDEO_ID}/hqdefault.jpg`;
-                }}
-              />
+              {posterOk && (
+                <img
+                  src={DEMO_POSTER}
+                  alt=""
+                  loading="eager"
+                  decoding="async"
+                  className="absolute inset-0 h-full w-full object-cover"
+                  /* No poster file: the dark panel behind it is the fallback, never another host. */
+                  onError={() => setPosterOk(false)}
+                />
+              )}
               <span className="absolute inset-0 bg-ink-50/30 transition group-hover:bg-ink-50/20" aria-hidden />
               <span
                 className="absolute left-1/2 top-1/2 flex h-20 w-20 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full bg-brand-600 shadow-glow transition group-hover:scale-105"

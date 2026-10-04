@@ -4,6 +4,7 @@ import { extractDomain, inferDepartment, inferSeniority, isPublicHost, splitName
 import { emitEvent } from "../lib/events.js";
 import { tryConsume, type QuotaOutcome } from "../lib/quota.js";
 import { httpUrlOrNull, stripNul } from "../lib/sanitize.js";
+import { addressFingerprint, onPlatformList } from "../lib/privacySuppression.js";
 
 /**
  * The one definition of "an email address we will store and later send to".
@@ -199,6 +200,9 @@ const clip = (v: string | null | undefined, max: number): string | null | undefi
  * as `emailRejected`), a LinkedIn URL that is not http(s) is not stored, and a company is
  * only created for a real public domain.
  */
+/** Why an address was not stored: its owner asked never to be contacted through Scout. */
+export const DO_NOT_CONTACT_REASON = "this person has asked not to be contacted through Scout, so their address was not stored";
+
 export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts: UpsertLeadOptions = {}): Promise<{ lead: Lead; created: boolean; emailRejected?: string }> {
   const { db } = getDb();
   const input: UpsertLeadInput = {
@@ -214,7 +218,17 @@ export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts:
   const email = canonicalEmail(input.email);
   // Something was offered as an email and it is not one address: say so, store nothing.
   const offered = typeof input.email === "string" ? input.email.trim() : input.email == null ? "" : String(input.email);
-  const emailRejected = offered && !email ? "not a single valid email address" : undefined;
+  /**
+   * An address on the platform-wide do-not-contact list is not stored again.
+   *
+   * That list holds people who asked us - not one customer - to stop: an erasure request
+   * removes them from every workspace and puts the address there. Without this, the next
+   * import or search simply brought the address back. It is still used to FIND a lead the
+   * workspace already has (so an import does not create a duplicate); it is never written,
+   * and it is not copied into the "rejected" note either.
+   */
+  const doNotContact = !!email && (await onPlatformList(email, db).catch(() => false));
+  const emailRejected = offered && !email ? "not a single valid email address" : doNotContact ? DO_NOT_CONTACT_REASON : undefined;
   const linkedin = input.linkedinUrl ? profileUrlOrNull(input.linkedinUrl, 500) : null;
 
   let companyId: string | null = null;
@@ -225,7 +239,15 @@ export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts:
   }
   const nm = input.fullName ? splitName(input.fullName) : { firstName: input.firstName ?? undefined, lastName: input.lastName ?? undefined, fullName: [input.firstName, input.lastName].filter(Boolean).join(" ") };
 
-  const existing = await findExistingLead(orgId, { email, linkedinUrl: linkedin });
+  let existing = await findExistingLead(orgId, { email, linkedinUrl: linkedin });
+  // A do-not-contact address is not stored, so a second import of the same row has no address
+  // to be recognised by - and would add the same person again each time. The row left by the
+  // first import carries a one-way fingerprint of the address; it is found by that.
+  const fingerprint = doNotContact && email ? addressFingerprint(email) : null;
+  if (!existing && fingerprint) {
+    const [same] = await db.select().from(leads).where(and(eq(leads.orgId, orgId), sql`${leads.raw}->'emailRejected'->>'fingerprint' = ${fingerprint}`)).limit(1);
+    existing = same ?? undefined;
+  }
 
   const values: Partial<NewLead> = {
     firstName: input.firstName ?? nm.firstName,
@@ -238,7 +260,7 @@ export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts:
     title: input.title ?? undefined,
     seniority: inferSeniority(input.title ?? undefined),
     department: inferDepartment(input.title ?? undefined),
-    email: email ?? undefined,
+    email: doNotContact ? undefined : email ?? undefined,
     // A verdict describes an address. With the address refused, there is nothing it is about.
     emailStatus: emailRejected ? undefined : input.emailStatus ?? undefined,
     emailConfidence: emailRejected ? undefined : input.emailConfidence ?? undefined,
@@ -257,7 +279,7 @@ export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts:
     verifiedAt: !emailRejected && input.emailStatus && input.emailStatus !== "unknown" ? new Date() : undefined,
     updatedAt: new Date(),
   };
-  const rejectedNote = emailRejected ? { emailRejected: { reason: emailRejected, value: stripNul(offered).slice(0, 120), at: new Date().toISOString() } } : null;
+  const rejectedNote = emailRejected ? { emailRejected: { reason: emailRejected, ...(doNotContact ? { fingerprint } : { value: stripNul(offered).slice(0, 120) }), at: new Date().toISOString() } } : null;
   const clean = Object.fromEntries(Object.entries(values).filter(([, v]) => v !== undefined)) as Partial<NewLead>;
 
   if (existing) {
@@ -313,7 +335,8 @@ export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts:
       }
     }
 
-    if (rejectedNote) clean.raw = { ...((existing.raw as Record<string, unknown> | null) ?? {}), ...((clean.raw as Record<string, unknown> | undefined) ?? {}), ...rejectedNote };
+    // (No note when the workspace already holds this address on this lead: nothing was refused.)
+    if (rejectedNote && !(doNotContact && existing.email === email)) clean.raw = { ...((existing.raw as Record<string, unknown> | null) ?? {}), ...((clean.raw as Record<string, unknown> | undefined) ?? {}), ...rejectedNote };
     const [row] = await db.update(leads).set(clean).where(eq(leads.id, existing.id)).returning();
     await emitEvent(orgId, "lead.updated", { id: row.id, email: row.email, changes: Object.keys(clean) }, { type: "lead", id: row.id });
     return { lead: row, created: false, ...(emailRejected ? { emailRejected } : {}) };

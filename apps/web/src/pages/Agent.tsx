@@ -69,7 +69,7 @@ export function AgentPage() {
           </div>
           {gen && <div className="grid gap-2 sm:grid-cols-3"><input className="input" placeholder="Your name" value={sender.name} onChange={(e) => setSender({ ...sender, name: e.target.value })} /><input className="input" placeholder="Your company" value={sender.company} onChange={(e) => setSender({ ...sender, company: e.target.value })} /><input className="input" placeholder="Value proposition" value={sender.valueProp} onChange={(e) => setSender({ ...sender, valueProp: e.target.value })} /></div>}
         </div>
-        <div className="card min-w-0 p-4"><div className="label">Equivalent API call</div><pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-[11px] leading-relaxed text-emerald-800">{curl}</pre><div className="mt-2 text-xs text-ink-400 [overflow-wrap:anywhere]">MCP: <code>npx @prospex/mcp</code> with <code>PROSPEX_API_KEY</code>. Docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noopener noreferrer">{API_URL}/docs</a></div></div>
+        <div className="card min-w-0 p-4"><div className="label">Equivalent API call</div><pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-[11px] leading-relaxed text-emerald-800">{curl}</pre><div className="mt-2 text-xs text-ink-400 [overflow-wrap:anywhere]">Scout has an MCP server for AI assistants (Claude Desktop, Cursor). It is not published to a public package registry. Ask support for the package, or use the REST API and OpenAPI document with your API key. Docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noopener noreferrer">{API_URL}/docs</a></div></div>
       </div>
       {res && (
         <div className="mt-6">

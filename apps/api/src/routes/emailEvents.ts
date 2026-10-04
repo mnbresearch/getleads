@@ -52,7 +52,8 @@ emailEventRoutes.post("/resend", async (c) => {
   const secret = process.env.RESEND_WEBHOOK_SECRET;
   // Refused, not accepted unverified: an open endpoint that suppresses addresses and marks
   // leads invalid would let anyone stop any org's outreach.
-  if (!secret) return c.json({ error: "RESEND_WEBHOOK_SECRET is not configured" }, 503);
+  // Plain, internals-free message: the provider event hook is not set up on this deployment.
+  if (!secret) return c.json({ error: { code: "not_configured", message: "Delivery event handling is not set up on this server." } }, 503);
   const body = await c.req.text();
   const ok = verifySvixSignature(secret, { id: c.req.header("svix-id"), timestamp: c.req.header("svix-timestamp"), signature: c.req.header("svix-signature") }, body);
   if (!ok) return c.json({ error: "invalid signature" }, 401);

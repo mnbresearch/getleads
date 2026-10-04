@@ -254,7 +254,17 @@ export async function purgeDueWorkspaces(opts: { now?: Date; onlyOrgIds?: string
         if (!still.length) return false;
         // Rows that name this workspace's people but do not hang off the organization row.
         await tx.execute(sql`DELETE FROM login_attempts WHERE subject IN (SELECT lower(email) FROM users WHERE org_id = ${org.id})`);
-        await tx.execute(sql`DELETE FROM upgrade_requests WHERE org_id = ${org.id}`);
+        // Upgrade requests: the workspace's own, and any its people sent from the public
+        // pricing page while signed out (those carry no workspace id, only the address).
+        await tx.execute(sql`DELETE FROM upgrade_requests WHERE org_id = ${org.id} OR lower(email) IN (SELECT lower(email) FROM users WHERE org_id = ${org.id})`);
+        // Security-log rows written before a sign-in knew its workspace (a failed attempt,
+        // a password-reset request) name the address and have no workspace id, so they would
+        // not go with the organization row. The workspace's own rows cascade with it.
+        await tx.execute(sql`
+          DELETE FROM audit_log
+          WHERE org_id IS NULL
+            AND (actor_user_id IN (SELECT id FROM users WHERE org_id = ${org.id})
+              OR lower(data->>'email') IN (SELECT lower(email) FROM users WHERE org_id = ${org.id}))`);
         // Queued and finished jobs carry ids (and sometimes data) of this workspace.
         await tx.execute(sql`DELETE FROM jobs WHERE org_id = ${org.id}`);
         await tx.execute(sql`UPDATE workspace_deletion_requests SET completed_at = now() WHERE id = ${req.id}`);

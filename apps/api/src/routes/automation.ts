@@ -44,7 +44,7 @@ function withErrorShape<T extends { status: string; error?: string; note?: strin
 const discoveryStatus = (s: string) => (s === "quota" ? 402 : s === "blocked" ? 502 : s === "failed" ? 500 : 200);
 
 const leadsQuery = z.object({
-  company: z.string().optional(),
+  company: z.string().max(200).optional(),
   runId: z.string().uuid().optional(),
   limit: z.coerce.number().min(1).max(500).default(50),
   offset: z.coerce.number().min(0).default(0),

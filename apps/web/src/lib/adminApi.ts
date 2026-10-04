@@ -3,33 +3,120 @@ import { API_URL, UNREADABLE_CODE, UNREADABLE_MESSAGE, errorCode, errorMessage, 
 
 const TOKEN_KEY = "gl.admin.token";
 const listeners = new Set<() => void>();
+const notify = () => listeners.forEach((fn) => fn());
+
+/**
+ * Where the admin session lives: sessionStorage, not localStorage.
+ *
+ * This token opens every workspace on the platform. In localStorage it outlived the tab, the
+ * window and the browser session - on a machine someone else uses next it was still there
+ * days later, and any script that ever ran on this origin could read it at any time, admin
+ * console open or not. sessionStorage ends with the tab.
+ *
+ * Nobody is signed out by the change: the first time the console runs in a browser that
+ * still has the token in localStorage, it is moved across (and removed from localStorage).
+ * That happens once; after it there is nothing left to move.
+ *
+ * `memory` covers a browser that refuses sessionStorage (some private modes): the session
+ * then lasts until the page is reloaded, rather than not working at all.
+ */
+let memory: string | null = null;
+
+function readSession(): string | null {
+  try {
+    return sessionStorage.getItem(TOKEN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function migrateFromLocalStorage() {
+  let old: string | null = null;
+  try {
+    old = localStorage.getItem(TOKEN_KEY);
+  } catch {
+    return;
+  }
+  if (!old) return;
+  // A session this tab already has wins: the stored one is the older of the two.
+  if (!readSession() && !memory) {
+    try {
+      sessionStorage.setItem(TOKEN_KEY, old);
+    } catch {}
+    if (readSession() !== old) memory = old;
+  }
+  try {
+    localStorage.removeItem(TOKEN_KEY);
+  } catch {}
+}
+
+/**
+ * The move happens the first time the admin console asks for its token - not when this file
+ * loads. This file is part of the one bundle every page loads, so moving at load time would
+ * hand the session to whichever tab happened to open first after the upgrade (very likely a
+ * customer page), and the tab with the console in it would find nothing.
+ */
+let migrated = false;
+function ensureMigrated() {
+  if (migrated) return;
+  migrated = true;
+  migrateFromLocalStorage();
+}
+
+// Other tabs: sessionStorage is per tab, so "sign out here signs out there" needs a message.
+// The server retires the token on sign-out as well, so a tab that misses the message is
+// turned away on its next request anyway - this only makes it immediate.
+const channel: BroadcastChannel | null = (() => {
+  try {
+    return typeof BroadcastChannel === "function" ? new BroadcastChannel("gl.admin") : null;
+  } catch {
+    return null;
+  }
+})();
+if (channel) {
+  channel.onmessage = (e: MessageEvent) => {
+    const d = e.data as { type?: unknown; token?: unknown } | null;
+    // Only the session that was signed out: a tab holding a newer sign-in keeps it.
+    if (d?.type === "signed-out" && typeof d.token === "string" && d.token === (readSession() ?? memory)) dropToken();
+  };
+}
+
+function dropToken() {
+  memory = null;
+  try {
+    sessionStorage.removeItem(TOKEN_KEY);
+  } catch {}
+  notify();
+}
 
 export const adminAuth = {
   get token() {
-    try {
-      return localStorage.getItem(TOKEN_KEY);
-    } catch {
-      return null;
-    }
+    ensureMigrated();
+    return readSession() ?? memory;
   },
   set(token: string | null) {
+    const before = adminAuth.token;
+    memory = null;
     try {
-      token ? localStorage.setItem(TOKEN_KEY, token) : localStorage.removeItem(TOKEN_KEY);
+      token ? sessionStorage.setItem(TOKEN_KEY, token) : sessionStorage.removeItem(TOKEN_KEY);
     } catch {}
-    listeners.forEach((fn) => fn());
+    if (token && readSession() !== token) memory = token;
+    // Never leave a copy behind in the old place.
+    try {
+      localStorage.removeItem(TOKEN_KEY);
+    } catch {}
+    if (!token && before) {
+      try {
+        channel?.postMessage({ type: "signed-out", token: before });
+      } catch {}
+    }
+    notify();
   },
   subscribe(fn: () => void) {
     listeners.add(fn);
     return () => listeners.delete(fn);
   },
 };
-
-// Signing out of the admin console in one tab signs out the others (see lib/api.ts).
-if (typeof window !== "undefined") {
-  window.addEventListener("storage", (e) => {
-    if (e.key === TOKEN_KEY || e.key === null) listeners.forEach((fn) => fn());
-  });
-}
 
 export function useAdminToken(): string | null {
   return useSyncExternalStore(adminAuth.subscribe, () => adminAuth.token);

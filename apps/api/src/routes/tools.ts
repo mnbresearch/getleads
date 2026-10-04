@@ -2,6 +2,7 @@
  * Enrichment tools that mirror the Prospex.ai catalog:
  * LinkedIn URL → email, email → LinkedIn, colleagues, decision makers, batch enrich, domain health, saved searches, tasks, team, autopilot.
  */
+import { onPlatformList } from "../lib/privacySuppression.js";
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
@@ -25,6 +26,7 @@ import { tryConsume } from "../lib/quota.js";
 import { audit } from "../lib/audit.js";
 import { emailField } from "../lib/fields.js";
 import { storedSearchQuerySchema } from "../lib/searchQuery.js";
+import { assertRowCap, guardJobCapacity, TEXT_CAPS, withOrgLock } from "../lib/limits.js";
 import { safeHeaderText } from "../lib/sanitize.js";
 import { enforceWindows } from "../lib/rateWindow.js";
 import { orgMemberEmail } from "../lib/members.js";
@@ -360,6 +362,7 @@ toolRoutes.post("/batch-enrich", zValidator("json", z.object({ leadIds: z.array(
     requested = ids.length;
   }
   if (!ids.length) return c.json({ queued: 0, requested, notFound: requested, jobId: null });
+  await guardJobCapacity(db, oid, "leads.bulk_enrich");
   const job = await enqueue(db, "leads.bulk_enrich", { leadIds: ids }, { orgId: oid });
   return c.json({ queued: ids.length, requested, notFound: requested - ids.length, jobId: job.id }, 202);
 });
@@ -390,6 +393,7 @@ toolRoutes.post("/saved-searches", zValidator("json", z.object({ name: z.string(
   const oid = orgId(c);
   const { db } = getDb();
   const { clientId, ...b } = c.req.valid("json");
+  await assertRowCap(db, savedSearches, oid, "savedSearches");
   // Every id is checked against this workspace: the scheduled run writes into the list (and,
   // via the query, uses the ICP and client) by id alone, with no org predicate of its own.
   await assertOwned(lists, b.listId, oid, "List", c);
@@ -433,6 +437,7 @@ toolRoutes.post("/saved-searches/:id/run", async (c) => {
   const { db } = getDb();
   const ss = await db.query.savedSearches.findFirst({ where: and(eq(savedSearches.id, c.req.param("id")), eq(savedSearches.orgId, orgId(c))) });
   if (!ss) throw notFound("Saved search");
+  await guardJobCapacity(db, ss.orgId, "savedsearch.run");
   const job = await enqueue(db, "savedsearch.run", { savedSearchId: ss.id }, { orgId: ss.orgId, priority: 2 });
   return c.json({ jobId: job.id }, 202);
 });
@@ -453,14 +458,15 @@ toolRoutes.get("/tasks", zValidator("query", z.object({ status: z.string().defau
     .limit(q.limit);
   return c.json({ tasks: rows.map((r) => ({ ...r.task, lead: r.lead ? { ...r.lead, company: r.company } : null })) });
 });
-toolRoutes.post("/tasks", zValidator("json", z.object({ leadId: z.string().uuid().optional(), type: z.string().default("task"), title: z.string().min(1), body: z.string().optional(), dueAt: z.string().datetime().optional() })), async (c) => {
+toolRoutes.post("/tasks", zValidator("json", z.object({ leadId: z.string().uuid().optional(), type: z.string().max(TEXT_CAPS.taskType).default("task"), title: z.string().min(1).max(TEXT_CAPS.taskTitle), body: z.string().max(TEXT_CAPS.taskBody).optional(), dueAt: z.string().datetime().optional() })), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
+  await assertRowCap(db, tasks, orgId(c), "tasks");
   await assertOwned(leads, b.leadId, orgId(c), "Lead", c);
   const [row] = await db.insert(tasks).values({ orgId: orgId(c), leadId: b.leadId, type: b.type, title: b.title, body: b.body, dueAt: b.dueAt ? new Date(b.dueAt) : new Date(), assigneeUserId: c.get("auth").user?.id }).returning();
   return c.json(row, 201);
 });
-toolRoutes.post("/tasks/:id/complete", zValidator("json", z.object({ outcome: z.enum(["done", "skipped"]).default("done"), note: z.string().optional() })), async (c) => {
+toolRoutes.post("/tasks/:id/complete", zValidator("json", z.object({ outcome: z.enum(["done", "skipped"]).default("done"), note: z.string().max(TEXT_CAPS.note).optional() })), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
   const t = await db.query.tasks.findFirst({ where: and(eq(tasks.id, c.req.param("id")), eq(tasks.orgId, orgId(c))) });
@@ -510,6 +516,9 @@ async function sendInviteEmail(a: { orgName: string; inviter: string }, email: s
   // so the subject cannot be made to read as (or link to) something else.
   const orgName = safeHeaderText(a.orgName, 80, "a workspace");
   const inviter = safeHeaderText(a.inviter, 80, "A teammate");
+  // An address on the platform-wide do-not-contact list gets no mail from Scout at all. The
+  // invite itself still exists; the link can be shared by hand.
+  if (await onPlatformList(email).catch(() => false)) return { link, emailed: false, emailError: INVITE_EMAIL_NOT_SENT };
   const r = await sendMail(null, {
     from: env.mailFrom,
     to: email,
@@ -682,6 +691,7 @@ async function assertAutopilotRefs(c: import("hono").Context<Env>, oid: string, 
 toolRoutes.post("/autopilots", zValidator("json", apInput), async (c) => {
   const { db } = getDb();
   const b = c.req.valid("json");
+  await assertRowCap(db, autopilots, orgId(c), "autopilots");
   await assertAutopilotRefs(c, orgId(c), b);
   const [row] = await db.insert(autopilots).values({ orgId: orgId(c), ...b }).returning();
   await audit(c, "autopilot.created", { targetType: "autopilot", targetId: row.id, data: { name: row.name, dailyLeads: row.dailyLeads, autoEnroll: row.autoEnroll, campaignId: row.campaignId } });
@@ -707,6 +717,7 @@ toolRoutes.post("/autopilots/:id/run", async (c) => {
   const { db } = getDb();
   const ap = await db.query.autopilots.findFirst({ where: and(eq(autopilots.id, c.req.param("id")), eq(autopilots.orgId, orgId(c))) });
   if (!ap) throw notFound("Autopilot");
+  await guardJobCapacity(db, ap.orgId, "autopilot.run");
   const job = await enqueue(db, "autopilot.run", { autopilotId: ap.id }, { orgId: ap.orgId, priority: 2 });
   return c.json({ jobId: job.id }, 202);
 });
@@ -743,10 +754,24 @@ joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.obje
   const weak = passwordProblem(b.password, { email: inv.email, name: b.name });
   if (weak) return c.json({ error: { code: "weak_password", message: weak } }, 400);
   const limits = effectiveLimits(org);
-  const [{ m }] = await db.select({ m: sql<number>`count(*)::int` }).from(users).where(eq(users.orgId, org.id));
-  if (limits.seats > 0 && m >= limits.seats) return c.json({ error: { code: "seat_limit", message: `${org.name} has no free seats (${limits.seats}). Ask an owner to upgrade or free a seat.` } }, 400);
-  const [user] = await db.insert(users).values({ orgId: inv.orgId, email: inv.email, passwordHash: await hashPassword(b.password), name: b.name ?? "", role: inv.role, lastLoginAt: new Date() }).returning();
-  await db.update(invites).set({ acceptedAt: new Date() }).where(eq(invites.id, inv.id));
+  // Hash first (slow), then do the seat check and both writes under a per-workspace lock, so
+  // many invites accepted at once cannot each read the same count and all slip in past the
+  // seat limit. The invite's single-use claim lives inside the same lock.
+  const passwordHash = await hashPassword(b.password);
+  let user;
+  try {
+    user = await withOrgLock(db, org.id, "seats", async (tx) => {
+      const claimed = await tx.update(invites).set({ acceptedAt: new Date() }).where(and(eq(invites.id, inv.id), sql`${invites.acceptedAt} IS NULL`)).returning({ id: invites.id });
+      if (!claimed.length) throw new ApiError(400, "Invite is invalid or already used", "invalid_invite");
+      const [{ m }] = await tx.select({ m: sql<number>`count(*)::int` }).from(users).where(eq(users.orgId, org.id));
+      if (limits.seats > 0 && m >= limits.seats) throw new ApiError(400, `${org.name} has no free seats (${limits.seats}). Ask an owner to upgrade or free a seat.`, "seat_limit");
+      const [u] = await tx.insert(users).values({ orgId: inv.orgId, email: inv.email, passwordHash, name: b.name ?? "", role: inv.role, lastLoginAt: new Date() }).returning();
+      return u;
+    });
+  } catch (e) {
+    if (e instanceof ApiError) return c.json({ error: { code: e.code, message: e.message } }, e.status as 400);
+    throw e;
+  }
   // A new account, so it gets the same "confirm your address" email a signup gets. Accepting
   // an invite does not prove the mailbox (the link is also shown to the inviter). Nothing is
   // sent when the platform has no mail provider, and this never delays or fails the join.

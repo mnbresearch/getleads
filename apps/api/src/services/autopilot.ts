@@ -1,5 +1,6 @@
 import { and, autopilots, campaigns, eq, getDb, icps, listLeads, lists, organizations, remainingPremiumBudget, type Autopilot } from "@prospex/db";
-import { clampLeadQuery, createAiProviderForPlan, runLeadPipelineDetailed, type IcpCriteria } from "@prospex/core";
+import { clampLeadQuery, runLeadPipelineDetailed, type IcpCriteria } from "@prospex/core";
+import { aiForOrg } from "../lib/ai.js";
 import { env } from "../env.js";
 import { clampSearchQuery } from "../lib/searchQuery.js";
 import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertLead } from "./leads.js";
@@ -40,7 +41,7 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
   const input = clampLeadQuery({ ...stored, limit: Math.min(200, Math.max(1, ap.dailyLeads * 3)), findEmails: true });
   const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, {
     // The plan decides the engine: free workspaces never reach the paid model.
-    ai: createAiProviderForPlan(org.plan),
+    ai: aiForOrg(org),
     verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
     icp: (icp?.criteria as IcpCriteria | undefined) ?? undefined,
     maxProviderLeads: providerBudget,

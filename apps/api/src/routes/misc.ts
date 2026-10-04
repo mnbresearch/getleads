@@ -15,6 +15,7 @@ import { INTEGRATION_PROVIDERS, integrationName, validateIntegrationConfig } fro
 import { audit } from "../lib/audit.js";
 import { ownerOrAdmin } from "../lib/roles.js";
 import { newWebhookSecret, publicWebhook } from "../lib/webhookSecret.js";
+import { assertRowCap, guardJobCapacity, withOrgLock } from "../lib/limits.js";
 /** Channel/data providers configured via the same integrations table (config-only, no lead sync). */
 const CHANNEL_PROVIDERS = ["whatsapp", "apollo", "hunter", "pdl", "ipinfo"];
 /** Credential fields each provider cannot work without (what its sync/send reads). */
@@ -166,6 +167,7 @@ miscRoutes.post("/webhooks", requireAuth, ownerOrAdmin("webhook.created"), zVali
     warning = `${msg} Saved because this server runs in development mode, but deliveries to it will be skipped.`;
   }
   const { db } = getDb();
+  await assertRowCap(db, webhooks, orgId(c), "webhooks");
   const fresh = newWebhookSecret(orgId(c));
   const [row] = await db.insert(webhooks).values({ orgId: orgId(c), url, events: c.req.valid("json").events, ...fresh.columns }).returning();
   await audit(c, "webhook.created", { targetType: "webhook", targetId: row.id, data: { host: hostOf(url), events: row.events, signatureVersion: row.signatureVersion } });
@@ -190,8 +192,10 @@ miscRoutes.post("/webhooks/:id/rotate-secret", requireAuth, ownerOrAdmin("webhoo
   const { db } = getDb();
   const hook = await db.query.webhooks.findFirst({ where: and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c))) });
   if (!hook) throw notFound("Webhook");
+  // Serialised per workspace so two rotations cannot interleave and leave a caller holding a
+  // secret that was already replaced before it even read the response.
   const fresh = newWebhookSecret(hook.orgId);
-  await db.update(webhooks).set(fresh.columns).where(and(eq(webhooks.id, hook.id), eq(webhooks.orgId, hook.orgId)));
+  await withOrgLock(db, hook.orgId, "webhook-rotate", (tx) => tx.update(webhooks).set(fresh.columns).where(and(eq(webhooks.id, hook.id), eq(webhooks.orgId, hook.orgId))));
   await audit(c, "webhook.secret_rotated", { targetType: "webhook", targetId: hook.id, data: { host: hostOf(hook.url), fromSignatureVersion: hook.signatureVersion, signatureVersion: 2 } });
   return c.json({ id: hook.id, secret: fresh.secret, signatureVersion: 2 });
 });
@@ -215,6 +219,7 @@ miscRoutes.post("/webhooks/:id/test", requireAuth, ownerOrAdmin("webhook.tested"
   const { db } = getDb();
   const hook = await db.query.webhooks.findFirst({ where: and(eq(webhooks.id, c.req.param("id")), eq(webhooks.orgId, orgId(c))) });
   if (!hook) throw notFound("Webhook");
+  await guardJobCapacity(db, hook.orgId, "webhook.deliver");
   const [ev] = await db.insert(events).values({ orgId: hook.orgId, type: "webhook.test", data: { hello: "world", webhookId: hook.id } }).returning();
   const job = await enqueue(db, "webhook.deliver", { webhookId: hook.id, eventId: ev.id }, { orgId: hook.orgId, maxAttempts: 1 });
   await audit(c, "webhook.tested", { targetType: "webhook", targetId: hook.id, data: { host: hostOf(hook.url) } });
@@ -282,6 +287,7 @@ miscRoutes.post("/integrations/:provider/sync", requireAuth, ownerOrAdmin("integ
   // as queued reported work that was never going to happen.
   const requested = [...new Set(c.req.valid("json").leadIds)];
   const owned = (await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, requested)))).map((r) => r.id);
+  if (owned.length) await guardJobCapacity(db, oid, "integration.sync");
   for (const leadId of owned) await enqueue(db, "integration.sync", { integrationId: integ.id, leadId }, { orgId: oid, maxAttempts: 3 });
   await audit(c, "integration.synced", { targetType: "integration", targetId: integ.id, data: { provider: integ.provider, requested: requested.length, queued: owned.length } });
   return c.json({ queued: owned.length, requested: requested.length, notFound: requested.length - owned.length }, 202);

@@ -11,9 +11,16 @@ import { describeIssues } from "../lib/validate.js";
 import { audit } from "../lib/audit.js";
 import { stripNulDeep } from "../lib/sanitize.js";
 import { emailField, profileUrlField } from "../lib/fields.js";
+import { boundedCsv, boundedRead, likeContains, LIST_SEARCH_MAX } from "../lib/listSearch.js";
+import { assertRowCap, guardJobCapacity } from "../lib/limits.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { canonicalEmail, companyDomainOrNull, findExistingLead, leadWithCompany, upsertCompany, upsertLead, verifierOf } from "../services/leads.js";
 import { emitEvent } from "../lib/events.js";
+import { eraseLeads } from "../lib/privacyErase.js";
+import { onPlatformList } from "../lib/privacySuppression.js";
+
+/** What a caller is told when an address is on the platform-wide do-not-contact list. */
+const PLATFORM_LISTED = "This person has asked not to be contacted through Scout, so their address cannot be stored.";
 
 export const leadRoutes = new Hono<Env>();
 leadRoutes.use("*", requireAuth);
@@ -142,20 +149,30 @@ const leadPatch = z.object({
 /** Signals visible to an org: the shared feed plus its own private ones (job changes). */
 const visibleSignals = (oid: string) => or(isNull(signals.orgId), eq(signals.orgId, oid))!;
 
+/** Is this a Postgres unique-constraint violation (SQLSTATE 23505), anywhere in the cause chain? */
+function isUniqueViolation(e: unknown): boolean {
+  for (let cur: unknown = e, i = 0; cur && typeof cur === "object" && i < 5; cur = (cur as { cause?: unknown }).cause, i++) {
+    if ((cur as { code?: unknown }).code === "23505") return true;
+  }
+  return false;
+}
+
 const listQuery = z.object({
-  q: z.string().optional(),
-  emailStatus: z.string().optional(),
+  // Bounded: the text is matched with a leading-wildcard ILIKE across several columns, which
+  // is a sequential scan. An unbounded pattern was a one-request way to tie up the instance.
+  q: z.string().max(LIST_SEARCH_MAX).optional(),
+  emailStatus: z.string().max(400).optional(),
   minScore: z.coerce.number().optional(),
-  tag: z.string().optional(),
+  tag: z.string().max(LIST_SEARCH_MAX).optional(),
   icpId: z.string().uuid().optional(),
   listId: z.string().uuid().optional(),
-  companyDomain: z.string().optional(),
-  seniority: z.string().optional(),
-  department: z.string().optional(),
+  companyDomain: z.string().max(253).optional(),
+  seniority: z.string().max(400).optional(),
+  department: z.string().max(400).optional(),
   hasEmail: z.enum(["true", "false"]).optional(),
   // The pipeline stage. The column and the transition endpoint both existed; there was no
   // way to filter by it, so "show me everyone I have contacted" was unaskable.
-  status: z.string().optional(),
+  status: z.string().max(400).optional(),
   /** A client id, or "none" for the unassigned pool. */
   clientId: z.union([z.string().uuid(), z.literal("none")]).optional(),
   /** One of the client dashboard's needs-attention buckets, with the dashboard's definition. */
@@ -171,18 +188,19 @@ async function buildWhere(oid: string, q: z.infer<typeof listQuery>) {
   // Company name and domain too: the job-change feed's "Open" link searches by company name,
   // and searching for "Acme" returning nobody who works at Acme reads as "no such leads".
   if (q.q) {
-    const p = `%${q.q}%`;
+    // Escaped literal substring, so the caller's own % and _ cannot widen the scan.
+    const p = likeContains(q.q);
     conds.push(or(ilike(leads.fullName, p), ilike(leads.email, p), ilike(leads.title, p), sql`${leads.companyId} IN (SELECT id FROM companies WHERE org_id = ${oid} AND (name ILIKE ${p} OR domain ILIKE ${p}))`)!);
   }
-  if (q.emailStatus) conds.push(inArray(leads.emailStatus, q.emailStatus.split(",")));
+  if (q.emailStatus) conds.push(inArray(leads.emailStatus, boundedCsv(q.emailStatus)));
   if (q.minScore !== undefined) conds.push(sql`${leads.score} >= ${q.minScore}`);
-  if (q.tag) conds.push(sql`${q.tag} = ANY(${leads.tags})`);
+  if (q.tag) conds.push(sql`${q.tag.slice(0, LIST_SEARCH_MAX)} = ANY(${leads.tags})`);
   if (q.icpId) conds.push(eq(leads.icpId, q.icpId));
-  if (q.seniority) conds.push(inArray(leads.seniority, q.seniority.split(",")));
-  if (q.department) conds.push(inArray(leads.department, q.department.split(",")));
+  if (q.seniority) conds.push(inArray(leads.seniority, boundedCsv(q.seniority)));
+  if (q.department) conds.push(inArray(leads.department, boundedCsv(q.department)));
   if (q.hasEmail === "true") conds.push(sql`${leads.email} IS NOT NULL`);
   if (q.hasEmail === "false") conds.push(sql`${leads.email} IS NULL`);
-  if (q.status) conds.push(inArray(leads.status, q.status.split(",")));
+  if (q.status) conds.push(inArray(leads.status, boundedCsv(q.status)));
   if (q.clientId === "none") conds.push(sql`${leads.clientId} IS NULL`);
   else if (q.clientId) conds.push(eq(leads.clientId, q.clientId));
   if (q.attention) {
@@ -200,17 +218,22 @@ leadRoutes.get("/", zValidator("query", listQuery), async (c) => {
   const { db } = getDb();
   const where = await buildWhere(oid, q);
   const sortCol = { score: leads.score, created: leads.createdAt, updated: leads.updatedAt, name: leads.fullName }[q.sort];
-  const rows = await db
-    .select({ lead: leads, company: companies })
-    .from(leads)
-    // The join is scoped as well as the WHERE: a lead whose company_id points at another
-    // workspace's company must come back with no company, not with theirs.
-    .leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid)))
-    .where(where)
-    .orderBy(q.order === "asc" ? asc(sortCol) : desc(sortCol))
-    .limit(q.limit)
-    .offset(q.offset);
-  const [{ n }] = await db.select({ n: sql<number>`count(*)::int` }).from(leads).where(where);
+  // Under a statement time cap: a filter that would otherwise scan a large table for seconds
+  // is cancelled and answered with a 503, instead of occupying a connection and the instance.
+  const { rows, n } = await boundedRead(db, async (tx) => {
+    const rows = await tx
+      .select({ lead: leads, company: companies })
+      .from(leads)
+      // The join is scoped as well as the WHERE: a lead whose company_id points at another
+      // workspace's company must come back with no company, not with theirs.
+      .leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid)))
+      .where(where)
+      .orderBy(q.order === "asc" ? asc(sortCol) : desc(sortCol))
+      .limit(q.limit)
+      .offset(q.offset);
+    const [{ n }] = await tx.select({ n: sql<number>`count(*)::int` }).from(leads).where(where);
+    return { rows, n };
+  });
   return c.json({ leads: rows.map((r) => ({ ...r.lead, company: r.company })), total: n, limit: q.limit, offset: q.offset });
 });
 
@@ -219,7 +242,8 @@ leadRoutes.get("/export.csv", zValidator("query", listQuery), async (c) => {
   const q = { ...filters, limit: 5000, offset: 0 };
   const oid = orgId(c);
   const { db } = getDb();
-  const rows = await db.select({ lead: leads, company: companies }).from(leads).leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid))).where(await buildWhere(oid, q)).orderBy(desc(leads.score)).limit(5000);
+  const where = await buildWhere(oid, q);
+  const rows = await boundedRead(db, (tx) => tx.select({ lead: leads, company: companies }).from(leads).leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid))).where(where).orderBy(desc(leads.score)).limit(5000));
   const cols = ["first_name", "last_name", "title", "email", "email_status", "email_confidence", "linkedin_url", "phone", "location", "company", "company_domain", "industry", "company_size", "score", "tags", "created_at"];
   const esc = csvCell;
   const lines = [cols.join(",")];
@@ -242,9 +266,20 @@ leadRoutes.post("/", zValidator("json", leadInput), async (c) => {
   if (b.companyDomain !== undefined && !companyDomainOrNull(b.companyDomain)) throw badRequest(`companyDomain "${b.companyDomain.slice(0, 80)}" is not a public company domain (for example acme.com).`);
   // Charged only when this creates a lead. Posting someone the workspace already has is an
   // update, and billing it as a new lead charged customers for their own duplicates.
-  if (!(await findExistingLead(oid, b))) await consume(db, oid, "leads", 1);
-  const r = await upsertLead(oid, { ...b, source: b.source ?? "api" });
-  return c.json(r, r.created ? 201 : 200);
+  const charged = !(await findExistingLead(oid, b));
+  if (charged) await consume(db, oid, "leads", 1);
+  try {
+    const r = await upsertLead(oid, { ...b, source: b.source ?? "api" });
+    // A race: two parallel creates of one new address both found no existing lead and both
+    // charged, but only one inserted. The one whose insert folded into an update of the other
+    // (created === false) did not create a lead, so give its charge back.
+    if (charged && !r.created) await consume(db, oid, "leads", -1, { allowOverage: true }).catch(() => {});
+    return c.json(r, r.created ? 201 : 200);
+  } catch (e) {
+    // The loser of the same race whose insert hit the unique index: it created nothing.
+    if (charged && isUniqueViolation(e)) await consume(db, oid, "leads", -1, { allowOverage: true }).catch(() => {});
+    throw e;
+  }
 });
 
 /** Most rows in one import. */
@@ -331,13 +366,20 @@ leadRoutes.post("/import", async (c) => {
       skippedRows.push({ row: i + 1, reason: "No name, email or LinkedIn URL - nothing identifies this person." });
       continue;
     }
+    let rowCharged = false;
     try {
       // Only a NEW lead costs a lead. Re-importing a file to refresh titles used to bill
       // every row again.
-      if (!(await findExistingLead(oid, it))) await consume(db, oid, "leads", 1);
+      if (!(await findExistingLead(oid, it))) {
+        await consume(db, oid, "leads", 1);
+        rowCharged = true;
+      }
       const r = await upsertLead(oid, { ...it, source: "import" });
+      // Folded into an existing lead after all (a concurrent writer won): no new lead, give it back.
+      if (rowCharged && !r.created) await consume(db, oid, "leads", -1, { allowOverage: true }).catch(() => {});
       r.created ? created++ : updated++;
     } catch (e) {
+      if (rowCharged) await consume(db, oid, "leads", -1, { allowOverage: true }).catch(() => {});
       // What the caller is told is written here. The exception's own text is the SQL
       // statement with every bound value in it, and it used to be returned as-is.
       if (e instanceof QuotaExceededError) {
@@ -369,7 +411,8 @@ leadRoutes.post("/import", async (c) => {
 leadRoutes.post("/bulk/delete", zValidator("json", z.object({ ids: z.array(z.string().uuid()).min(1).max(1000) })), async (c) => {
   const { db } = getDb();
   const ids = [...new Set(c.req.valid("json").ids)];
-  const gone = await db.delete(leads).where(and(inArray(leads.id, ids), eq(leads.orgId, orgId(c)))).returning({ id: leads.id });
+  // Deleting a person removes the copies too (messages, events, monitor results): lib/privacyErase.ts.
+  const gone = (await eraseLeads(orgId(c), ids, db)).deleted.map((id) => ({ id }));
   await audit(c, "leads.bulk_deleted", { targetType: "lead", data: { requested: ids.length, deleted: gone.length } });
   return c.json({ ok: true, requested: ids.length, deleted: gone.length, notFound: ids.length - gone.length });
 });
@@ -395,6 +438,7 @@ leadRoutes.post("/bulk/enrich", zValidator("json", z.object({ ids: z.array(z.str
   const requested = [...new Set(c.req.valid("json").ids)];
   const owned = (await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, requested)))).map((r) => r.id);
   if (!owned.length) return c.json({ jobId: null, status: "nothing_to_do", requested: requested.length, queued: 0, notFound: requested.length });
+  await guardJobCapacity(db, oid, "leads.bulk_enrich");
   const job = await enqueue(db, "leads.bulk_enrich", { leadIds: owned }, { orgId: oid });
   return c.json({ jobId: job.id, status: "queued", requested: requested.length, queued: owned.length, notFound: requested.length - owned.length }, 202);
 });
@@ -411,6 +455,7 @@ leadRoutes.get("/lists/all", async (c) => {
 });
 leadRoutes.post("/lists", zValidator("json", z.object({ name: z.string().min(1).max(200), description: z.string().max(5000).optional(), clientId: z.string().uuid().optional() })), async (c) => {
   const { db } = getDb();
+  await assertRowCap(db, lists, orgId(c), "lists");
   await assertOwned(clients, c.req.valid("json").clientId, orgId(c), "Client", c);
   const [row] = await db.insert(lists).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
   return c.json(row, 201);
@@ -533,6 +578,8 @@ leadRoutes.patch("/:id", zValidator("json", leadPatch), async (c) => {
   await assertOwned(icps, b.icpId, oid, "ICP", c);
   // Already canonical: the schema ran canonicalEmail.
   const email = rawEmail;
+  // A person who asked the platform itself to stop is not stored again by hand either.
+  if (email && email !== existing.email && (await onPlatformList(email, db))) throw new ApiError(409, PLATFORM_LISTED, "suppressed");
 
   /**
    * The company is identified by its domain, so a domain moves the lead to that company
@@ -587,7 +634,7 @@ leadRoutes.patch("/:id", zValidator("json", leadPatch), async (c) => {
 
 leadRoutes.delete("/:id", async (c) => {
   const { db } = getDb();
-  const gone = await db.delete(leads).where(and(eq(leads.id, c.req.param("id")), eq(leads.orgId, orgId(c)))).returning({ id: leads.id });
+  const gone = (await eraseLeads(orgId(c), [c.req.param("id")], db)).deleted;
   if (!gone.length) throw notFound("Lead");
   return c.json({ ok: true });
 });
@@ -598,6 +645,7 @@ leadRoutes.post("/:id/enrich", async (c) => {
   const { db } = getDb();
   const l = await db.query.leads.findFirst({ where: and(eq(leads.id, c.req.param("id")), eq(leads.orgId, oid)) });
   if (!l) throw notFound("Lead");
+  await guardJobCapacity(db, oid, "lead.enrich");
   const job = await enqueue(db, "lead.enrich", { leadId: l.id }, { orgId: oid, priority: 3 });
   return c.json({ jobId: job.id, status: "queued" }, 202);
 });
@@ -630,6 +678,11 @@ leadRoutes.post("/:id/find-email", async (c) => {
   if (!domain || !l.firstName || !l.lastName) throw badRequest("Need first name, last name and a company domain");
   await consume(db, oid, "verifications", 1);
   const r = await findEmail({ firstName: l.firstName, lastName: l.lastName, domain, knownPattern: co?.emailPattern, knownEmails: (co?.raw as { emailsFound?: string[] })?.emailsFound }, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
+  if (r.email && canonicalEmail(r.email) && (await onPlatformList(canonicalEmail(r.email), db))) {
+    // Nothing is stored and nothing is charged for an address that may not be kept.
+    await consume(db, oid, "verifications", -1, { allowOverage: true }).catch(() => {});
+    throw new ApiError(409, PLATFORM_LISTED, "suppressed");
+  }
   if (r.email && canonicalEmail(r.email)) {
     // Only stamp verifiedAt when something checked the mailbox; a pattern guess is not verified.
     await db.update(leads).set({ email: canonicalEmail(r.email) ?? undefined, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: r.verifiedBy ? new Date() : null, emailVerifiedBy: r.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id));

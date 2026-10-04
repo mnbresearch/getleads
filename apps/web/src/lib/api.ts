@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { Prospex, ProspexError } from "@prospex/sdk";
+import { safeReturnPath } from "./returnPath";
 
 export const API_URL = (import.meta.env.VITE_API_URL as string | undefined)?.replace(/\/$/, "") ?? "http://localhost:8080";
 
@@ -290,15 +291,16 @@ export function rejectSession(sentToken: string | null | undefined) {
 function markSessionExpired() {
   try {
     sessionStorage.setItem(EXPIRED_KEY, "1");
-    const here = window.location.pathname + window.location.search;
-    if (!NO_RETURN.some((p) => window.location.pathname.startsWith(p))) sessionStorage.setItem(RETURN_KEY, here);
+    const here = safeReturnPath(window.location.pathname + window.location.search);
+    if (here && !NO_RETURN.some((p) => window.location.pathname.startsWith(p))) sessionStorage.setItem(RETURN_KEY, here);
   } catch {}
 }
 
 /** Remember where to go after sign-in (e.g. Protected bouncing a signed-out deep link). */
 export function rememberReturnPath(path: string) {
   try {
-    if (!NO_RETURN.some((p) => path.startsWith(p))) sessionStorage.setItem(RETURN_KEY, path);
+    const safe = safeReturnPath(path);
+    if (safe && !NO_RETURN.some((p) => safe.startsWith(p))) sessionStorage.setItem(RETURN_KEY, safe);
   } catch {}
 }
 
@@ -318,13 +320,15 @@ export function sessionExpiredNotice(): string | null {
 
 /**
  * Where to send the user after a successful sign-in, or `fallback`. Reading it clears it.
- * Only same-origin relative paths are returned, so a stored value can't redirect off-site.
+ * Only a path on this app is returned (see lib/returnPath.ts for what that rules out), so a
+ * stored value cannot send anyone off-site - whoever wrote it.
  */
 export function consumeReturnPath(fallback = "/"): string {
   try {
     const p = sessionStorage.getItem(RETURN_KEY);
     sessionStorage.removeItem(RETURN_KEY);
-    if (p && p.startsWith("/") && !p.startsWith("//")) return p;
+    const safe = safeReturnPath(p);
+    if (safe) return safe;
   } catch {}
   return fallback;
 }

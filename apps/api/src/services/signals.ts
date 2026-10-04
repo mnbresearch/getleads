@@ -1,4 +1,4 @@
-import { and, companies, eq, getDb, inArray, isNull, or, signalMatches, signalSubscriptions, signals, sql, type SignalSubscription } from "@prospex/db";
+import { and, companies, desc, eq, getDb, inArray, isNull, or, signalMatches, signalSubscriptions, signals, sql, type SignalSubscription } from "@prospex/db";
 import { companyNews, domainHintFromUrl, findPeopleDetailed, resolveCompanyDomain, scanSignals, scoreLeadRules, type IcpCriteria, type ParsedSignal, type SignalType } from "@prospex/core";
 import { upsertCompany, upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
@@ -46,6 +46,10 @@ export async function runSubscription(sub: SignalSubscription, log: (m: string) 
         sql`${signals.id} NOT IN (SELECT signal_id FROM signal_matches WHERE subscription_id = ${sub.id})`,
       ),
     )
+    // The workspace's own signals first, then the newest. With no order, a busy week of
+    // public news filled all 200 places and the workspace's own job changes - the ones only
+    // it has - were never matched.
+    .orderBy(sql`(${signals.orgId} IS NULL)`, desc(signals.createdAt))
     .limit(200);
   const kw = [...sub.keywords, ...sub.industries, ...sub.locations].map((k) => k.toLowerCase());
   let matched = 0;

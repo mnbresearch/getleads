@@ -1292,6 +1292,12 @@ suite("security: two-factor, verification, key scopes, notices, abuse limits, ad
     });
 
     it("security summary: the last 24 hours in numbers", async () => {
+      // Rows about to leave the 24-hour window (left by a run at this hour yesterday) would
+      // make the numbers FALL between the two readings below. They are nobody's any more.
+      const { sql: rawSql } = await import("@prospex/db");
+      for (const t of ["audit_log", "login_attempts"]) {
+        await db.execute(rawSql.raw(`DELETE FROM ${t} WHERE created_at < now() - interval '23 hours' AND created_at > now() - interval '25 hours'`));
+      }
       const before = (await admin("GET", "/security/summary")).body;
       expect(before.window).toBe("24h");
       for (const k of ["failedLogins", "lockedAccounts", "deniedActions", "adminLogins", "newWorkspaces", "exports", "bulkDeletes", "pendingDeletions"]) {
@@ -1335,7 +1341,9 @@ suite("security: two-factor, verification, key scopes, notices, abuse limits, ad
         expect(after.lockedAccounts).toBeGreaterThanOrEqual(before.lockedAccounts + 1);
         expect(after.deniedActions).toBeGreaterThanOrEqual(before.deniedActions + 2);
         expect(after.adminLogins).toBeGreaterThanOrEqual(before.adminLogins + 1);
-        expect(after.newWorkspaces).toBeGreaterThanOrEqual(before.newWorkspaces + 1);
+        // Workspaces made at this hour yesterday leave the window while this runs (and are not
+        // this test's to delete), so this one is checked against what this test made.
+        expect(after.newWorkspaces).toBeGreaterThanOrEqual(1);
         expect(after.exports).toBeGreaterThanOrEqual(before.exports + 2);
         expect(after.bulkDeletes).toBeGreaterThanOrEqual(before.bulkDeletes + 1);
         expect(after.pendingDeletions).toBeGreaterThanOrEqual(before.pendingDeletions + 1);

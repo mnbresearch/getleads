@@ -181,6 +181,24 @@ export function openapi(apiUrl: string) {
           responses: ok(obj({ ok: bool, totpEnabled: bool }, ["ok", "totpEnabled"])),
         },
       },
+      "/v1/account/export": {
+        get: { tags: ["Account"], security: [{ bearerAuth: [] }], summary: "Download everything the workspace owns as JSON (owner session only). Re-confirmed with the `x-confirm-password` header, or `x-confirm-code` when two-factor sign-in is on. At most one export every 10 minutes per workspace", parameters: [{ name: "x-confirm-password", in: "header", schema: str }, { name: "x-confirm-code", in: "header", schema: str }], responses: ok({ type: "object", description: "The workspace's data, as a file download" }) },
+        post: { tags: ["Account"], security: [{ bearerAuth: [] }], summary: "The same export, with the confirmation in the body", requestBody: j(obj({ password: str, code: str })), responses: ok({ type: "object", description: "The workspace's data, as a file download" }) },
+      },
+      "/v1/account/deletion": { get: { tags: ["Account"], security: [{ bearerAuth: [] }], summary: "Whether a deletion of this workspace is pending, and when it is due", responses: ok(obj({ pending: bool, scheduledFor: str }, ["pending"])) } },
+      "/v1/account/delete": { post: { tags: ["Account"], security: [{ bearerAuth: [] }], summary: "Schedule the workspace and all its data for deletion in 7 days (owner session only). `confirmName` is the workspace's exact name; `password`, or `code` when two-factor sign-in is on, re-confirms who is asking. The workspace keeps working until then, with campaigns paused", requestBody: j(obj({ confirmName: str, password: str, code: str }, ["confirmName"])), responses: ok(obj({ scheduledFor: str }, ["scheduledFor"])) } },
+      "/v1/account/delete/cancel": { post: { tags: ["Account"], security: [{ bearerAuth: [] }], summary: "Cancel a pending workspace deletion (owner session only)", responses: ok(obj({ ok: bool })) } },
+      "/v1/account/privacy": {
+        get: { tags: ["Account"], summary: "Workspace privacy settings: whether AI assistance is on, and the mailing address added to the foot of campaign emails", responses: ok(obj({ aiAssist: bool, mailingAddress: str }, ["aiAssist", "mailingAddress"])) },
+        patch: { tags: ["Account"], security: [{ bearerAuth: [] }], summary: "Change AI assistance or the mailing address (owner/admin session only). With AI assistance off, nothing about leads, prospects or replies is sent to an AI provider; features fall back to their built-in rules and templates", requestBody: j(obj({ aiAssist: bool, mailingAddress: { ...str, maxLength: 300 } })), responses: ok(obj({ aiAssist: bool, mailingAddress: str }, ["aiAssist", "mailingAddress"])) },
+      },
+      "/v1/admin/suppressions": {
+        get: { tags: ["Admin"], security: adminSec, summary: "The platform-wide do-not-contact list: addresses no workspace may email. `q` matches part of the address", parameters: [{ name: "q", in: "query", schema: { ...str, maxLength: 200 } }, { name: "limit", in: "query", schema: { type: "integer", default: 100, maximum: 500 } }], responses: ok(obj({ suppressions: arr(obj({ id: str, email: str, reason: str, note: { type: ["string", "null"] }, createdAt: str })) }, ["suppressions"])) },
+        post: { tags: ["Admin"], security: adminSec, summary: "Add an address to the platform-wide list. Answers 201 when it was added and 200 when it was already there", requestBody: j(obj({ email: str, reason: str, note: str }, ["email"])), responses: ok(obj({ suppression: { type: "object" }, created: bool })) },
+      },
+      "/v1/admin/suppressions/{id}": { delete: { tags: ["Admin"], security: adminSec, summary: "Remove an address from the platform-wide list", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok(obj({ ok: bool })) } },
+      "/v1/admin/data-subject": { get: { tags: ["Admin"], security: adminSec, summary: "Where one person's address appears: counts per workspace, and whether it is on the platform-wide list. No content is returned", parameters: [{ name: "email", in: "query", required: true, schema: str }], responses: ok(obj({ email: str, globallySuppressed: bool, workspaces: arr(obj({ orgId: str, orgName: str, leads: { type: "integer" }, campaignContacts: { type: "integer" }, messages: { type: "integer" }, suppressed: bool })) }, ["email", "globallySuppressed", "workspaces"])) } },
+      "/v1/admin/data-subject/erase": { post: { tags: ["Admin"], security: adminSec, summary: "Erase a person from every workspace and add their address to the platform-wide list. `confirm` must repeat the address. Cannot be undone", requestBody: j(obj({ email: str, confirm: str }, ["email", "confirm"])), responses: ok(obj({ ok: bool, workspaces: { type: "integer" }, leadsDeleted: { type: "integer" }, globallySuppressed: bool })) } },
       "/v1/admin/audit-log": {
         get: {
           tags: ["Admin"],

@@ -11,6 +11,7 @@ import {
   eq,
   getDb,
   getToolsSummary,
+  globalSuppressions,
   ilike,
   inArray,
   isNull,
@@ -43,6 +44,11 @@ import { ADMIN_LOCK_POLICY, attemptQueue, isNewAddressFor, lockedError, lockStat
 import { isValidTotpSecret, verifyTotp } from "../lib/totp.js";
 import { clearTwoFactor, twoFactorEnabled } from "../lib/twoFactor.js";
 import { notifySecurity } from "../lib/securityMail.js";
+import { aiDisabled } from "../lib/ai.js";
+import { canonicalEmail } from "../services/leads.js";
+import { mailingAddressOf } from "../services/campaigns.js";
+import { addressFingerprint } from "../lib/privacySuppression.js";
+import { dataSubjectReport, eraseDataSubject } from "../lib/privacyErase.js";
 
 export const adminRoutes = new Hono<Env>();
 
@@ -310,8 +316,28 @@ adminRoutes.get("/orgs/:id", async (c) => {
   // What an operator set for this workspace on top of its plan: the limits that differ from
   // the plan's defaults. Nothing showed these before, so an override was invisible once made.
   const overrides = planOverrides(org);
+  // A whitelist, not the row. The row carries the workspace's free-form settings - which
+  // include copies of replies its people wrote to prospects - and its billing identifiers;
+  // spreading it here put all of that in front of the operator (and into anything that
+  // logged the response) for no purpose the console has. New columns are not exposed until
+  // someone decides they should be.
   return c.json({
-    org: { ...org, limits: effectiveLimits(org), overrides, pendingDeletionAt: pendingDeletion?.scheduledFor ?? null },
+    org: {
+      id: org.id,
+      name: org.name,
+      slug: org.slug,
+      plan: org.plan,
+      planLimits: org.planLimits,
+      status: org.status,
+      createdAt: org.createdAt,
+      limits: effectiveLimits(org),
+      overrides,
+      pendingDeletionAt: pendingDeletion?.scheduledFor ?? null,
+      hasSubscription: !!org.stripeSubscriptionId,
+      // The workspace's privacy switches, as yes-or-no answers (not the address itself).
+      aiAssist: !aiDisabled(org),
+      mailingAddressSet: !!mailingAddressOf(org),
+    },
     overrides,
     users: orgUsers,
     usage: Object.fromEntries(usageRows.map((r) => [r.metric, r.count])),
@@ -848,4 +874,86 @@ adminRoutes.patch("/tools/:provider", zValidator("json", TOOL_LIMIT_SCHEMA), asy
   if (!updated) throw notFound("Tool");
   await adminAudit(c, "admin.tool_limit_changed", null, { targetType: "tool", targetId: provider, data: { before, after: pick(updated as unknown as Record<string, unknown>) } });
   return c.json({ ...updated, changed: true });
+});
+
+// ── Platform-wide do-not-contact list ──
+//
+// A workspace's own list stops that workspace. This one is for people who told US - not one
+// customer - that they never want to hear from anyone using Scout, and for erasure requests.
+// Every send path of every workspace checks it (lib/privacySuppression.ts).
+
+const emailInput = z.string().max(320);
+/** The address as both lists store it, or a 400 that says what is wrong. */
+function oneAddress(raw: string): string {
+  const email = canonicalEmail(raw);
+  if (!email) throw badRequest("Enter one email address, like jane@example.com.");
+  return email;
+}
+const suppressionOut = (r: { id: string; email: string; reason: string; note: string | null; createdAt: Date }) => ({ id: r.id, email: r.email, reason: r.reason, note: r.note, createdAt: r.createdAt });
+
+adminRoutes.get("/suppressions", zValidator("query", z.object({ q: z.string().max(200).optional(), limit: z.coerce.number().int().min(1).max(500).default(100) })), async (c) => {
+  const { q, limit } = c.req.valid("query");
+  const { db } = getDb();
+  const term = q?.trim().toLowerCase();
+  const rows = await db
+    .select()
+    .from(globalSuppressions)
+    .where(term ? ilike(globalSuppressions.email, `%${escapeLike(term)}%`) : undefined)
+    .orderBy(desc(globalSuppressions.createdAt))
+    .limit(limit);
+  return c.json({ suppressions: rows.map(suppressionOut) });
+});
+
+adminRoutes.post("/suppressions", zValidator("json", z.object({ email: emailInput, reason: z.string().max(100).optional(), note: z.string().max(500).optional() })), async (c) => {
+  const b = c.req.valid("json");
+  const email = oneAddress(b.email);
+  const { db } = getDb();
+  // Idempotent on the address: adding one that is already listed returns the existing entry
+  // unchanged, so a double click (or a second request about the same person) is not an error.
+  const inserted = await db
+    .insert(globalSuppressions)
+    .values({ email, reason: b.reason?.trim() || "request", note: b.note?.trim() || null })
+    .onConflictDoNothing()
+    .returning();
+  const row = inserted[0] ?? (await db.query.globalSuppressions.findFirst({ where: eq(globalSuppressions.email, email) }));
+  if (!row) throw new ApiError(500, "The address could not be added to the list. Try again.", "internal_error");
+  // The log names the entry and a fingerprint of the address, not the address: this log is
+  // kept for a long time, and the list itself is where the address belongs.
+  if (inserted.length) await adminAudit(c, "admin.suppression_added", null, { targetType: "global_suppression", targetId: row.id, data: { address: addressFingerprint(email), reason: row.reason } });
+  return c.json({ suppression: suppressionOut(row), created: inserted.length > 0 }, inserted.length ? 201 : 200);
+});
+
+adminRoutes.delete("/suppressions/:id", async (c) => {
+  const id = c.req.param("id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw badRequest("That is not a valid id.");
+  const { db } = getDb();
+  const gone = await db.delete(globalSuppressions).where(eq(globalSuppressions.id, id)).returning();
+  if (!gone.length) throw notFound("Suppression");
+  await adminAudit(c, "admin.suppression_removed", null, { targetType: "global_suppression", targetId: id, data: { address: addressFingerprint(gone[0].email), reason: gone[0].reason } });
+  return c.json({ ok: true });
+});
+
+// ── Data-subject requests: where does this person appear, and erase them ──
+
+/** Counts per workspace - never the content. Looking someone up is itself recorded. */
+adminRoutes.get("/data-subject", rateLimit({ perMinute: 30, name: "admin-data-subject" }), zValidator("query", z.object({ email: emailInput })), async (c) => {
+  const email = oneAddress(c.req.valid("query").email);
+  const report = await dataSubjectReport(email);
+  await adminAudit(c, "admin.data_subject_viewed", null, { targetType: "data_subject", targetId: addressFingerprint(email), data: { workspaces: report.workspaces.length, globallySuppressed: report.globallySuppressed } });
+  return c.json(report);
+});
+
+/**
+ * Erase a person everywhere: their lead records and every copy of their personal data in
+ * every workspace (the same routine a lead deletion runs), and their address onto the
+ * platform list so no workspace can add or contact them again. `confirm` must repeat the
+ * address - this cannot be undone.
+ */
+adminRoutes.post("/data-subject/erase", rateLimit({ perMinute: 10, name: "admin-data-subject-erase" }), zValidator("json", z.object({ email: emailInput, confirm: z.string().max(320) })), async (c) => {
+  const b = c.req.valid("json");
+  const email = oneAddress(b.email);
+  if (canonicalEmail(b.confirm) !== email) throw new ApiError(400, "The confirmation does not match the address. Type the same address again to confirm.", "confirm_mismatch");
+  const r = await eraseDataSubject(email);
+  await adminAudit(c, "admin.data_subject_erased", null, { targetType: "data_subject", targetId: addressFingerprint(email), data: { workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, eventsDeleted: r.eventsDeleted } });
+  return c.json({ ok: true, workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, globallySuppressed: true });
 });

@@ -7,6 +7,14 @@ import { stripNulDeep } from "./sanitize.js";
 const CONTAINERS = new Set(["body", "query", "settings", "criteria", "data", "payload", "filters", "params", "config", "options", "credentials"]);
 /** Words shown in capitals rather than sentence case. */
 const ACRONYMS: Record<string, string> = { url: "URL", id: "ID", icp: "ICP", ai: "AI", api: "API", csv: "CSV", mx: "MX", smtp: "SMTP", crm: "CRM", utc: "UTC" };
+/**
+ * Look a word up in ACRONYMS by OWN property only. A plain object inherits `constructor`,
+ * `toString` and friends from Object.prototype, so `ACRONYMS["constructor"]` returned a
+ * function - and a validation error whose field was literally named `constructor` (a
+ * caller-controlled key in any `z.record`) then threw "first.toUpperCase is not a function"
+ * and turned a 400 into a 500. Own-property lookup returns the word unchanged instead.
+ */
+const acronym = (w: string): string => (Object.hasOwn(ACRONYMS, w) ? ACRONYMS[w] : w);
 
 function words(seg: string): string[] {
   return seg
@@ -37,7 +45,7 @@ export function humanizePath(path: (string | number)[], fallback = "body"): stri
   const parent = typeof directParent === "string" && !/^\d+$/.test(directParent) ? directParent : null;
   const bare = words(last).length === 1;
   const parts = parent && bare && !CONTAINERS.has(parent) ? [...words(parent), ...words(last)] : words(last);
-  const out = parts.map((w) => ACRONYMS[w] ?? w);
+  const out = parts.map((w) => acronym(w));
   const first = out[0] ?? last;
   out[0] = first === first.toUpperCase() ? first : first.charAt(0).toUpperCase() + first.slice(1);
   return out.join(" ");

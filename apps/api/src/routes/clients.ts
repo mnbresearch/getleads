@@ -1,11 +1,12 @@
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, enqueue, eq, getDb, getUsage, listLeads, lists, organizations } from "@prospex/db";
+import { and, clients, enqueue, eq, getDb, getUsage, listLeads, lists, organizations } from "@prospex/db";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { ApiError, notFound } from "../lib/errors.js";
 import { audit } from "../lib/audit.js";
 import { ownerOrAdmin } from "../lib/roles.js";
+import { assertRowCap } from "../lib/limits.js";
 import {
   assignLeads,
   attentionLeadIds,
@@ -64,6 +65,8 @@ clientRoutes.post("/", zValidator("json", clientInput), async (c) => {
     await audit(c, "client.report_settings_changed", { result: "denied", targetType: "client", data: { reason: "role", role, on: "create" } });
     throw new ApiError(403, `Only a workspace owner or admin can change what the client report shows. Your role is "${role}" - ask an owner or admin, or create the client without that setting.`, "forbidden_role");
   }
+  // A generous ceiling on how many clients one workspace can hold (lib/limits.ts); existing ones are untouched.
+  await assertRowCap(getDb().db, clients, orgId(c), "clients");
   const created = await createClient(orgId(c), input);
   await audit(c, "client.created", { targetType: "client", targetId: created.id, data: { name: created.name } });
   return c.json(created, 201);

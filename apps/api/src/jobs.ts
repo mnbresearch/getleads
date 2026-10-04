@@ -11,9 +11,15 @@ import { AiNotConfiguredError, knownBrands, sampleAcrossEngines } from "./servic
 import { sendStep, tickCampaign } from "./services/campaigns.js";
 import { appsScriptOutputUrl, fetchAppsScriptOutput, syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
+import { aiForOrg } from "./lib/ai.js";
+import { RETENTION, runRetention } from "./lib/privacyRetention.js";
+import { onPlatformList } from "./lib/privacySuppression.js";
+
+/** What an email lookup records when the only address it found is on the platform do-not-contact list. */
+const DO_NOT_CONTACT_FOUND = "found an address whose owner has asked not to be contacted through Scout; it was not stored";
 import { tryConsume, type QuotaOutcome } from "./lib/quota.js";
 import { scanJobChanges } from "./services/jobChanges.js";
-import { identifyVisit } from "./services/visitors.js";
+import { identifyVisit, openVisitorJob } from "./services/visitors.js";
 import { refreshCompanySignals, runSubscription } from "./services/signals.js";
 import { runMonitor } from "./services/monitors.js";
 import { runAutopilot } from "./services/autopilot.js";
@@ -22,7 +28,7 @@ import { sendMail } from "./lib/mailer.js";
 import { purgeDueWorkspaces } from "./services/accountDeletion.js";
 import { migrateLegacyLinkTokens } from "./lib/linkTokens.js";
 
-/** Org's plan, for the plan-gated AI factory. A missing org is treated as free. */
+/** Org's plan, for plan-gated features. A missing org is treated as free. */
 async function planOf(db: Db, orgId: string | null | undefined): Promise<string> {
   if (!orgId) return "free";
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId) });
@@ -30,11 +36,15 @@ async function planOf(db: Db, orgId: string | null | undefined): Promise<string>
 }
 
 /**
- * The AI engine this org's plan pays for. `createAiProvider()` picks Anthropic whenever it
- * is configured, so every background job gave free workspaces the paid model.
+ * The AI engine a background job may use for this workspace: none when the workspace has
+ * turned AI assistance off (or no longer exists), otherwise the one its plan pays for.
+ * `createAiProvider()` picks Anthropic whenever it is configured, so every background job
+ * gave free workspaces the paid model.
  */
 async function aiFor(db: Db, orgId: string | null | undefined) {
-  return createAiProviderForPlan(await planOf(db, orgId));
+  if (!orgId) return createAiProviderForPlan("free");
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId), columns: { plan: true, settings: true } });
+  return aiForOrg(org ?? { plan: "free" });
 }
 
 /**
@@ -215,9 +225,14 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
     if (!c.ok) return { skipped: "quota", detail: c.message };
     const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, priorBad);
     if (r.email) {
-      // The same "taken" check replaceInvalid has. Writing an address another lead
-      // already holds hit the unique index, and the job failed three times over it.
-      if (await takenByOther(r.email)) {
+      // An address whose owner asked never to be contacted through Scout is not stored -
+      // not even in the note about what the lookup found.
+      if (await onPlatformList(r.email, db)) {
+        custom.emailLookup = { at: new Date().toISOString(), result: DO_NOT_CONTACT_FOUND };
+        Object.assign(patch, { custom });
+      } else if (await takenByOther(r.email)) {
+        // The same "taken" check replaceInvalid has. Writing an address another lead
+        // already holds hit the unique index, and the job failed three times over it.
         custom.emailLookup = { at: new Date().toISOString(), result: `found ${r.email.toLowerCase()}, which another lead already has` };
         Object.assign(patch, { custom });
       } else {
@@ -241,7 +256,8 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
     // Every address already known bad, and the current one, are excluded - the finder
     // used to hand back an address from invalidEmails as the "replacement".
     const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, [...priorBad, lead.email]);
-    const usable = r.email && r.email.toLowerCase() !== lead.email.toLowerCase() && (r.status === "valid" || r.status === "catch_all" || r.status === "risky");
+    const listed = r.email ? await onPlatformList(r.email, db) : false;
+    const usable = r.email && !listed && r.email.toLowerCase() !== lead.email.toLowerCase() && (r.status === "valid" || r.status === "catch_all" || r.status === "risky");
     const taken = usable ? await takenByOther(r.email!) : false;
     if (usable && !taken) {
       custom.invalidEmails = [...new Set([...priorBad, lead.email])];
@@ -253,7 +269,7 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
       // Recorded, so the next look at this lead can tell "tried, nothing better" from
       // "never tried" - and the dashboard is not asked to repeat the same lookup.
       custom.replacementSearchedAt = new Date().toISOString();
-      custom.replacementResult = taken ? "found an address another lead already has" : r.email ? `only found ${r.status} candidates` : "no candidate found";
+      custom.replacementResult = listed ? DO_NOT_CONTACT_FOUND : taken ? "found an address another lead already has" : r.email ? `only found ${r.status} candidates` : "no candidate found";
       Object.assign(patch, { custom });
     }
   }
@@ -725,15 +741,24 @@ export const handlers: Record<string, JobHandler> = {
     // The raw IP is needed to identify the visit and for nothing after. It is dropped from
     // the job row once identification is done - or once the last attempt has failed - so
     // the jobs table does not keep a log of visitors' addresses.
-    const forget = () => ctx.db.execute(dsql`UPDATE jobs SET payload = payload - 'ip' WHERE id = ${job.id}`).catch(() => {});
+    const forget = () => ctx.db.execute(dsql`UPDATE jobs SET payload = payload - 'sealed' - 'ip' - 'identify' WHERE id = ${job.id}`).catch(() => {});
     const visitId = String(job.payload.visitId);
     const visit = isUuid(visitId) ? await ctx.db.query.visits.findFirst({ where: eq(visits.id, visitId), columns: { id: true, orgId: true } }) : null;
     if (visit && foreign(job, visit.orgId)) {
       await forget();
       return ORG_MISMATCH;
     }
+    // The address (and anything identify() said) is carried encrypted. Jobs queued by the
+    // release before this one carry it in clear; both are read, and both are scrubbed.
+    const sealed = openVisitorJob(job.payload);
+    if (!sealed.ip) {
+      // Nothing readable is left: already scrubbed, or sealed under a key this server no
+      // longer holds. Retrying cannot bring the address back.
+      await forget();
+      return { skipped: "the visitor's address is no longer available for this visit" };
+    }
     try {
-      const r = await identifyVisit(String(job.payload.visitId), String(job.payload.ip), (job.payload.identify as Record<string, unknown> | null) ?? null);
+      const r = await identifyVisit(String(job.payload.visitId), sealed.ip, sealed.identify);
       await forget();
       return r;
     } catch (e) {
@@ -1092,18 +1117,26 @@ export const handlers: Record<string, JobHandler> = {
       // carries no foreign key, so deleting the job left that endpoint returning an empty
       // result set for every search older than a week - indistinguishable from a search
       // that genuinely found nothing. Keeping them is cheap; the lie was not.
+      // The numbers are RETENTION's (lib/privacyRetention.ts), which the Privacy Policy states.
       await db
         .delete(jobs)
-        .where(and(eq(jobs.status, "done"), ne(jobs.type, "search.run"), lt(jobs.updatedAt, new Date(Date.now() - 7 * 86_400_000))));
+        .where(and(eq(jobs.status, "done"), ne(jobs.type, "search.run"), lt(jobs.updatedAt, new Date(Date.now() - RETENTION.finishedJobDays * 86_400_000))));
       // Failed jobs were never pruned at all and grew without bound. They are worth keeping
       // longer than successes, because they are what someone reads when diagnosing.
-      await db.execute(sql`DELETE FROM jobs WHERE status = 'failed' AND updated_at < now() - interval '30 days'`);
-      await db.execute(sql`DELETE FROM events WHERE created_at < now() - interval '90 days'`);
+      await db.execute(sql`DELETE FROM jobs WHERE status = 'failed' AND updated_at < now() - ${sql.raw(`interval '${RETENTION.failedJobDays} days'`)}`);
+      await db.execute(sql`DELETE FROM events WHERE created_at < now() - ${sql.raw(`interval '${RETENTION.eventDays} days'`)}`);
+      // Everything else with a lifetime: visitor rows, sign-in attempts, expired tokens, the
+      // audit log - and the copies a deleted lead left behind. Each step is time-limited and
+      // reports rather than throws, so one slow table never stops the housekeeping.
+      const retention = await runRetention(db).catch((e) => {
+        console.warn(`[jobs] the retention pass did not run: ${(e as Error).name}`);
+        return null;
+      });
       // Link tokens still in plaintext are moved out of it at server start; repeated here
       // for deployments with no long-running server process (the job runner endpoint) and
       // for rows an older instance wrote during a rolling deploy. Does nothing once done.
       await migrateLegacyLinkTokens().catch((e) => console.warn(`[jobs] could not finish moving link tokens out of plaintext: ${(e as Error).name}`));
-      return {};
+      return retention ? { retention } : {};
     });
   },
 };

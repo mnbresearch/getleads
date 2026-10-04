@@ -11,6 +11,7 @@ import { useGoogleEnabled } from "../lib/googleSignIn";
 import { AuditResult, auditEntryLabel, auditReason, auditWho, type AuditEntry } from "../components/AuditBits";
 import { TwoFactorCard } from "../components/TwoFactorCard";
 import { WorkspaceData } from "../components/WorkspaceData";
+import { WorkspacePrivacy } from "../components/WorkspacePrivacy";
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
 function MembersNote({ what }: { what: string }) {
@@ -79,6 +80,7 @@ function Workspace() {
         setOrg((o) => (o ? { ...o, name: saved } : o));
       }).catch((e) => toast(e.message, "err"))}>Save</button>}
     </div>
+    <WorkspacePrivacy />
     <ChangePassword />
     <TwoFactorCard />
     <Sessions />
@@ -286,9 +288,10 @@ function ApiKeys() {
       <div className="card p-5 text-sm">
         <div className="mb-2 font-medium">Use with AI agents</div>
         <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-600" href={`${API_URL}/openapi.json`} target="_blank" rel={EXTERNAL_REL}>{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel={EXTERNAL_REL}>/docs</a>.</p>
-        <p className="mt-2 text-ink-300">MCP (Claude Desktop, Claude Code, Cursor):</p>
-        <pre className="mt-1 max-w-full overflow-x-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{`{ "mcpServers": { "prospex": { "command": "npx", "args": ["-y", "@prospex/mcp"],
-    "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "${API_URL}" } } } }`}</pre>
+        {/* This used to print an `npx` command for a package name on the public registry that is
+            not ours - anyone could publish under it, and the command would have run their code
+            with the customer's API key in its environment. */}
+        <p className="mt-2 text-ink-300" data-testid="mcp-note">Scout has an MCP server for AI assistants (Claude Desktop, Cursor). It is not published to a public package registry. <a className="text-brand-600 hover:underline" href="mailto:contact@mnbresearch.com?subject=Scout%20MCP%20server">Ask support</a> for the package, or use the REST API and OpenAPI document with your API key.</p>
       </div>
     </div>
   );

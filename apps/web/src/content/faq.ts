@@ -28,7 +28,7 @@ export const FAQS: Faq[] = [
   },
   {
     q: "How is Scout different from Apollo, Clay or Lusha?",
-    a: "Two ways. Those tools sell you access to a contact database; Scout searches live sources and verifies each address before anything is sent to it, and holds back the ones it cannot verify. And none of them measure what AI engines say about you, which is increasingly where buyers form an opinion before they ever reply.",
+    a: "Two ways. Those tools sell you access to a contact database; Scout searches live sources, can verify each address before you send, and never sends to one it knows is invalid. And none of them measure what AI engines say about you, which is increasingly where buyers form an opinion before they ever reply.",
   },
   {
     q: "What are AEO and GEO?",
@@ -44,7 +44,7 @@ export const FAQS: Faq[] = [
   },
   {
     q: "Will sending through Scout damage my email domain?",
-    a: "Scout is built to prevent that. Addresses are verified before they are used, risky ones are held back rather than sent to, each mailbox carries a health score, and a circuit breaker stops a campaign automatically if bounce rates climb mid-run.",
+    a: "Scout is built to prevent that. Addresses can be verified before they are used, ones known to be invalid are never sent to, each mailbox carries a health score, and a circuit breaker stops a campaign automatically if bounce rates climb mid-run.",
   },
   {
     q: "What happens when Scout does not have enough data to answer?",

@@ -20,7 +20,7 @@
     "start:worker": "npm run worker:prod -w apps/api"
   },
   "engines": {
-    "node": ">=22.12.0"
+    "node": ">=22.12.0 <23"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

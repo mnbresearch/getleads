@@ -24,7 +24,7 @@ const problems = [
   {
     pain: "Half your list bounces, and your domain pays for it.",
     why: "Exported lists rot at roughly 2% a month. Send into them and your reputation goes down with them.",
-    fix: "Scout verifies before it sends, holds back risky addresses, and trips a circuit breaker the moment bounce rates climb.",
+    fix: "Scout never sends to an address it knows is invalid, can verify addresses before you send, and trips a circuit breaker the moment bounce rates climb.",
   },
   {
     pain: "Everyone is emailing the same exported list.",

@@ -10,6 +10,9 @@ import { clientIp, requireAuth, requireUser, type Env } from "../middleware.js";
 import { reconfirmIdentity } from "../services/accountGuards.js";
 import { exportWorkspaceStream } from "../services/accountExport.js";
 import { cancelWorkspaceDeletion, pendingDeletion, requestWorkspaceDeletion } from "../services/accountDeletion.js";
+import { organizations } from "@prospex/db";
+import { aiDisabled } from "../lib/ai.js";
+import { mailingAddressOf } from "../services/campaigns.js";
 
 /**
  * The workspace as a whole: take a copy of everything in it, or delete it.
@@ -174,3 +177,59 @@ accountRoutes.post("/delete/cancel", requireUser, roleGate("account.deletion_can
   // they can be resumed deliberately.
   return c.json({ ok: true, cancelled: r.cancelled, pausedCampaigns: r.pausedCampaigns });
 });
+
+// ── Privacy settings ──
+
+/**
+ * Two switches a workspace has over what happens to the people it contacts:
+ *
+ *  - AI assistance. Off means no lead, prospect or inbound-mail content of this workspace is
+ *    sent to any AI provider: drafts fall back to the workspace's own templates, replies are
+ *    classified by the built-in rules, searches use the keyword parser.
+ *  - Mailing address. When set it is printed under the unsubscribe line of every email the
+ *    workspace sends to a prospect.
+ *
+ * Stored in `organizations.settings` as `aiDisabled` and `mailingAddress`. Read back from
+ * the database, not from the session, so a change made a moment ago by a colleague shows.
+ */
+async function privacyOf(orgId: string, fallback: { settings?: unknown }) {
+  const { db } = getDb();
+  const [org] = await db.select({ settings: organizations.settings }).from(organizations).where(eq(organizations.id, orgId));
+  const src = org ?? fallback;
+  return { aiAssist: !aiDisabled(src), mailingAddress: mailingAddressOf(src) };
+}
+
+/** Any signed-in member (or API key) may read them: the campaign editor shows what the footer will carry. */
+accountRoutes.get("/privacy", async (c) => {
+  const a = c.get("auth");
+  return c.json(await privacyOf(a.org.id, a.org));
+});
+
+accountRoutes.patch(
+  "/privacy",
+  requireUser,
+  roleGate("account.privacy_updated", "owner", "admin"),
+  zValidator("json", z.object({ aiAssist: z.boolean().optional(), mailingAddress: z.string().max(300, "The mailing address can be at most 300 characters.").optional() }).strict()),
+  async (c) => {
+    const a = c.get("auth");
+    const b = c.req.valid("json");
+    const before = await privacyOf(a.org.id, a.org);
+    // The address is plain text. It is cleaned the same way it is cleaned when it is printed
+    // (control characters out, at most six lines), so what is saved is what will be sent.
+    const address = b.mailingAddress === undefined ? undefined : mailingAddressOf({ settings: { mailingAddress: b.mailingAddress } });
+    if (b.mailingAddress !== undefined && /[<>]/.test(b.mailingAddress)) throw new ApiError(400, "The mailing address is plain text - it cannot contain < or >.", "validation_error");
+    const patch: Record<string, unknown> = {};
+    if (b.aiAssist !== undefined) patch.aiDisabled = !b.aiAssist;
+    if (address !== undefined) patch.mailingAddress = address;
+    if (Object.keys(patch).length) {
+      const { db } = getDb();
+      // Merged in the database: only these keys are written, so a setting someone else
+      // saved in the meantime is not overwritten with this request's stale copy.
+      await db.execute(sql`UPDATE organizations SET settings = coalesce(settings, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb WHERE id = ${a.org.id}`);
+    }
+    const after = await privacyOf(a.org.id, a.org);
+    const changed = { ...(after.aiAssist !== before.aiAssist ? { aiAssist: { before: before.aiAssist, after: after.aiAssist } } : {}), ...(after.mailingAddress !== before.mailingAddress ? { mailingAddress: { before: !!before.mailingAddress, after: !!after.mailingAddress } } : {}) };
+    if (Object.keys(changed).length) await audit(c, "account.privacy_updated", { targetType: "organization", targetId: a.org.id, data: changed });
+    return c.json(after);
+  },
+);

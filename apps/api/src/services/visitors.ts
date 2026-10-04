@@ -1,6 +1,6 @@
 import { and, eq, getDb, pixels, sql, visitorCompanies, visits, enqueue } from "@prospex/db";
 import { cleanOrgName, identifyIp, pageIntentWeight, resolveCompanyDomain } from "@prospex/core";
-import { sha256 } from "../lib/crypto.js";
+import { openVisitorJob, sealVisitorJob, visitorIpHash, withoutQuery } from "../lib/privacyVisitor.js";
 import { env } from "../env.js";
 import { canonicalEmail, companyDomainOrNull, upsertCompany } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
@@ -28,12 +28,20 @@ export const NEW_VISITOR_COMPANIES_PER_HOUR = 50;
 /** A JSON string literal that is also safe inside a <script> element. */
 const jsString = (v: string) => JSON.stringify(v).replace(/</g, "\\u003c").replace(/>/g, "\\u003e").replace(/\u2028/g, "\\u2028").replace(/\u2029/g, "\\u2029");
 
-/** The JS snippet customers embed. Tiny, no cookies beyond a session id in sessionStorage. */
+/**
+ * The JS snippet customers embed. Tiny, no cookies beyond a session id in sessionStorage.
+ *
+ * It sends nothing at all for a browser that asks not to be tracked (Global Privacy Control,
+ * or the older Do Not Track); the server refuses those hits too, for browsers still running
+ * a cached copy of the old script. The page address goes without its query string and the
+ * referrer without its query string or fragment: that is where reset tokens, email addresses
+ * and search terms live, and none of it is needed to tell which company is visiting.
+ */
 export function pixelScript(key: string) {
   // The key is validated AND encoded: a caller that forgets the first still cannot inject.
   if (!isPixelKey(key)) return "/* unknown pixel */";
   const endpoint = jsString(`${env.apiUrl}/px/${key}/collect`);
-  return `(function(){try{var u=${endpoint};var s=sessionStorage.getItem("__gl_sid");if(!s){s=Math.random().toString(36).slice(2)+Date.now().toString(36);sessionStorage.setItem("__gl_sid",s)}var t0=Date.now();function send(extra){var d={sid:s,p:location.pathname+location.search,r:document.referrer,t:document.title,d:Date.now()-t0};for(var k in extra)d[k]=extra[k];var b=JSON.stringify(d);if(navigator.sendBeacon){navigator.sendBeacon(u,new Blob([b],{type:"application/json"}))}else{fetch(u,{method:"POST",body:b,keepalive:true,headers:{"content-type":"application/json"}})}}send({e:"view"});var last=location.pathname;setInterval(function(){if(location.pathname!==last){last=location.pathname;t0=Date.now();send({e:"view"})}},800);addEventListener("pagehide",function(){send({e:"leave"})});window.prospex={identify:function(o){send({e:"identify",id:o})}}}catch(e){}})();`;
+  return `(function(){try{var n=navigator;if(n.globalPrivacyControl||n.doNotTrack==="1"||n.doNotTrack==="yes"||window.doNotTrack==="1"||n.msDoNotTrack==="1"){window.prospex={identify:function(){}};return}var u=${endpoint};var s=sessionStorage.getItem("__gl_sid");if(!s){s=Math.random().toString(36).slice(2)+Date.now().toString(36);sessionStorage.setItem("__gl_sid",s)}var t0=Date.now();function send(extra){var d={sid:s,p:location.pathname,r:(document.referrer||"").split(/[?#]/)[0],t:document.title,d:Date.now()-t0};for(var k in extra)d[k]=extra[k];var b=JSON.stringify(d);if(navigator.sendBeacon){navigator.sendBeacon(u,new Blob([b],{type:"application/json"}))}else{fetch(u,{method:"POST",body:b,keepalive:true,headers:{"content-type":"application/json"}})}}send({e:"view"});var last=location.pathname;setInterval(function(){if(location.pathname!==last){last=location.pathname;t0=Date.now();send({e:"view"})}},800);addEventListener("pagehide",function(){send({e:"leave"})});window.prospex={identify:function(o){send({e:"identify",id:o})}}}catch(e){}})();`;
 }
 
 /**
@@ -75,15 +83,22 @@ export async function collectHit(raw: CollectInput) {
   const input: CollectInput = {
     ...raw,
     sessionId: stripNul(String(raw.sessionId ?? "")).slice(0, PIXEL_LIMITS.sessionId) || "unknown",
-    page: raw.page === undefined ? undefined : stripNul(String(raw.page)).slice(0, PIXEL_LIMITS.page),
-    referrer: raw.referrer === undefined ? undefined : stripNul(String(raw.referrer)).slice(0, PIXEL_LIMITS.referrer),
+    // Stored without query string or fragment, whatever the page sent (an older cached copy
+    // of the script still sends them).
+    page: raw.page === undefined ? undefined : withoutQuery(stripNul(String(raw.page)), PIXEL_LIMITS.page),
+    referrer: raw.referrer === undefined ? undefined : withoutQuery(stripNul(String(raw.referrer)), PIXEL_LIMITS.referrer),
     userAgent: raw.userAgent === undefined ? undefined : stripNul(String(raw.userAgent)).slice(0, PIXEL_LIMITS.userAgent),
     durationMs: Number.isFinite(raw.durationMs) ? Math.min(Math.max(0, Math.round(raw.durationMs as number)), PIXEL_LIMITS.durationMs) : 0,
     identify: cleanIdentify(raw.identify),
   };
   const pixel = await db.query.pixels.findFirst({ where: and(eq(pixels.key, input.pixelKey), eq(pixels.active, true)) });
   if (!pixel) return false;
-  const ipHash = sha256(`${input.ip}:${pixel.id}`);
+  // Keyed with a server secret: the stored value cannot be turned back into an address by
+  // trying every address, which the plain sha256(ip:pixel) it replaces could.
+  const ipHash = visitorIpHash(input.ip, pixel.id);
+  // The address and anything identify() said travel to the lookup job encrypted, never in
+  // clear in the queue. The job row is scrubbed when the job ends (see jobs.ts).
+  const sealed = sealVisitorJob({ ip: input.ip, identify: input.identify ?? null });
   if (input.event === "leave") {
     // update duration of the latest visit in this session
     await db.execute(sql`UPDATE visits SET duration_ms = GREATEST(duration_ms, ${input.durationMs ?? 0}) WHERE id = (SELECT id FROM visits WHERE pixel_id = ${pixel.id} AND session_id = ${input.sessionId} ORDER BY visited_at DESC LIMIT 1)`);
@@ -99,7 +114,7 @@ export async function collectHit(raw: CollectInput) {
       .orderBy(sql`${visits.visitedAt} DESC`)
       .limit(1);
     if (latest) {
-      await enqueue(db, "visit.identify", { visitId: latest.id, ip: input.ip, identify: input.identify ?? null }, { orgId: pixel.orgId, priority: 4, maxAttempts: 2 });
+      await enqueue(db, "visit.identify", { visitId: latest.id, sealed }, { orgId: pixel.orgId, priority: 4, maxAttempts: 2 });
       return true;
     }
     // No view recorded for this session (beacon lost, or identify fired first): fall
@@ -109,7 +124,7 @@ export async function collectHit(raw: CollectInput) {
     .insert(visits)
     .values({ orgId: pixel.orgId, pixelId: pixel.id, sessionId: input.sessionId, ipHash, page: input.page?.slice(0, 500), referrer: input.referrer?.slice(0, 500), userAgent: input.userAgent?.slice(0, 300), durationMs: input.durationMs ?? 0 })
     .returning();
-  await enqueue(db, "visit.identify", { visitId: row.id, ip: input.ip, identify: input.identify ?? null }, { orgId: pixel.orgId, priority: 4, maxAttempts: 2 });
+  await enqueue(db, "visit.identify", { visitId: row.id, sealed }, { orgId: pixel.orgId, priority: 4, maxAttempts: 2 });
   return true;
 }
 
@@ -162,7 +177,7 @@ export async function identifyVisit(visitId: string, ip: string, identify?: Reco
   // This visit was already rolled up under this company (an identify() for a visit the IP
   // lookup had already placed). Counting it again inflated visits and intent.
   if (v.companyDomain === domain) return { domain, name, alreadyCounted: true };
-  const weight = pageIntentWeight(v.page ?? "/");
+  const weight = pageIntentWeight(withoutQuery(v.page) ?? "/");
   const existing = await db.query.visitorCompanies.findFirst({ where: and(eq(visitorCompanies.orgId, v.orgId), eq(visitorCompanies.domain, domain)) });
   const pageKey = (v.page ?? "/").split("?")[0].slice(0, 120);
   if (existing) {
@@ -189,10 +204,13 @@ export async function identifyVisit(visitId: string, ip: string, identify?: Reco
     // whatever the page claimed.
     const label = claimed ? company?.name ?? name : name;
     await db.insert(visitorCompanies).values({ orgId: v.orgId, domain, name: label, companyId: company?.id, visits: 1, sessions: 1, pages: { [pageKey]: 1 }, intentScore: Math.min(100, weight * 5) }).onConflictDoNothing();
-    await emitEvent(v.orgId, "visitor.identified", { domain, name: label, page: v.page, country: id.country }, { type: "company", id: company?.id ?? domain });
+    await emitEvent(v.orgId, "visitor.identified", { domain, name: label, page: withoutQuery(v.page) ?? null, country: id.country }, { type: "company", id: company?.id ?? domain });
     // enrich the company in the background so the visitors page shows description/industry
     if (company && !overCap) await enqueue(db, "company.enrich", { companyId: company.id }, { orgId: v.orgId, priority: 1 });
     if (overCap) return { domain, name, enrichmentSkipped: true };
   }
   return { domain, name };
 }
+
+/** Re-exported for the job handler, so it has one place to read a visit.identify payload. */
+export { openVisitorJob };

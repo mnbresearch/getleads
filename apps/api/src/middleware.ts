@@ -87,7 +87,7 @@ export const requireAdmin: MiddlewareHandler = async (c, next) => {
  * request headers, so nothing needs the URL form.
  */
 export const requireInternalToken: MiddlewareHandler = async (c, next) => {
-  if (!env.internalToken) throw new ApiError(503, "INTERNAL_TOKEN is not configured on the server, so the job runner endpoint is disabled.", "not_configured");
+  if (!env.internalToken) throw new ApiError(503, "The job runner is not configured on this server.", "not_configured");
   const presented = c.req.header("x-internal-token") ?? "";
   if (!presented || !safeEqual(presented, env.internalToken)) {
     const inUrl = c.req.query("token") !== undefined;

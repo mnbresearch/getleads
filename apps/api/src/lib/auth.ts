@@ -2,7 +2,67 @@ import bcrypt from "bcryptjs";
 import { sign, verify } from "hono/jwt";
 import { apiKeys, eq, getDb, organizations, sql, users, type ApiKey, type Organization, type User } from "@prospex/db";
 import { env } from "../env.js";
+import { ApiError } from "./errors.js";
 import { randomToken, sha256 } from "./crypto.js";
+
+/**
+ * bcrypt gate: a small cap on how many password hashes/compares run at once, with a bounded
+ * wait for a slot.
+ *
+ * bcryptjs is pure JavaScript on the one event loop. Its async form yields between rounds, so
+ * a few in flight interleave with everything else - but nothing limited how many ran at once,
+ * so a burst of sign-ins (or wrong-password attempts, each of which still costs one compare
+ * to avoid leaking whether the account exists) pinned the loop and slowed every unrelated
+ * request, the health check included. The cap keeps the loop responsive; the bounded wait
+ * turns an overload into a quick, honest "busy, try again" (503) instead of an ever-growing
+ * pile of pending hashes.
+ *
+ * The hashes themselves are unchanged bcrypt - every existing stored hash still verifies.
+ */
+const HASH_CONCURRENCY = (() => {
+  const n = Number(process.env.PASSWORD_HASH_CONCURRENCY);
+  return Number.isInteger(n) && n >= 1 && n <= 32 ? n : 2;
+})();
+const HASH_MAX_WAITERS = 200;
+const HASH_WAIT_MS = 8000;
+let hashActive = 0;
+const hashWaiters: Array<{ resolve: () => void; reject: (e: unknown) => void; timer: ReturnType<typeof setTimeout> }> = [];
+
+export const PASSWORD_SERVICE_BUSY = "The service is busy right now. Wait a moment and try again.";
+const busyError = () => new ApiError(503, PASSWORD_SERVICE_BUSY, "server_busy");
+
+function releaseHashSlot() {
+  const next = hashWaiters.shift();
+  if (next) {
+    clearTimeout(next.timer);
+    next.resolve();
+  } else {
+    hashActive--;
+  }
+}
+
+async function withHashSlot<T>(fn: () => Promise<T>): Promise<T> {
+  if (hashActive < HASH_CONCURRENCY) {
+    hashActive++;
+  } else {
+    if (hashWaiters.length >= HASH_MAX_WAITERS) throw busyError();
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const i = hashWaiters.findIndex((w) => w.timer === timer);
+        if (i >= 0) hashWaiters.splice(i, 1);
+        reject(busyError());
+      }, HASH_WAIT_MS);
+      if (typeof timer.unref === "function") timer.unref();
+      hashWaiters.push({ resolve, reject, timer });
+    });
+    // granted a slot handed over by releaseHashSlot (hashActive was not decremented)
+  }
+  try {
+    return await fn();
+  } finally {
+    releaseHashSlot();
+  }
+}
 
 export interface AuthContext {
   org: Organization;
@@ -12,7 +72,9 @@ export interface AuthContext {
 }
 
 export async function hashPassword(p: string) {
-  return bcrypt.hash(p, 10);
+  // The async (callback/promise) form yields to the event loop between rounds; `hashSync`
+  // does not. Gated so a burst cannot pin the loop.
+  return withHashSlot(() => bcrypt.hash(p, 10));
 }
 
 /**
@@ -25,7 +87,7 @@ export async function hashPassword(p: string) {
 export const NO_PASSWORD_PREFIX = "!nopassword:";
 
 export async function unusablePasswordHash(seed: string) {
-  return `${NO_PASSWORD_PREFIX}${await bcrypt.hash(`${seed}:${randomToken(32)}`, 10)}`;
+  return `${NO_PASSWORD_PREFIX}${await withHashSlot(() => bcrypt.hash(`${seed}:${randomToken(32)}`, 10))}`;
 }
 
 export function hasUsablePassword(hash: string) {
@@ -34,7 +96,7 @@ export function hasUsablePassword(hash: string) {
 
 export async function checkPassword(p: string, hash: string) {
   if (!hasUsablePassword(hash)) return false;
-  return bcrypt.compare(p, hash);
+  return withHashSlot(() => bcrypt.compare(p, hash));
 }
 
 /**
@@ -220,7 +282,8 @@ export async function claimAdminTotpStep(step: number): Promise<boolean> {
 let dummyHash: Promise<string> | null = null;
 export async function burnPasswordCheck(p: string): Promise<void> {
   dummyHash ??= bcrypt.hash(randomToken(24), 10);
-  await bcrypt.compare(p, await dummyHash).catch(() => false);
+  const h = await dummyHash;
+  await withHashSlot(() => bcrypt.compare(p, h)).catch(() => false);
 }
 
 /** bcrypt reads at most 72 bytes; anything after that is silently ignored. */

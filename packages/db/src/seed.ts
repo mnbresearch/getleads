@@ -3,6 +3,7 @@
  * Prints the API key once. Safe to re-run (skips if org exists).
  */
 import { createHash, randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
 import { eq } from "drizzle-orm";
 import { loadEnv } from "./loadEnv.js";
 loadEnv();
@@ -10,7 +11,27 @@ import { createDb } from "./client.js";
 import { apiKeys, organizations, users } from "./schema.js";
 import { limitsFor } from "./plans.js";
 
+/**
+ * The seed creates an owner account with a password that is printed in the README. Against a
+ * production database that is a ready-made way in, so it refuses to run there. `--force` (or
+ * SEED_FORCE=true) is for the person who really means it, e.g. a throwaway staging database.
+ */
+export function seedRefusal(env: Record<string, string | undefined> = process.env, argv: string[] = process.argv): string | null {
+  const forced = argv.includes("--force") || /^(1|true|yes)$/i.test(env.SEED_FORCE ?? "");
+  if (forced) return null;
+  if ((env.NODE_ENV ?? "").toLowerCase() === "production") {
+    return "[seed] refusing to run with NODE_ENV=production: the demo account has a published password. Run with --force only against a database you intend to throw away.";
+  }
+  return null;
+}
+
 async function main() {
+  const refusal = seedRefusal();
+  if (refusal) {
+    console.error(refusal);
+    process.exitCode = 1;
+    return;
+  }
   const { db, sql } = createDb();
   try {
     const existing = await db.query.organizations.findFirst({ where: eq(organizations.slug, "demo") });
@@ -41,7 +62,11 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+const isMain = !!process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+if (isMain) {
+  main().catch((e) => {
+    const err = e as { name?: string; code?: string; message?: string };
+    console.error(`[seed] failed: ${err?.name ?? "Error"}${err?.code ? ` [${err.code}]` : ""}: ${String(err?.message ?? e).split(/Failed query:|\bparams:/i)[0]!.slice(0, 300)}`);
+    process.exit(1);
+  });
+}
