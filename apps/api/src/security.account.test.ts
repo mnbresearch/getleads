@@ -759,7 +759,7 @@ suite("security: two-factor, verification, key scopes, notices, abuse limits, ad
       expect(again.body.error.code).toBe("invalid_verification_token");
     });
 
-    it("an expired link is refused, and confirming one link kills the others", async () => {
+    it("an expired link is refused, a newer link ends the older one, and a link works once", async () => {
       const u = await signup("verify-expiry");
       const expired = await E.issueVerificationToken(u.userId, -1000);
       const r = await req("POST", "/v1/auth/verify/confirm", null, { token: expired });
@@ -767,9 +767,13 @@ suite("security: two-factor, verification, key scopes, notices, abuse limits, ad
       expect(r.body.error.code).toBe("invalid_verification_token");
       expect((await me(u.token)).body.user.emailVerified).toBe(false);
 
+      // Only the newest link works: issuing a second one ends the first ("Send again").
       const first = await E.issueVerificationToken(u.userId);
       const second = await E.issueVerificationToken(u.userId);
-      expect((await req("POST", "/v1/auth/verify/confirm", null, { token: first })).status).toBe(200);
+      expect((await req("POST", "/v1/auth/verify/confirm", null, { token: first })).status).toBe(400);
+      expect((await me(u.token)).body.user.emailVerified).toBe(false);
+      expect((await req("POST", "/v1/auth/verify/confirm", null, { token: second })).status).toBe(200);
+      // ...and a confirmed link cannot be used twice.
       expect((await req("POST", "/v1/auth/verify/confirm", null, { token: second })).status).toBe(400);
       const live = await db.select().from(S.emailVerificationTokens).where(S.and(S.eq(S.emailVerificationTokens.userId, u.userId), S.isNull(S.emailVerificationTokens.usedAt), S.gt(S.emailVerificationTokens.expiresAt, new Date())));
       expect(live).toHaveLength(0);

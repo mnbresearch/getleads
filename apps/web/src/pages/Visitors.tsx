@@ -21,12 +21,23 @@ export function VisitorsPage() {
   // A failed pixels fetch used to show "No pixel yet" to a customer with a live pixel.
   const [pixErr, setPixErr] = useState<string | null>(null);
   const [pixLoaded, setPixLoaded] = useState(false);
+  const shownFor = useRef<string | null>(null);
+  const listSeq = useRef(0);
   const load = useCallback(() => {
+    const key = `${days}|${status}`;
+    const mine = ++listSeq.current;
+    // Rows belong to the filter they were loaded for. When a load for a DIFFERENT filter
+    // fails, the rows on screen are not its answer and must not stay as if they were; when
+    // a refresh of the SAME filter fails (a blip between polls), they are still right.
     apiFetch<{ pixels: Pixel[] }>("GET", "/v1/visitors/pixels").then((r) => { setPixels(expectLists(r, "pixels").pixels); setPixErr(null); setPixLoaded(true); }).catch((e) => setPixErr((e as Error).message));
     apiFetch<{ companies: VC[]; totals: typeof totals }>("GET", `/v1/visitors?days=${days}${status ? `&status=${status}` : ""}`)
-      .then((r) => { setRows(r.companies); setTotals(r.totals); setListErr(null); })
-      .catch((e) => setListErr((e as Error).message))
-      .finally(() => setLoading(false));
+      .then((r) => { if (mine !== listSeq.current) return; setRows(expectLists(r, "companies").companies); setTotals(r.totals); shownFor.current = key; setListErr(null); })
+      .catch((e) => {
+        if (mine !== listSeq.current) return;
+        if (shownFor.current !== key) { setRows([]); shownFor.current = null; }
+        setListErr((e as Error).message);
+      })
+      .finally(() => { if (mine === listSeq.current) setLoading(false); });
   }, [days, status]);
   useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t); }, [load]);
 

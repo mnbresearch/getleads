@@ -1,4 +1,4 @@
-import { getDb, runMigrations, startWorker } from "@prospex/db";
+import { databaseTlsHint, getDb, runMigrations, startWorker } from "@prospex/db";
 import "./env.js";
 import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
@@ -67,5 +67,8 @@ async function main() {
 
 main().catch((e) => {
   console.error(`[worker] could not start: ${errLine(e)}${errWhere(e)}`);
+  // When the reason is the database's TLS certificate (or TLS itself), the fix is one setting.
+  const hint = databaseTlsHint(e);
+  if (hint) console.error(hint);
   process.exit(1);
 });

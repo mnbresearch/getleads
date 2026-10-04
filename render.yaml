@@ -102,6 +102,14 @@ services:
       #                             https://*.vercel.app previews, "none" allows only the
       #                             exact origins
       #   AI_PROVIDER, OPENAI_COMPAT_BASE_URL / _API_KEY / _MODEL   another AI endpoint
+      #   CREDENTIAL_REBIND_ON_READ    "true" rewrites old-format saved credentials in the new
+      #                                format when read. Default off (cheap rollback, DEPLOY.md B11)
+      #   LINK_TOKENS_CLEAR_PLAINTEXT  "true" removes the readable copy of existing client report
+      #                                links. Default off (cheap rollback, DEPLOY.md B11)
+      #   PRIVACY_SWEEP                "off" skips removing content of leads deleted before this
+      #                                release. Default on; it cannot be rolled back
+      #   IP_LOOKUP_ALLOW_PLAIN_HTTP   "true" re-enables the plain-HTTP visitor look-up provider
+      #                                as a last resort. Default off; prefer IPINFO_TOKEN
       #   SHUTDOWN_GRACE_MS         how long requests and jobs get to finish on a restart
       #                             (default 25000; Render stops the process after 30 s)
       #   HTTP_KEEPALIVE_TIMEOUT_MS / HTTP_REQUEST_TIMEOUT_MS / HTTP_HEADERS_TIMEOUT_MS

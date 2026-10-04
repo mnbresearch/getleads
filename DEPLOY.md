@@ -192,10 +192,10 @@ What migration 0018 does:
 
 It is idempotent and only adds things; it can be re-run safely.
 
-**Rolling back.** The previous release runs on the upgraded database, so rolling back is "redeploy the previous build" and nothing needs to be undone in the database. Three things made on the new code do not work on the old code, so check them if you roll back:
+**Rolling back.** (Section B11 has the full, rehearsed procedure; what follows is this release's part of it.) The previous release runs on the upgraded database, so rolling back is "redeploy the previous build" and nothing needs to be undone in the database. Three things made on the new code do not work on the old code, so check them if you roll back:
 
 - **Webhooks created or rotated on the new code** sign with v2 and keep their secret encrypted. The old code cannot read that secret, so those webhooks stop delivering until you roll forward again (webhooks that were never rotated keep working).
-- **Sender and integration credentials saved on the new code** are stored in the new encrypted format, which the old code cannot decrypt. Those senders and integrations show as needing to be reconnected on the old code. Do not reconnect them there; roll forward instead and they work again.
+- **Sender and integration credentials saved on the new code** are stored in the new encrypted format, which the old code cannot decrypt. Those senders and integrations show as needing to be reconnected on the old code. Do not reconnect them there: run `scripts/rollback-restore.mjs` before rolling back (B11) and the old code reads them, or roll forward and they work again.
 - **Job-change signals** cannot be inserted by the old code (it writes against the old index), so the daily job-change scan logs errors and records nothing until you roll forward. Nothing already stored is lost.
 
 Admin sessions issued by the new code keep working on the old code, but the old code ignores sign-outs: a signed-out admin session works again until it expires (12 hours at most). Rotate `ADMIN_JWT_SECRET` (or `JWT_SECRET` if that is not set) if that matters.
@@ -266,7 +266,7 @@ When a mail provider is configured, `ADMIN_EMAIL` is emailed when the admin dash
 
 **Rolling back**
 
-Redeploy the previous build; the database needs nothing undone. On the old code:
+Redeploy the previous build; the database needs nothing undone (B11 has the full procedure, including client report links and invitations). On the old code:
 
 - **Read-only API keys become full-access keys.** The old code does not know about key scopes and lets any key write. If you roll back for more than a moment, revoke the read-only keys first (`UPDATE api_keys SET revoked_at = now() WHERE NOT ('*' = ANY(scopes)) AND revoked_at IS NULL;`) or tell the customers who created them.
 - **Two-factor sign-in is not asked for.** Accounts that turned it on sign in with their password alone until you roll forward; their setting is kept.
@@ -284,7 +284,7 @@ Nothing here needs a migration. Three things are worth a minute BEFORE the deplo
 | Database host | What happens | Same as before? |
 |---|---|---|
 | `localhost`, `127.0.0.1`, `::1` | no TLS | yes |
-| a single-label name (`db`, a platform's internal service name) or a private address | TLS when offered | yes |
+| a single-label name (`db`, a platform's internal service name), a private-network name (`*.internal`, `*.flycast`, `*.local`, `*.lan` and similar) or a private address | TLS when offered | yes |
 | `*.neon.tech` | TLS, **and the server's certificate is checked** (also when the string says `sslmode=require`) | stricter |
 | any other remote host | TLS required - the connection fails rather than fall back to plaintext | stricter |
 
@@ -319,7 +319,85 @@ Other changes, none of which need action:
 
 **A time limit on database statements** is not set by the server, on purpose: as a connection start-up parameter it is refused or leaked by connection poolers (Neon's pooled URL included). The safe place is the database role - run once, as the owner: `ALTER ROLE <app role> SET statement_timeout = '60s'; ALTER ROLE <app role> SET idle_in_transaction_session_timeout = '60s';`. Migrations lift the limit for their own transaction. Optional; decide the number with the longest report or export you expect in mind.
 
-**Rolling back from this release** to the previous one is safe for everything in B10: no data changes. Two things to know: the previous code connects with the old "TLS if offered" behaviour again, and `DATABASE_SSL` / `MIGRATION_DATABASE_URL` are ignored by it. (The one-way step in this line of releases is B9's: once the server has moved client report links out of plaintext, a release older than B9 can no longer resolve them.)
+**Rolling back:** nothing in B10 changes stored data. The whole picture - what a rollback costs, the restore script, and the order to do it in - is in B11.
+
+---
+
+### B11. Before you deploy, the four switches, and rolling back
+
+This section replaces the scattered rollback notes above with one procedure. It is written from a rehearsal: the release that is live today and this one were both built, run against the same database, upgraded, used, rolled back and rolled forward again. Where a sentence says "works" or "fails", that is what happened.
+
+The rule this release follows: **a one-click rollback stays cheap.** Whatever the new release would do by itself to data that already exists, in a form the previous release cannot read, is switched off unless you turn it on.
+
+#### Before you deploy (10 minutes)
+
+1. **Make a restore point.** In Neon: Branches > Create branch from the current state of `main` (instant, free; name it with today's date). That branch is your "undo everything", including the things no rollback can undo (below). On another database, take a backup.
+2. **Check two secrets in Render** (Environment): `JWT_SECRET` and `ENCRYPTION_KEY` are each at least 16 characters and not an example value. The Blueprint generates both, so normally there is nothing to do. The new release refuses to start otherwise (B10).
+3. **Check the admin password** is not a well-known example (`changeme`, `password`, a value from these docs). If it is, the service starts, but the admin sign-in page says it is switched off until you set a real one.
+4. **Check the database certificate** (B10): `openssl s_client -starttls postgres -connect <your-neon-host>:5432 -servername <your-neon-host> -verify_return_error </dev/null 2>&1 | grep "Verify return code"` prints `0 (ok)`. Safety net if you would rather not check: set `DATABASE_SSL=require` in Render before deploying (the old code ignores it), and remove it once the service is up. If the new release cannot verify the certificate it says so in one log line starting `[db]`, with the setting to change.
+5. **Decide the four switches** below. The defaults are the cheap-rollback choice; leave them unless you have a reason.
+
+#### Deploy order
+
+1. **API first.** It applies migrations 0015 to 0020 on start (all additive: the old release keeps running on the upgraded database). Wait for `curl https://<api>/health` to answer `{"ok":true,"db":"up"}`.
+2. **Web second**, straight after. In between, the old web app works against the new API. The other way round does not: the new web app asks the old API for pages it does not have (it answers 404 for the workspace privacy settings, the deletion status and the audit log).
+3. Sign in to `/admin` once and open one client report link to see both work.
+
+#### The four switches
+
+None of these is set in `render.yaml`. Add one in Render's Environment only if you want the non-default behaviour. `CREDENTIAL_REBIND_ON_READ` and `LINK_TOKENS_CLEAR_PLAINTEXT` are on only when the value is exactly `true`; anything else (unset, `1`, `yes`, `on`) is off.
+
+A report link from before the upgrade keeps its readable copy by default, and the encrypted copy stored next to it is marked `legacy:`. A link that is replaced or turned off while the previous release is running stays replaced or off after you roll forward again - the old link does not come back.
+
+| Variable | Default | What it does | What turning it on costs on a rollback |
+|---|---|---|---|
+| `CREDENTIAL_REBIND_ON_READ` | off | `true`: a saved sender, integration or webhook credential in the old format is rewritten, the first time it is read, in the new format that ties it to its workspace. Credentials saved or changed on the new release are always written in the new format. | Every credential that was read since is unreadable by the old release until the restore script has run. |
+| `LINK_TOKENS_CLEAR_PLAINTEXT` | off | Client report links that existed before the upgrade get a hash and an encrypted copy on start either way (the new release looks links up by hash). `true` also removes the readable copy from the database. Links created or rotated on the new release never have a readable copy. | Every report link answers "not found" on the old release until the restore script has run. |
+| `PRIVACY_SWEEP` | on | The daily clean-up removes the content of messages and activity belonging to leads that were deleted before this release (the new release removes it at the moment a lead is deleted; this catches up on the past). `off` skips only that; the rest of the retention clean-up still runs. | It deletes, so it cannot be rolled back at all - only the restore point brings that content back. If you want to decide later, set `off` before deploying. |
+| `IP_LOOKUP_ALLOW_PLAIN_HTTP` | off | Website-visitor identification now asks only providers that answer over HTTPS. `true` adds the old provider that only answers over plain HTTP back as the last one tried. | None. |
+
+**Visitor identification capacity:** with the plain-HTTP provider off, the free HTTPS provider allows about 1,000 look-ups a day. Set `IPINFO_TOKEN` (ipinfo.io, free for 50,000 a month) for more. Without it, visits beyond the free allowance are recorded and simply not matched to a company.
+
+#### What a rollback costs
+
+Rolling back means: redeploy the previous API build, then the previous web build. The database needs nothing undone. In the rehearsal, on the old release against the upgraded database:
+
+**Worked with no action:** signing in (including a password that was reset on the new release), sessions issued before and after the upgrade, API keys created before and after, every page (leads, campaigns and their messages, senders, clients, webhooks, integrations, team, tasks, signals, visitors, usage, analytics), sending, and the visitor pixel. The old release starts normally and ignores the tables and columns it does not know.
+
+**With the default switches, these need the restore script** (one command, below), and only if they exist:
+- client report links **created or rotated on the new release** (the old release answered "not found" for them; after the script, it served them);
+- sender and integration credentials **saved or changed on the new release** (the old release cannot read them; after the script it can).
+
+Report links and credentials that existed before the upgrade and were not changed keep working on the old release with no script.
+
+**With a switch turned on:** `LINK_TOKENS_CLEAR_PLAINTEXT=true` makes that every report link (in the rehearsal all three, two of them from before the upgrade, answered "not found" until the script ran); `CREDENTIAL_REBIND_ON_READ=true` makes that every credential that has been used. The same script fixes both.
+
+**The script does not fix these - handle them by hand if you stay on the old release for more than a moment:**
+- **Invitations sent from the new release** are refused by the old one. Send them again after rolling back.
+- **Read-only API keys act as full-access keys.** Revoke them first: `UPDATE api_keys SET revoked_at = now() WHERE NOT ('*' = ANY(scopes)) AND revoked_at IS NULL;`
+- **Two-factor sign-in is not asked for** (accounts and the admin console sign in with the password alone; the settings are kept for when you roll forward). Email confirmation is not enforced; security emails are not sent.
+- **The platform-wide do-not-contact list, "erase a person" and the workspace AI switch are unknown to the old release.** It would email an address that is only on the platform list. If you have used that list, copy it into every workspace's own list before rolling back: `INSERT INTO suppressions (org_id, email, reason) SELECT o.id, g.email, 'platform' FROM organizations o CROSS JOIN global_suppressions g ON CONFLICT DO NOTHING;`
+- **Webhooks created or rotated on the new release** are not signed correctly by the old one, and the daily job-change scan records nothing on it (B8).
+
+**No rollback undoes these - only the restore point does:** leads, workspaces and people erased on the new release; the content removed by `PRIVACY_SWEEP`; and what the retention clean-up deleted on its daily run (old visitor page views, sign-in attempts, finished jobs, activity older than 90 days - the periods are in the Privacy Policy).
+
+#### The restore script
+
+`scripts/rollback-restore.mjs` writes report-link tokens back in readable form and rewrites new-format sender and integration credentials in the old format, under the same key. It removes nothing: the new columns stay, so rolling forward again needs no step at all (rehearsed: the new release started and served every link). It prints counts only - never a token, a credential or a connection string - and is safe to run twice.
+
+Run it with the **new** build and the **production** values, **before** redeploying the previous build. From a clean checkout of the new release on your own machine (a `.env` file in the checkout would be read for anything you do not set, so use a clean one):
+
+```bash
+npm ci && npm run build -w packages/core -w packages/db -w apps/api
+export DATABASE_URL='<the production value>' ENCRYPTION_KEY='<the production value>' JWT_SECRET='<the production value>'
+# export ENCRYPTION_KEYS_OLD='...'   # only if it is set in production
+node scripts/rollback-restore.mjs --dry-run     # counts what it would change
+node scripts/rollback-restore.mjs               # does it
+```
+
+If the dry run reports nothing to change, there is nothing to restore: redeploy the previous build straight away. A line `could not be read` means those rows were saved under a key that is not in `ENCRYPTION_KEY` / `ENCRYPTION_KEYS_OLD`; they are left untouched.
+
+**Rollback order:** (1) the script, (2) the hand steps above that apply to you, (3) redeploy the previous API build, (4) redeploy the previous web build. **Rolling forward again:** deploy the new API, then the new web. Nothing else.
 
 ---
 

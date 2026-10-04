@@ -3,6 +3,7 @@ import { eq, getDb, messages, suppressions, campaignContacts, and, leads, type M
 import { bumpEngagement, bumpStat } from "../services/campaigns.js";
 import { emitEvent } from "../lib/events.js";
 import { canonicalEmail } from "../services/leads.js";
+import { shownAddress } from "../lib/privacySuppression.js";
 
 /** Public tracking endpoints: open pixel, click redirect, unsubscribe. */
 export const trackRoutes = new Hono();
@@ -133,7 +134,10 @@ async function unsubscribe(m: Message) {
     // unsubscribed person kept being suggested as someone to contact today.
     await db.update(leads).set({ status: "unsubscribed", updatedAt: new Date() }).where(and(eq(leads.id, m.leadId), eq(leads.orgId, m.orgId)));
   }
-  await emitEvent(m.orgId, "lead.unsubscribed", { leadId: m.leadId, email: m.toEmail }, m.leadId ? { type: "lead", id: m.leadId } : undefined);
+  // The event (and any webhook it feeds) carries an address, or says the contact was removed -
+  // never the fingerprint a deleted contact's message holds in its place.
+  const shown = shownAddress(m.toEmail);
+  await emitEvent(m.orgId, "lead.unsubscribed", { leadId: m.leadId, email: shown.address, ...(shown.recipientRemoved ? { recipientRemoved: true } : {}) }, m.leadId ? { type: "lead", id: m.leadId } : undefined);
 }
 
 const UNSUBSCRIBED = page("Unsubscribed", `<h2>You're unsubscribed</h2><p>You won't receive further emails from this sender.</p>`);

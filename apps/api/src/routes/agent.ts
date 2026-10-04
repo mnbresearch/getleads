@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { QuotaExceededError, consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
-import { generateOutreach, runLeadPipelineDetailed } from "@prospex/core";
+import { generateOutreach, hasAi, runLeadPipelineDetailed } from "@prospex/core";
 import { aiFor } from "../lib/ai.js";
 import { blockedByProvidersNote } from "../services/notes.js";
 import { env } from "../env.js";
@@ -62,7 +62,9 @@ agentRoutes.post(
       }
       let email: { subject: string; body: string } | undefined;
       if (b.generateEmails && b.sender && r.email) {
-        const charge = await tryConsume(db, oid, "aiMessages", 1);
+        // An AI message is charged only when a model will actually write it. With the
+        // workspace's AI switched off (or no engine) the template is returned, free.
+        const charge = hasAi(ai) ? await tryConsume(db, oid, "aiMessages", 1) : ({ ok: true } as const);
         if (!charge.ok) emailSkipped = charge.reason === "quota" ? charge.message : `could not record usage: ${charge.message}`;
         if (charge.ok) {
           const g = await generateOutreach(ai, { lead: { firstName: r.firstName, lastName: r.lastName, fullName: r.fullName, title: r.title, company: r.company ? { name: r.company.name, domain: r.company.domain, industry: r.company.industry, description: r.company.description } : null }, sender: b.sender });

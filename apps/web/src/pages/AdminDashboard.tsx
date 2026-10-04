@@ -25,10 +25,11 @@ type OrgRow = {
 };
 // `twoFactorEnabled` is absent on an older server: no badge and no reset button, rather
 // than a guess either way.
-type OrgUser = { id: string; email: string; name: string; role: string; lastLoginAt: string | null; createdAt: string; twoFactorEnabled?: boolean };
+// `emailVerified` likewise: absent means the server does not say, and nothing is shown.
+type OrgUser = { id: string; email: string; name: string; role: string; lastLoginAt: string | null; createdAt: string; twoFactorEnabled?: boolean; emailVerified?: boolean };
 // `overrides` (the limits that differ from the plan's own) is sent by newer servers, at the
 // top level or on the org; older ones send neither and it is worked out here (overridesOf).
-type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> | null; overrides?: Record<string, unknown> | null }; overrides?: Record<string, unknown> | null; users: OrgUser[]; usage: Record<string, number>; period: string };
+type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> | null; overrides?: Record<string, unknown> | null; aiAssist?: boolean; mailingAddressSet?: boolean }; overrides?: Record<string, unknown> | null; users: OrgUser[]; usage: Record<string, number>; period: string };
 type UpgradeRequest = { id: string; orgId: string | null; orgName?: string | null; name: string; email: string; mobile: string; country: string; planId: string; message: string | null; status: string; createdAt: string };
 type Plan = { id: string; name: string; priceUsd: number; limits: PlanLimits };
 type ToolSummary = {
@@ -480,12 +481,40 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
         </div>
       </div>
 
+      {/* The workspace's own privacy choices, as the owner set them in Settings. Read-only
+          here: they are the customer's to change. Yes-or-no only - the address itself is
+          not sent to this console. Not shown at all when the server does not say. */}
+      {(typeof org.aiAssist === "boolean" || typeof org.mailingAddressSet === "boolean") && (
+        <div data-testid="org-privacy">
+          <div className="label">Privacy settings</div>
+          <ul className="space-y-1 text-sm text-ink-300">
+            {typeof org.aiAssist === "boolean" && (
+              <li>
+                AI assistance <span className={`badge ${org.aiAssist ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`}>{org.aiAssist ? "On" : "Off"}</span>
+                {!org.aiAssist && <span className="ml-1 text-xs text-ink-400">Lead and reply content is not sent to AI providers for this workspace.</span>}
+              </li>
+            )}
+            {typeof org.mailingAddressSet === "boolean" && (
+              <li>
+                Mailing address <span className={`badge ${org.mailingAddressSet ? "bg-emerald-50 text-emerald-700" : "bg-black/[0.05] text-ink-300"}`}>{org.mailingAddressSet ? "Set" : "Not set"}</span>
+                {!org.mailingAddressSet && <span className="ml-1 text-xs text-ink-400">Their campaign emails carry no postal address.</span>}
+              </li>
+            )}
+          </ul>
+        </div>
+      )}
+
       <div>
         <div className="label">Users ({detail.users.length})</div>
         <ul className="space-y-1 text-sm text-ink-300 [overflow-wrap:anywhere]">
           {detail.users.map((u) => (
             <li key={u.id} data-user-row={u.id}>
               {u.name || u.email} <span className="text-ink-500">· {u.email} · {u.role}</span>
+              {typeof u.emailVerified === "boolean" && (
+                <>
+                  {" "}<span className={`badge ${u.emailVerified ? "bg-emerald-50 text-emerald-700" : "bg-amber-50 text-amber-800"}`} title={u.emailVerified ? "This person opened the confirmation link sent to this address" : "This person has not opened the confirmation link sent to this address"}>{u.emailVerified ? "Email confirmed" : "Email not confirmed"}</span>
+                </>
+              )}
               {u.twoFactorEnabled === true && (
                 <>
                   {" "}<span className="badge bg-emerald-50 text-emerald-700" title="This user signs in with a password and a code from an authenticator app">2FA on</span>

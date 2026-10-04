@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AdminApiError, adminFetch } from "../lib/adminApi";
 import { expectLists, expectShape, fmtDate, fmtNum } from "../lib/api";
+import { LIST_SEARCH_MAX } from "../lib/listSearch";
 
 /** Same thumb-sized targets as the rest of the console (see AdminDashboard). */
 const TAP = "inline-flex items-center max-lg:min-h-[40px] max-lg:px-2";
@@ -37,7 +38,7 @@ const LIST_LIMIT = 100;
  * `onMissing` is called when the server has no such list (an older server); the caller then
  * renders none of this, rather than an error box for a feature that is simply not there yet.
  */
-function SuppressionsSection({ onMissing, refreshKey }: { onMissing: () => void; refreshKey: number }) {
+function SuppressionsSection({ onMissing, refreshKey, onLogged }: { onMissing: () => void; refreshKey: number; onLogged: () => void }) {
   const [rows, setRows] = useState<Suppression[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -92,6 +93,7 @@ function SuppressionsSection({ onMissing, refreshKey }: { onMissing: () => void;
       expectShape(r, (x) => !!x.suppression && typeof x.suppression.email === "string");
       setAdd({ email: "", reason: "", note: "" });
       setNote(`${r.suppression!.email} is on the platform list. No workspace can send to it.`);
+      onLogged();
       await load(q);
     } catch (x) {
       setAddErr(isMissing(x) ? "The platform list is not available on this server yet." : said(x));
@@ -109,6 +111,7 @@ function SuppressionsSection({ onMissing, refreshKey }: { onMissing: () => void;
     try {
       await adminFetch("DELETE", `/v1/admin/suppressions/${encodeURIComponent(s.id)}`);
       setNote(`${s.email} was removed from the platform list.`);
+      onLogged();
       await load(q);
     } catch (x) {
       // The row stays on screen, so a silent failure would read as "done".
@@ -141,7 +144,7 @@ function SuppressionsSection({ onMissing, refreshKey }: { onMissing: () => void;
 
       <div className="card">
         <form className="flex flex-wrap items-end gap-2 border-b border-black/5 p-3" onSubmit={(e) => { e.preventDefault(); setQ(draftQ.trim()); }} role="search">
-          <div className="min-w-0 flex-1"><label className="label" htmlFor="sup-q">Search the list</label><input id="sup-q" className="input" value={draftQ} maxLength={200} onChange={(e) => setDraftQ(e.target.value)} placeholder="Address or part of one" /></div>
+          <div className="min-w-0 flex-1"><label className="label" htmlFor="sup-q">Search the list</label><input id="sup-q" className="input" value={draftQ} maxLength={LIST_SEARCH_MAX} onChange={(e) => setDraftQ(e.target.value)} placeholder="Address or part of one" /></div>
           <button className="btn-secondary max-lg:min-h-[40px]" disabled={busy}>Search</button>
           {q && <button type="button" className="btn-secondary max-lg:min-h-[40px]" onClick={() => { setDraftQ(""); setQ(""); }}>Clear</button>}
         </form>
@@ -180,22 +183,52 @@ interface SubjectWorkspace {
   orgName?: string | null;
   leads?: number;
   campaignContacts?: number;
+  /** Message rows that still hold the address. */
   messages?: number;
+  /** Message rows kept as records, with the address and the text removed. Absent on an older server. */
+  anonymisedMessages?: number;
   suppressed?: boolean;
 }
 interface SubjectReport {
   email: string;
   globallySuppressed?: boolean;
+  /** Whether any workspace still holds the person's data. Absent on an older server. */
+  held?: boolean;
   workspaces: SubjectWorkspace[];
 }
 interface EraseResult {
   ok?: boolean;
   workspaces?: number | unknown[];
   leadsDeleted?: number;
+  messagesAnonymised?: number;
   globallySuppressed?: boolean;
 }
 
 const count = (n: unknown) => (typeof n === "number" ? fmtNum(n) : "-");
+const num = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : 0);
+/** A workspace still holds the person when it has a lead, a campaign contact or a message with their address. */
+const holds = (w: SubjectWorkspace) => num(w.leads) > 0 || num(w.campaignContacts) > 0 || num(w.messages) > 0;
+
+/**
+ * What a lookup found, in the terms the request is asked in: is this person's data still
+ * held, and what records remain without them in it.
+ *
+ * `held` is the server's answer where it gives one. Without it (an older server, which has
+ * no anonymised rows to tell apart) every listed workspace counts as holding the person,
+ * as before.
+ */
+export function subjectSummary(r: SubjectReport): { held: boolean; holding: number; kept: number; keptIn: number } {
+  const split = r.workspaces.some((w) => typeof w.anonymisedMessages === "number") || typeof r.held === "boolean";
+  const holding = split ? r.workspaces.filter(holds).length : r.workspaces.length;
+  const held = typeof r.held === "boolean" ? r.held : holding > 0;
+  const kept = r.workspaces.reduce((n, w) => n + num(w.anonymisedMessages), 0);
+  const keptIn = r.workspaces.filter((w) => num(w.anonymisedMessages) > 0).length;
+  return { held, holding: held ? Math.max(holding, 1) : 0, kept, keptIn };
+}
+
+const records = (n: number) => `${fmtNum(n)} message ${n === 1 ? "record" : "records"}`;
+/** What "kept without content" means, once, where the number is first shown. */
+const KEPT_MEANS = "when a message was sent and what happened to it, not who it was to or what it said";
 
 /**
  * A data-subject request, start to finish: where does this person appear, and erase them.
@@ -205,7 +238,7 @@ const count = (n: unknown) => (typeof n === "number" ? fmtNum(n) : "-");
  * was looked up, not whatever is in the search box now - and it says exactly what it will do
  * before the button is live. What happened is then reported from the server's own numbers.
  */
-function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string) => void; onErased: () => void }) {
+function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (orgId: string) => void; onErased: () => void; onLogged: () => void }) {
   const [email, setEmail] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
@@ -232,6 +265,8 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
       // A 200 without the list of workspaces is not "this person appears nowhere".
       const ok = expectLists(expectShape(r, (x) => typeof x.email === "string"), "workspaces");
       setReport({ ...ok, workspaces: ok.workspaces.filter((w) => w && typeof w.orgId === "string") });
+      // Looking someone up is itself recorded.
+      onLogged();
     } catch (x) {
       if (mine !== seq.current) return;
       setReport(null);
@@ -243,7 +278,12 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
 
   const target = report?.email ?? "";
   const matches = !!report && normaliseEmail(confirmText) === normaliseEmail(target);
-  const found = report ? report.workspaces.length : 0;
+  const summary = report ? subjectSummary(report) : null;
+  const found = summary ? summary.holding : 0;
+  const listed = report ? report.workspaces.length : 0;
+  const showKept = !!report && report.workspaces.some((w) => typeof w.anonymisedMessages === "number");
+  // Erased already: nothing held, and the address is on the platform list.
+  const alreadyErased = !!report && !!summary && !summary.held && report.globallySuppressed === true;
   const totalLeads = report ? report.workspaces.reduce((n, w) => n + (typeof w.leads === "number" ? w.leads : 0), 0) : 0;
 
   const erase = async (e: React.FormEvent) => {
@@ -257,13 +297,19 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
       expectShape(r, (x) => x.ok === true);
       const spaces = typeof r.workspaces === "number" ? r.workspaces : Array.isArray(r.workspaces) ? r.workspaces.length : null;
       const leads = typeof r.leadsDeleted === "number" ? r.leadsDeleted : null;
+      const kept = typeof r.messagesAnonymised === "number" ? r.messagesAnonymised : null;
       setErased(
-        `Erased ${report.email}: ${leads === null ? "their lead records were" : `${fmtNum(leads)} lead ${leads === 1 ? "record was" : "records were"}`} removed${spaces === null ? "" : ` across ${fmtNum(spaces)} ${spaces === 1 ? "workspace" : "workspaces"}`}, along with the copies of their details in messages and activity. The address is now on the platform suppression list, so no workspace can email it again.`,
+        [
+          `The data held about ${report.email} is erased: ${leads === null ? "their lead records were" : `${fmtNum(leads)} lead ${leads === 1 ? "record was" : "records were"}`} removed${spaces === null ? "" : ` across ${fmtNum(spaces)} ${spaces === 1 ? "workspace" : "workspaces"}`}, along with the copies of their details in messages and activity.`,
+          kept === null ? "" : kept === 0 ? "No message records are kept." : `${records(kept)} ${kept === 1 ? "is" : "are"} kept without content (${KEPT_MEANS}).`,
+          "The address is now on the platform suppression list, so no workspace can email it again.",
+        ].filter(Boolean).join(" "),
       );
       setReport(null);
       setConfirmText("");
       setEmail("");
       onErased();
+      onLogged();
     } catch (x) {
       setEraseErr(
         isMissing(x)
@@ -292,15 +338,16 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
         <div className="card mt-3" data-testid="subject-report">
           <div className="border-b border-black/5 p-4 text-sm">
             <div className="font-mono text-xs text-ink-50 [overflow-wrap:anywhere]">{report.email}</div>
-            <div className="mt-1 text-ink-300">
-              {found === 0 ? "No workspace holds this address." : `Held by ${fmtNum(found)} ${found === 1 ? "workspace" : "workspaces"}.`}{" "}
+            <div className="mt-1 text-ink-300" data-testid="subject-summary">
+              {alreadyErased ? "This person's data has been erased: no workspace holds it." : found === 0 ? "No workspace holds this address." : `Held by ${fmtNum(found)} ${found === 1 ? "workspace" : "workspaces"}.`}{" "}
+              {summary && summary.kept > 0 ? `${records(summary.kept)} ${summary.kept === 1 ? "is" : "are"} kept without content in ${fmtNum(summary.keptIn)} ${summary.keptIn === 1 ? "workspace" : "workspaces"} (${KEPT_MEANS}). ` : ""}
               {report.globallySuppressed === true ? "It is on the platform suppression list." : report.globallySuppressed === false ? "It is not on the platform suppression list." : ""}
             </div>
           </div>
-          {found > 0 && (
+          {listed > 0 && (
             <div className="overflow-x-auto">
               <table className="w-full text-sm" data-testid="subject-table">
-                <thead><tr><th className="th">Workspace</th><th className="th text-right">Leads</th><th className="th text-right">In campaigns</th><th className="th text-right">Messages</th><th className="th">Do-not-contact there</th></tr></thead>
+                <thead><tr><th className="th">Workspace</th><th className="th text-right">Leads</th><th className="th text-right">In campaigns</th><th className="th text-right">Messages</th>{showKept && <th className="th text-right">Kept without content</th>}<th className="th">Do-not-contact there</th></tr></thead>
                 <tbody className="divide-y divide-black/5">
                   {report.workspaces.map((w) => (
                     <tr key={w.orgId}>
@@ -308,6 +355,7 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
                       <td className="td text-right tabular-nums">{count(w.leads)}</td>
                       <td className="td text-right tabular-nums">{count(w.campaignContacts)}</td>
                       <td className="td text-right tabular-nums">{count(w.messages)}</td>
+                      {showKept && <td className="td text-right tabular-nums">{count(w.anonymisedMessages)}</td>}
                       <td className="td">{w.suppressed === true ? "Yes" : w.suppressed === false ? "No" : "-"}</td>
                     </tr>
                   ))}
@@ -315,6 +363,9 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
               </table>
             </div>
           )}
+          {alreadyErased ? (
+            <p className="border-t border-black/5 p-4 text-sm text-ink-300" data-testid="subject-nothing-to-erase">There is nothing left to erase, and the address cannot be added or emailed by any workspace while it stays on the platform suppression list.</p>
+          ) : (
           <form onSubmit={erase} className="space-y-3 border-t border-black/5 bg-red-50/40 p-4" data-testid="subject-erase">
             <div className="text-sm font-medium text-red-800">Erase this person everywhere</div>
             <p className="text-sm text-ink-200">
@@ -327,6 +378,7 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
             {eraseErr && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-700 [overflow-wrap:anywhere]" role="alert" data-testid="subject-erase-error">{eraseErr}</div>}
             <button className="btn-danger max-lg:min-h-[40px]" disabled={erasing || !matches} data-testid="subject-erase-button">{erasing ? "Erasing…" : "Erase everywhere"}</button>
           </form>
+          )}
         </div>
       )}
     </section>
@@ -340,7 +392,7 @@ function DataSubjectSection({ onViewOrg, onErased }: { onViewOrg: (orgId: string
  * "no such route") this renders nothing at all - no heading, no error - because from the
  * admin's side the feature does not exist yet. Any other failure is shown where it happened.
  */
-export function PrivacySections({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
+export function PrivacySections({ onViewOrg, onLogged = () => {} }: { onViewOrg: (orgId: string) => void; onLogged?: () => void }) {
   const [missing, setMissing] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
   const onMissing = useCallback(() => setMissing(true), []);
@@ -348,8 +400,8 @@ export function PrivacySections({ onViewOrg }: { onViewOrg: (orgId: string) => v
   if (missing) return null;
   return (
     <>
-      <SuppressionsSection onMissing={onMissing} refreshKey={refreshKey} />
-      <DataSubjectSection onViewOrg={onViewOrg} onErased={onErased} />
+      <SuppressionsSection onMissing={onMissing} refreshKey={refreshKey} onLogged={onLogged} />
+      <DataSubjectSection onViewOrg={onViewOrg} onErased={onErased} onLogged={onLogged} />
     </>
   );
 }

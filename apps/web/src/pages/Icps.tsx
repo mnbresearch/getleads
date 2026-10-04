@@ -24,6 +24,9 @@ interface ScoreResponse {
 
 const RERANK_SKIP: Record<string, string> = {
   no_ai_provider: "AI scoring isn't switched on for this workspace yet, so rule scores were used - contact support to turn it on",
+  // The workspace's own switch (Settings > Workspace), not a missing provider.
+  ai_off: "AI assistance is turned off for this workspace, so rule scores were used. An owner or admin can turn it back on under Settings",
+  ai_disabled: "AI assistance is turned off for this workspace, so rule scores were used. An owner or admin can turn it back on under Settings",
   quota: "your plan has no AI messages left this month",
   error: "usage could not be recorded, so it was not run",
 };

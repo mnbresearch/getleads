@@ -44,11 +44,12 @@ if (TEST_DB) {
 }
 
 type Sent = { to: string; from: string; subject: string; text: string; html?: string; headers?: Record<string, string> };
-const mocks = vi.hoisted(() => ({ sent: [] as Sent[] }));
+const mocks = vi.hoisted(() => ({ sent: [] as Sent[], platformMailer: false }));
 vi.mock("./lib/mailer.js", async (importOriginal) => {
   const orig = await importOriginal<typeof import("./lib/mailer.js")>();
   return {
     ...orig,
+    systemMailerConfig: () => (mocks.platformMailer ? { provider: "resend" as const, resendApiKey: "re_test_platform_key" } : orig.systemMailerConfig()),
     sendMail: vi.fn(async (_cfg: unknown, input: Sent) => {
       mocks.sent.push(input);
       return { ok: true, provider: "test", providerMessageId: `t-${Math.random().toString(36).slice(2)}` };
@@ -206,9 +207,12 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
 
   afterEach(() => {
     mocks.sent.length = 0;
+    mocks.platformMailer = false;
     net.calls.length = 0;
     net.answer = null;
     delete process.env.GROQ_API_KEY;
+    delete process.env.PRIVACY_SWEEP;
+    delete process.env.IP_LOOKUP_ALLOW_PLAIN_HTTP;
     rateWindow.resetWindows();
   });
 
@@ -595,9 +599,9 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
 
       const found = await admin("GET", `/data-subject?email=${encodeURIComponent(`  ${email.toUpperCase()} `)}`);
       expect(found.status).toBe(200);
-      expect(found.body).toMatchObject({ email, globallySuppressed: false });
-      expect(found.body.workspaces.map((w: any) => [w.orgId, w.leads, w.campaignContacts, w.messages, w.suppressed]).sort()).toEqual(
-        [[a.org.id, 1, 1, 2, false], [b.org.id, 1, 1, 2, true]].sort(),
+      expect(found.body).toMatchObject({ email, globallySuppressed: false, held: true });
+      expect(found.body.workspaces.map((w: any) => [w.orgId, w.leads, w.campaignContacts, w.messages, w.anonymisedMessages, w.suppressed]).sort()).toEqual(
+        [[a.org.id, 1, 1, 2, 0, false], [b.org.id, 1, 1, 2, 0, true]].sort(),
       );
       expect(found.body.workspaces.every((w: any) => typeof w.orgName === "string" && w.orgName)).toBe(true);
       expect((await admin("GET", "/data-subject?email=not-an-address")).status).toBe(400);
@@ -617,8 +621,12 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
       expect(await db.select().from(S.leads).where(S.eq(S.leads.orgId, c.org.id))).toHaveLength(1);
       expect((await db.select().from(S.messages).where(S.eq(S.messages.orgId, c.org.id))).every((m: any) => m.subject !== "(removed)")).toBe(true);
       const after = await admin("GET", `/data-subject?email=${encodeURIComponent(email)}`);
-      expect(after.body).toMatchObject({ globallySuppressed: true });
-      expect(after.body.workspaces.map((w: any) => [w.leads, w.campaignContacts])).toEqual([[0, 0], [0, 0]]);
+      // Nobody holds the person any more. What is left is counted for what it is: message
+      // records kept without content, and a do-not-contact entry - not "2 messages".
+      expect(after.body).toMatchObject({ globallySuppressed: true, held: false });
+      expect(after.body.workspaces.map((w: any) => [w.orgId, w.leads, w.campaignContacts, w.messages, w.anonymisedMessages, w.suppressed]).sort()).toEqual(
+        [[a.org.id, 0, 0, 0, 2, false], [b.org.id, 0, 0, 0, 2, true]].sort(),
+      );
       // Erasing again is safe.
       expect((await admin("POST", "/data-subject/erase", { email, confirm: email })).body).toMatchObject({ ok: true, leadsDeleted: 0 });
 
@@ -902,6 +910,306 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
       expect(r.body.users.map((u: any) => u.email)).toEqual([o.email]);
       expect(r.body).toHaveProperty("usage");
       expect(r.body).toHaveProperty("overrides");
+    });
+  });
+
+  // ── 6b. Round 5: what the verifiers found on the release candidate ─────────────────
+  describe("platform list: refused on create, skipped on import, plus-tagged variants", () => {
+    it("POST /v1/leads refuses a listed address with 409 'suppressed' (not 201 with the address dropped); import skips and counts it", async () => {
+      const o = await signup("r5-create");
+      const listed = `listed-${u8()}@prospect.example`;
+      await db.insert(S.globalSuppressions).values({ email: listed, reason: "request" });
+      const leadsUsed = async () => (await db.select().from(S.usage).where(S.and(S.eq(S.usage.orgId, o.orgId), S.eq(S.usage.metric, "leads"))))[0]?.count ?? 0;
+
+      const refused = await req("POST", "/v1/leads", o.token, { email: listed, fullName: "Lee Listed" });
+      expect([refused.status, refused.body.error.code]).toEqual([409, "suppressed"]);
+      expect(refused.body.error.message).toBe("This person has asked not to be contacted through Scout, so their address cannot be stored.");
+      expect(await db.select().from(S.leads).where(S.eq(S.leads.orgId, o.orgId))).toHaveLength(0);
+      expect(await leadsUsed()).toBe(0);
+      // Someone not on the list is saved as before.
+      const fine = await req("POST", "/v1/leads", o.token, { email: `fine-${u8()}@prospect.example`, fullName: "Fay Fine" });
+      expect(fine.status).toBe(201);
+
+      const imp = await req("POST", "/v1/leads/import", o.token, [
+        { email: `imp-${u8()}@prospect.example`, fullName: "Ina Imported" },
+        { email: listed.toUpperCase(), fullName: "Lee Listed" },
+        { email: listed.replace("@", "+promo@"), fullName: "Lee Listed Again" },
+      ]);
+      expect(imp.status).toBe(200);
+      expect(imp.body).toMatchObject({ created: 1, updated: 0, skipped: 2, skippedDoNotContact: 2 });
+      expect(imp.body.skippedRows.map((r: any) => [r.row, r.code])).toEqual([[2, "do_not_contact"], [3, "do_not_contact"]]);
+      expect(imp.body.skippedRows[0].reason).toBe("This person has asked not to be contacted through Scout, so they were not imported.");
+      expect((await db.select().from(S.leads).where(S.eq(S.leads.orgId, o.orgId))).map((l: any) => l.fullName).sort()).toEqual(["Fay Fine", "Ina Imported"]);
+      expect(await tablesContaining("Lee Listed")).toEqual({});
+      // Only the two that were created were charged.
+      expect(await leadsUsed()).toBe(2);
+    });
+
+    it("a listed address blocks its plus-tagged variants - and a listed variant blocks the plain address - on lookup, send and store", async () => {
+      const tag = u8();
+      const plain = `jane-${tag}@prospect.example`;
+      const variant = `jane-${tag}+news@prospect.example`;
+      expect(ps.platformBase(variant)).toBe(plain);
+      expect(ps.platformBase(`  ${plain.toUpperCase()} `)).toBe(plain);
+      // Not a tag: a local part that starts with "+", and anything after the "@".
+      expect(ps.platformBase("+odd@x.example")).toBe("+odd@x.example");
+      expect(ps.platformBase("a@b+c.example")).toBe("a@b+c.example");
+      // No provider-specific rules: dots are different people.
+      expect(ps.platformBase("j.ane@x.example")).not.toBe(ps.platformBase("jane@x.example"));
+
+      await db.insert(S.globalSuppressions).values({ email: plain, reason: "request" });
+      // Lookup.
+      for (const a of [plain, variant, `jane-${tag}+a+b@prospect.example`, variant.toUpperCase()]) expect(await ps.onPlatformList(a), a).toBe(true);
+      for (const a of [`jane-${tag}x@prospect.example`, `jane-${tag}@other.example`, `ane-${tag}@prospect.example`]) expect(await ps.onPlatformList(a), a).toBe(false);
+      expect([...(await ps.platformListed([variant, `nobody-${tag}@prospect.example`, plain]))].sort()).toEqual([plain, variant].sort());
+      // Send.
+      const { org, campaign, step } = await setup();
+      const { cc } = await newContact(org.id, campaign.id, { email: variant });
+      expect(await campaignsSvc.sendStep(campaign.id, cc.id, step.id)).toMatchObject({ skipped: "suppressed", list: "platform" });
+      expect(mocks.sent).toHaveLength(0);
+      // Store.
+      const stored = await leadsSvc.upsertLead(org.id, { email: `jane-${tag}+sales@prospect.example`, fullName: "Jane Variant", source: "import" });
+      expect(stored.lead.email).toBeNull();
+      const o = await signup("r5-plus");
+      const refused = await req("POST", "/v1/leads", o.token, { email: variant, fullName: "Jane Variant" });
+      expect([refused.status, refused.body.error.code]).toEqual([409, "suppressed"]);
+
+      // The other way round: listing a tagged address covers the mailbox.
+      const other = `sam-${tag}@prospect.example`;
+      await db.insert(S.globalSuppressions).values({ email: other.replace("@", "+list@"), reason: "request" });
+      expect(await ps.onPlatformList(other)).toBe(true);
+      expect(await ps.onPlatformList(other.replace("@", "+else@"))).toBe(true);
+
+      // An erasure request by the plain address finds and removes the tagged record too.
+      const { lead: tagged } = await newContact(org.id, campaign.id, { email: `erin-${tag}+promo@prospect.example`, fullName: "Erin Tagged" });
+      const report = await admin("GET", `/data-subject?email=${encodeURIComponent(`erin-${tag}@prospect.example`)}`);
+      expect(report.body).toMatchObject({ held: true });
+      expect(report.body.workspaces.map((w: any) => [w.orgId, w.leads])).toEqual([[org.id, 1]]);
+      const erased = await admin("POST", "/data-subject/erase", { email: `erin-${tag}@prospect.example`, confirm: `erin-${tag}@prospect.example` });
+      expect(erased.body).toMatchObject({ ok: true, leadsDeleted: 1 });
+      expect(await db.select().from(S.leads).where(S.eq(S.leads.id, tagged.id))).toHaveLength(0);
+    });
+  });
+
+  describe("an anonymised message is never shown as a fingerprint", () => {
+    it("message lists and the do-not-contact list answer toEmail/email null with recipientRemoved, and events do the same", async () => {
+      const o = await signup("r5-shown");
+      const { campaign, step } = await setup({ orgId: o.orgId });
+      const gone = await newContact(o.orgId, campaign.id, { fullName: "Gone Soon" });
+      const stays = await newContact(o.orgId, campaign.id, { fullName: "Stays Here" });
+      for (const c of [gone, stays]) expect(await campaignsSvc.sendStep(campaign.id, c.cc.id, step.id)).toMatchObject({ sent: true });
+      const [goneMsg] = await db.select().from(S.messages).where(S.eq(S.messages.leadId, gone.lead.id));
+      await pe.eraseLeads(o.orgId, [gone.lead.id]);
+      // The removed contact unsubscribes from the email they already had.
+      expect((await app.request(`/t/u/${goneMsg.trackingToken}`, { method: "POST" })).status).toBe(200);
+
+      const list = await req("GET", `/v1/campaigns/${campaign.id}/messages`, o.token);
+      expect(list.status).toBe(200);
+      const byRemoved = (flag: boolean) => list.body.messages.filter((m: any) => m.recipientRemoved === flag);
+      expect(byRemoved(true)).toHaveLength(1);
+      expect(byRemoved(true)[0]).toMatchObject({ toEmail: null, subject: "(removed)", bodyText: "(removed)", lead: null });
+      expect(byRemoved(false)).toHaveLength(1);
+      expect(byRemoved(false)[0]).toMatchObject({ toEmail: stays.lead.email, lead: { id: stays.lead.id } });
+
+      const dnc = await req("GET", "/v1/leads/suppressions/all", o.token);
+      expect(dnc.body.suppressions).toHaveLength(1);
+      expect(dnc.body.suppressions[0]).toMatchObject({ email: null, recipientRemoved: true, reason: "unsubscribe_link" });
+      const events = await req("GET", "/v1/events?type=lead.unsubscribed", o.token);
+      expect(events.body.events[0].data).toMatchObject({ email: null, recipientRemoved: true });
+      for (const r of [list, dnc, events]) expect(r.text).not.toContain("sha256:");
+      // A normal entry is unchanged, with the flag false.
+      await req("POST", "/v1/leads/suppressions", o.token, { emails: [`plain-${u8()}@prospect.example`] });
+      const dnc2 = await req("GET", "/v1/leads/suppressions/all", o.token);
+      expect(dnc2.body.suppressions.filter((x: any) => x.recipientRemoved === false && typeof x.email === "string")).toHaveLength(1);
+    });
+  });
+
+  describe("operator switches", () => {
+    it("PRIVACY_SWEEP=off skips the deleted-lead sweep and nothing else", async () => {
+      const { org, campaign } = await setup();
+      const email = `sweepoff-${u8()}@prospect.example`;
+      const [lead] = await db.insert(S.leads).values({ orgId: org.id, email, fullName: "Sweep Off" }).returning();
+      await db.insert(S.messages).values({ orgId: org.id, campaignId: campaign.id, leadId: lead.id, toEmail: email, subject: "Hello Sweep", bodyText: "Body", status: "sent", createdAt: new Date(Date.now() - 2 * 3600_000) });
+      const [pixel] = await db.insert(S.pixels).values({ orgId: org.id, key: `px_${randomBytes(9).toString("base64url")}`, name: "site" }).returning();
+      await db.insert(S.visits).values({ orgId: org.id, pixelId: pixel.id, sessionId: `sw-${u8()}`, ipHash: pv.visitorIpHash("203.0.113.5", pixel.id), page: "/", visitedAt: new Date(Date.now() - (pr.RETENTION.visitDays + 2) * 86_400_000) });
+      await db.delete(S.leads).where(S.eq(S.leads.id, lead.id));
+
+      process.env.PRIVACY_SWEEP = "off";
+      expect(pr.privacySweepEnabled()).toBe(false);
+      const off = await pr.runRetention(db);
+      expect(off.skipped).toEqual([expect.stringMatching(/copies of deleted leads/)]);
+      expect(off.converted["messages of deleted leads"]).toBeUndefined();
+      // The message is untouched; the rest of retention still ran (the old visit is gone).
+      expect((await db.select().from(S.messages).where(S.eq(S.messages.orgId, org.id)))[0]).toMatchObject({ toEmail: email, subject: "Hello Sweep" });
+      expect(await db.select().from(S.visits).where(S.eq(S.visits.pixelId, pixel.id))).toHaveLength(0);
+
+      delete process.env.PRIVACY_SWEEP;
+      expect(pr.privacySweepEnabled()).toBe(true);
+      const on = await pr.runRetention(db);
+      expect(on.skipped).toBeUndefined();
+      expect((await db.select().from(S.messages).where(S.eq(S.messages.orgId, org.id)))[0]).toMatchObject({ toEmail: ps.addressFingerprint(email), subject: "(removed)" });
+    });
+
+    it("the plain-HTTP IP lookup is used only when switched on, and only after the HTTPS providers", async () => {
+      const core = await import("@prospex/core");
+      // No real reverse-DNS query leaves the machine either.
+      const dns = await import("node:dns");
+      const reverse = vi.spyOn(dns.promises, "reverse").mockRejectedValue(Object.assign(new Error("no record"), { code: "ENOTFOUND" }));
+      const answer = (url: string) => (url.startsWith("http://ip-api.com/") ? new Response(JSON.stringify({ status: "success", org: "Example Corp Ltd", isp: "Example Corp Ltd", as: "AS64501 Example", country: "India", city: "Pune", hosting: true }), { status: 200, headers: { "content-type": "application/json" } }) : null);
+      net.answer = answer;
+      // Off (the default): the HTTPS providers are asked, and nothing travels in clear.
+      const off = await core.identifyIp("203.0.113.211", { allowPlainHttp: false });
+      expect(net.calls.map((c) => c.url).filter((u) => u.startsWith("http://"))).toEqual([]);
+      expect(off.provider).not.toBe("ip-api");
+      net.calls.length = 0;
+      process.env.IP_LOOKUP_ALLOW_PLAIN_HTTP = "true";
+      const on = await core.identifyIp("203.0.113.212");
+      expect(on).toMatchObject({ resolved: true, provider: "ip-api", orgName: "Example Corp Ltd" });
+      expect(net.calls.map((c) => new URL(c.url).host)).toEqual(["api.ipapi.is", "ipinfo.io", "ip-api.com"]);
+      reverse.mockRestore();
+    });
+  });
+
+  describe("AI switched off: the same sentence everywhere, and nothing charged when no AI runs", () => {
+    it("company brief, ICP assistant, 'write with AI' and the search parser say AI is off and how to turn it on", async () => {
+      process.env.GROQ_API_KEY = "gsk_test_key";
+      net.answer = (url) => (url.startsWith("https://api.groq.com/") ? new Response(JSON.stringify({ choices: [{ message: { content: "{}" } }] }), { status: 200, headers: { "content-type": "application/json" } }) : null);
+      const o = await signup("r5-aioff");
+      expect((await req("PATCH", "/v1/account/privacy", o.token, { aiAssist: false })).status).toBe(200);
+      const [company] = await db.insert(S.companies).values({ orgId: o.orgId, domain: `acme-${u8()}.example`, name: "Acme" }).returning();
+      const [icp] = await db.insert(S.icps).values({ orgId: o.orgId, name: "Buyers", criteria: {} }).returning();
+      const used = async () => (await db.select().from(S.usage).where(S.and(S.eq(S.usage.orgId, o.orgId), S.eq(S.usage.metric, "aiMessages"))))[0]?.count ?? 0;
+      const OFF = /^AI assistance is turned off for this workspace.* An owner or admin can turn it back on under Settings\.$/;
+
+      const brief = await req("POST", `/v1/companies/${company.id}/brief`, o.token, {});
+      expect(brief.status).toBe(200);
+      expect(brief.body).toMatchObject({ brief: null, aiOff: true });
+      expect(brief.body.error).toMatch(OFF);
+      const chat = await req("POST", `/v1/icps/${icp.id}/chat`, o.token, { message: "Make it more specific" });
+      expect([chat.status, chat.body.error.code]).toEqual([409, "ai_off"]);
+      expect(chat.body.error.message).toMatch(OFF);
+      const suggest = await req("POST", "/v1/visibility/prompts/suggest", o.token, { ai: true });
+      expect(suggest.status).toBe(200);
+      expect(suggest.body).toMatchObject({ source: "starter", aiOff: true });
+      expect(suggest.body.note).toMatch(/AI assistance is turned off for this workspace.*turn it back on under Settings\.$/);
+      const parse = await req("POST", "/v1/search/parse", o.token, { query: "heads of marketing at fintech companies in Pune" });
+      expect(parse.status).toBe(200);
+      expect(parse.body).toMatchObject({ aiOff: true, note: expect.stringMatching(OFF) });
+      for (const r of [brief, chat, suggest, parse]) expect(r.text).not.toMatch(/contact support/i);
+      // No model was called and no AI message was charged for any of it.
+      expect(net.calls.filter((c) => /groq|generativelanguage|anthropic/.test(c.url))).toEqual([]);
+      expect(await used()).toBe(0);
+
+      // Back on: the parser uses (and charges for) the model again.
+      expect((await req("PATCH", "/v1/account/privacy", o.token, { aiAssist: true })).status).toBe(200);
+      const parseOn = await req("POST", "/v1/search/parse", o.token, { query: "heads of marketing at fintech companies in Pune" });
+      expect(parseOn.body.aiOff).toBeUndefined();
+      expect(net.calls.filter((c) => c.url.includes("groq")).length).toBeGreaterThanOrEqual(1);
+      expect(await used()).toBe(1);
+    });
+
+    it("with no AI engine at all, the search parser charges nothing either", async () => {
+      const o = await signup("r5-noai");
+      const parse = await req("POST", "/v1/search/parse", o.token, { query: "CTOs at logistics companies in Delhi" });
+      expect(parse.status).toBe(200);
+      expect(parse.body.aiOff).toBeUndefined();
+      expect((await db.select().from(S.usage).where(S.and(S.eq(S.usage.orgId, o.orgId), S.eq(S.usage.metric, "aiMessages"))))[0]?.count ?? 0).toBe(0);
+    });
+  });
+
+  describe("settings, limits and wording", () => {
+    it("an ICP with more than 50 terms in a facet can be saved; the cap is 500", async () => {
+      const o = await signup("r5-icp");
+      const sixty = Array.from({ length: 60 }, (_, i) => `keyword ${i}`);
+      const made = await req("POST", "/v1/icps", o.token, { name: "Wide", criteria: { keywords: sixty } });
+      expect(made.status).toBe(201);
+      const id = made.body.icp?.id ?? made.body.id;
+      const saved = await req("PATCH", `/v1/icps/${id}`, o.token, { name: "Wide, renamed", criteria: { keywords: sixty, titles: ["CTO"] } });
+      expect(saved.status).toBe(200);
+      const tooMany = await req("POST", "/v1/icps", o.token, { name: "Too wide", criteria: { keywords: Array.from({ length: 501 }, (_, i) => `k${i}`) } });
+      expect(tooMany.status).toBe(400);
+    });
+
+    it("a search text that is too long is named in words, not as 'Q'", async () => {
+      const o = await signup("r5-q");
+      for (const path of ["/v1/leads", "/v1/signals"]) {
+        const r = await req("GET", `${path}?q=${"x".repeat(121)}`, o.token);
+        expect(r.status, path).toBe(400);
+        expect(r.body.error.message, path).toContain("Search text is too long (120 characters at most)");
+        expect(r.body.error.message).not.toMatch(/\bQ is\b/);
+      }
+    });
+
+    it("PATCH /v1/auth/org: a mailing address over 300 characters is refused, and saving other settings does not undo the AI switch", async () => {
+      const o = await signup("r5-org");
+      const long = await req("PATCH", "/v1/auth/org", o.token, { settings: { mailingAddress: "x".repeat(301) } });
+      expect(long.status).toBe(400);
+      expect(long.body.error.message).toMatch(/300 characters/);
+      expect((await req("PATCH", "/v1/auth/org", o.token, { settings: { mailingAddress: "<b>x</b>" } })).status).toBe(400);
+      expect((await req("PATCH", "/v1/auth/org", o.token, { settings: { aiDisabled: "yes" } })).status).toBe(400);
+      const ok = await req("PATCH", "/v1/auth/org", o.token, { settings: { mailingAddress: " 1 Main Road\r\nPune ", senderCompany: "Acme" } });
+      expect(ok.status).toBe(200);
+      expect((await req("GET", "/v1/account/privacy", o.token)).body).toEqual({ aiAssist: true, mailingAddress: "1 Main Road\nPune" });
+
+      // A colleague turns AI off. This session's copy of the settings is now stale...
+      await db.execute(S.sql`UPDATE organizations SET settings = settings || '{"aiDisabled":true}'::jsonb WHERE id = ${o.orgId}`);
+      // ...and saving something else from it must not turn AI back on.
+      expect((await req("PATCH", "/v1/auth/org", o.token, { settings: { valueProp: "We cut onboarding time" } })).status).toBe(200);
+      const { saveVisibilityConfig } = await import("./services/visibility.js");
+      await saveVisibilityConfig(db, o.orgId, { brand: { name: "Acme", aliases: [], domain: null }, competitors: [] } as any);
+      const [org] = await db.select().from(S.organizations).where(S.eq(S.organizations.id, o.orgId));
+      expect(org.settings).toMatchObject({ aiDisabled: true, senderCompany: "Acme", valueProp: "We cut onboarding time", mailingAddress: "1 Main Road\nPune", visibility: { brand: { name: "Acme" } } });
+      expect((await req("GET", "/v1/account/privacy", o.token)).body.aiAssist).toBe(false);
+    });
+  });
+
+  describe("account mail", () => {
+    it("'Send again' ends the earlier confirmation links: only the newest works", async () => {
+      const o = await signup("r5-verify");
+      await db.update(S.users).set({ emailVerifiedAt: null }).where(S.eq(S.users.id, o.userId));
+      const ev = await import("./lib/emailVerification.js");
+      const first = await ev.issueVerificationToken(o.userId);
+      const second = await ev.issueVerificationToken(o.userId);
+      const third = await ev.issueVerificationToken(o.userId);
+      for (const stale of [first, second]) {
+        const r = await req("POST", "/v1/auth/verify/confirm", null, { token: stale });
+        expect([r.status, r.body.error.code]).toEqual([400, "invalid_verification_token"]);
+      }
+      expect((await db.select().from(S.users).where(S.eq(S.users.id, o.userId)))[0].emailVerifiedAt).toBeNull();
+      expect((await req("POST", "/v1/auth/verify/confirm", null, { token: third })).status).toBe(200);
+      expect((await db.select().from(S.users).where(S.eq(S.users.id, o.userId)))[0].emailVerifiedAt).toBeTruthy();
+      // Another person's link is not touched by someone else asking again.
+      const other = await signup("r5-verify-other");
+      await db.update(S.users).set({ emailVerifiedAt: null }).where(S.eq(S.users.id, other.userId));
+      const theirs = await ev.issueVerificationToken(other.userId);
+      await ev.issueVerificationToken(o.userId);
+      expect((await req("POST", "/v1/auth/verify/confirm", null, { token: theirs })).status).toBe(200);
+    });
+
+    it("the 'new sign-in' notice goes out at most once per 24 hours per person - across restarts", async () => {
+      mocks.platformMailer = true;
+      const sm = await import("./lib/securityMail.js");
+      const o = await signup("r5-notice");
+      const user = { id: o.userId, orgId: o.orgId, email: o.email };
+      mocks.sent.length = 0;
+      expect(await sm.notifySecurity(user, "new_signin", { ip: "203.0.113.10", method: "your password" })).toBe(true);
+      // An hour later, and after a restart (the in-memory window is gone): still not again.
+      rateWindow.resetWindows();
+      expect(await sm.notifySecurity(user, "new_signin", { ip: "203.0.113.11", method: "your password" })).toBe(false);
+      expect(mocks.sent.filter((m) => m.to === o.email)).toHaveLength(1);
+      // Someone else is not affected.
+      const other = await signup("r5-notice-other");
+      expect(await sm.notifySecurity({ id: other.userId, orgId: other.orgId, email: other.email }, "new_signin", { ip: "203.0.113.10", method: "your password" })).toBe(true);
+      // Other kinds of notice are not held back by it.
+      expect(await sm.notifySecurity(user, "password_changed", { ip: "203.0.113.10" })).toBe(true);
+      // A day later it is sent again.
+      await db.execute(S.sql`UPDATE audit_log SET created_at = now() - interval '25 hours' WHERE action = 'security.new_signin_notice' AND org_id = ${o.orgId}`);
+      rateWindow.resetWindows();
+      expect(await sm.notifySecurity(user, "new_signin", { ip: "203.0.113.12", method: "your password" })).toBe(true);
+      // The record of it names no address.
+      const log = await q`SELECT target_id, data FROM audit_log WHERE action = 'security.new_signin_notice' AND org_id = ${o.orgId}`;
+      expect(log).toHaveLength(2);
+      expect(JSON.stringify(log)).not.toContain(o.email);
     });
   });
 

@@ -5,6 +5,7 @@ import { and, consume, desc, eq, getDb, organizations, visibilityPrompts, visibi
 import { notFound, requireSomeFields } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { assertRowCap } from "../lib/limits.js";
+import { aiDisabled } from "../lib/ai.js";
 import { enginesForPlan, knownBrands, observationsFor, sampleAcrossEngines, saveVisibilityConfig, suggestPrompts, visibilityConfig, visibilityOverview } from "../services/visibility.js";
 
 /**
@@ -135,7 +136,8 @@ visibilityRoutes.post(
     const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
     // One model call, charged like any other - before it is made, and an org with no AI
     // quota left gets a 402 instead of a free call (the charge's error used to be swallowed).
-    if (body.ai) await consume(db, oid, "aiMessages", 1);
+    // (Nothing is charged when the workspace has AI switched off: no call is made.)
+    if (body.ai && !aiDisabled(org)) await consume(db, oid, "aiMessages", 1);
     return c.json(await suggestPrompts(db, oid, { plan: org?.plan ?? "free", useAi: body.ai, category: body.category }));
   },
 );

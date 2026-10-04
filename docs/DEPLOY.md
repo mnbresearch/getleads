@@ -91,6 +91,15 @@ Read DEPLOY.md section B10 before deploying. In short:
 - **`/health`** no longer returns the database error text, only `database unavailable`.
 - **MCP:** run the server from this repository (README); do not use `npx` with a package name.
 
+### Before you deploy, and rolling back
+
+The full procedure is DEPLOY.md section B11. In short:
+
+- **Before:** create a Neon branch (your restore point), check `JWT_SECRET` / `ENCRYPTION_KEY` are 16+ characters, check the admin password is not an example value, run the `openssl` certificate check (or set `DATABASE_SSL=require` as a safety net).
+- **Order:** API first, wait for `/health`, then web.
+- **Switches (all optional):** `CREDENTIAL_REBIND_ON_READ` (default off), `LINK_TOKENS_CLEAR_PLAINTEXT` (default off), `PRIVACY_SWEEP` (default on; `off` to defer), `IP_LOOKUP_ALLOW_PLAIN_HTTP` (default off). Set `IPINFO_TOKEN` for visitor-identification capacity.
+- **Rolling back:** run `node scripts/rollback-restore.mjs --dry-run`, then without `--dry-run`, with the new build and the production values; then redeploy the previous API and web builds. With the default switches the script only has work to do for report links and credentials created or changed on the new release.
+
 ## Operating
 
 - Admin: the dashboard at `/admin` (sign in with `ADMIN_EMAIL` / `ADMIN_PASSWORD`), or `GET /v1/admin/orgs` and `PATCH /v1/admin/orgs/:id/plan` with header `x-admin-token: $ADMIN_API_TOKEN` to list orgs and change plans/limits. `INTERNAL_TOKEN` is only the job runner's token and does not open the admin API. Every admin change is recorded in the workspace's security log.

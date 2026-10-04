@@ -4,7 +4,7 @@ import { z } from "zod";
 import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions, type EmailAccount } from "@prospex/db";
 import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPublicHost, isSsrfBlocked, redact } from "@prospex/core";
 import { AI_OFF_NOTE, aiDisabled, aiFor, NO_AI } from "../lib/ai.js";
-import { contactBlock } from "../lib/privacySuppression.js";
+import { contactBlock, shownAddress } from "../lib/privacySuppression.js";
 import { assertRowCap } from "../lib/limits.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
@@ -504,7 +504,14 @@ campaignRoutes.get("/:id/messages", async (c) => {
     .limit(200);
   // `trackingToken` is what the open / click / unsubscribe links of a message are keyed on;
   // it has no use in a list and is not part of one.
-  return c.json({ messages: rows.map((r) => ({ ...r.message, bodyHtml: undefined, trackingToken: undefined, lead: r.lead ? { id: r.lead.id, fullName: r.lead.fullName, title: r.lead.title } : null })) });
+  // A message whose contact was deleted keeps its row without content; its stored address
+  // is a fingerprint, which is not shown: `toEmail` is null and `recipientRemoved` is true.
+  return c.json({
+    messages: rows.map((r) => {
+      const to = shownAddress(r.message.toEmail);
+      return { ...r.message, toEmail: to.address, recipientRemoved: to.recipientRemoved, bodyHtml: undefined, trackingToken: undefined, lead: r.lead ? { id: r.lead.id, fullName: r.lead.fullName, title: r.lead.title } : null };
+    }),
+  });
 });
 
 /** Preview AI-personalized copy for a lead without sending. */
@@ -824,7 +831,8 @@ campaignRoutes.post(
         // The lead is remembered with the example, so deleting that lead removes it (see
         // lib/privacyErase.ts): an example is a copy of what was written to that person.
         const next = [...prior, { subject, body: bodyText, leadId: lead.id }].slice(-5);
-        await db.update(organizations).set({ settings: { ...settings, aiReplyStyleExamples: next } }).where(eq(organizations.id, oid)).catch(() => {});
+        // Only this key is written (see the note in services/visibility.ts saveVisibilityConfig).
+        await db.execute(sql`UPDATE organizations SET settings = jsonb_set(coalesce(settings, '{}'::jsonb), '{aiReplyStyleExamples}', ${JSON.stringify(next)}::jsonb) WHERE id = ${oid}`).catch(() => {});
       }
       return c.json({ sent: true, messageId: msg.id });
     }

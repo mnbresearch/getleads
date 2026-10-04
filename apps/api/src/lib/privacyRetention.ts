@@ -48,6 +48,13 @@ export interface RetentionReport {
   converted: Record<string, number>;
   /** Steps that did not finish this time; they run again on the next pass. */
   failed: string[];
+  /** Steps that were not run because an operator switched them off. */
+  skipped?: string[];
+}
+
+/** The deleted-lead sweep runs unless PRIVACY_SWEEP is "off" (also: false, 0, no). Read per pass, so it can be changed without a deploy. */
+export function privacySweepEnabled(): boolean {
+  return !/^(off|false|0|no)$/i.test((process.env.PRIVACY_SWEEP ?? "").trim());
 }
 
 /**
@@ -131,10 +138,19 @@ export async function runRetention(db: Db): Promise<RetentionReport> {
   await step("deleted", "upgrade requests", async (tx) => counted(await tx.execute(sql`DELETE FROM upgrade_requests WHERE status IN ('converted', 'dismissed') AND created_at < now() - ${days(RETENTION.closedUpgradeRequestDays)}`)));
 
   // ── Copies of deleted leads ──
-  const swept = await sweepErasedLeads(db);
-  if (swept.messagesAnonymised) report.converted["messages of deleted leads"] = swept.messagesAnonymised;
-  if (swept.eventsDeleted) report.deleted["events of deleted leads"] = swept.eventsDeleted;
-  report.failed.push(...swept.failed);
+  // The one step that rewrites rows a customer could once read (a deleted lead's old
+  // messages lose their content), and cannot be undone. On by default; an operator who
+  // wants to keep a rollback to the previous release free of surprises can switch it off,
+  // and everything above still runs. Deleting a lead in the app erases its copies at once
+  // either way - this only concerns what earlier deletes left behind.
+  if (privacySweepEnabled()) {
+    const swept = await sweepErasedLeads(db);
+    if (swept.messagesAnonymised) report.converted["messages of deleted leads"] = swept.messagesAnonymised;
+    if (swept.eventsDeleted) report.deleted["events of deleted leads"] = swept.eventsDeleted;
+    report.failed.push(...swept.failed);
+  } else {
+    report.skipped = ["copies of deleted leads (switched off by the operator)"];
+  }
   return report;
 }
 

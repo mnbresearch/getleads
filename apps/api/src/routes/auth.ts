@@ -22,6 +22,7 @@ import {
   type GoogleResolution,
 } from "../lib/googleAuth.js";
 import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors.js";
+import { mailingAddressOf } from "../services/campaigns.js";
 import { clientIp, rateLimit, requireAuth, requireRole, requireUser, type Env } from "../middleware.js";
 import { randomToken, safeEqual, sha256 } from "../lib/crypto.js";
 import { sendMail } from "../lib/mailer.js";
@@ -821,9 +822,25 @@ authRoutes.patch("/org", requireAuth, requireUser, requireRole("owner", "admin")
   const body = c.req.valid("json");
   requireSomeFields(body);
   const { db } = getDb();
+  // The two privacy settings have a dedicated route (PATCH /v1/account/privacy) with its own
+  // rules. Sent through this general one they are held to the same rules: the mailing
+  // address is plain text of at most 300 characters (it is printed in every email), and the
+  // AI switch is true or false.
+  const patch: Record<string, unknown> | undefined = body.settings ? { ...body.settings } : undefined;
+  if (patch && "mailingAddress" in patch) {
+    const v = patch.mailingAddress;
+    if (typeof v !== "string") throw badRequest("The mailing address must be text.");
+    if (v.length > 300) throw badRequest("The mailing address can be at most 300 characters.");
+    if (/[<>]/.test(v)) throw badRequest("The mailing address is plain text - it cannot contain < or >.");
+    patch.mailingAddress = mailingAddressOf({ settings: { mailingAddress: v } });
+  }
+  if (patch && "aiDisabled" in patch && typeof patch.aiDisabled !== "boolean") throw badRequest("The AI assistance setting must be true or false.");
+  // Merged in the database (`settings || patch`): only the keys this request names are
+  // written. Writing back the whole object from the session's copy reverted whatever a
+  // colleague had saved a moment earlier - turning AI assistance back on, for one.
   const [org] = await db
     .update(organizations)
-    .set({ ...(body.name ? { name: body.name } : {}), ...(body.settings ? { settings: { ...a.org.settings, ...body.settings } } : {}) })
+    .set({ ...(body.name ? { name: body.name } : {}), ...(patch ? { settings: sql`coalesce(${organizations.settings}, '{}'::jsonb) || ${JSON.stringify(patch)}::jsonb` } : {}) })
     .where(eq(organizations.id, a.org.id))
     .returning();
   // Setting NAMES only: the values are free-form and may hold things that do not belong in a log.

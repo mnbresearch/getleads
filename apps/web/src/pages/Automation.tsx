@@ -128,7 +128,7 @@ export function AutomationPage() {
                       </span>
                       {/* Shown because a name-only match can also be a rebrand or an acquisition. */}
                       <span className="text-ink-400" title="How sure we are this is a real change and not a data artefact">{Math.round(ch.confidence * 100)}%</span>
-                      {ch.raw?.leadId && leadSearchTerm(ch) && <Link className="text-brand-600 hover:underline" to={`/leads?q=${encodeURIComponent(leadSearchTerm(ch)!)}`}>Open</Link>}
+                      {ch.raw?.leadId && leadSearchTerm(ch) && <Link className="text-brand-600 hover:underline" to={`/leads?q=${encodeURIComponent(leadSearchTerm(ch)!.slice(0, 120))}`}>Open</Link>}
                       <span className="text-ink-500">{fmtDate(ch.createdAt)}</span>
                     </div>
                   </li>

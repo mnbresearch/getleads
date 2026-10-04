@@ -4,6 +4,7 @@ import { apiFetch, expectLists, fmtDate } from "../lib/api";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { useMe } from "../lib/me";
 import { plural } from "../lib/plural";
+import { recipientLabel, recipientRemoved } from "../lib/recipient";
 
 interface Step { id?: string; delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string | null; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
 interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; steps?: Step[]; createdAt: string }
@@ -322,6 +323,14 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
   const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
   const [removing, setRemoving] = useState<string | null>(null);
+  // For the platform sender the From address is the platform's, never the customer's. The
+  // form shows it (when a platform sender already exists, its address is known) instead of
+  // asking. Without the signed-in address to hand - it is what the request carries in that
+  // field - the form falls back to asking, as before.
+  const { me } = useMe();
+  const myEmail = me?.user?.email || null;
+  const platformForm = f.provider === "system" && !!myEmail;
+  const platformAddress = accounts.find((a) => a.provider === "system")?.fromEmail ?? null;
   const [retesting, setRetesting] = useState<string | null>(null);
   // Why the last "Test again" failed, per sender - kept on the row, because the reason is
   // what tells the user which setting to fix and a toast is gone in seconds.
@@ -371,8 +380,21 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
     setBusy(true);
     try {
       const config = f.provider === "resend" ? { apiKey: f.apiKey } : f.provider === "smtp" ? { host: f.host, port: Number(f.port), user: f.user || undefined, pass: f.pass || undefined, secure: Number(f.port) === 465 } : undefined;
-      const r = await apiFetch<{ test: { ok: boolean; error?: string } }>("POST", "/v1/campaigns/email-accounts", { provider: f.provider, fromName: f.fromName, fromEmail: f.fromEmail, replyTo: f.replyTo || undefined, signature: f.signature || undefined, dailyLimit: f.dailyLimit, config });
-      toast(r.test.ok ? "Sender added and verified" : `Added but connection test failed: ${r.test.error}`, r.test.ok ? "ok" : "err");
+      // The platform sender always sends from the platform's own address, so the form does
+      // not ask for one. The request still needs an address in that field; the person's own
+      // is sent, which the server uses only to decide where replies go when no Reply-to is given.
+      const fromEmail = platformForm ? myEmail! : f.fromEmail;
+      const r = await apiFetch<{ test: { ok: boolean; error?: string }; emailAccount?: { fromEmail?: unknown; replyTo?: unknown } }>("POST", "/v1/campaigns/email-accounts", { provider: f.provider, fromName: f.fromName, fromEmail, replyTo: f.replyTo || undefined, signature: f.signature || undefined, dailyLimit: f.dailyLimit, config });
+      const sendsFrom = typeof r.emailAccount?.fromEmail === "string" ? r.emailAccount.fromEmail : null;
+      const repliesTo = typeof r.emailAccount?.replyTo === "string" ? r.emailAccount.replyTo : null;
+      toast(
+        !r.test.ok
+          ? `Added but connection test failed: ${r.test.error}`
+          : platformForm && sendsFrom
+            ? `Sender added. Emails go out from ${sendsFrom}${repliesTo ? ` and replies come to ${repliesTo}` : ""}.`
+            : "Sender added and verified",
+        r.test.ok ? "ok" : "err",
+      );
       setF(blank);
       onChanged();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
@@ -407,8 +429,18 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
         <div><label className="label">Provider</label><select className="input" value={f.provider} onChange={(e) => setF({ ...f, provider: e.target.value })}>{sysAvail && <option value="system">Platform default (free, shared)</option>}<option value="resend">Resend (3,000/mo free)</option><option value="smtp">SMTP (Brevo, Gmail, Zoho…)</option></select></div>
         <div><label className="label">Daily limit</label><input type="number" className="input" value={f.dailyLimit} onChange={(e) => setF({ ...f, dailyLimit: Number(e.target.value) })} /></div>
         <div><label className="label">From name</label><input className="input" value={f.fromName} onChange={(e) => setF({ ...f, fromName: e.target.value })} /></div>
-        <div><label className="label">From email</label><input className="input" value={f.fromEmail} onChange={(e) => setF({ ...f, fromEmail: e.target.value })} /></div>
-        <div><label className="label">Reply-to (optional)</label><input className="input" value={f.replyTo} onChange={(e) => setF({ ...f, replyTo: e.target.value })} /></div>
+        {platformForm ? (
+          // Not a field: whatever was typed here was replaced by the platform's address on
+          // the server, so asking for it only set up a surprise.
+          <div data-testid="platform-from">
+            <div className="label">From email</div>
+            <div className="rounded-lg border border-black/10 bg-black/[0.03] px-3 py-2 text-sm text-ink-300 [overflow-wrap:anywhere]">{platformAddress ?? "Scout's shared sending address"}</div>
+            <p className="mt-1 text-xs text-ink-400">The platform sender always sends from this address - it cannot be changed. Recipients see your From name. To send from your own address, choose Resend or SMTP.</p>
+          </div>
+        ) : (
+          <div><label className="label" htmlFor="sender-from-email">From email</label><input id="sender-from-email" className="input" type="email" autoComplete="off" value={f.fromEmail} onChange={(e) => setF({ ...f, fromEmail: e.target.value })} /></div>
+        )}
+        <div><label className="label" htmlFor="sender-reply-to">{platformForm ? "Replies go to (optional)" : "Reply-to (optional)"}</label><input id="sender-reply-to" className="input" type="email" autoComplete="off" value={f.replyTo} placeholder={platformForm ? myEmail ?? "" : ""} onChange={(e) => setF({ ...f, replyTo: e.target.value })} />{platformForm && <p className="mt-1 text-xs text-ink-400">Must be the address of someone in this workspace. Left empty, replies come to you.</p>}</div>
         {f.provider === "resend" && <div><label className="label" htmlFor="sender-resend-key">Resend API key</label><input id="sender-resend-key" className="input" autoComplete="off" spellCheck={false} value={f.apiKey} onChange={(e) => setF({ ...f, apiKey: e.target.value })} /></div>}
         {f.provider === "smtp" && <>
           <div><label className="label">SMTP host</label><input className="input" value={f.host} onChange={(e) => setF({ ...f, host: e.target.value })} placeholder="smtp-relay.brevo.com" /></div>
@@ -420,7 +452,7 @@ function AccountsModal({ open, onClose, accounts, campaigns = [], sysAvail, canM
         </>}
         <div className="sm:col-span-2"><label className="label">Signature</label><textarea className="input h-16" value={f.signature} onChange={(e) => setF({ ...f, signature: e.target.value })} /></div>
       </div>
-      <button className="btn-primary mt-3 w-full justify-center" disabled={busy || !f.fromName || !f.fromEmail} onClick={add}>{busy ? "Testing…" : "Add sender"}</button>
+      <button className="btn-primary mt-3 w-full justify-center" disabled={busy || !f.fromName || (!platformForm && !f.fromEmail)} onClick={add}>{busy ? "Testing…" : "Add sender"}</button>
       </>)}
     </Modal>
   );
@@ -432,7 +464,7 @@ export function CampaignDetail() {
   const [c, setC] = useState<Campaign | null>(null);
   const [stats, setStats] = useState<{ messages: Record<string, number>; contacts: Record<string, number>; rates: Record<string, number>; variants?: { stepId: string | null; variant: number; sent: number; opened: number; replied: number }[] } | null>(null);
   const [contacts, setContacts] = useState<{ id: string; status: string; currentStep: number; nextSendAt: string | null; lastError?: string | null; sendFailures?: number | null; lead: { id: string; fullName: string | null; email: string | null; emailStatus: string; title: string | null; company: { name: string | null } | null } }[]>([]);
-  const [messages, setMessages] = useState<{ id: string; toEmail: string; subject: string; status: string; sentAt: string | null; openedAt: string | null; repliedAt: string | null; bodyText: string; direction: string; intent?: string | null; draftReply?: { subject: string; body: string } | null }[]>([]);
+  const [messages, setMessages] = useState<{ id: string; toEmail: string | null; recipientRemoved?: boolean; subject: string; status: string; sentAt: string | null; openedAt: string | null; repliedAt: string | null; bodyText: string; direction: string; intent?: string | null; draftReply?: { subject: string; body: string } | null }[]>([]);
   const [tab, setTab] = useState<"contacts" | "messages">("contacts");
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
@@ -602,14 +634,18 @@ export function CampaignDetail() {
             <details key={m.id} className="p-3">
               <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
                 <StatusBadge s={m.status} /><span className="font-medium">{m.subject}</span>
-                <span className="text-ink-400">{m.direction === "inbound" ? "from" : "to"} {m.toEmail}</span>
+                {/* A message whose contact was deleted is kept as a record, without the person:
+                    the server sends no address (an older one sent a "sha256:..." fingerprint,
+                    which is never shown). */}
+                <span className="text-ink-400" data-testid="message-recipient">{m.direction === "inbound" ? "from" : "to"} {recipientLabel(m)}</span>
                 {m.intent && <span className="badge bg-brand-50 text-brand-700">{m.intent.replace(/_/g, " ")}</span>}
                 <span className="ml-auto text-xs text-ink-500">{fmtDate(m.sentAt)}{m.openedAt && " · opened"}{m.repliedAt && " · replied"}</span>
               </summary>
               <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-ink-200">{m.bodyText}</pre>
               {/* Every inbound message can be answered from here. The box used to render only
                   when an AI draft existed, so a workspace with no AI had no way to reply at all. */}
-              {m.direction === "inbound" && <ReplyBox message={m} onSent={() => { toast(`Reply sent to ${m.toEmail}`); load(); }} onFailed={load} toast={toast} />}
+              {recipientRemoved(m) && <p className="mt-2 text-xs text-ink-400">This contact was deleted, so the message is kept as a record only: who it was {m.direction === "inbound" ? "from" : "to"} and what it said have been removed.</p>}
+              {m.direction === "inbound" && !recipientRemoved(m) && <ReplyBox message={{ ...m, toEmail: m.toEmail ?? "" }} onSent={() => { toast(`Reply sent to ${m.toEmail}`); load(); }} onFailed={load} toast={toast} />}
             </details>
           ))}
           {messages.length === 0 && <div className="p-8 text-center text-sm text-ink-400">No messages yet.</div>}

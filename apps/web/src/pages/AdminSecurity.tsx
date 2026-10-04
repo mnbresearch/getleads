@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AdminApiError, adminFetch } from "../lib/adminApi";
 import { expectLists, expectShape, fmtDate, fmtNum } from "../lib/api";
 import { PrivacySections } from "./AdminPrivacy";
-import { AUDIT_ACTOR, AuditResult, auditActionLabel, auditEntryLabel, auditReason, auditWho, type AuditEntry } from "../components/AuditBits";
+import { AUDIT_ACTOR, AuditResult, auditActionLabel, auditDetail, auditEntryLabel, auditReason, auditTarget, auditWho, type AuditEntry } from "../components/AuditBits";
 
 /** Same thumb-sized targets as the rest of the console (see AdminDashboard). */
 const TAP = "inline-flex items-center max-lg:min-h-[40px] max-lg:px-2";
@@ -130,13 +130,15 @@ type LogPage = { entries: AuditEntry[]; hasMore?: boolean; nextBefore?: string |
 const KNOWN_ACTIONS = [
   "auth.login", "auth.login_locked", "auth.google_login", "auth.signup", "auth.logout_all", "auth.password_changed", "auth.password_reset", "auth.password_reset_requested",
   "auth.2fa_challenge", "auth.2fa_setup", "auth.2fa_enabled", "auth.2fa_disabled", "auth.2fa_failed", "auth.2fa_recovery_codes_regenerated", "auth.email_verified", "auth.verification_sent",
-  "role.denied", "reference.denied", "apikey.scope_denied",
+  "role.denied", "reference.denied", "apikey.scope_denied", "security.new_signin_notice", "lead.create_refused",
   "apikey.created", "apikey.revoked", "webhook.created", "webhook.deleted", "webhook.secret_rotated", "integration.connected", "integration.disconnected", "sender.created", "sender.deleted",
   "team.invited", "team.invite_resent", "team.invite_revoked", "team.joined", "team.member_removed",
   "leads.exported", "leads.imported", "leads.bulk_deleted", "list.deleted", "client.created", "client.deleted", "client.share_enabled", "client.share_disabled", "client.share_rotated",
   "campaign.started", "campaign.paused", "campaign.deleted",
-  "org.settings_changed", "account.export_started", "account.exported", "account.deletion_requested", "account.deletion_cancelled", "account.deletion_reminder", "account.purged",
+  "org.settings_changed", "account.privacy_updated", "account.export_started", "account.exported", "account.deletion_requested", "account.deletion_cancelled", "account.deletion_reminder", "account.purged",
   "admin.login", "admin.logout", "admin.2fa_reset", "admin.plan_changed", "admin.status_changed", "admin.credits_changed",
+  "admin.upgrade_request_status_changed", "admin.tool_limit_changed",
+  "admin.suppression_added", "admin.suppression_removed", "admin.data_subject_viewed", "admin.data_subject_erased",
 ];
 
 /**
@@ -161,7 +163,21 @@ function qs(f: Filters, before: string | null): string {
   return p.toString();
 }
 
-function AuditSection({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
+/** The target and what changed, under the action's name. Nothing at all when neither was recorded. */
+function AuditMore({ e }: { e: AuditEntry }) {
+  const target = auditTarget(e);
+  const detail = auditDetail(e);
+  if (!target && !detail) return null;
+  return (
+    <div className="text-xs text-ink-400 [overflow-wrap:anywhere]" data-testid="audit-more">
+      {target && <span data-testid="audit-target">{target}</span>}
+      {target && detail ? " - " : ""}
+      {detail && <span data-testid="audit-detail">{detail}</span>}
+    </div>
+  );
+}
+
+function AuditSection({ onViewOrg, refreshKey = 0 }: { onViewOrg: (orgId: string) => void; refreshKey?: number }) {
   const [filters, setFilters] = useState<Filters>(NO_FILTERS);
   const [entries, setEntries] = useState<AuditEntry[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -203,7 +219,10 @@ function AuditSection({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
       })
       .finally(() => { if (mine === seq.current) setBusy(false); });
   }, []);
-  useEffect(() => { void load(filters); }, [filters, load]);
+  // `refreshKey` changes when something on this page has just written to the log (a
+  // suppression added or removed, a person looked up or erased), so the new entry is there
+  // without a manual refresh.
+  useEffect(() => { void load(filters); }, [filters, load, refreshKey]);
 
   useEffect(() => {
     let live = true;
@@ -320,6 +339,7 @@ function AuditSection({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
                     <AuditResult result={e.result} />
                   </div>
                   {reason && <div className={`text-xs ${e.result === "denied" ? "text-amber-800" : "text-red-700"}`}>{reason}</div>}
+                  <AuditMore e={e} />
                   <div className="[overflow-wrap:anywhere]">{orgCell(e)}</div>
                   <div className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 text-xs text-ink-400">
                     <span className="min-w-0 [overflow-wrap:anywhere]">{auditWho(e)}</span>
@@ -345,6 +365,7 @@ function AuditSection({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
                     <td className="td max-w-[18rem] [overflow-wrap:anywhere]">
                       <div className="font-medium text-ink-50">{auditEntryLabel(e)}</div>
                       {reason && <div className={`text-xs ${e.result === "denied" ? "text-amber-800" : "text-red-700"}`}>{reason}</div>}
+                      <AuditMore e={e} />
                     </td>
                     <td className="td max-w-[14rem] text-xs [overflow-wrap:anywhere]">{auditWho(e)}</td>
                     <td className="td"><AuditResult result={e.result} /></td>
@@ -384,11 +405,13 @@ function AuditSection({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
  * log, and the other way round.
  */
 export function SecurityTab({ onViewOrg }: { onViewOrg: (orgId: string) => void }) {
+  const [logKey, setLogKey] = useState(0);
+  const onLogged = useCallback(() => setLogKey((k) => k + 1), []);
   return (
     <div>
       <SummarySection />
-      <AuditSection onViewOrg={onViewOrg} />
-      <PrivacySections onViewOrg={onViewOrg} />
+      <AuditSection onViewOrg={onViewOrg} refreshKey={logKey} />
+      <PrivacySections onViewOrg={onViewOrg} onLogged={onLogged} />
     </div>
   );
 }

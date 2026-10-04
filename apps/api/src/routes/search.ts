@@ -3,8 +3,8 @@ import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, consume, consumeLead, desc, runJobById, enqueue, eq, getDb, getJob, icps, jobs, listLeads, lists, QuotaExceededError, remainingPremiumBudget, searches } from "@prospex/db";
 import { assertOwned } from "../lib/ownership.js";
-import { crawlCompanyWebsite, findCompanies, findEmail, findPeople, resolveCompanyDomain, runLeadPipeline, verifyEmail, parseQuery, pMap } from "@prospex/core";
-import { aiFor, NO_AI } from "../lib/ai.js";
+import { crawlCompanyWebsite, findCompanies, findEmail, findPeople, hasAi, resolveCompanyDomain, runLeadPipeline, verifyEmail, parseQuery, pMap } from "@prospex/core";
+import { AI_OFF_NOTE, aiDisabled, aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
 import { badRequest, notFound } from "../lib/errors.js";
@@ -142,8 +142,15 @@ searchRoutes.post("/parse", zValidator("json", z.object({ query: z.string().min(
   const { db } = getDb();
   // One AI call, metered like every other. Over quota the rule-based parser answers instead,
   // and the response says so.
+  // Nothing is charged when no AI will run: the workspace has AI switched off, or the server
+  // has no engine. The keyword parser answers, and the response says why.
+  const ai = aiFor(c.get("auth"));
+  if (!hasAi(ai)) {
+    const parsed = await parseQuery(NO_AI, { query: c.req.valid("json").query });
+    return c.json(aiDisabled(c.get("auth").org) ? { ...parsed, aiOff: true, note: AI_OFF_NOTE } : parsed);
+  }
   const charge = await tryConsume(db, orgId(c), "aiMessages", 1);
-  const parsed = await parseQuery(charge.ok ? aiFor(c.get("auth")) : NO_AI, { query: c.req.valid("json").query });
+  const parsed = await parseQuery(charge.ok ? ai : NO_AI, { query: c.req.valid("json").query });
   return c.json(charge.ok ? parsed : { ...parsed, skipped: charge.reason === "quota" ? "quota" : "error" });
 });
 

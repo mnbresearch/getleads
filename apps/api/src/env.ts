@@ -109,6 +109,13 @@ export const env = {
   adminEmail: (process.env.ADMIN_EMAIL ?? "").toLowerCase(),
   adminPassword: process.env.ADMIN_PASSWORD ?? "",
   /**
+   * Set when the admin password was configured but is a published example value, so the admin
+   * sign-in has been switched off (see applySecretPolicy). The sign-in form answers with this
+   * sentence instead of a bare "not configured" - the operator did configure it, and needs to
+   * know what is wrong and what to do. Empty when the sign-in is available or simply unset.
+   */
+  adminSignInOff: "",
+  /**
    * Second factor for the admin dashboard login: a base32 TOTP secret, the same one that is
    * added to an authenticator app. Optional. When set, POST /v1/admin/login also needs the
    * current 6-digit code; when unset the login is email + password, as before. Spaces and
@@ -259,7 +266,7 @@ export function assessSecrets(vars: Record<string, string | undefined>, nodeEnv:
 
   const guarded: { name: string; guards: string; off: string }[] = [
     { name: "ADMIN_API_TOKEN", guards: "the server-to-server admin API", off: "Token access to the admin API is switched off" },
-    { name: "ADMIN_PASSWORD", guards: "the admin console sign-in", off: "The admin console sign-in is switched off" },
+    { name: "ADMIN_PASSWORD", guards: "the admin console sign-in", off: "Admin sign-in is switched off (everything else is running normally)" },
     { name: "INTERNAL_TOKEN", guards: "the job runner endpoint", off: "The job runner endpoint is switched off" },
     { name: "STRIPE_WEBHOOK_SECRET", guards: "billing events", off: "Billing events are ignored" },
     { name: "RESEND_WEBHOOK_SECRET", guards: "delivery events (bounces and complaints)", off: "Delivery events are refused" },
@@ -271,7 +278,11 @@ export function assessSecrets(vars: Record<string, string | undefined>, nodeEnv:
     const weakAdminJwt = g.name === "ADMIN_JWT_SECRET" && v.length < MIN_SECRET_LENGTH;
     if (isPublishedPlaceholder(v) || weakAdminJwt) {
       const why = isPublishedPlaceholder(v) ? "a placeholder value that is published in this project's example files" : `only ${v.length} characters long`;
-      if (prod) out.disabled.push({ name: g.name, line: `[env] SECURITY: ${g.name} is ${why}, so it does not protect ${g.guards}. ${g.off} until it is set to a long random value (openssl rand -hex 24).` });
+      const fix =
+        g.name === "ADMIN_PASSWORD"
+          ? "Set a new, long ADMIN_PASSWORD in your hosting dashboard and redeploy; the admin sign-in page says the same until then."
+          : `Set ${g.name} to a long random value (openssl rand -hex 24) in your hosting dashboard and redeploy.`;
+      if (prod) out.disabled.push({ name: g.name, line: `[env] SECURITY: ${g.name} is ${why}, so it does not protect ${g.guards}. ${g.off}. ${fix}` });
       else out.warnings.push(`[env] ${g.name} is ${why}. In production ${g.guards} would be switched off until it is replaced.`);
     }
   }
@@ -288,6 +299,10 @@ export function assessSecrets(vars: Record<string, string | undefined>, nodeEnv:
   return out;
 }
 
+/** What the admin sign-in form answers while it is switched off for a placeholder password. No variable names: it is shown on a web page. */
+export const ADMIN_SIGN_IN_OFF_MESSAGE =
+  "Admin sign-in is switched off because the admin password set on the server is a published example value. Set a new one in your hosting dashboard and redeploy.";
+
 /**
  * Apply the assessment to the running configuration. Throws for a fatal finding (production
  * only); blanks each disabled credential so the code that checks it sees "not configured".
@@ -299,7 +314,10 @@ function applySecretPolicy() {
   for (const d of a.disabled) {
     console.error(d.line);
     if (d.name === "ADMIN_API_TOKEN") env.adminApiToken = "";
-    else if (d.name === "ADMIN_PASSWORD") env.adminPassword = "";
+    else if (d.name === "ADMIN_PASSWORD") {
+      env.adminPassword = "";
+      env.adminSignInOff = ADMIN_SIGN_IN_OFF_MESSAGE;
+    }
     else if (d.name === "INTERNAL_TOKEN") env.internalToken = "";
     else if (d.name === "STRIPE_WEBHOOK_SECRET") env.stripe.webhookSecret = undefined;
     else if (d.name === "ADMIN_JWT_SECRET") env.adminJwtSecret = env.jwtSecret;

@@ -82,7 +82,7 @@ adminRoutes.post(
     const { email, password } = c.req.valid("json");
     const code = c.req.valid("json").code?.trim() || undefined;
     const ip = clientIp(c);
-    if (!env.adminEmail || !env.adminPassword) throw badRequest("Admin login is not configured (set ADMIN_EMAIL and ADMIN_PASSWORD)");
+    if (!env.adminEmail || !env.adminPassword) throw badRequest("Admin sign-in is not set up on this server yet. Set the admin email and password in your hosting dashboard and redeploy.");
     // One queue per address: every address has its own allowance here, and a stranger filling
     // a shared queue must not be able to make the operator's attempt bounce off it.
     return serialised(await attemptQueue("admin-login", ADMIN_SUBJECT, clientIp(c), { perAddress: true }), async () => {

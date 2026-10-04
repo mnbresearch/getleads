@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { apiFetch, fmtDate, expectLists } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 import { ExtLink } from "../components/ExtLink";
 import { plural } from "../lib/plural";
+import { LIST_SEARCH_MAX, listErrorText, searchText } from "../lib/listSearch";
 
 interface Signal { id: string; type: string; companyName: string | null; companyDomain: string | null; title: string; summary: string | null; url: string; source: string | null; amountUsd: number | null; round: string | null; confidence: number; occurredAt: string | null; createdAt: string; match: { status: string; leadsCreated: number } | null }
 interface Sub { id: string; name: string; types: string[]; keywords: string[]; industries: string[]; locations: string[]; targetTitles: string[]; autoCreateLeads: boolean; active: boolean; lastRunAt: string | null; stats: Record<string, number> }
@@ -77,11 +78,22 @@ export function SignalsPage() {
   const [subsErr, setSubsErr] = useState<string | null>(null);
   const [monsErr, setMonsErr] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  const shownFor = useRef<string | null>(null);
+  const feedSeq = useRef(0);
   const load = useCallback(() => {
+    const key = `${type}|${q}|${matched}`;
+    const mine = ++feedSeq.current;
+    // Rows belong to the filter they were loaded for. When a load for a DIFFERENT filter
+    // fails, the rows on screen are not its answer and must not stay as if they were; when
+    // a refresh of the SAME filter fails (a blip between polls), they are still right.
     apiFetch<{ signals: Signal[] }>("GET", `/v1/signals?days=14&limit=200${type ? `&type=${type}` : ""}${q ? `&q=${encodeURIComponent(q)}` : ""}${matched ? "&matched=true" : ""}`)
-      .then((r) => { setSignals(r.signals); setListErr(null); })
-      .catch((e) => setListErr((e as Error).message))
-      .finally(() => setLoading(false));
+      .then((r) => { if (mine !== feedSeq.current) return; setSignals(expectLists(r, "signals").signals); shownFor.current = key; setListErr(null); })
+      .catch((e) => {
+        if (mine !== feedSeq.current) return;
+        if (shownFor.current !== key) { setSignals([]); shownFor.current = null; }
+        setListErr(listErrorText((e as Error).message));
+      })
+      .finally(() => { if (mine === feedSeq.current) setLoading(false); });
     apiFetch<{ subscriptions: Sub[] }>("GET", "/v1/signals/subscriptions").then((r) => { setSubs(expectLists(r, "subscriptions").subscriptions); setSubsErr(null); }).catch((e) => setSubsErr((e as Error).message));
     apiFetch<{ monitors: Monitor[] }>("GET", "/v1/signals/monitors").then((r) => { setMons(expectLists(r, "monitors").monitors); setMonsErr(null); }).catch((e) => setMonsErr((e as Error).message));
   }, [type, q, matched]);
@@ -108,7 +120,7 @@ export function SignalsPage() {
 
       {tab === "feed" && <>
         <div className="mb-3 flex flex-wrap gap-2">
-          <input className="input w-64" placeholder="Search company or headline" onKeyDown={(e) => e.key === "Enter" && setQ((e.target as HTMLInputElement).value)} />
+          <input className="input w-64" placeholder="Search company or headline" aria-label="Search signals" maxLength={LIST_SEARCH_MAX} onKeyDown={(e) => e.key === "Enter" && setQ(searchText((e.target as HTMLInputElement).value))} />
           <select className="input w-40" value={type} onChange={(e) => setType(e.target.value)}><option value="">All types</option>{TYPES.map((t) => <option key={t}>{t}</option>)}</select>
           <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={matched} onChange={(e) => setMatched(e.target.checked)} /> Only matched to my subscriptions</label>
         </div>

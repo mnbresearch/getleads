@@ -1,7 +1,7 @@
 import { and, campaignContacts, clientLeadDeliveries, clients, eq, getDb, icps, inArray, leads, or, organizations, sql, type Client } from "@prospex/db";
 import { scoreLeadRules, type IcpCriteria, type LeadForScoring } from "@prospex/core";
 import { badRequest, notFound } from "../lib/errors.js";
-import { hashLinkToken, migrateClientShareToken, newShareToken, openShareToken, shareTokenColumns } from "../lib/linkTokens.js";
+import { hashLinkToken, isLiveShareCopy, LIVE_SHARE_COPY_SQL, migrateClientShareToken, newShareToken, openShareToken, shareTokenColumns } from "../lib/linkTokens.js";
 
 /**
  * Client workspaces: every lead belongs to a client, or sits in the pool waiting for one.
@@ -210,9 +210,17 @@ export async function clientOverview(orgId: string, opts: { includeArchived?: bo
   };
 }
 
-/** Does this client have a report link, wherever it is stored (hashed, or a legacy plaintext row)? */
-export function hasShareLink(c: Pick<Client, "shareToken" | "shareTokenHash">): boolean {
-  return !!(c.shareTokenHash || c.shareToken);
+/**
+ * Does this client have a report link?
+ *
+ * Yes when the row still has its plaintext token (a link from before this release - that
+ * column is what the previous release reads and writes, so it decides), or when it has a
+ * hash together with the encrypted copy this release writes for a link without plaintext.
+ * A hash left behind on a link the previous release turned off (no plaintext, and either no
+ * copy or the copy that was kept next to the plaintext) is not a link.
+ */
+export function hasShareLink(c: Pick<Client, "shareToken" | "shareTokenHash" | "shareTokenEncrypted">): boolean {
+  return !!c.shareToken || (!!c.shareTokenHash && isLiveShareCopy(c.shareTokenEncrypted));
 }
 
 /**
@@ -699,23 +707,26 @@ export async function autoRoute(orgId: string, opts: { limit?: number; leadIds?:
 /**
  * The report link's token for someone allowed to see it (an owner or admin).
  *
- * New and rotated links are stored encrypted; a link from before that is still in the
- * legacy plaintext column and is moved out of it here, the first time it is read.
+ * A link from before this release still has its plaintext column: that is returned as it
+ * is (it is what the previous release serves, so it is the truth), and the row is given its
+ * hash and encrypted copy on the way if it does not have them yet. The plaintext is only
+ * removed when the operator has asked for that (see lib/linkTokens.ts).
+ * A link created or replaced on this release is read from its encrypted copy.
  * `unreadable` means a link exists but its stored copy cannot be decrypted (the server's
  * key changed): the link itself still works for whoever already has it, it just cannot be
  * shown again - replacing it gives a new one.
  */
 async function readableShareToken(c: Client): Promise<{ token: string | null; unreadable: boolean }> {
-  if (c.shareTokenEncrypted) {
+  if (c.shareToken) {
+    await migrateClientShareToken(c).catch(() => false);
+    return { token: c.shareToken, unreadable: false };
+  }
+  if (c.shareTokenHash && c.shareTokenEncrypted && isLiveShareCopy(c.shareTokenEncrypted)) {
     try {
       return { token: openShareToken(c.orgId, c.id, c.shareTokenEncrypted), unreadable: false };
     } catch {
       return { token: null, unreadable: true };
     }
-  }
-  if (c.shareToken) {
-    await migrateClientShareToken(c).catch(() => false);
-    return { token: c.shareToken, unreadable: false };
   }
   return { token: null, unreadable: false };
 }
@@ -805,13 +816,16 @@ export async function attentionLeadIds(orgId: string, clientId: string | null, b
 
 export async function enableSharing(orgId: string, id: string) {
   const { db } = getDb();
-  await requireClient(orgId, id);
+  const before = await requireClient(orgId, id);
   // 32 bytes of randomness: a report link is a bearer credential for this client's pipeline.
   // Stored as a hash (what a report request is looked up by) and encrypted (so an owner can
-  // copy the link again); never in plaintext. Any previous link stops working here.
+  // copy the link again); never in plaintext. Any previous link stops working here - also
+  // one from before this release, whose plaintext column is cleared by this write.
   const token = newShareToken();
   await db.update(clients).set({ ...shareTokenColumns(orgId, id, token), updatedAt: new Date() }).where(and(eq(clients.id, id), eq(clients.orgId, orgId)));
-  return { shareToken: token };
+  // `rotated`: there was a link already and this one replaced it (so the page can say
+  // "the old one no longer works" rather than "link created").
+  return { shareToken: token, rotated: hasShareLink(before) };
 }
 
 export async function disableSharing(orgId: string, id: string) {
@@ -843,15 +857,22 @@ function isVerified(r: Record<string, unknown>): boolean {
 /**
  * The client a report-link token belongs to, or null.
  *
- * Looked up by the token's hash - an index probe, with nothing compared against a stored
- * secret. The second arm finds a legacy row that has no hash yet (written by the previous
- * release while both were running); the boot-time task gives those their hash and removes
- * the plaintext, after which only the first arm can match.
+ * A link created or replaced on this release has no plaintext: it is found by the token's
+ * hash - an index probe, with nothing compared against a stored secret - and only when the
+ * row carries the encrypted copy this release writes for such a link.
+ *
+ * A link from before this release still has its plaintext column, and that column decides:
+ * it is found by it, exactly as the previous release finds it. Its hash is deliberately not
+ * trusted on its own - a link that was replaced or turned off on the previous release
+ * (during a rollback, or by an old instance in a rolling deploy) leaves an out-of-date hash
+ * behind, and an old or switched-off link must not start working again because of it.
  */
 export async function findClientByShareToken(token: string): Promise<Client | null> {
   if (typeof token !== "string" || token.length < 20 || token.length > 200) return null;
   const { db } = getDb();
-  const c = await db.query.clients.findFirst({ where: or(eq(clients.shareTokenHash, hashLinkToken(token)), and(sql`${clients.shareTokenHash} IS NULL`, eq(clients.shareToken, token))) });
+  const c = await db.query.clients.findFirst({
+    where: or(and(sql`${clients.shareToken} IS NULL`, eq(clients.shareTokenHash, hashLinkToken(token)), LIVE_SHARE_COPY_SQL), eq(clients.shareToken, token)),
+  });
   return c ?? null;
 }
 

@@ -1,7 +1,9 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { API_URL, apiFetch, auth, expectLists, fmtDate, rejectSession } from "../lib/api";
 import { integrationName } from "../lib/integrations";
+import { LIST_SEARCH_MAX, SEARCH_TOO_LONG, listErrorText, searchText } from "../lib/listSearch";
+import { recipientLabel } from "../lib/recipient";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 import { BUCKET_COPY, type ClientAttention } from "../lib/clients";
 import { ExtLink } from "../components/ExtLink";
@@ -65,6 +67,41 @@ export function cleanLeadQuery(raw: Record<string, string>): Record<string, stri
   return q;
 }
 
+/**
+ * What deleting a lead takes with it. Said before the delete, in both places it can be done:
+ * the messages that were sent to and received from the person stay as records (that
+ * something was sent, when, and what happened to it) but their content and the address are
+ * removed, and that cannot be brought back.
+ */
+export const LEAD_DELETE_CONSEQUENCE = "Their activity history and list memberships go with them, and the content of the messages sent to and received from them is removed too.";
+export function bulkDeleteConfirm(n: number): string {
+  const one = n === 1;
+  return [
+    `Delete ${plural(n, "lead")}?`,
+    `${one ? "Its" : "Their"} activity history and list memberships go with ${one ? "it" : "them"}, and the content of the messages sent to and received from ${one ? "that person" : "those people"} is removed too.`,
+    "This cannot be undone.",
+  ].join("\n\n");
+}
+
+/** The sentence for an import result. Exported so the wording is tested where it is made. */
+export interface ImportResult { created: number; updated: number; errors: unknown[]; skipped?: number; skippedDoNotContact?: number; skippedRows?: { row: number; reason: string; code?: string }[]; stopped?: string; notProcessed?: number }
+export function importMessage(r: ImportResult): { text: string; kind: "ok" | "err" } {
+  const errors = Array.isArray(r.errors) ? r.errors.length : 0;
+  const skippedN = r.skipped ?? r.skippedRows?.length ?? 0;
+  // People on the platform-wide do-not-contact list are skipped on purpose, and are counted
+  // on their own: "3 rows skipped" alone reads like three mistakes in the file.
+  const listed = typeof r.skippedDoNotContact === "number" ? r.skippedDoNotContact : (r.skippedRows ?? []).filter((x) => x.code === "do_not_contact").length;
+  const other = Math.max(0, skippedN - listed);
+  const firstOther = (r.skippedRows ?? []).find((x) => x.code !== "do_not_contact");
+  const parts = [`Imported: ${r.created} new, ${r.updated} updated`];
+  if (listed) parts.push(`${plural(listed, "row")} skipped because ${listed === 1 ? "that person has" : "those people have"} asked not to be contacted through Scout`);
+  if (other) parts.push(`${plural(other, "row")} skipped${firstOther ? ` (row ${firstOther.row}: ${firstOther.reason})` : ""}`);
+  if (errors) parts.push(plural(errors, "error"));
+  let text = parts.join(", ");
+  if (r.stopped) text += `. ${r.stopped}${r.notProcessed ? ` - ${plural(r.notProcessed, "row")} ${r.notProcessed === 1 ? "was" : "were"} not processed` : ""}`;
+  return { text, kind: r.stopped || (r.created + r.updated === 0 && (skippedN || errors)) ? "err" : "ok" };
+}
+
 export function LeadsPage() {
   const [params, setParams] = useSearchParams();
   const [rows, setRows] = useState<Lead[]>([]);
@@ -108,11 +145,19 @@ export function LeadsPage() {
   const limit = Number(q.limit ?? 50);
   const offset = Number(q.offset ?? 0);
 
+  // Only the newest list request may write. `silent` is the refresh that runs while a lead
+  // is open: it re-asks the same question, so it never starts a spinner, never outranks a
+  // real load that is still on its way, and - if it fails - changes nothing on screen.
+  const seq = useRef(0);
+  const loadingReal = useRef(false);
   const load = useCallback((silent = false) => {
-    if (!silent) setLoading(true);
+    if (silent && loadingReal.current) return;
+    const mine = silent ? seq.current : ++seq.current;
+    if (!silent) { loadingReal.current = true; setLoading(true); }
     const qs = new URLSearchParams({ limit: String(limit), offset: String(offset), sort: q.sort ?? "created", order: q.order ?? "desc", ...Object.fromEntries(Object.entries(q).filter(([k, v]) => v && !["limit", "offset", "sort", "order"].includes(k))) });
     apiFetch<{ leads: Lead[]; total: number }>("GET", `/v1/leads?${qs}`)
       .then((res) => {
+        if (mine !== seq.current) return;
         const r = expectLists(res, "leads");
         // Deleting everything on the last page left an empty page reading "No leads match"
         // while the earlier pages still had leads. Step back to the real last page instead.
@@ -124,8 +169,22 @@ export function LeadsPage() {
         }
         setRows(r.leads); setTotal(r.total); setListErr(null);
       })
-      .catch((e) => setListErr((e as Error).message))
-      .finally(() => setLoading(false));
+      .catch((e) => {
+        if (mine !== seq.current || silent) return;
+        // The rows on screen answered a DIFFERENT question (the previous search or filter).
+        // Left there, they read as the result of this one - a refused search showed the whole
+        // unfiltered list with "Delete" live over it. A failed load shows the failure and
+        // nothing else: no rows, no count, nothing selected.
+        setRows([]);
+        setTotal(0);
+        setSel(new Set());
+        setListErr(listErrorText((e as Error).message));
+      })
+      .finally(() => {
+        if (mine !== seq.current || silent) return;
+        loadingReal.current = false;
+        setLoading(false);
+      });
   }, [q, limit, offset]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { load(); }, [load]);
   // The selection is of rows on screen. Kept across a page or filter change it went on
@@ -164,7 +223,7 @@ export function LeadsPage() {
         const queued = r?.queued ?? ids.length - (r?.notFound ?? 0);
         toast(`Enrichment queued for ${plural(queued, "lead")}${r?.notFound ? `, ${r.notFound} not found (deleted?)` : ""}`);
       }
-      if (action === "delete") { if (!confirm(`Delete ${plural(ids.length, "lead")}?`)) return; await apiFetch("POST", "/v1/leads/bulk/delete", { ids }); toast("Deleted"); }
+      if (action === "delete") { if (!confirm(bulkDeleteConfirm(ids.length))) return; await apiFetch("POST", "/v1/leads/bulk/delete", { ids }); toast("Deleted"); }
       if (action.startsWith("list:")) {
         const r = await apiFetch<AddToListResult>("POST", `/v1/leads/lists/${action.slice(5)}/leads`, { ids });
         toast(addToListMessage(r, ids.length));
@@ -235,6 +294,9 @@ export function LeadsPage() {
   };
 
   const exportCsv = async () => {
+    // The export applies the same search as the list; one the server will refuse is said
+    // here, in words, rather than sent.
+    if ((q.q ?? "").length > LIST_SEARCH_MAX) { toast(`Nothing was exported: ${SEARCH_TOO_LONG.toLowerCase()}. Shorten the search and export again.`, "err"); return; }
     const qs = new URLSearchParams(Object.entries(q).filter(([k, v]) => v && !["limit", "offset"].includes(k)));
     try {
       const sentToken = auth.token;
@@ -246,7 +308,7 @@ export function LeadsPage() {
       // as leads.csv. The user got a file named like a success containing {"error":...}.
       if (!res.ok) {
         const text = await res.text().catch(() => "");
-        let msg = `Export failed (${res.status})`;
+        let msg = "";
         // The error may be an object ({code,message}) or a string; handing the object to the
         // toast crashed React ("Objects are not valid as a React child").
         try {
@@ -254,7 +316,8 @@ export function LeadsPage() {
           if (typeof e === "string" && e) msg = e;
           else if (e && typeof e === "object" && typeof (e as { message?: unknown }).message === "string") msg = (e as { message: string }).message;
         } catch { /* not JSON */ }
-        toast(msg, "err");
+        // Always a sentence: what did not happen, why if the server said, and what to do.
+        toast(msg ? `Nothing was exported: ${listErrorText(msg)}` : res.status === 429 ? "Nothing was exported: too many requests. Wait a moment and try again." : res.status >= 500 ? "Nothing was exported: the server is temporarily unavailable. Try again in a minute." : "Nothing was exported. Check your filters and try again.", "err");
         return;
       }
       const blob = await res.blob();
@@ -269,17 +332,17 @@ export function LeadsPage() {
       document.body.appendChild(a);
       a.click();
       setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 30_000);
-    } catch (e) {
-      toast((e as Error).message, "err");
+    } catch {
+      toast("Nothing was exported: the server could not be reached. Check your connection and try again.", "err");
     }
   };
 
   return (
-    <Page title="Leads" subtitle={plural(total, "lead")} actions={<><button className="btn-secondary" onClick={() => setSuppressOpen(true)}>Do-not-contact</button><button className="btn-secondary" onClick={() => setImportOpen(true)}>Import CSV</button><button className="btn-secondary" onClick={exportCsv}>Export CSV</button><button className="btn-primary" onClick={() => setAddOpen(true)}>Add lead</button></>}>
+    <Page title="Leads" subtitle={listErr ? undefined : plural(total, "lead")} actions={<><button className="btn-secondary" onClick={() => setSuppressOpen(true)}>Do-not-contact</button><button className="btn-secondary" onClick={() => setImportOpen(true)}>Import CSV</button><button className="btn-secondary" onClick={exportCsv}>Export CSV</button><button className="btn-primary" onClick={() => setAddOpen(true)}>Add lead</button></>}>
       {Toast}
       <div className="card mb-4 flex flex-wrap items-center gap-2 p-3">
         {/* Keyed on the URL value: an uncontrolled input otherwise keeps showing the old text after the URL changes (back button, a chip cleared). */}
-        <input key={`q:${q.q ?? ""}`} className="input w-56" placeholder="Search name, email, title…" defaultValue={q.q ?? ""} onKeyDown={(e) => e.key === "Enter" && set("q", (e.target as HTMLInputElement).value)} />
+        <input key={`q:${q.q ?? ""}`} className="input w-56" placeholder="Search name, email, title…" aria-label="Search leads" maxLength={LIST_SEARCH_MAX} defaultValue={q.q ?? ""} onKeyDown={(e) => e.key === "Enter" && set("q", searchText((e.target as HTMLInputElement).value))} />
         <select className="input w-40" value={q.emailStatus ?? ""} onChange={(e) => set("emailStatus", e.target.value)}><option value="">Any email status</option><option value="valid">valid</option><option value="catch_all">catch-all</option><option value="risky">risky</option><option value="invalid">invalid</option><option value="unknown">unknown</option></select>
         <select className="input w-40" value={q.status ?? ""} onChange={(e) => set("status", e.target.value)} aria-label="Pipeline stage"><option value="">Any stage</option>{STAGES.map((s) => <option key={s} value={s}>{s}</option>)}</select>
         <select className="input w-40" value={q.seniority ?? ""} onChange={(e) => set("seniority", e.target.value)}><option value="">Any seniority</option>{["c_level", "vp", "director", "manager", "senior", "individual", "entry"].map((s) => <option key={s} value={s}>{s}</option>)}</select>
@@ -320,8 +383,8 @@ export function LeadsPage() {
         </select>
       </div>
 
-      {sel.size > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-brand-50 px-3 py-2 text-sm">
+      {sel.size > 0 && !listErr && !loading && (
+        <div className="mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-brand-50 px-3 py-2 text-sm" data-testid="bulk-bar">
           <span className="font-medium text-brand-600">{sel.size} selected</span>
           <button className="btn-secondary" onClick={() => bulk("enrich")}>Enrich</button>
           <button className="btn-secondary" onClick={() => bulk("tag")}>Tag</button>
@@ -341,7 +404,7 @@ export function LeadsPage() {
         </div>
       )}
 
-      {loading ? <Spinner label="Loading leads…" /> : listErr && rows.length === 0 ? <LoadError message={listErr} onRetry={() => load()} /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
+      {loading ? <Spinner label="Loading leads…" /> : listErr ? <LoadError message={listErr} onRetry={() => load()} /> : rows.length === 0 ? <Empty title="No leads match" hint="Run a search or import a CSV to get started." /> : (
         <div className="card overflow-x-auto">
           <table className="w-full min-w-[900px]">
             <thead className="border-b border-black/10 bg-cream">
@@ -550,11 +613,11 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
         }))}>{busy === "verify" ? "…" : "Verify email"}</button>
         <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>
         <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string; ai?: boolean; note?: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
-        {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast("AI briefs aren't switched on for this workspace yet - contact support.", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
+        {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null; note?: unknown; message?: unknown }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast(typeof r.note === "string" && r.note ? r.note : typeof r.message === "string" && r.message ? r.message : "A brief could not be written for this company right now. Try again later.", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
         <DeleteButton
           className="btn-danger ml-auto"
           what={lead.fullName ?? lead.email ?? "this lead"}
-          consequence="Their activity history and list memberships go with them."
+          consequence={LEAD_DELETE_CONSEQUENCE}
           onDelete={async () => { await apiFetch("DELETE", `/v1/leads/${lead.id}`); toast("Lead deleted"); onClose(); onChanged(); }}
           onError={(m) => toast(m, "err")}
         />
@@ -578,24 +641,33 @@ function AddLeadModal({ open, onClose, onDone, toast }: { open: boolean; onClose
   const blank = { fullName: "", title: "", email: "", linkedinUrl: "", companyName: "", companyDomain: "", location: "" };
   const [f, setF] = useState(blank);
   const [busy, setBusy] = useState(false);
+  // A refusal stays in the form until it is dealt with. As a toast it was gone in a few
+  // seconds, and "this person asked not to be contacted" is not something to miss.
+  const [err, setErr] = useState<string | null>(null);
   // Fresh form each time it opens. Cleared when it CLOSES, not when it opens: resetting on
   // open ran after the first paint, so the previous lead's details showed for a frame.
-  useEffect(() => { if (!open) setF(blank); }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
+  useEffect(() => { if (!open) { setF(blank); setErr(null); } }, [open]); // eslint-disable-line react-hooks/exhaustive-deps
   const submit = async () => {
     setBusy(true);
+    setErr(null);
     try {
       await apiFetch("POST", "/v1/leads", Object.fromEntries(Object.entries(f).filter(([, v]) => v)));
       toast("Lead saved");
       onDone();
-    } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
+    } catch (e) {
+      // The server's own sentence: it says whether the address is on the do-not-contact
+      // list, already a lead, or simply malformed. Nothing was saved in any of those cases.
+      setErr((e as Error).message || "The lead was not saved. Try again.");
+    } finally { setBusy(false); }
   };
   return (
     <Modal open={open} onClose={onClose} title="Add lead">
       <div className="grid gap-3 sm:grid-cols-2">
         {(["fullName", "title", "email", "linkedinUrl", "companyName", "companyDomain", "location"] as const).map((k) => (
-          <div key={k} className={k === "fullName" ? "sm:col-span-2" : ""}><label className="label">{ADD_LEAD_LABELS[k]}</label><input className="input" value={f[k]} onChange={(e) => setF({ ...f, [k]: e.target.value })} /></div>
+          <div key={k} className={k === "fullName" ? "sm:col-span-2" : ""}><label className="label">{ADD_LEAD_LABELS[k]}</label><input className="input" value={f[k]} onChange={(e) => { setF({ ...f, [k]: e.target.value }); if (err) setErr(null); }} /></div>
         ))}
       </div>
+      {err && <div className="mt-3 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800 [overflow-wrap:anywhere]" role="alert" data-testid="add-lead-error">Not saved: {err}</div>}
       <button className="btn-primary mt-4 w-full justify-center" disabled={busy || !f.fullName} onClick={submit}>{busy ? "Saving…" : "Save lead"}</button>
     </Modal>
   );
@@ -628,10 +700,9 @@ function ImportModal({ open, onClose, onDone, toast }: { open: boolean; onClose:
     setSizeErr(null);
     setBusy(true);
     try {
-      const r = await apiFetch<{ created: number; updated: number; errors: unknown[]; skipped?: number; skippedRows?: { row: number; reason: string }[]; stopped?: string; notProcessed?: number }>("POST", "/v1/leads/import", undefined, { contentType: "text/csv", body: text });
-      const skippedN = r.skipped ?? r.skippedRows?.length ?? 0;
-      const firstSkip = r.skippedRows?.[0];
-      toast(`Imported: ${r.created} new, ${r.updated} updated${skippedN ? `, ${plural(skippedN, "row")} skipped${firstSkip ? ` (row ${firstSkip.row}: ${firstSkip.reason})` : ""}` : ""}${r.errors.length ? `, ${plural(r.errors.length, "error")}` : ""}${r.stopped ? `. ${r.stopped}${r.notProcessed ? ` - ${plural(r.notProcessed, "row")} ${r.notProcessed === 1 ? "was" : "were"} not processed` : ""}` : ""}`, r.stopped || (r.created + r.updated === 0 && (skippedN || r.errors.length)) ? "err" : "ok");
+      const r = await apiFetch<ImportResult>("POST", "/v1/leads/import", undefined, { contentType: "text/csv", body: text });
+      const said = importMessage(r);
+      toast(said.text, said.kind);
       onDone();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
@@ -655,7 +726,7 @@ function ImportModal({ open, onClose, onDone, toast }: { open: boolean; onClose:
  * have to take on faith, and someone who opts out by phone or in person had nowhere to go.
  */
 function SuppressionsModal({ open, onClose, toast }: { open: boolean; onClose: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
-  const [rows, setRows] = useState<{ id: string; email: string; reason: string | null; createdAt: string }[]>([]);
+  const [rows, setRows] = useState<{ id: string; email: string | null; recipientRemoved?: boolean; reason: string | null; createdAt: string }[]>([]);
   const [state, setState] = useState<"idle" | "loading" | "error">("idle");
   const [err, setErr] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -664,7 +735,7 @@ function SuppressionsModal({ open, onClose, toast }: { open: boolean; onClose: (
   const load = useCallback(() => {
     setState("loading");
     apiFetch<{ suppressions: typeof rows }>("GET", "/v1/leads/suppressions/all")
-      .then((r) => { setRows(r.suppressions); setState("idle"); setErr(null); })
+      .then((r) => { setRows(expectLists(r, "suppressions").suppressions); setState("idle"); setErr(null); })
       .catch((e) => { setErr((e as Error).message); setState("error"); });
   }, []);
   useEffect(() => { if (open) load(); }, [open, load]);
@@ -698,8 +769,9 @@ function SuppressionsModal({ open, onClose, toast }: { open: boolean; onClose: (
           <ul className="max-h-80 divide-y divide-slate-100 overflow-auto text-sm">
             {rows.map((r) => (
               <li key={r.id} className="flex items-center justify-between py-2">
-                <span>{r.email}</span>
-                <span className="text-xs text-ink-400">{r.reason ?? "unsubscribed"} · {fmtDate(r.createdAt)}</span>
+                {/* An entry for someone since deleted still blocks their address; it just no longer says whose it is. */}
+                <span className="min-w-0 [overflow-wrap:anywhere]">{recipientLabel(r)}</span>
+                <span className="shrink-0 pl-3 text-xs text-ink-400">{r.reason ?? "unsubscribed"} · {fmtDate(r.createdAt)}</span>
               </li>
             ))}
           </ul>

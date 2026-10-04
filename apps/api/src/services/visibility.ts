@@ -1,4 +1,5 @@
 import { and, consume, desc, eq, getDb, icps, organizations, sql, type IcpCriteria, visibilityPrompts, visibilityRuns } from "@prospex/db";
+import { AI_OFF_UNAVAILABLE, aiDisabled } from "../lib/ai.js";
 import {
   analyzeAnswer,
   availableAiProvidersForPlan,
@@ -79,12 +80,9 @@ export async function visibilityConfig(db: ReturnType<typeof getDb>["db"], orgId
 }
 
 export async function saveVisibilityConfig(db: ReturnType<typeof getDb>["db"], orgIdValue: string, cfg: VisibilityConfig) {
-  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgIdValue) });
-  const settings = (org?.settings ?? {}) as Record<string, unknown>;
-  await db
-    .update(organizations)
-    .set({ settings: { ...settings, visibility: cfg } })
-    .where(eq(organizations.id, orgIdValue));
+  // Only this key is written, in the database. Reading the whole settings object and writing
+  // it back overwrote whatever a colleague saved in between - including the AI switch.
+  await db.execute(sql`UPDATE organizations SET settings = jsonb_set(coalesce(settings, '{}'::jsonb), '{visibility}', ${JSON.stringify(cfg)}::jsonb) WHERE id = ${orgIdValue}`);
   return cfg;
 }
 
@@ -387,6 +385,8 @@ export async function suggestPrompts(
   rejected: { text: string; reason: string }[];
   coverage: { intent: string; count: number }[];
   note?: string;
+  /** True when AI was asked for and the workspace has AI assistance switched off. */
+  aiOff?: boolean;
 }> {
   const cfg = await visibilityConfig(db, orgIdValue);
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgIdValue) });
@@ -427,6 +427,13 @@ export async function suggestPrompts(
     return { source: "starter", prompts: starter.kept, rejected: starter.rejected, coverage: intentCoverage(starter.kept) };
   }
 
+  // "Write with AI" sends the workspace's own description of its buyer to a model. With the
+  // workspace's AI switch off it does not run: the starter questions come back, with the
+  // reason and how to turn AI back on. (Sampling the engines is the feature itself and is
+  // not affected by the switch - it sends only the questions the workspace tracks.)
+  if (aiDisabled(org)) {
+    return { source: "starter", prompts: starter.kept, rejected: starter.rejected, coverage: intentCoverage(starter.kept), aiOff: true, note: `These are the standard starter questions, not ones written for your business: ${AI_OFF_UNAVAILABLE}` };
+  }
   const provider = availableAiProvidersForPlan(opts.plan ?? "free")[0];
   if (!provider) {
     return {

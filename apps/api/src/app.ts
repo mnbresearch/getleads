@@ -3,7 +3,7 @@ import { bodyLimit } from "hono/body-limit";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import { randomBytes } from "node:crypto";
-import { getDb } from "@prospex/db";
+import { databaseTlsHint, getDb } from "@prospex/db";
 import { env } from "./env.js";
 import { describeError, errorHandler } from "./lib/errors.js";
 import { requireInternalToken, type Env } from "./middleware.js";
@@ -37,7 +37,17 @@ import { wireToolMeter } from "./lib/toolMeter.js";
 const SECRET_QUERY_KEYS = new Set([
   "token", "u", "code", "state", "key", "api_key", "apikey", "cv", "verifier", "access_token", "id_token", "refresh_token", "secret", "password", "signature", "sig", "authorization", "x-internal-token", "x-admin-token", "x-api-key",
 ]);
+/**
+ * Query parameters whose VALUE can be a person's address or name: the look-ups and search
+ * boxes. `GET /v1/admin/data-subject?email=...`, `/v1/admin/orgs?q=sara%40...` and
+ * `/v1/admin/suppressions?q=...` wrote the address someone was being looked up by into the
+ * access log - the one place a data-subject request should leave no new copy. `to` / `from`
+ * are here for the same reason (they also carry dates on some APIs; a date is no loss).
+ */
+const PERSONAL_QUERY_KEYS = new Set(["email", "q", "to", "from", "cc", "bcc", "recipient", "address", "search", "query", "name", "phone", "reply_to", "replyto", "user", "username", "login"]);
 const REDACTED = "[redacted]";
+/** Something shaped like an email address, as sent (%40) or decoded (@). */
+const ADDRESS_SHAPED = /[^\s/@=&]{1,64}(?:@|%40)[^\s/@=&]{1,255}\.[a-z]{2,}/i;
 
 /**
  * A request path + query string that is safe to write to a log.
@@ -58,6 +68,11 @@ export function redactRequestLine(path: string, rawQuery = ""): string {
   p = p.replace(/^\/px\/.+$/s, (m: string) => `/px/${REDACTED}${m.endsWith("/collect") ? "/collect" : m.endsWith(".js") ? ".js" : ""}`);
   // Anything else in a path is a route name or a UUID. Control characters could forge extra
   // log lines, so they never reach the log.
+  // An address in a path segment (no route takes one today; a mistyped or probing URL can).
+  p = p
+    .split("/")
+    .map((seg) => (ADDRESS_SHAPED.test(seg) ? REDACTED : seg))
+    .join("/");
   p = p.replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 300);
   if (!rawQuery) return p;
   const parts = rawQuery
@@ -76,7 +91,10 @@ export function redactRequestLine(path: string, rawQuery = ""): string {
       }
       const safeKey = key.replace(/[^\w.\-[\]]/g, "_").slice(0, 40);
       if (eq === -1) return safeKey;
-      if (SECRET_QUERY_KEYS.has(key.trim().toLowerCase())) return `${safeKey}=${REDACTED}`;
+      const k = key.trim().toLowerCase();
+      if (SECRET_QUERY_KEYS.has(k) || PERSONAL_QUERY_KEYS.has(k)) return `${safeKey}=${REDACTED}`;
+      // Whatever the parameter is called: a value that is an address is not written down.
+      if (ADDRESS_SHAPED.test(pair.slice(eq + 1))) return `${safeKey}=${REDACTED}`;
       return `${safeKey}=${pair.slice(eq + 1).replace(/[\u0000-\u001f\u007f]/g, "?").slice(0, 200)}`;
     });
   return parts.length ? `${p}?${parts.join("&")}` : p;
@@ -203,6 +221,9 @@ function logHealthFailure(e: unknown) {
   lastHealthFailureLog = now;
   const d = describeError(e);
   console.error(`[api] health check: database unavailable: ${d.name}${d.code ? ` [${d.code}]` : ""}: ${d.message}`);
+  // A certificate or handshake problem has a one-line fix; say it next to the error.
+  const hint = databaseTlsHint(e);
+  if (hint) console.error(hint);
 }
 
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
@@ -315,6 +336,13 @@ export function createApp(opts: AppOptions = {}) {
   app.route("/px", pixelPublic);
   app.route("/v1", miscRoutes);
   app.route("/v1", leadCaptureRoutes);
+  // The admin password was set, but to a published example value, so sign-in is switched off
+  // (env.ts). Say exactly that, in words the operator can act on - the route's own answer for
+  // a missing password is "not configured", which sends them looking for a setting they did set.
+  app.post("/v1/admin/login", async (c, next) => {
+    if (env.adminSignInOff) return c.json({ error: { code: "bad_request", message: env.adminSignInOff } }, 400);
+    await next();
+  });
   app.route("/v1/admin", adminRoutes);
   app.route("/v1/audit-log", auditRoutes);
   // Workspace export and deletion: owner only, session only, re-confirmed (routes/account.ts).

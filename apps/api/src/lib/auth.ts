@@ -24,7 +24,11 @@ const HASH_CONCURRENCY = (() => {
   return Number.isInteger(n) && n >= 1 && n <= 32 ? n : 2;
 })();
 const HASH_MAX_WAITERS = 200;
-const HASH_WAIT_MS = 8000;
+// 30 seconds: a small instance hashes a few passwords a second, and at about nine
+// simultaneous sign-ins an 8-second wait was already answering "busy" to people who would
+// have been served a moment later. Waiting is the better answer; the cap on waiters above
+// is what keeps a flood from piling up.
+const HASH_WAIT_MS = 30_000;
 let hashActive = 0;
 const hashWaiters: Array<{ resolve: () => void; reject: (e: unknown) => void; timer: ReturnType<typeof setTimeout> }> = [];
 

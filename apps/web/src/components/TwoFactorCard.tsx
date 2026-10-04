@@ -3,6 +3,7 @@ import { ProspexError, apiFetch, fmtDay } from "../lib/api";
 import { saveText } from "../lib/download";
 import { useGoogleEnabled } from "../lib/googleSignIn";
 import { rememberMe, useMe } from "../lib/me";
+import { clearRecoveryCodeNotice } from "../lib/recoveryNotice";
 import { digitsOnly } from "./TwoFactorStep";
 
 const NOT_AVAILABLE = "Two-factor sign-in is not available yet. Try again later.";
@@ -166,6 +167,8 @@ export function TwoFactorCard() {
       const codes = Array.isArray(r?.recoveryCodes) ? r.recoveryCodes.filter((c): c is string => typeof c === "string" && !!c) : [];
       if (codes.length === 0) throw new Error("The server did not return any codes. Try again.");
       setSaved(false);
+      // The banner's "N are left" was about the old set, which no longer exists.
+      clearRecoveryCodeNotice();
       go({ at: "codes", codes, fresh: "regenerated" });
     } catch (x) {
       setErr(words(x, "That code is not right. Enter the code your app is showing now, or a recovery code you have not used."));
@@ -183,6 +186,8 @@ export function TwoFactorCard() {
     try {
       await apiFetch("POST", "/v1/auth/2fa/disable", { code: code.trim() }, undefined, { reconfirm: true });
       setEnabled(false);
+      // No two-factor, no recovery codes: nothing for the banner to warn about.
+      clearRecoveryCodeNotice();
       go({ at: "idle" });
       setDone("Two-factor sign-in is off. Signing in now needs only your password.");
     } catch (x) {

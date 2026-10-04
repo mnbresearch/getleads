@@ -39,6 +39,10 @@ export function emailVerificationAvailable(): boolean {
 export async function issueVerificationToken(userId: string, ttlMs: number = VERIFICATION_TTL_MS): Promise<string> {
   const { db } = getDb();
   const token = randomToken(32);
+  // Only the newest link works. "Send again" used to leave every earlier link valid for its
+  // full 24 hours, while the screen said the opposite; a link forwarded or left in an old
+  // inbox stayed usable. Earlier unused links are ended here, before the new one exists.
+  await db.execute(sql`UPDATE email_verification_tokens SET expires_at = now() WHERE user_id = ${userId} AND used_at IS NULL AND expires_at > now()`);
   await db.insert(emailVerificationTokens).values({ userId, tokenHash: sha256(token), expiresAt: new Date(Date.now() + ttlMs) });
   // Housekeeping: links that expired more than a week ago are never read again.
   void db

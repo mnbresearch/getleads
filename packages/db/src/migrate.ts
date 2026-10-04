@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import postgres from "postgres";
 import { loadEnv } from "./loadEnv.js";
-import { sslOption } from "./ssl.js";
+import { databaseTlsHint, sslOption } from "./ssl.js";
 loadEnv();
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -74,6 +74,8 @@ if (isMain) {
   runMigrations().catch((e) => {
     // Never the error object: the driver attaches the statement and its parameters to it.
     console.error(`[migrate] failed: ${describeMigrationError(e)}`);
+    const hint = databaseTlsHint(e);
+    if (hint) console.error(hint);
     process.exit(1);
   });
 }

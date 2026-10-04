@@ -16,6 +16,9 @@ const ACRONYMS: Record<string, string> = { url: "URL", id: "ID", icp: "ICP", ai:
  */
 const acronym = (w: string): string => (Object.hasOwn(ACRONYMS, w) ? ACRONYMS[w] : w);
 
+/** Top-level field names that read badly when humanised ("Q is too long"). Looked up by own property only. */
+const FIELD_NAMES: Record<string, string> = { q: "Search text" };
+
 function words(seg: string): string[] {
   return seg
     .replace(/([a-z0-9])([A-Z])/g, "$1 $2")
@@ -38,6 +41,8 @@ export function humanizePath(path: (string | number)[], fallback = "body"): stri
   const segs = path.filter((p): p is string => typeof p === "string" && !/^\d+$/.test(p));
   if (!segs.length) return fallback === "body" ? "Request" : fallback;
   const last = segs[segs.length - 1];
+  // A field whose name is an abbreviation nobody outside the code uses: said in words.
+  if (segs.length === 1 && Object.hasOwn(FIELD_NAMES, last)) return FIELD_NAMES[last];
   // The parent counts only when it directly holds the field: in "leads.0.email" the parent
   // is a list, and "Leads email" reads worse than "Email".
   const lastIdx = path.lastIndexOf(last);

@@ -31,7 +31,7 @@ if (TEST_DB) {
   process.env.JOB_MODE = "worker";
   process.env.MAIL_FROM = "Scout <no-reply@platform.test>";
   process.env.APP_URL = "https://app.scout.test";
-  for (const k of ["RESEND_API_KEY", "SMTP_HOST", "HUNTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "SERPER_API_KEY", "APOLLO_API_KEY", "STRIPE_SECRET_KEY", "IPINFO_TOKEN", "PILOT_INVITE_CODE", "CREDENTIAL_REBIND_ON_READ"]) delete process.env[k];
+  for (const k of ["RESEND_API_KEY", "SMTP_HOST", "HUNTER_API_KEY", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", "GROQ_API_KEY", "GEMINI_API_KEY", "SERPER_API_KEY", "APOLLO_API_KEY", "STRIPE_SECRET_KEY", "IPINFO_TOKEN", "PILOT_INVITE_CODE", "CREDENTIAL_REBIND_ON_READ", "LINK_TOKENS_CLEAR_PLAINTEXT"]) delete process.env[k];
 }
 
 const mocks = vi.hoisted(() => ({
@@ -171,6 +171,7 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
     mocks.sent.length = 0;
     mocks.platformMailer = false;
     delete process.env.CREDENTIAL_REBIND_ON_READ;
+    delete process.env.LINK_TOKENS_CLEAR_PLAINTEXT;
     rateWindow.resetWindows();
   });
 
@@ -270,6 +271,8 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
       expect(on.status).toBe(200);
       const token = on.body.shareToken as string;
       expect(Buffer.from(token, "base64url")).toHaveLength(32);
+      // The first link for this client: created, not replaced.
+      expect(on.body.rotated).toBe(false);
 
       const row = await clientRow(c.id);
       expect(row.shareToken).toBeNull();
@@ -288,6 +291,7 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
 
       const rotated = await req("POST", `/v1/clients/${c.id}/share`, o.token, {});
       expect(rotated.body.shareToken).not.toBe(token);
+      expect(rotated.body.rotated).toBe(true);
       expect((await report(token)).status).toBe(404);
       expect((await report(rotated.body.shareToken)).status).toBe(200);
       expect((await auditOf(o.orgId, "client.share_rotated")).length).toBe(1);
@@ -327,45 +331,211 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
       for (const secret of [token, hash, enc, "shareToken"]) expect(patched.text).not.toContain(secret);
     });
 
-    it("a legacy plaintext link keeps resolving, is moved out of plaintext when an owner reads it, and by the boot-time task", async () => {
+    /** The previous release's lookup, as it is written there: `findFirst({ where: eq(clients.shareToken, token) })`. */
+    const previousReleaseFinds = async (token: string): Promise<string | null> => {
+      const viaOrm = await db.query.clients.findFirst({ where: S.eq(S.clients.shareToken, token) });
+      const viaSql = await q`SELECT id FROM clients WHERE share_token = ${token}`;
+      expect(viaSql.map((r: any) => r.id)).toEqual(viaOrm ? [viaOrm.id] : []);
+      return viaOrm?.id ?? null;
+    };
+    const legacyToken = () => randomBytes(32).toString("base64url");
+
+    it("DEFAULT: a link from before the upgrade keeps its plaintext - it gains a hash and an encrypted copy, and the previous release still finds it", async () => {
+      expect(process.env.LINK_TOKENS_CLEAR_PLAINTEXT).toBeUndefined();
+      expect(links.clearsLinkPlaintext()).toBe(false);
       const o = await signup("share-legacy");
       const member = await addMember(o, "member");
-      // (a) backfilled by the migration, (b) written by the previous release after it (no hash).
-      const tA = randomBytes(32).toString("base64url");
-      const tB = randomBytes(32).toString("base64url");
-      const tC = randomBytes(32).toString("base64url");
+      // (a) as migration 0019 leaves an existing row: plaintext + backfilled hash;
+      // (b) written by the previous release after the migration: plaintext only;
+      // (c) read by an owner before the start-up task gets to it.
+      const tA = legacyToken();
+      const tB = legacyToken();
+      const tC = legacyToken();
       const [a] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Legacy A ${u8()}`, shareToken: tA, shareTokenHash: sha256(tA) }).returning();
       const [b] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Legacy B ${u8()}`, shareToken: tB }).returning();
-      const [c] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Legacy C ${u8()}`, shareToken: tC, shareTokenHash: sha256(tC) }).returning();
-      for (const t of [tA, tB, tC]) expect((await report(t)).status).toBe(200);
+      const [c] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Legacy C ${u8()}`, shareToken: tC }).returning();
+      // ... and one made on the new release, for contrast.
+      const fresh = await newClient(o);
+      const tN = (await req("POST", `/v1/clients/${fresh.id}/share`, o.token, {})).body.shareToken as string;
+      for (const t of [tA, tB, tC, tN]) expect((await report(t)).status).toBe(200);
 
       // A member reading the client changes nothing and learns nothing.
-      const m = await req("GET", `/v1/clients/${a.id}`, member.token);
-      expect(m.body.client).toMatchObject({ sharing: true, shareToken: null });
+      const m = await req("GET", `/v1/clients/${c.id}`, member.token);
+      expect(m.body.client).toMatchObject({ sharing: true, shareToken: null, shareLinkVisible: false });
+      expect(m.text).not.toContain(tC);
+      expect(await clientRow(c.id)).toMatchObject({ shareToken: tC, shareTokenHash: null, shareTokenEncrypted: null });
+
+      // An owner gets the same link as before. The row gains its hash and copy; the plaintext stays.
+      const d = await req("GET", `/v1/clients/${c.id}`, o.token);
+      expect(d.body.client).toMatchObject({ sharing: true, shareToken: tC, shareLinkVisible: true });
+      const cAfter = await clientRow(c.id);
+      expect([cAfter.shareToken, cAfter.shareTokenHash]).toEqual([tC, sha256(tC)]);
+      expect(links.openShareCopy(o.orgId, c.id, cAfter.shareTokenEncrypted)).toBe(tC);
+
+      // The start-up task - twice at once, as two instances starting together would.
+      const [r1, r2] = await Promise.all([links.migrateLegacyLinkTokens({ batchSize: 1 }), links.migrateLegacyLinkTokens()]);
+      expect(r1.plaintextCleared).toBe(false);
+      expect(r1.clientLinks + r2.clientLinks).toBeGreaterThanOrEqual(2);
+      for (const [row, t] of [[a, tA], [b, tB], [c, tC]] as const) {
+        const after = await clientRow(row.id);
+        // The plaintext column is untouched, byte for byte; hash and encrypted copy are filled.
+        expect(after.shareToken).toBe(t);
+        expect(after.shareTokenHash).toBe(sha256(t));
+        expect(after.shareTokenEncrypted).toMatch(/^legacy:v2\./);
+        expect(after.shareTokenEncrypted).not.toContain(t);
+        expect(links.openShareCopy(o.orgId, row.id, after.shareTokenEncrypted)).toBe(t);
+        // The copy does not open on another client's row.
+        expect(() => links.openShareCopy(o.orgId, fresh.id, after.shareTokenEncrypted)).toThrow();
+        // The previous release reads clients.share_token: every pre-upgrade link is still there for it.
+        expect(await previousReleaseFinds(t)).toBe(row.id);
+        // ... and the new release serves it.
+        const pub = await report(t);
+        expect(pub.status).toBe(200);
+        expect(pub.body.client.name).toBe(row.name);
+        // The hash is not the credential.
+        expect((await report(after.shareTokenHash)).status).toBe(404);
+      }
+      // (The link made on the new release has no plaintext: that one the previous release cannot serve.)
+      expect(await previousReleaseFinds(tN)).toBeNull();
+      expect((await clientRow(fresh.id)).shareToken).toBeNull();
+
+      // Idempotent without the plaintext having been removed: a second run writes nothing.
+      const snapshot = async () => JSON.stringify(await db.select().from(S.clients).where(S.eq(S.clients.orgId, o.orgId)).orderBy(S.clients.id));
+      const before = await snapshot();
+      const again = await links.migrateLegacyLinkTokens();
+      expect(again).toEqual({ clientLinks: 0, inviteHashes: 0, plaintextCleared: false, disabledLinksTidied: 0 });
+      expect(await snapshot()).toBe(before);
+
+      // Owners and admins still read the link; a member still does not; no list carries it.
+      expect((await req("GET", `/v1/clients/${a.id}`, o.token)).body.client).toMatchObject({ sharing: true, shareToken: tA });
+      expect((await req("GET", `/v1/clients/${b.id}`, o.apiKey)).body.client).toMatchObject({ sharing: true, shareToken: tB });
+      const asMember = await req("GET", `/v1/clients/${a.id}`, member.token);
+      expect(asMember.body.client).toMatchObject({ sharing: true, shareToken: null });
+      const list = await req("GET", "/v1/clients", member.token);
+      for (const secret of [tA, tB, tC, sha256(tA), "legacy:v2."]) expect(asMember.text).not.toContain(secret);
+      for (const secret of [tA, tB, tC, sha256(tA), "legacy:v2.", "shareToken"]) expect(list.text).not.toContain(secret);
+      // Reading and serving changed nothing either.
+      expect(await snapshot()).toBe(before);
+    });
+
+    it("DEFAULT: a legacy link replaced or turned off on the previous release does not come back through its old hash", async () => {
+      const o = await signup("share-rollback");
+      const t1 = legacyToken();
+      const tOff = legacyToken();
+      const [rot] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Rotated ${u8()}`, shareToken: t1 }).returning();
+      const [off] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Turned off ${u8()}`, shareToken: tOff }).returning();
+      const fresh = await newClient(o);
+      const tN = (await req("POST", `/v1/clients/${fresh.id}/share`, o.token, {})).body.shareToken as string;
+      await links.migrateLegacyLinkTokens();
+      expect((await report(t1)).status).toBe(200);
+      expect((await report(tOff)).status).toBe(200);
+
+      // Rolled back: the previous release only knows clients.share_token.
+      // "New link" there writes a new plaintext and leaves the hash and copy as they were.
+      const t2 = legacyToken();
+      await q`UPDATE clients SET share_token = ${t2} WHERE id = ${rot.id}`;
+      // "Turn off" there sets the plaintext to NULL and leaves the rest.
+      await q`UPDATE clients SET share_token = NULL WHERE id = ${off.id}`;
+
+      // Rolled forward again - before the start-up task has run:
+      expect((await report(t1)).status).toBe(404); // the replaced link stays dead although its hash is still stored
+      expect((await report(t2)).status).toBe(200);
+      expect((await req("GET", `/v1/clients/${rot.id}`, o.token)).body.client.shareToken).toBe(t2);
+      expect((await report(tOff)).status).toBe(404); // the switched-off link stays off
+      expect((await req("GET", `/v1/clients/${off.id}`, o.token)).body.client).toMatchObject({ sharing: false, shareToken: null });
+      expect((await req("GET", "/v1/clients", o.token)).body.clients.find((x: any) => x.id === off.id).sharing).toBe(false);
+
+      // ... and after it: the stored hash and copy follow the plaintext again, the leftovers are gone.
+      const r = await links.migrateLegacyLinkTokens();
+      expect(r.disabledLinksTidied).toBeGreaterThanOrEqual(1);
+      const rotAfter = await clientRow(rot.id);
+      expect([rotAfter.shareToken, rotAfter.shareTokenHash]).toEqual([t2, sha256(t2)]);
+      expect(links.openShareCopy(o.orgId, rot.id, rotAfter.shareTokenEncrypted)).toBe(t2);
+      const offAfter = await clientRow(off.id);
+      expect([offAfter.shareToken, offAfter.shareTokenHash, offAfter.shareTokenEncrypted]).toEqual([null, null, null]);
+      expect((await report(t1)).status).toBe(404);
+      expect((await report(tOff)).status).toBe(404);
+
+      // A link made on the new release whose plaintext was written back for a rollback
+      // (the rollback tool does this) is then a link "with plaintext" like any other:
+      await q`UPDATE clients SET share_token = ${tN} WHERE id = ${fresh.id}`;
+      expect(await previousReleaseFinds(tN)).toBe(fresh.id);
+      expect((await report(tN)).status).toBe(200);
+      await links.migrateLegacyLinkTokens();
+      const restored = await clientRow(fresh.id);
+      expect([restored.shareToken, restored.shareTokenHash]).toEqual([tN, sha256(tN)]);
+      expect(restored.shareTokenEncrypted).toMatch(/^legacy:v2\./);
+      await q`UPDATE clients SET share_token = NULL WHERE id = ${fresh.id}`; // turned off on the previous release
+      expect((await report(tN)).status).toBe(404);
+
+      // Turning a legacy link off on the NEW release removes the plaintext as well, so it is off for both releases.
+      const tGone = legacyToken();
+      const [gone] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Off here ${u8()}`, shareToken: tGone }).returning();
+      await links.migrateLegacyLinkTokens();
+      expect((await req("DELETE", `/v1/clients/${gone.id}/share`, o.token)).status).toBe(200);
+      expect(await previousReleaseFinds(tGone)).toBeNull();
+      expect((await report(tGone)).status).toBe(404);
+      // Replacing one does too, and says it replaced something.
+      const tOld = legacyToken();
+      const [repl] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Replaced here ${u8()}`, shareToken: tOld }).returning();
+      const made = await req("POST", `/v1/clients/${repl.id}/share`, o.token, {});
+      expect(made.body.rotated).toBe(true);
+      expect(await previousReleaseFinds(tOld)).toBeNull();
+      expect((await report(tOld)).status).toBe(404);
+      expect((await report(made.body.shareToken)).status).toBe(200);
+      expect((await clientRow(repl.id)).shareToken).toBeNull();
+    });
+
+    it("OPT-IN LINK_TOKENS_CLEAR_PLAINTEXT=true: the plaintext is cleared - by the start-up task and when an owner reads the link", async () => {
+      const o = await signup("share-clear");
+      const tA = legacyToken();
+      const tB = legacyToken();
+      const tC = legacyToken();
+      const [a] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Clear A ${u8()}`, shareToken: tA, shareTokenHash: sha256(tA) }).returning();
+      const [b] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Clear B ${u8()}`, shareToken: tB }).returning();
+      const [c] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Clear C ${u8()}`, shareToken: tC }).returning();
+      // First a start with the default, so (a) and (b) are in the "plaintext kept" state.
+      await links.migrateLegacyLinkTokens();
       expect((await clientRow(a.id)).shareToken).toBe(tA);
 
-      // An owner gets the same link as before, and the row is re-encrypted on the way.
-      const d = await req("GET", `/v1/clients/${a.id}`, o.token);
-      expect(d.body.client.shareToken).toBe(tA);
-      const moved = await clientRow(a.id);
-      expect([moved.shareToken, moved.shareTokenHash]).toEqual([null, sha256(tA)]);
-      expect(links.openShareToken(o.orgId, a.id, moved.shareTokenEncrypted)).toBe(tA);
-      expect((await req("GET", `/v1/clients/${a.id}`, o.token)).body.client.shareToken).toBe(tA);
+      for (const notOn of ["false", "1", "yes", "on", ""]) {
+        process.env.LINK_TOKENS_CLEAR_PLAINTEXT = notOn;
+        expect({ notOn, clears: links.clearsLinkPlaintext() }).toEqual({ notOn, clears: false });
+      }
+      process.env.LINK_TOKENS_CLEAR_PLAINTEXT = " TRUE ";
+      expect(links.clearsLinkPlaintext()).toBe(true);
+      process.env.LINK_TOKENS_CLEAR_PLAINTEXT = "true";
 
-      // The boot-time task finishes the rest - twice at once, as two instances starting together would.
+      // An owner reading a link moves that one out of plaintext...
+      expect((await req("GET", `/v1/clients/${c.id}`, o.token)).body.client.shareToken).toBe(tC);
+      const cAfter = await clientRow(c.id);
+      expect([cAfter.shareToken, cAfter.shareTokenHash]).toEqual([null, sha256(tC)]);
+      expect(links.openShareToken(o.orgId, c.id, cAfter.shareTokenEncrypted)).toBe(tC);
+
+      // ... and the start-up task does the rest, two instances at once.
       const [r1, r2] = await Promise.all([links.migrateLegacyLinkTokens({ batchSize: 1 }), links.migrateLegacyLinkTokens()]);
+      expect(r1.plaintextCleared).toBe(true);
       expect(r1.clientLinks + r2.clientLinks).toBeGreaterThanOrEqual(2);
-      for (const [row, t] of [[b, tB], [c, tC]] as const) {
+      for (const [row, t] of [[a, tA], [b, tB], [c, tC]] as const) {
         const after = await clientRow(row.id);
         expect([after.shareToken, after.shareTokenHash]).toEqual([null, sha256(t)]);
+        expect(after.shareTokenEncrypted).toMatch(/^v2\./);
         expect(links.openShareToken(o.orgId, row.id, after.shareTokenEncrypted)).toBe(t);
+        // A dump of the row holds no usable link.
         expect(JSON.stringify(after)).not.toContain(t);
+        // Still served, still readable by an owner - and (the documented cost) not by the previous release.
         expect((await report(t)).status).toBe(200);
+        expect((await req("GET", `/v1/clients/${row.id}`, o.token)).body.client).toMatchObject({ sharing: true, shareToken: t });
+        expect(await previousReleaseFinds(t)).toBeNull();
       }
       // Nothing left in plaintext anywhere, and running it again changes nothing.
       expect(await q`SELECT count(*)::int AS n FROM clients WHERE share_token IS NOT NULL`).toEqual([{ n: 0 }]);
-      expect(await links.migrateLegacyLinkTokens()).toEqual({ clientLinks: 0, inviteHashes: 0 });
-      expect((await req("GET", `/v1/clients/${b.id}`, o.token)).body.client.shareToken).toBe(tB);
+      expect(await links.migrateLegacyLinkTokens()).toEqual({ clientLinks: 0, inviteHashes: 0, plaintextCleared: true, disabledLinksTidied: 0 });
+      // The explicit argument wins over the environment either way.
+      const tD = legacyToken();
+      const [dRow] = await db.insert(S.clients).values({ orgId: o.orgId, name: `Clear D ${u8()}`, shareToken: tD }).returning();
+      expect((await links.migrateLegacyLinkTokens({ clearPlaintext: false })).plaintextCleared).toBe(false);
+      expect((await clientRow(dRow.id)).shareToken).toBe(tD);
     });
 
     it("the boot-time task gives a hash to an invite that has only a plaintext token", async () => {
@@ -464,26 +634,123 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
       expect((await accountRow(rowB.id)).configEncrypted).toBe(rowA.configEncrypted);
     });
 
-    it("credentials saved before the binding still work, and are rewritten bound the first time they are read", async () => {
-      const a = await signup("cred-lazy");
+    const settle = () => new Promise((r) => setTimeout(r, 250));
+    const integrationRow = async (id: string) => (await db.select().from(S.integrations).where(S.eq(S.integrations.id, id)))[0];
+    const hookRow = async (id: string) => (await db.select().from(S.webhooks).where(S.eq(S.webhooks.id, id)))[0];
+    /** Run the real delivery job for one hook, with the endpoint answering 200. */
+    async function deliver(orgId: string, hookId: string) {
+      const [ev] = await db.insert(S.events).values({ orgId, type: "lead.created", data: {} }).returning();
+      const seen: string[] = [];
+      vi.stubGlobal("fetch", (async (_u: unknown, init: { headers?: Record<string, string> }) => {
+        seen.push(String(new Headers(init?.headers).get("x-prospex-signature")));
+        return new Response("ok", { status: 200 });
+      }) as unknown as typeof fetch);
+      try {
+        const { handlers } = await import("./jobs.js");
+        const job = { id: randomUUID(), orgId, type: "webhook.deliver", payload: { webhookId: hookId, eventId: ev.id }, status: "running", priority: 0, attempts: 1, maxAttempts: 1, runAt: new Date(), lockedAt: new Date(), lockedBy: "t", progress: 0, result: null, error: null, createdAt: new Date(), updatedAt: new Date() };
+        const r = await handlers["webhook.deliver"](job as any, { db, progress: async () => {}, log: () => {} } as any);
+        return { result: r, signatures: seen };
+      } finally {
+        vi.stubGlobal("fetch", (async () => {
+          throw new Error("security.data: outbound fetch is blocked in this test");
+        }) as typeof fetch);
+      }
+    }
+    /** One legacy credential of each kind, in the given old format, read through its real code path. */
+    async function legacyCredentials(orgId: string, format: (plain: string) => string) {
+      const sender = await account(orgId, { configEncrypted: format(JSON.stringify({ apiKey: RESEND_KEY })) });
+      const [integ] = await db.insert(S.integrations).values({ orgId, provider: "hubspot", configEncrypted: format(JSON.stringify({ accessToken: "crm-legacy-token" })), status: "active" }).returning();
+      const [wa] = await db.insert(S.integrations).values({ orgId, provider: "whatsapp", configEncrypted: format(JSON.stringify({ phoneNumberId: "123", accessToken: "wa-legacy-token" })), status: "active" }).returning();
+      const [hook] = await db.insert(S.webhooks).values({ orgId, url: "https://hooks.customer-site.com/legacy", events: ["*"], secret: null, secretEncrypted: format("whsec_old_unbound_secret_0123456789"), signatureVersion: 2 }).returning();
+      const [lead] = await db.insert(S.leads).values({ orgId, fullName: "L", email: `l-${u8()}@example.com` }).returning();
+      return { sender, integ, wa, hook, lead };
+    }
+    async function readAll(orgId: string, x: Awaited<ReturnType<typeof legacyCredentials>>) {
+      const { resolveMailer, whatsappSender } = await import("./services/campaigns.js");
+      const { syncLead } = await import("./services/integrations.js");
+      const { webhookSecret } = await import("./lib/webhookSecret.js");
+      // Each read works: legacy credentials stay usable in both modes.
+      expect(resolveMailer(x.sender)).toEqual({ ok: true, mailer: { provider: "resend", resendApiKey: RESEND_KEY } });
+      const synced = await syncLead(x.integ, x.lead.id); // reaches the provider call (blocked here), i.e. past the read
+      expect(String(synced.error ?? "")).not.toMatch(/could not be read/);
+      expect((await whatsappSender(orgId)).ok).toBe(true);
+      expect(webhookSecret(x.hook, { upgrade: true })).toBe("whsec_old_unbound_secret_0123456789");
+      const sent = await deliver(orgId, x.hook.id);
+      expect(sent.result).toEqual({ status: 200 });
+      expect(sent.signatures[0]).toMatch(/^v2=[0-9a-f]{64}$/);
+    }
+
+    it("DEFAULT: reading a legacy sender, integration or webhook credential leaves the stored blob byte-identical", async () => {
+      expect(process.env.CREDENTIAL_REBIND_ON_READ).toBeUndefined();
+      expect(creds.rebindOnReadEnabled()).toBe(false);
+      for (const format of [legacyBlob, (plain: string) => crypto.encrypt(plain)]) {
+        const a = await signup("cred-default");
+        const x = await legacyCredentials(a.orgId, format);
+        const stored = { sender: x.sender.configEncrypted, integ: x.integ.configEncrypted, wa: x.wa.configEncrypted, hook: x.hook.secretEncrypted };
+        await readAll(a.orgId, x);
+        await readAll(a.orgId, x);
+        await settle();
+        expect({
+          sender: (await accountRow(x.sender.id)).configEncrypted,
+          integ: (await integrationRow(x.integ.id)).configEncrypted,
+          wa: (await integrationRow(x.wa.id)).configEncrypted,
+          hook: (await hookRow(x.hook.id)).secretEncrypted,
+        }).toEqual(stored);
+        // The previous release's read (no binding) still opens every one of them.
+        for (const blob of Object.values(stored)) expect(() => crypto.decrypt(blob)).not.toThrow();
+        // Asked directly, the upgrade declines too.
+        expect(await creds.rebindOnRead(a.orgId, "email-account", x.sender.id, stored.sender, JSON.stringify({ apiKey: RESEND_KEY }))).toBe(false);
+        expect((await accountRow(x.sender.id)).configEncrypted).toBe(stored.sender);
+      }
+      // Only exactly "true" turns it on.
+      for (const notOn of ["false", "0", "off", "1", "yes", "on", ""]) {
+        process.env.CREDENTIAL_REBIND_ON_READ = notOn;
+        expect({ notOn, enabled: creds.rebindOnReadEnabled() }).toEqual({ notOn, enabled: false });
+      }
+      process.env.CREDENTIAL_REBIND_ON_READ = " True ";
+      expect(creds.rebindOnReadEnabled()).toBe(true);
+    });
+
+    it("DEFAULT: a credential SAVED on this release is still written bound (the documented rollback cost)", async () => {
+      const a = await signup("cred-saved");
+      const made = await req("POST", "/v1/campaigns/email-accounts", a.token, { provider: "resend", fromName: "Asha", fromEmail: `asha@${u8()}.example`, config: { apiKey: RESEND_KEY } });
+      expect(made.status).toBe(201);
+      const row = await accountRow(made.body.emailAccount.id);
+      expect(creds.isUnboundSecret(row.configEncrypted)).toBe(false);
+      expect(() => crypto.decrypt(row.configEncrypted)).toThrow(crypto.CredentialUnreadableError);
+      expect(creds.openOrgJson(a.orgId, "email-account", row.configEncrypted)).toEqual({ apiKey: RESEND_KEY });
+    });
+
+    it("OPT-IN CREDENTIAL_REBIND_ON_READ=true: legacy credentials still work and are rewritten bound the first time they are read", async () => {
+      process.env.CREDENTIAL_REBIND_ON_READ = "true";
       const { resolveMailer } = await import("./services/campaigns.js");
-      for (const old of [legacyBlob(JSON.stringify({ apiKey: RESEND_KEY })), crypto.encryptJson({ apiKey: RESEND_KEY })]) {
-        const row = await account(a.orgId, { configEncrypted: old });
-        expect(resolveMailer(row)).toEqual({ ok: true, mailer: { provider: "resend", resendApiKey: RESEND_KEY } });
-        const after = await until(async () => {
-          const r = await accountRow(row.id);
-          return r.configEncrypted !== old ? r : null;
-        });
-        expect(creds.isUnboundSecret(after.configEncrypted)).toBe(false);
-        expect(creds.openOrgJson(a.orgId, "email-account", after.configEncrypted)).toEqual({ apiKey: RESEND_KEY });
-        expect(() => creds.openOrgJson(randomUUID(), "email-account", after.configEncrypted)).toThrow(crypto.CredentialUnreadableError);
-        expect(resolveMailer(after)).toEqual({ ok: true, mailer: { provider: "resend", resendApiKey: RESEND_KEY } });
+      for (const format of [legacyBlob, (plain: string) => crypto.encrypt(plain)]) {
+        const a = await signup("cred-lazy");
+        const x = await legacyCredentials(a.orgId, format);
+        await readAll(a.orgId, x);
+        const changed = async <T extends { id: string }>(read: (id: string) => Promise<any>, row: T, field: string, old: string) =>
+          until(async () => {
+            const r = await read(row.id);
+            return r[field] !== old ? r : null;
+          });
+        const sender = await changed(accountRow, x.sender, "configEncrypted", x.sender.configEncrypted);
+        const integ = await changed(integrationRow, x.integ, "configEncrypted", x.integ.configEncrypted);
+        const wa = await changed(integrationRow, x.wa, "configEncrypted", x.wa.configEncrypted);
+        const hook = await changed(hookRow, x.hook, "secretEncrypted", x.hook.secretEncrypted);
+        for (const blob of [sender.configEncrypted, integ.configEncrypted, wa.configEncrypted, hook.secretEncrypted]) expect(creds.isUnboundSecret(blob)).toBe(false);
+        expect(creds.openOrgJson(a.orgId, "email-account", sender.configEncrypted)).toEqual({ apiKey: RESEND_KEY });
+        expect(creds.openOrgJson(a.orgId, "integration", integ.configEncrypted)).toEqual({ accessToken: "crm-legacy-token" });
+        expect(creds.openOrgJson(a.orgId, "integration", wa.configEncrypted)).toMatchObject({ accessToken: "wa-legacy-token" });
+        expect(creds.openOrgSecret(a.orgId, "webhook-secret", hook.secretEncrypted)).toBe("whsec_old_unbound_secret_0123456789");
+        expect(() => creds.openOrgJson(randomUUID(), "email-account", sender.configEncrypted)).toThrow(crypto.CredentialUnreadableError);
+        expect(resolveMailer(sender)).toEqual({ ok: true, mailer: { provider: "resend", resendApiKey: RESEND_KEY } });
         // Already bound: nothing more to do.
-        expect(await creds.rebindOnRead(a.orgId, "email-account", after.id, after.configEncrypted, JSON.stringify({ apiKey: RESEND_KEY }))).toBe(false);
+        expect(await creds.rebindOnRead(a.orgId, "email-account", sender.id, sender.configEncrypted, JSON.stringify({ apiKey: RESEND_KEY }))).toBe(false);
       }
     });
 
-    it("the lazy upgrade only writes while the row still holds what was read, and can be switched off", async () => {
+    it("OPT-IN: the lazy upgrade only writes while the row still holds what was read; switching it off again stops it", async () => {
+      process.env.CREDENTIAL_REBIND_ON_READ = "true";
       const a = await signup("cred-guard");
       const old = crypto.encryptJson({ apiKey: RESEND_KEY });
       const row = await account(a.orgId, { configEncrypted: old });
@@ -496,10 +763,13 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
       const other = await account(a.orgId, { configEncrypted: old });
       expect(await creds.rebindOnRead(randomUUID(), "email-account", other.id, old, "{}")).toBe(false);
 
-      process.env.CREDENTIAL_REBIND_ON_READ = "false";
-      expect(await creds.rebindOnRead(a.orgId, "email-account", other.id, old, JSON.stringify({ apiKey: RESEND_KEY }))).toBe(false);
-      expect((await accountRow(other.id)).configEncrypted).toBe(old);
-      delete process.env.CREDENTIAL_REBIND_ON_READ;
+      for (const off of ["false", undefined]) {
+        if (off === undefined) delete process.env.CREDENTIAL_REBIND_ON_READ;
+        else process.env.CREDENTIAL_REBIND_ON_READ = off;
+        expect(await creds.rebindOnRead(a.orgId, "email-account", other.id, old, JSON.stringify({ apiKey: RESEND_KEY }))).toBe(false);
+        expect((await accountRow(other.id)).configEncrypted).toBe(old);
+      }
+      process.env.CREDENTIAL_REBIND_ON_READ = "true";
       expect(await creds.rebindOnRead(a.orgId, "email-account", other.id, old, JSON.stringify({ apiKey: RESEND_KEY }))).toBe(true);
       expect(creds.isUnboundSecret((await accountRow(other.id)).configEncrypted)).toBe(false);
     });
@@ -531,7 +801,7 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
       expect(() => creds.openOrgJson(a.orgId, "email-account", ia2.configEncrypted)).toThrow(crypto.CredentialUnreadableError);
     });
 
-    it("a webhook signing secret is bound; an older unbound one still signs and is upgraded by a delivery", async () => {
+    it("a webhook signing secret is bound; an older unbound one still signs", async () => {
       const a = await signup("cred-hook-a");
       const b = await signup("cred-hook-b");
       const { webhookSecret, secretPreview } = await import("./lib/webhookSecret.js");
@@ -552,18 +822,12 @@ suite("data protection: link tokens, credentials, export, deletion", () => {
       expect(webhookSecret(ha2)).toBe(rot.body.secret);
       expect(creds.isUnboundSecret(ha2.secretEncrypted)).toBe(false);
 
-      // A secret encrypted before the binding: still usable, upgraded when the delivery job reads it.
+      // A secret encrypted before the binding stays usable (and, by default, untouched: see the DEFAULT test above).
       const old = crypto.encrypt("whsec_old_unbound_secret_0123456789");
       const [legacy] = await db.insert(S.webhooks).values({ orgId: a.orgId, url: "https://hooks.customer-site.com/legacy", events: ["*"], secret: null, secretEncrypted: old, signatureVersion: 2 }).returning();
       expect(webhookSecret(legacy)).toBe("whsec_old_unbound_secret_0123456789");
-      expect((await db.select().from(S.webhooks).where(S.eq(S.webhooks.id, legacy.id)))[0].secretEncrypted).toBe(old);
       expect(webhookSecret(legacy, { upgrade: true })).toBe("whsec_old_unbound_secret_0123456789");
-      const up = await until(async () => {
-        const [r] = await db.select().from(S.webhooks).where(S.eq(S.webhooks.id, legacy.id));
-        return r.secretEncrypted !== old ? r : null;
-      });
-      expect(creds.isUnboundSecret(up.secretEncrypted)).toBe(false);
-      expect(webhookSecret(up)).toBe("whsec_old_unbound_secret_0123456789");
+      expect((await db.select().from(S.webhooks).where(S.eq(S.webhooks.id, legacy.id)))[0].secretEncrypted).toBe(old);
     });
   });
 

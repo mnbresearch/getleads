@@ -17,7 +17,7 @@ import { orgId, requireAuth, type Env } from "../middleware.js";
 import { canonicalEmail, companyDomainOrNull, findExistingLead, leadWithCompany, upsertCompany, upsertLead, verifierOf } from "../services/leads.js";
 import { emitEvent } from "../lib/events.js";
 import { eraseLeads } from "../lib/privacyErase.js";
-import { onPlatformList } from "../lib/privacySuppression.js";
+import { onPlatformList, shownAddress } from "../lib/privacySuppression.js";
 
 /** What a caller is told when an address is on the platform-wide do-not-contact list. */
 const PLATFORM_LISTED = "This person has asked not to be contacted through Scout, so their address cannot be stored.";
@@ -267,6 +267,14 @@ leadRoutes.post("/", zValidator("json", leadInput), async (c) => {
   // Charged only when this creates a lead. Posting someone the workspace already has is an
   // update, and billing it as a new lead charged customers for their own duplicates.
   const charged = !(await findExistingLead(oid, b));
+  // Someone on the platform-wide do-not-contact list is not added. This used to answer 201
+  // "saved" with the address silently left out, which read as success; it is refused in
+  // the same words PATCH uses. (Posting a lead the workspace already holds is an update of
+  // that lead and goes through - its address is not written again.)
+  if (charged && b.email && (await onPlatformList(b.email, db))) {
+    await audit(c, "lead.create_refused", { result: "denied", targetType: "lead", data: { reason: "platform_do_not_contact" } });
+    throw new ApiError(409, PLATFORM_LISTED, "suppressed");
+  }
   if (charged) await consume(db, oid, "leads", 1);
   try {
     const r = await upsertLead(oid, { ...b, source: b.source ?? "api" });
@@ -338,7 +346,10 @@ leadRoutes.post("/import", async (c) => {
   let stopped: string | undefined;
   let notProcessed = 0;
   const errors: { row: number; error: string }[] = [];
-  const skippedRows: { row: number; reason: string }[] = [];
+  const skippedRows: { row: number; reason: string; code?: string }[] = [];
+  // People on the platform-wide do-not-contact list are skipped, counted on their own and
+  // named in the result.
+  let skippedDoNotContact = 0;
   for (let i = 0; i < items.length; i++) {
     if (i === unterminated) {
       skippedRows.push({ row: i + 1, reason: "This row opens a quote (\") that is never closed, so the rest of the file was read as part of it. Close the quote and import again." });
@@ -370,7 +381,14 @@ leadRoutes.post("/import", async (c) => {
     try {
       // Only a NEW lead costs a lead. Re-importing a file to refresh titles used to bill
       // every row again.
-      if (!(await findExistingLead(oid, it))) {
+      const known = await findExistingLead(oid, it);
+      const rowEmail = canonicalEmail(it.email);
+      if (!known && rowEmail && (await onPlatformList(rowEmail, db))) {
+        skippedDoNotContact++;
+        skippedRows.push({ row: i + 1, code: "do_not_contact", reason: "This person has asked not to be contacted through Scout, so they were not imported." });
+        continue;
+      }
+      if (!known) {
         await consume(db, oid, "leads", 1);
         rowCharged = true;
       }
@@ -399,7 +417,7 @@ leadRoutes.post("/import", async (c) => {
   }
   await emitEvent(oid, "leads.imported", { created, updated, errors: errors.length, skipped: skippedRows.length });
   await audit(c, "leads.imported", { targetType: "lead", data: { format, rows: items.length, created, updated, skipped: skippedRows.length, errors: errors.length, stopped: !!stopped } });
-  return c.json({ created, updated, errors: errors.slice(0, 50), stopped, notProcessed, skipped: skippedRows.length, skippedRows: skippedRows.slice(0, 50), ...(warnings.length ? { warnings } : {}) });
+  return c.json({ created, updated, errors: errors.slice(0, 50), stopped, notProcessed, skipped: skippedRows.length, skippedDoNotContact, skippedRows: skippedRows.slice(0, 50), ...(warnings.length ? { warnings } : {}) });
 });
 
 // ── Static paths first ──
@@ -495,7 +513,10 @@ leadRoutes.delete("/lists/:listId/leads/:leadId", async (c) => {
 // ── Suppressions ──
 leadRoutes.get("/suppressions/all", async (c) => {
   const { db } = getDb();
-  return c.json({ suppressions: await db.select().from(suppressions).where(eq(suppressions.orgId, orgId(c))).orderBy(desc(suppressions.createdAt)).limit(1000) });
+  const rows = await db.select().from(suppressions).where(eq(suppressions.orgId, orgId(c))).orderBy(desc(suppressions.createdAt)).limit(1000);
+  // An entry recorded for a contact who was deleted holds a fingerprint, not an address. It
+  // still blocks that address; it is shown as "a removed contact", never as the fingerprint.
+  return c.json({ suppressions: rows.map((r) => { const shown = shownAddress(r.email); return { ...r, email: shown.address, recipientRemoved: shown.recipientRemoved }; }) });
 });
 leadRoutes.post("/suppressions", zValidator("json", z.object({ emails: z.array(emailField).min(1).max(5000), reason: z.string().max(200).optional() })), async (c) => {
   const { db } = getDb();

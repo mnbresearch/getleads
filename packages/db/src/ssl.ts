@@ -29,7 +29,7 @@ export interface SslChoice {
  */
 const PUBLIC_CA_HOST_SUFFIXES = [".neon.tech"];
 
-const LOOPBACK_NAMES = new Set(["localhost", "localhost.localdomain", "ip6-localhost"]);
+const LOOPBACK_NAMES = new Set(["localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"]);
 
 function stripBrackets(h: string): string {
   return h.startsWith("[") && h.endsWith("]") ? h.slice(1, -1) : h;
@@ -73,7 +73,8 @@ export function parseDbTarget(url: string): { host: string; params: Record<strin
 /** Loopback, a unix socket, or nothing at all (the driver then uses its local default). */
 export function isLoopbackHost(host: string): boolean {
   if (!host || host.startsWith("/")) return true;
-  if (LOOPBACK_NAMES.has(host)) return true;
+  // "<anything>.localhost" is loopback by definition (RFC 6761).
+  if (LOOPBACK_NAMES.has(host) || host.endsWith(".localhost")) return true;
   const v = isIP(host);
   if (v === 4) return host.startsWith("127.");
   if (v === 6) return host === "::1" || host === "0:0:0:0:0:0:0:1" || /^::ffff:127\./.test(host);
@@ -82,7 +83,8 @@ export function isLoopbackHost(host: string): boolean {
 
 /**
  * A host that is only reachable on a private network: a single-label name (a docker-compose
- * service such as "db", a platform's internal service name), an RFC 1918 / link-local /
+ * service such as "db", a platform's internal service name), a name under a private-network
+ * suffix (".internal", ".flycast", ".local", ".lan", ...), an RFC 1918 / link-local /
  * carrier-grade NAT IPv4 address, or a unique-local / link-local IPv6 address.
  */
 export function isPrivateNetworkHost(host: string): boolean {
@@ -104,8 +106,19 @@ export function isPrivateNetworkHost(host: string): boolean {
     return mapped ? isPrivateNetworkHost(mapped[1]!) : false;
   }
   // Not an address: a name with no dot in it never resolves on the public internet.
-  return !host.includes(".");
+  if (!host.includes(".")) return true;
+  return PRIVATE_NAME_SUFFIXES.some((s) => host.endsWith(s) && host.length > s.length);
 }
+
+/**
+ * Names that only exist inside a private network: platform-internal DNS (Fly's
+ * `<app>.internal` and `<app>.flycast`, Railway's `<service>.railway.internal`, a cloud
+ * provider's `*.internal` instance names, Kubernetes' `*.svc.cluster.local`), mDNS and home or
+ * office routers (`.local`, `.lan`, `.home.arpa`, ...). None of them can be reached - or
+ * impersonated - from the public internet, and databases addressed this way very often have
+ * no TLS at all, so they keep "TLS when the server offers it", as before.
+ */
+const PRIVATE_NAME_SUFFIXES = [".internal", ".flycast", ".local", ".localdomain", ".lan", ".home", ".home.arpa", ".corp", ".intranet", ".private"];
 
 export function isPublicCaHost(host: string): boolean {
   return PUBLIC_CA_HOST_SUFFIXES.some((s) => host.endsWith(s) && host.length > s.length);
@@ -197,4 +210,67 @@ export function chooseSsl(url: string, opts: { mode?: string | undefined; ca?: s
 /** The `ssl` option for the driver. See `chooseSsl` for the rules. */
 export function sslOption(url: string, opts: { mode?: string | undefined; ca?: string | undefined } = {}): SslDecision {
   return chooseSsl(url, opts).ssl;
+}
+
+// ── When the connection fails because of TLS: say what to do ──
+
+const CERTIFICATE_ERROR_CODES = new Set([
+  "DEPTH_ZERO_SELF_SIGNED_CERT",
+  "SELF_SIGNED_CERT_IN_CHAIN",
+  "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "UNABLE_TO_GET_ISSUER_CERT",
+  "UNABLE_TO_GET_ISSUER_CERT_LOCALLY",
+  "CERT_HAS_EXPIRED",
+  "CERT_NOT_YET_VALID",
+  "CERT_UNTRUSTED",
+  "CERT_REVOKED",
+  "CERT_SIGNATURE_FAILURE",
+  "ERR_TLS_CERT_ALTNAME_INVALID",
+  "HOSTNAME_MISMATCH",
+]);
+
+function errorChain(e: unknown): { code?: unknown; message?: unknown }[] {
+  const out: { code?: unknown; message?: unknown }[] = [];
+  for (let cur: unknown = e, i = 0; cur && typeof cur === "object" && i < 5; cur = (cur as { cause?: unknown }).cause, i++) out.push(cur as { code?: unknown; message?: unknown });
+  return out;
+}
+
+/** Did the connection fail because the database's certificate could not be verified? */
+export function isCertificateError(e: unknown): boolean {
+  return errorChain(e).some(
+    (x) => (typeof x.code === "string" && CERTIFICATE_ERROR_CODES.has(x.code)) || (typeof x.message === "string" && /self[- ]signed certificate|unable to verify the first certificate|certificate has expired|does not match certificate's altnames|unable to get (local )?issuer certificate/i.test(x.message)),
+  );
+}
+
+/** Did the other end refuse or drop the TLS handshake itself (a server with no TLS, most often)? */
+export function isTlsHandshakeFailure(e: unknown): boolean {
+  return errorChain(e).some(
+    (x) =>
+      (typeof x.code === "string" && /^ERR_SSL_|^EPROTO$/.test(x.code)) ||
+      (typeof x.message === "string" && /before secure TLS connection was established|wrong version number|ssl3?_|tlsv1 alert|packet length too long/i.test(x.message)),
+  );
+}
+
+/** Where the settings below are explained. */
+export const DATABASE_TLS_DOC = 'DEPLOY.md, section B10, "Database connection security"';
+
+/**
+ * One sentence for the log when a database connection failed for a TLS reason: what to set,
+ * and where it is documented. Null when the failure is something else (wrong password, host
+ * unreachable), so the caller prints nothing misleading. Never includes the connection string.
+ */
+export function databaseTlsHint(e: unknown): string | null {
+  if (isCertificateError(e)) {
+    return (
+      "[db] The database's TLS certificate could not be verified, so no connection was made. If your provider signs its certificates with its own CA, set DATABASE_SSL_CA to that CA certificate; " +
+      `to encrypt without checking the certificate, set DATABASE_SSL=require. See ${DATABASE_TLS_DOC}.`
+    );
+  }
+  if (isTlsHandshakeFailure(e)) {
+    return (
+      "[db] The database did not complete a TLS handshake, so no connection was made (this server never falls back to an unencrypted connection to a remote database). " +
+      `If the database is on a private network and has no TLS, set DATABASE_SSL=disable. See ${DATABASE_TLS_DOC}.`
+    );
+  }
+  return null;
 }

@@ -91,11 +91,18 @@ export function ClientDetailPage() {
   };
 
   const share = async (on: boolean) => {
+    // "New link" on a client that already has one replaces it: the old link stops working,
+    // and whoever was sent it needs the new one. Saying only "created" hid that.
+    const hadLink = d?.client.sharing === true || !!d?.client.shareToken;
     try {
-      if (on) await apiFetch("POST", `/v1/clients/${id}/share`);
-      else await apiFetch("DELETE", `/v1/clients/${id}/share`);
+      let rotated: boolean | null = null;
+      if (on) {
+        const r = await apiFetch<{ rotated?: unknown } | null>("POST", `/v1/clients/${id}/share`);
+        // The server may say so itself; otherwise it follows from what was there before.
+        rotated = typeof r?.rotated === "boolean" ? r.rotated : null;
+      } else await apiFetch("DELETE", `/v1/clients/${id}/share`);
       load();
-      toast(on ? "Report link created" : "Report link turned off - old links no longer work");
+      toast(!on ? "Report link turned off - old links no longer work" : (rotated ?? hadLink) ? "New link created - the old one no longer works" : "Report link created");
     } catch (e) {
       toast((e as Error).message, "err");
     }

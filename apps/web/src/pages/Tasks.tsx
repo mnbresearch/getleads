@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { apiFetch, fmtDate } from "../lib/api";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { apiFetch, expectLists, fmtDate } from "../lib/api";
 import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { ExtLink } from "../components/ExtLink";
 
@@ -14,13 +14,23 @@ export function TasksPage() {
   const { toast, Toast } = useToast();
   const [listErr, setListErr] = useState<string | null>(null);
   const [addOpen, setAddOpen] = useState(false);
+  const shownFor = useRef<string | null>(null);
+  const seq = useRef(0);
   const load = useCallback(() => {
+    const mine = ++seq.current;
+    // Rows belong to the filter they were loaded for. When a load for a DIFFERENT filter
+    // fails, the rows on screen are not its answer and must not stay as if they were; when
+    // a refresh of the SAME filter fails (a blip between polls), they are still right.
     // .finally without .catch turned a server error into "No tasks", which reads as an
     // empty queue rather than as a page that failed to load.
     apiFetch<{ tasks: Task[] }>("GET", `/v1/tools/tasks?status=${status}`)
-      .then((r) => { setRows(r.tasks); setListErr(null); })
-      .catch((e) => setListErr((e as Error).message))
-      .finally(() => setLoading(false));
+      .then((r) => { if (mine !== seq.current) return; setRows(expectLists(r, "tasks").tasks); shownFor.current = status; setListErr(null); })
+      .catch((e) => {
+        if (mine !== seq.current) return;
+        if (shownFor.current !== status) { setRows([]); shownFor.current = null; }
+        setListErr((e as Error).message);
+      })
+      .finally(() => { if (mine === seq.current) setLoading(false); });
   }, [status]);
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
   const done = async (t: Task, outcome: "done" | "skipped") => {

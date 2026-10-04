@@ -13,6 +13,9 @@ export const NO_AI: AiProvider = { name: "none", model: "none", complete: async 
 /** What a customer is told when a feature ran without AI because the workspace turned it off. */
 export const AI_OFF_NOTE = "AI assistance is turned off for this workspace, so this was done without AI. An owner or admin can turn it back on under Settings.";
 
+/** The same, for a feature that cannot run without AI: what is not available, and how to get it back. */
+export const AI_OFF_UNAVAILABLE = "AI assistance is turned off for this workspace, so this is not available. An owner or admin can turn it back on under Settings.";
+
 /**
  * Has this workspace turned AI assistance off?
  *

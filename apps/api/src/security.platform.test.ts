@@ -14,6 +14,10 @@
  *  8. The seed refuses production. Migration errors are logged without the statement.
  *  9. Nobody is told to run the MCP server from a package name we do not own, and the
  *     deployment files keep the properties they were given.
+ * 10. The access log never writes down the address someone was looked up by.
+ * 11. Private-network database names keep "TLS if offered"; a TLS failure says what to set.
+ * 12. An admin sign-in switched off for a placeholder password says so, in words to act on.
+ * 13. The rollback restore script, and the documentation of the rollback switches.
  *
  * The TLS stubs speak just enough of the Postgres wire protocol to see what a client sends
  * first. Certificates are made with the `openssl` command at test time (no key material in
@@ -24,7 +28,7 @@
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createDecipheriv, createHash, randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer as createHttpServer, request as httpRequest } from "node:http";
 import { connect as netConnect, createServer as createNetServer, type Server as NetServer, type Socket } from "node:net";
@@ -1138,5 +1142,448 @@ describe("supply chain and deployment files", () => {
     expect(ex).toMatch(/^DATABASE_SSL=$/m);
     expect(ex).toMatch(/refuses to start/);
     expect(read("DEPLOY.md")).toMatch(/DATABASE_SSL=disable \| require \| verify-full/);
+  });
+});
+
+// ── 10. The access log and personal data ──
+
+describe("access log: no address, name or search text is written down", () => {
+  const line = async (path: string, query = "") => (await import("./app.js")).redactRequestLine(path, query);
+
+  it("the admin look-ups that used to log the address they were given", async () => {
+    expect(await line("/v1/admin/data-subject", "email=sara.khan%40acme.example")).toBe("/v1/admin/data-subject?email=[redacted]");
+    expect(await line("/v1/admin/orgs", "q=sara%40acme.example")).toBe("/v1/admin/orgs?q=[redacted]");
+    expect(await line("/v1/admin/suppressions", "q=sara&limit=50")).toBe("/v1/admin/suppressions?q=[redacted]&limit=50");
+  });
+
+  it("search boxes and message addressing: q, search, query, name, to, from, cc, bcc, recipient, phone", async () => {
+    for (const k of ["q", "search", "query", "name", "to", "from", "cc", "bcc", "recipient", "address", "phone", "Email", "Q"]) {
+      const out = await line("/v1/leads", `${k}=Priya+Sharma&limit=20`);
+      expect(out, k).not.toMatch(/Priya|Sharma/);
+      expect(out, k).toContain("limit=20");
+    }
+  });
+
+  it("an address is redacted whatever the parameter is called, encoded or not, and in a path", async () => {
+    for (const q of ["contact=sara.khan%40acme.example", "x=sara.khan@acme.example", "filter=owner%3Asara.khan%40acme.example", "next=%2Fleads%3Femail%3Dsara.khan%40acme.example"]) {
+      expect(await line("/v1/anything", q), q).not.toMatch(/sara|acme/);
+    }
+    expect(await line("/v1/leads/suppressions/sara.khan@acme.example")).toBe("/v1/leads/suppressions/[redacted]");
+    expect(await line("/v1/leads/suppressions/sara.khan%40acme.example")).not.toMatch(/sara/);
+  });
+
+  it("what is not personal stays readable: ids, limits, filters, a company domain", async () => {
+    expect(await line("/v1/leads", "limit=50&offset=0&sort=created&order=desc&status=new&seniority=c_level")).toBe("/v1/leads?limit=50&offset=0&sort=created&order=desc&status=new&seniority=c_level");
+    expect(await line("/v1/signals", "days=30&type=funding&matched=true")).toBe("/v1/signals?days=30&type=funding&matched=true");
+    expect(await line("/v1/companies/acme.example/visits", "companyDomain=acme.example&domain=acme.example")).toBe("/v1/companies/acme.example/visits?companyDomain=acme.example&domain=acme.example");
+    expect(await line("/v1/leads/3f0c2a1e-9d54-4c1b-8a55-2f1d6f0b7c11")).toBe("/v1/leads/3f0c2a1e-9d54-4c1b-8a55-2f1d6f0b7c11");
+  });
+
+  it("credentials in a query are still redacted", async () => {
+    expect(await line("/internal/jobs/run", "token=abc123&maxMs=1000")).toBe("/internal/jobs/run?token=[redacted]&maxMs=1000");
+  });
+
+  it.skipIf(!TEST_DB)("through the real app: the three admin look-ups leave no address in either log line", async () => {
+    const { createApp } = await import("./app.js");
+    const lines: string[] = [];
+    const app = createApp({ accessLog: (l) => lines.push(l) });
+    for (const path of ["/v1/admin/data-subject?email=sara.khan%40acme.example", "/v1/admin/orgs?q=sara.khan%40acme.example", "/v1/admin/suppressions?q=sara.khan%40acme.example", "/v1/leads?q=Sara+Khan"]) {
+      await app.request(path);
+    }
+    expect(lines.length).toBe(8);
+    expect(lines.join("\n")).not.toMatch(/sara|khan|acme|%40/i);
+    expect(lines.filter((l) => l.includes("[redacted]")).length).toBe(8);
+  });
+});
+
+// ── 11. Private-network database names, and what a TLS failure says ──
+
+describe("database TLS: private-network names and the hint on failure", { timeout: 20_000 }, () => {
+  const choose = async (url: string) => (await import("@prospex/db")).chooseSsl(url, { mode: undefined, ca: undefined });
+
+  it("platform-internal and local-network names keep 'TLS when offered' (they often have no TLS at all)", async () => {
+    for (const host of ["myapp-db.internal", "myapp-db.flycast", "postgres.railway.internal", "ip-10-0-3-4.ec2.internal", "pg.default.svc.cluster.local", "nas.local", "db.lan", "db.home.arpa", "db.corp", "top1.nearest.of.myapp-db.internal"]) {
+      const c = await choose(`postgres://u:p@${host}:5432/d`);
+      expect(c.ssl, host).toBe("prefer");
+      expect(c.reason, host).toBe("private-network host");
+    }
+  });
+
+  it("'<name>.localhost' is loopback", async () => {
+    expect((await choose("postgres://u:p@db.localhost:5432/d")).ssl).toBe(false);
+  });
+
+  it("a public name that merely contains one of those words still requires TLS", async () => {
+    for (const host of ["internal.example.com", "db.internal.example.com", "local.example.com", "mylan.example.com", "flycast.example.org", "db.internal-tools.io", "internal", "x.locals.example"]) {
+      const c = await choose(`postgres://u:p@${host}:5432/d`);
+      // "internal" on its own is a single-label name: private, as before.
+      expect(c.ssl, host).toBe(host === "internal" ? "prefer" : "require");
+    }
+  });
+
+  it("an explicit setting still wins for a private-network name", async () => {
+    const { chooseSsl } = await import("@prospex/db");
+    expect(chooseSsl("postgres://u:p@myapp-db.internal/d", { mode: "verify-full", ca: undefined }).ssl).toBe("verify-full");
+    expect(chooseSsl("postgres://u:p@myapp-db.internal/d?sslmode=require", { mode: undefined, ca: undefined }).ssl).toBe("require");
+    expect(chooseSsl("postgres://u:p@myapp-db.internal/d?sslmode=disable", { mode: undefined, ca: undefined }).ssl).toBe(false);
+  });
+
+  /** The error a real connection attempt through createDb ends with. */
+  const connectError = async (url: string, envVars: Record<string, string | undefined>, until: () => boolean): Promise<unknown> => {
+    const saved: Record<string, string | undefined> = {};
+    for (const k of Object.keys(envVars)) {
+      saved[k] = process.env[k];
+      if (envVars[k] === undefined) delete process.env[k];
+      else process.env[k] = envVars[k];
+    }
+    const { createDb } = await import("@prospex/db");
+    const { sql } = createDb(url);
+    try {
+      return await Promise.race([
+        sql`select 1`.then(
+          () => null,
+          (e: unknown) => e,
+        ),
+        (async () => {
+          for (let i = 0; i < 120 && !until(); i++) await sleep(25);
+          await sleep(200);
+          return new Error("no error surfaced");
+        })(),
+      ]);
+    } finally {
+      void sql.end({ timeout: 0 }).catch(() => {});
+      for (const k of Object.keys(saved)) {
+        if (saved[k] === undefined) delete process.env[k];
+        else process.env[k] = saved[k];
+      }
+    }
+  };
+
+  const certs = makeCerts();
+  afterAll(() => {
+    if (certs) rmSync(certs.dir, { recursive: true, force: true });
+  });
+
+  it.skipIf(!certs)("a certificate failure produces one sentence: what to set, and where it is documented", async () => {
+    const { databaseTlsHint, isCertificateError } = await import("@prospex/db");
+    const stub = await startStub(certs!.selfSigned);
+    try {
+      const e = await connectError(`postgres://appuser:pw-must-not-leak@localhost:${stub.port}/appdb`, { DATABASE_SSL: "verify-full", DATABASE_SSL_CA: undefined }, () => false);
+      expect(isCertificateError(e)).toBe(true);
+      const hint = databaseTlsHint(e)!;
+      expect(hint).toMatch(/^\[db\] The database's TLS certificate could not be verified/);
+      expect(hint).toMatch(/DATABASE_SSL_CA/);
+      expect(hint).toMatch(/DATABASE_SSL=require/);
+      expect(hint).toMatch(/DEPLOY\.md, section B10/);
+      expect(hint).not.toMatch(/appuser|pw-must-not-leak|localhost|appdb/);
+      expect(hint.split("\n").length).toBe(1);
+    } finally {
+      await stub.close();
+    }
+    // The place the hint points at exists.
+    expect(read("DEPLOY.md")).toMatch(/### B10\./);
+    expect(read("DEPLOY.md")).toMatch(/\*\*1\. Database connection security\.\*\*/);
+  });
+
+  it("a server that will not speak TLS produces the other sentence (set disable for a private database)", async () => {
+    const { databaseTlsHint, isCertificateError, isTlsHandshakeFailure } = await import("@prospex/db");
+    const stub = await startStub(null);
+    try {
+      const e = await connectError(`postgres://appuser:pw@localhost:${stub.port}/appdb`, { DATABASE_SSL: "require", DATABASE_SSL_CA: undefined }, () => stub.log.tlsHellos > 0);
+      expect(isCertificateError(e)).toBe(false);
+      expect(isTlsHandshakeFailure(e)).toBe(true);
+      expect(databaseTlsHint(e)).toMatch(/DATABASE_SSL=disable/);
+    } finally {
+      await stub.close();
+    }
+  });
+
+  it("anything else gets no TLS hint: a wrong password or an unreachable host is not a certificate problem", async () => {
+    const { databaseTlsHint } = await import("@prospex/db");
+    expect(databaseTlsHint(Object.assign(new Error('password authentication failed for user "x"'), { code: "28P01" }))).toBeNull();
+    expect(databaseTlsHint(Object.assign(new Error("connect ECONNREFUSED 10.0.0.5:5432"), { code: "ECONNREFUSED" }))).toBeNull();
+    expect(databaseTlsHint(Object.assign(new Error("getaddrinfo ENOTFOUND db.example.com"), { code: "ENOTFOUND" }))).toBeNull();
+    expect(databaseTlsHint(null)).toBeNull();
+    // Wrapped by the ORM: still recognised.
+    const wrapped = Object.assign(new Error("Failed query: select 1"), { cause: Object.assign(new Error("self-signed certificate"), { code: "DEPTH_ZERO_SELF_SIGNED_CERT" }) });
+    expect(databaseTlsHint(wrapped)).toMatch(/DATABASE_SSL_CA/);
+  });
+});
+
+// ── 12. Admin sign-in switched off for a placeholder password ──
+
+describe.skipIf(!TEST_DB)("admin sign-in switched off by a placeholder password", () => {
+  const withProduction = async <T>(vars: Record<string, string | undefined>, fn: (logged: { errors: string[] }) => Promise<T>): Promise<T> => {
+    const saved = { ...process.env };
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    vi.resetModules();
+    Object.assign(process.env, { NODE_ENV: "production", JWT_SECRET: "j".repeat(48), ENCRYPTION_KEY: "e".repeat(48), ADMIN_EMAIL: "root@scout.test", ADMIN_TOTP_SECRET: "" });
+    for (const [k, v] of Object.entries(vars)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+    try {
+      return await fn({
+        get errors() {
+          return error.mock.calls.map((c) => String(c[0]));
+        },
+      });
+    } finally {
+      error.mockRestore();
+      warn.mockRestore();
+      for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+      Object.assign(process.env, saved);
+      vi.resetModules();
+    }
+  };
+  const login = async (app: { request: (p: string, i: RequestInit) => Response | Promise<Response> }, password: string) => {
+    const res = await app.request("/v1/admin/login", { method: "POST", headers: { "content-type": "application/json", "cf-connecting-ip": "198.51.100.77" }, body: JSON.stringify({ email: "root@scout.test", password }) });
+    return { status: res.status, body: (await res.json()) as { error?: { code: string; message: string }; token?: string } };
+  };
+
+  it("the sign-in page is told what is wrong and what to do - not 'not configured', and no setting names", async () => {
+    await withProduction({ ADMIN_PASSWORD: "password" }, async (logged) => {
+      const { createApp } = await import("./app.js");
+      const { env, ADMIN_SIGN_IN_OFF_MESSAGE } = await import("./env.js");
+      expect(env.adminPassword).toBe("");
+      const app = createApp({ accessLog: false });
+      // Even the "right" placeholder password does not get in.
+      for (const pw of ["password", "anything-else"]) {
+        const r = await login(app, pw);
+        expect(r.status).toBe(400);
+        expect(r.body.token).toBeUndefined();
+        expect(r.body.error!.message).toBe(ADMIN_SIGN_IN_OFF_MESSAGE);
+      }
+      expect(ADMIN_SIGN_IN_OFF_MESSAGE).toBe("Admin sign-in is switched off because the admin password set on the server is a published example value. Set a new one in your hosting dashboard and redeploy.");
+      expect(ADMIN_SIGN_IN_OFF_MESSAGE).not.toMatch(/ADMIN_|[A-Z]{3,}_[A-Z]{3,}|not configured|—/);
+      // The boot log says the same, and names the setting (the log is for the operator).
+      const line = logged.errors.find((l) => l.includes("ADMIN_PASSWORD"))!;
+      expect(line).toMatch(/^\[env\] SECURITY: ADMIN_PASSWORD is a placeholder value/);
+      expect(line).toMatch(/Admin sign-in is switched off/);
+      expect(line).toMatch(/Set a new, long ADMIN_PASSWORD in your hosting dashboard and redeploy/);
+      expect(line).not.toContain('"password"');
+    });
+  });
+
+  it("a real admin password is left to the sign-in route (which is tested with its lock in security.auth.test.ts)", async () => {
+    await withProduction({ ADMIN_PASSWORD: "a-long-admin-password-4471" }, async () => {
+      const { createApp } = await import("./app.js");
+      const { env } = await import("./env.js");
+      expect(env.adminSignInOff).toBe("");
+      expect(env.adminPassword).toBe("a-long-admin-password-4471");
+      // A request the route refuses before it counts an attempt (no password at all): the
+      // answer is the route's own validation message, so the request did reach the route.
+      // (No real sign-in here: the admin form has one lock for the whole platform, and this
+      // file must not add attempts to the counts security.auth.test.ts asserts on.)
+      const res = await createApp({ accessLog: false }).request("/v1/admin/login", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ email: "root@scout.test" }) });
+      expect(res.status).toBe(400);
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      expect(body.error.code).toBe("validation_error");
+      expect(body.error.message).not.toMatch(/switched off/);
+    });
+  });
+
+  it("an admin password that was never set keeps the route's own answer", async () => {
+    await withProduction({ ADMIN_PASSWORD: undefined }, async () => {
+      const { createApp } = await import("./app.js");
+      const { env } = await import("./env.js");
+      // (A developer's .env may supply one; then this deployment simply has a password.)
+      if (env.adminPassword) return;
+      expect(env.adminSignInOff).toBe("");
+      const r = await login(createApp({ accessLog: false }), "whatever");
+      expect(r.status).toBe(400);
+      expect(r.body.error!.message).not.toMatch(/published example value/);
+    });
+  });
+});
+
+// ── 13. Rollback: the restore script and the documentation ──
+
+describe.skipIf(!TEST_DB)("rollback restore script", () => {
+  let D: typeof import("@prospex/db");
+  let db: import("@prospex/db").Db;
+  let orgId = "";
+  let otherOrgId = "";
+  const RAW_KEY = process.env.ENCRYPTION_KEY || process.env.JWT_SECRET || "";
+
+  /** Decrypt exactly as the previous release does: three base64 parts, AES-256-GCM, key = SHA-256 of the raw key. */
+  const decryptAsOldRelease = (blob: string): string => {
+    const parts = blob.split(".");
+    if (parts.length !== 3) throw new Error("not the old format");
+    const d = createDecipheriv("aes-256-gcm", createHash("sha256").update(RAW_KEY).digest(), Buffer.from(parts[0]!, "base64"));
+    d.setAuthTag(Buffer.from(parts[1]!, "base64"));
+    return Buffer.concat([d.update(Buffer.from(parts[2]!, "base64")), d.final()]).toString("utf8");
+  };
+
+  beforeAll(async () => {
+    D = await import("@prospex/db");
+    await D.runMigrations(TEST_DB);
+    db = D.getDb().db;
+    const mk = async (name: string) => (await db.insert(D.organizations).values({ name, slug: `h1-rollback-${randomUUID().slice(0, 12)}`, plan: "pilot", planLimits: D.limitsFor("pilot") }).returning())[0]!.id;
+    orgId = await mk("Rollback Co");
+    otherOrgId = await mk("Bystander Co");
+  });
+  afterAll(async () => {
+    if (orgId) await db.delete(D.organizations).where(D.inArray(D.organizations.id, [orgId, otherOrgId]));
+  });
+
+  it("puts back what only the old release's format can express, removes nothing, and is safe to repeat", async () => {
+    const L = await import("./lib/linkTokens.js");
+    const C = await import("./lib/credentials.js");
+    const { restore, legacyEncrypt } = (await import("../../../scripts/rollback-restore.mjs")) as {
+      restore: (o: Record<string, unknown>) => Promise<{ links: number; linksAlready: number; creds: number; credsAlready: number; failed: number }>;
+      legacyEncrypt: (plain: string, rawKey: string) => string;
+    };
+
+    // A link from before the upgrade (readable copy still there), one made on the new release
+    // (hash + encrypted copy only), and a client that was never shared.
+    const oldToken = L.newShareToken();
+    const newToken = L.newShareToken();
+    const [legacy] = await db.insert(D.clients).values({ orgId, name: "Shared before the upgrade", shareToken: oldToken, shareTokenHash: L.hashLinkToken(oldToken) }).returning();
+    const [fresh] = await db.insert(D.clients).values({ orgId, name: "Shared on the new release" }).returning();
+    const [unshared] = await db.insert(D.clients).values({ orgId, name: "Never shared" }).returning();
+    await db
+      .update(D.clients)
+      .set({ shareToken: null, shareTokenHash: L.hashLinkToken(newToken), shareTokenEncrypted: L.shareTokenColumns(orgId, fresh!.id, newToken).shareTokenEncrypted })
+      .where(D.eq(D.clients.id, fresh!.id));
+
+    const smtpNew = { host: "smtp.new.example", port: 587, user: "new-user", pass: "new-pass-MUST-NOT-PRINT" };
+    const smtpOld = { host: "smtp.old.example", port: 587, user: "old-user", pass: "old-pass-MUST-NOT-PRINT" };
+    const hub = { apiKey: "crm-key-MUST-NOT-PRINT" };
+    const [accNew] = await db.insert(D.emailAccounts).values({ orgId, provider: "smtp", fromName: "New", fromEmail: "new@rollback.example", configEncrypted: C.sealOrgJson(orgId, "email-account", smtpNew) }).returning();
+    const [accOld] = await db.insert(D.emailAccounts).values({ orgId, provider: "smtp", fromName: "Old", fromEmail: "old@rollback.example", configEncrypted: legacyEncrypt(JSON.stringify(smtpOld), RAW_KEY) }).returning();
+    const [integ] = await db.insert(D.integrations).values({ orgId, provider: "hubspot", configEncrypted: C.sealOrgJson(orgId, "integration", hub) }).returning();
+    // Another workspace, to show --org leaves everyone else alone.
+    const [bystander] = await db.insert(D.emailAccounts).values({ orgId: otherOrgId, provider: "smtp", fromName: "B", fromEmail: "b@bystander.example", configEncrypted: C.sealOrgJson(otherOrgId, "email-account", smtpNew) }).returning();
+
+    // Before: the old release cannot read the new-format rows.
+    expect(() => decryptAsOldRelease(accNew!.configEncrypted!)).toThrow();
+    expect(() => decryptAsOldRelease(integ!.configEncrypted!)).toThrow();
+    expect(JSON.parse(decryptAsOldRelease(accOld!.configEncrypted!))).toEqual(smtpOld);
+
+    const args = { dbPkg: D, db, openShareToken: L.openShareToken, openOrgSecret: C.openOrgSecret, legacyShareColumns: L.legacyShareColumns, rawKey: RAW_KEY, orgId };
+
+    // A dry run counts and changes nothing.
+    expect(await restore({ ...args, dryRun: true })).toEqual({ links: 1, linksAlready: 1, creds: 2, credsAlready: 1, failed: 0 });
+    expect((await db.select().from(D.clients).where(D.eq(D.clients.id, fresh!.id)))[0]!.shareToken).toBeNull();
+    expect((await db.select().from(D.emailAccounts).where(D.eq(D.emailAccounts.id, accNew!.id)))[0]!.configEncrypted).toBe(accNew!.configEncrypted);
+
+    // The real run.
+    expect(await restore(args)).toEqual({ links: 1, linksAlready: 1, creds: 2, credsAlready: 1, failed: 0 });
+
+    // Report links: the old release looks a link up by clients.share_token.
+    for (const [id, token] of [[legacy!.id, oldToken], [fresh!.id, newToken]] as const) {
+      const found = await db.select({ id: D.clients.id }).from(D.clients).where(D.eq(D.clients.shareToken, token));
+      expect(found.map((f) => f.id)).toEqual([id]);
+    }
+    const never = (await db.select().from(D.clients).where(D.eq(D.clients.id, unshared!.id)))[0]!;
+    expect([never.shareToken, never.shareTokenHash, never.shareTokenEncrypted]).toEqual([null, null, null]);
+
+    // Credentials: readable the old way, with the same content.
+    const after = async (table: typeof D.emailAccounts | typeof D.integrations, id: string) => (await db.select().from(table).where(D.eq(table.id, id)))[0]!.configEncrypted!;
+    expect(JSON.parse(decryptAsOldRelease(await after(D.emailAccounts, accNew!.id)))).toEqual(smtpNew);
+    expect(JSON.parse(decryptAsOldRelease(await after(D.integrations, integ!.id)))).toEqual(hub);
+    // The one already in the old format was not touched (byte-identical).
+    expect(await after(D.emailAccounts, accOld!.id)).toBe(accOld!.configEncrypted);
+
+    // Nothing was removed, so rolling forward needs nothing: the new release still finds the
+    // links by hash, still has the encrypted copy, and still opens every credential.
+    const freshAfter = (await db.select().from(D.clients).where(D.eq(D.clients.id, fresh!.id)))[0]!;
+    expect(freshAfter.shareTokenHash).toBe(L.hashLinkToken(newToken));
+    expect(L.openShareCopy(orgId, fresh!.id, freshAfter.shareTokenEncrypted!)).toBe(newToken);
+    // Kept in the marked form, so a link turned off on the previous release stays off after rolling forward.
+    expect(L.isLiveShareCopy(freshAfter.shareTokenEncrypted)).toBe(false);
+    expect(C.openOrgJson(orgId, "email-account", await after(D.emailAccounts, accNew!.id))).toEqual(smtpNew);
+    expect(C.openOrgJson(orgId, "integration", await after(D.integrations, integ!.id))).toEqual(hub);
+
+    // Another workspace was left alone.
+    expect(await after(D.emailAccounts, bystander!.id)).toBe(bystander!.configEncrypted);
+
+    // Running it again finds nothing left to do.
+    expect(await restore(args)).toEqual({ links: 0, linksAlready: 2, creds: 0, credsAlready: 3, failed: 0 });
+  });
+
+  it("a row it cannot read is counted and left exactly as it was", async () => {
+    const L = await import("./lib/linkTokens.js");
+    const C = await import("./lib/credentials.js");
+    const { restore } = (await import("../../../scripts/rollback-restore.mjs")) as { restore: (o: Record<string, unknown>) => Promise<{ links: number; creds: number; failed: number }> };
+    const damaged = "v2.000000000000.AAAAAAAAAAAAAAAA.AAAAAAAAAAAAAAAAAAAAAA==.AAAA";
+    const [acc] = await db.insert(D.emailAccounts).values({ orgId: otherOrgId, provider: "smtp", fromName: "X", fromEmail: "x@bystander.example", configEncrypted: damaged }).returning();
+    const r = await restore({ dbPkg: D, db, openShareToken: L.openShareToken, openOrgSecret: C.openOrgSecret, rawKey: RAW_KEY, orgId: otherOrgId });
+    expect(r.failed).toBe(1);
+    expect((await db.select().from(D.emailAccounts).where(D.eq(D.emailAccounts.id, acc!.id)))[0]!.configEncrypted).toBe(damaged);
+  });
+});
+
+describe("rollback restore script: the command line and the documentation", () => {
+  const SCRIPT = join(REPO, "scripts/rollback-restore.mjs");
+  const run = (args: string[], envVars: Record<string, string>) => {
+    try {
+      const out = execFileSync(process.execPath, [SCRIPT, ...args], { env: { PATH: process.env.PATH ?? "", ...envVars }, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], cwd: tmpdir() });
+      return { status: 0, out };
+    } catch (e) {
+      const err = e as { status?: number; stdout?: string; stderr?: string };
+      return { status: err.status ?? -1, out: `${err.stdout ?? ""}${err.stderr ?? ""}` };
+    }
+  };
+
+  it("refuses to run without the production values, and says which", () => {
+    const noDb = run([], {});
+    expect(noDb.status).toBe(1);
+    expect(noDb.out).toMatch(/DATABASE_URL is not set/);
+    const noKey = run([], { DATABASE_URL: "postgres://someuser:secret-pw-MUST-NOT-PRINT@127.0.0.1:1/none" });
+    expect(noKey.status).toBe(1);
+    expect(noKey.out).toMatch(/Neither ENCRYPTION_KEY nor JWT_SECRET is set/);
+    expect(noKey.out).not.toMatch(/MUST-NOT-PRINT|someuser/);
+    const badOrg = run(["--org", "not-a-uuid"], { DATABASE_URL: "postgres://u:p@127.0.0.1:1/none", JWT_SECRET: "x".repeat(40) });
+    expect(badOrg.status).toBe(1);
+    expect(badOrg.out).toMatch(/--org needs a workspace id/);
+    expect(run(["--help"], {}).out).toMatch(/--dry-run/);
+  });
+
+  it("the script never prints a value it handles", () => {
+    const src = read("scripts/rollback-restore.mjs");
+    // Every console line is built from counts, flags and fixed text.
+    for (const m of src.matchAll(/console\.(log|error)\(([\s\S]*?)\);\n/g)) {
+      expect(m[2]).not.toMatch(/\b(token|plain|rawKey|configEncrypted|shareToken|DATABASE_URL\b(?! is not set))\b(?![A-Za-z ]*(back|format|"))/);
+    }
+    expect(src).not.toMatch(/console\.(log|error)\([^)]*process\.env\./);
+  });
+
+  it("DEPLOY.md documents the rollback from the rehearsal: checklist, order, the four switches, the script", () => {
+    const d = read("DEPLOY.md");
+    expect(d).toMatch(/### B11\. Before you deploy, the four switches, and rolling back/);
+    for (const name of ["CREDENTIAL_REBIND_ON_READ", "LINK_TOKENS_CLEAR_PLAINTEXT", "PRIVACY_SWEEP", "IP_LOOKUP_ALLOW_PLAIN_HTTP", "IPINFO_TOKEN"]) expect(d, name).toContain(`\`${name}\``);
+    // The defaults, as fixed for this release.
+    expect(d).toMatch(/\| `CREDENTIAL_REBIND_ON_READ` \| off \|/);
+    expect(d).toMatch(/\| `LINK_TOKENS_CLEAR_PLAINTEXT` \| off \|/);
+    expect(d).toMatch(/\| `PRIVACY_SWEEP` \| on \|/);
+    expect(d).toMatch(/\| `IP_LOOKUP_ALLOW_PLAIN_HTTP` \| off \|/);
+    // The checklist and the order.
+    expect(d).toMatch(/Make a restore point/);
+    expect(d).toMatch(/at least 16 characters/);
+    expect(d).toMatch(/openssl s_client -starttls postgres/);
+    expect(d).toMatch(/DATABASE_SSL=require/);
+    expect(d).toMatch(/\*\*API first\.\*\*/);
+    expect(d).toMatch(/\*\*Web second\*\*/);
+    expect(d).toMatch(/node scripts\/rollback-restore\.mjs --dry-run/);
+    // Plain hyphens in the new section, as everywhere a person reads.
+    const b11 = d.slice(d.indexOf("### B11."), d.indexOf("## Part C"));
+    expect(b11).not.toMatch(/—|–/);
+    expect(read("docs/DEPLOY.md")).toMatch(/scripts\/rollback-restore\.mjs/);
+  });
+
+  it("the switches are documented in the example files and never given a value in render.yaml", () => {
+    const ex = read(".env.example");
+    const y = read("render.yaml");
+    for (const name of ["CREDENTIAL_REBIND_ON_READ", "LINK_TOKENS_CLEAR_PLAINTEXT", "PRIVACY_SWEEP", "IP_LOOKUP_ALLOW_PLAIN_HTTP"]) {
+      // Commented out: copying the example file must leave every switch at its default.
+      expect(ex, name).toMatch(new RegExp(`^# ${name}=`, "m"));
+      expect(ex, name).not.toMatch(new RegExp(`^${name}=`, "m"));
+      expect(y, name).toMatch(new RegExp(`#\\s+${name}\\b`));
+      expect(y, name).not.toMatch(new RegExp(`- key: ${name}\\b`));
+    }
+    expect(y).toMatch(/- key: IPINFO_TOKEN\n\s+sync: false/);
   });
 });

@@ -15,7 +15,10 @@
  *  - the address shown is the one the request came from, as far as we can tell. It is called
  *    approximate because that is what an IP address is.
  */
+import { createHash } from "node:crypto";
+import { getDb, sql } from "@prospex/db";
 import { env } from "../env.js";
+import { writeAudit } from "./audit.js";
 import { sendMail, systemMailerConfig } from "./mailer.js";
 import { windowHit, windowRemaining } from "./rateWindow.js";
 
@@ -165,8 +168,30 @@ export function securityMailAvailable(): boolean {
   return !!systemMailerConfig();
 }
 
-/** At most one "new sign-in" mail per account per hour, however many sign-ins there are. */
+/** At most one admin sign-in / lock mail per hour, however many sign-ins there are. */
 const NEW_SIGNIN_WINDOW_MS = 60 * 60 * 1000;
+/**
+ * A customer gets at most ONE "new sign-in" mail per 24 hours. Someone who travels, or whose
+ * provider hands out a new address every few minutes, was mailed every hour; a notice that
+ * arrives that often is one people learn to ignore. The limit is kept in the database (one
+ * small row in the security log per notice sent), so it holds across restarts and instances.
+ */
+const USER_SIGNIN_NOTICE_WINDOW_HOURS = 24;
+const SIGNIN_NOTICE_ACTION = "security.new_signin_notice";
+
+/** Has this address been sent a new-sign-in notice in the last 24 hours? If not, record that one is going out now. */
+async function claimSigninNotice(to: string, who: { id?: unknown; orgId?: unknown } | null): Promise<boolean> {
+  const key = `sha256:${createHash("sha256").update(to.toLowerCase(), "utf8").digest("hex")}`;
+  const { db } = getDb();
+  const recent = (await db.execute(
+    sql`SELECT 1 FROM audit_log WHERE action = ${SIGNIN_NOTICE_ACTION} AND target_id = ${key} AND created_at > now() - ${sql.raw(`interval '${USER_SIGNIN_NOTICE_WINDOW_HOURS} hours'`)} LIMIT 1`,
+  )) as unknown as unknown[];
+  if ([...recent].length) return false;
+  // The address itself is not written: the row is keyed by a fingerprint of it, and carries
+  // the user and workspace ids so it goes when they do.
+  await writeAudit({ action: SIGNIN_NOTICE_ACTION, actorType: "system", orgId: typeof who?.orgId === "string" ? who.orgId : null, actorUserId: typeof who?.id === "string" ? who.id : null, targetType: "user", targetId: key });
+  return true;
+}
 const HOURLY_KINDS: ReadonlySet<SecurityMailKind> = new Set(["new_signin", "admin_new_signin", "admin_locked"]);
 
 /**
@@ -187,6 +212,11 @@ export async function notifySecurity(userOrEmail: { email: string } | string | n
       const key = `secmail:${kind}:${to.toLowerCase()}`;
       if (windowRemaining(key, 1, NEW_SIGNIN_WINDOW_MS) < 1) return false;
       windowHit(key, NEW_SIGNIN_WINDOW_MS);
+    }
+    if (kind === "new_signin") {
+      const who = userOrEmail && typeof userOrEmail === "object" ? (userOrEmail as { id?: unknown; orgId?: unknown }) : null;
+      // If the check itself fails, the notice still goes out: an extra mail is the safe side.
+      if (!(await claimSigninNotice(to, who).catch(() => true))) return false;
     }
     const mail = securityMail(kind, to, details);
     const r = await sendMail(null, { from: env.mailFrom, to, subject: mail.subject, text: mail.text });

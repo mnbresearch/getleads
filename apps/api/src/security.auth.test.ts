@@ -264,7 +264,8 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
 
     it("redactRequestLine handles the awkward cases", async () => {
       const { redactRequestLine } = await import("./app.js");
-      expect(redactRequestLine("/v1/leads", "limit=5&q=acme")).toBe("/v1/leads?limit=5&q=acme");
+      // Search text can be a person's address or name, so it is not written to the log either.
+      expect(redactRequestLine("/v1/leads", "limit=5&q=acme")).toBe("/v1/leads?limit=5&q=[redacted]");
       expect(redactRequestLine("/internal/jobs/run", "token=abc")).toBe("/internal/jobs/run?token=[redacted]");
       expect(redactRequestLine("/x", "Token=abc&STATE=def&cv=ghi&u=jkl&code=m&key=n&api_key=o")).not.toMatch(/abc|def|ghi|jkl|=m|=n|=o/);
       expect(redactRequestLine("/x", "%zz=abc")).not.toContain("abc");

@@ -701,7 +701,8 @@ suite("route surface", () => {
       expect(typeof body.note).toBe("string");
       expect(body.note.length).toBeGreaterThan(20);
       if (body.status === "blocked") {
-        expect(body.note).toMatch(/not the same as nobody matching/i);
+        // With no search provider connected at all (CI), the note says that instead.
+        expect(body.note).toMatch(/not the same as nobody matching|no search source is connected/i);
         expect(r.status).toBe(502);
       } else {
         expect(body.note).toMatch(/nobody matched/i);

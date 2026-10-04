@@ -165,7 +165,8 @@ clientRoutes.post(
 clientRoutes.post("/:id/share", ownerOrAdmin("client.share_enabled"), async (c) => {
   const before = await requireClient(orgId(c), c.req.param("id"));
   const r = await enableSharing(orgId(c), c.req.param("id"));
-  // POST on a client that already has a link replaces it: the old link stops working.
+  // POST on a client that already has a link replaces it: the old link stops working, and
+  // the answer says so (`rotated: true`) so the page can tell "created" from "replaced".
   await audit(c, hasShareLink(before) ? "client.share_rotated" : "client.share_enabled", { targetType: "client", targetId: before.id, data: { name: before.name } });
   return c.json(r);
 });

@@ -6,7 +6,7 @@ import { and, clients, companies, consume, desc, inArray, enqueue, eq, getDb, ic
 import { assertOwned } from "../lib/ownership.js";
 import { scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriteria, type IcpChatMessage } from "@prospex/core";
 import { ApiError, notFound, requireSomeFields } from "../lib/errors.js";
-import { aiFor } from "../lib/ai.js";
+import { AI_OFF_UNAVAILABLE, aiDisabled, aiFor } from "../lib/ai.js";
 import { assertQuotaAvailable, tryConsume } from "../lib/quota.js";
 import { assertRowCap, guardJobCapacity } from "../lib/limits.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
@@ -18,7 +18,10 @@ icpRoutes.use("*", requireAuth);
 // Each facet is a bounded list of short terms: an ICP is a handful of each, and the lists
 // are read into search queries and rule scoring, so an unbounded one was free storage and
 // unbounded downstream work.
-const facet = z.array(z.string().max(200)).max(50);
+// 500, not 50: ICPs saved before this cap existed can hold more than 50 terms in a facet
+// (the AI builder and pasted keyword lists produce them), and a cap below what is already
+// stored made those ICPs impossible to save again - even to change their name.
+const facet = z.array(z.string().max(200)).max(500);
 const criteria = z.object({
   industries: facet.optional(),
   titles: facet.optional(),
@@ -114,6 +117,8 @@ icpRoutes.post("/:id/chat", zValidator("json", z.object({ message: z.string().mi
   const b = c.req.valid("json");
 
   const ai = aiFor(c.get("auth"));
+  // The workspace switched AI off itself: a 409 that says so and how to turn it back on.
+  if (aiDisabled(c.get("auth").org)) throw new ApiError(409, AI_OFF_UNAVAILABLE, "ai_off");
   // 503, not 404: the ICP exists; the service it needs is not available.
   if (!hasAi(ai)) throw new ApiError(503, `The ICP assistant is unavailable: ${AI_NOT_SWITCHED_ON}`, "ai_unavailable");
   // Checked before the call and charged after it worked. The charge used to come after with
@@ -190,7 +195,7 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
   const ai = aiFor(c.get("auth"));
   // Each rerank is one AI call and is charged as one, before it is made. It used to be free.
   const rerank = { requested: Math.min(b.aiRerankTop, scored.length), done: 0, skipped: undefined as string | undefined };
-  if (b.aiRerankTop > 0 && !hasAi(ai)) rerank.skipped = "no_ai_provider";
+  if (b.aiRerankTop > 0 && !hasAi(ai)) rerank.skipped = aiDisabled(c.get("auth").org) ? "ai_off" : "no_ai_provider";
   if (b.aiRerankTop > 0 && hasAi(ai)) {
     const summary = String((icp.aiProfile as { summary?: string } | null)?.summary ?? icp.description ?? icp.name);
     for (const s of scored.slice(0, b.aiRerankTop)) {

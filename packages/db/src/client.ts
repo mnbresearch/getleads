@@ -3,7 +3,7 @@ import { drizzle } from "drizzle-orm/postgres-js";
 import * as schema from "./schema.js";
 import { sslOption } from "./ssl.js";
 
-export { chooseSsl, sslOption, type SslChoice, type SslDecision } from "./ssl.js";
+export { chooseSsl, databaseTlsHint, isCertificateError, isTlsHandshakeFailure, sslOption, type SslChoice, type SslDecision } from "./ssl.js";
 
 export type Db = ReturnType<typeof createDb>["db"];
 export type Sql = ReturnType<typeof postgres>;

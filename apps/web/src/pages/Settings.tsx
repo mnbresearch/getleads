@@ -281,7 +281,27 @@ function ApiKeys() {
         )}
         {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-400"><div className="mb-1 flex items-center justify-between gap-2 text-white/85"><span>{freshScope === "read" ? "Read-only key - copy now, shown once:" : freshScope === "full" ? "Full-access key - copy now, shown once:" : "Copy now - shown once:"}</span><button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(fresh, toast)}>Copy</button></div><code className="break-all">{fresh}</code></div>}
         {loadErr && !loaded && <LoadError message={loadErr} onRetry={load} />}
-        {loaded && <div className="overflow-x-auto"><table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Access</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
+        {/* On a phone the six-column table pushed "Revoke" off the side of the screen; there
+            each key is a card with everything, Revoke included, in view. */}
+        {loaded && keys.length > 0 && (
+          <ul className="divide-y divide-black/5 sm:hidden" data-testid="apikey-cards">
+            {keys.map((k) => (
+              <li key={k.id} className={`flex items-start justify-between gap-3 py-3 ${k.revokedAt ? "opacity-50" : ""}`}>
+                <div className="min-w-0 text-sm">
+                  <div className="font-medium text-ink-50 [overflow-wrap:anywhere]">{k.name}</div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    {keyScope(k) === "read" ? <span className="badge whitespace-nowrap bg-sky-50 text-sky-800">Read-only</span> : <span className="badge whitespace-nowrap bg-black/[0.05] text-ink-300">Full access</span>}
+                    <span className="font-mono text-xs text-ink-300">{k.prefix}…</span>
+                    {k.revokedAt && <span className="text-xs text-ink-400">Revoked</span>}
+                  </div>
+                  <div className="mt-1 text-xs text-ink-400">Last used {k.lastUsedAt ? fmtDate(k.lastUsedAt) : "never"} · created {fmtDate(k.createdAt)}</div>
+                </div>
+                {!k.revokedAt && <button className="inline-flex min-h-[40px] shrink-0 items-center px-2 text-sm text-red-600" onClick={() => revoke(k)}>Revoke</button>}
+              </li>
+            ))}
+          </ul>
+        )}
+        {loaded && <div className="hidden overflow-x-auto sm:block"><table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Access</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
           <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td">{keyScope(k) === "read" ? <span className="badge whitespace-nowrap bg-sky-50 text-sky-800" title="Can look things up; cannot create, change, send or delete">Read-only</span> : <span className="badge whitespace-nowrap bg-black/[0.05] text-ink-300" title="Can do everything through the API">Full access</span>}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-600" onClick={() => revoke(k)}>Revoke</button>}</td></tr>)}</tbody></table></div>}
         {loaded && keys.length === 0 && <div className="py-3 text-sm text-ink-400">No API keys yet.</div>}
       </div>

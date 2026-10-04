@@ -1,5 +1,5 @@
 import { and, eq, events, getDb, globalSuppressions, inArray, jobs, leads, messages, monitorResults, organizations, scrapedLeads, sql, withStatementTimeout, type Db } from "@prospex/db";
-import { ADDRESS_FINGERPRINT_PREFIX, addressFingerprint } from "./privacySuppression.js";
+import { ADDRESS_FINGERPRINT_PREFIX, addressFingerprint, onPlatformList, platformBase } from "./privacySuppression.js";
 
 /**
  * Deleting a person means deleting the copies too.
@@ -146,31 +146,61 @@ export interface DataSubjectWorkspace {
   orgName: string;
   leads: number;
   campaignContacts: number;
+  /** Message rows that still hold the address (and so its content). */
   messages: number;
+  /** Message rows kept WITHOUT content: the address is a fingerprint, subject and body are removed. */
+  anonymisedMessages: number;
   suppressed: boolean;
 }
 
-/** Where one address appears, across every workspace. Counts only: no content leaves the workspace. */
-export async function dataSubjectReport(email: string): Promise<{ email: string; globallySuppressed: boolean; workspaces: DataSubjectWorkspace[] }> {
+/**
+ * "Is this the person's mailbox?" in SQL, for a lower-cased address column: the same rule
+ * as platformBase() - the local part up to the first "+". A request about jane@acme.com is
+ * a request about jane+news@acme.com too.
+ */
+const sameMailbox = (column: ReturnType<typeof sql>, base: string) => sql`regexp_replace(lower(btrim(${column})), '^([^+@]+)\\+[^@]*@', '\\1@') = ${base}`;
+
+/**
+ * Where one person appears, across every workspace. Counts only: no content leaves the workspace.
+ *
+ * `held` answers the question an operator is actually asking - "does any workspace still
+ * hold this person's data?". Message rows kept without content and do-not-contact entries
+ * are records ABOUT a removal, not the person's data, so a person who appears only in
+ * those is not held. They are still listed, with their own counts, so the operator can see
+ * what remains and why.
+ */
+export async function dataSubjectReport(email: string): Promise<{ email: string; globallySuppressed: boolean; held: boolean; workspaces: DataSubjectWorkspace[] }> {
   const { db } = getDb();
   const e = email.trim().toLowerCase();
-  const fp = addressFingerprint(e);
+  const base = platformBase(e);
+  const prints = [...new Set([addressFingerprint(e), addressFingerprint(base)])];
+  const listKeys = [...new Set([e, base, ...prints])];
   const rows = (await db.execute(sql`
-    WITH l AS (SELECT org_id, count(*)::int AS n FROM leads WHERE lower(email) = ${e} GROUP BY org_id),
-         cc AS (SELECT le.org_id, count(*)::int AS n FROM campaign_contacts c JOIN leads le ON le.id = c.lead_id WHERE lower(le.email) = ${e} GROUP BY le.org_id),
-         m AS (SELECT org_id, count(*)::int AS n FROM messages WHERE lower(to_email) = ${e} OR to_email = ${fp} GROUP BY org_id),
-         s AS (SELECT DISTINCT org_id FROM suppressions WHERE email IN (${e}, ${fp}))
-    SELECT o.id AS org_id, o.name AS org_name, coalesce(l.n, 0) AS leads, coalesce(cc.n, 0) AS campaign_contacts, coalesce(m.n, 0) AS messages, (s.org_id IS NOT NULL) AS suppressed
+    WITH l AS (SELECT org_id, count(*)::int AS n FROM leads WHERE ${sameMailbox(sql`email`, base)} GROUP BY org_id),
+         cc AS (SELECT le.org_id, count(*)::int AS n FROM campaign_contacts c JOIN leads le ON le.id = c.lead_id WHERE ${sameMailbox(sql`le.email`, base)} GROUP BY le.org_id),
+         m AS (SELECT org_id, count(*)::int AS n FROM messages WHERE ${sameMailbox(sql`to_email`, base)} GROUP BY org_id),
+         am AS (SELECT org_id, count(*)::int AS n FROM messages WHERE ${inArray(sql`to_email`, prints)} GROUP BY org_id),
+         s AS (SELECT DISTINCT org_id FROM suppressions WHERE ${inArray(sql`email`, listKeys)})
+    SELECT o.id AS org_id, o.name AS org_name, coalesce(l.n, 0) AS leads, coalesce(cc.n, 0) AS campaign_contacts, coalesce(m.n, 0) AS messages, coalesce(am.n, 0) AS anonymised_messages, (s.org_id IS NOT NULL) AS suppressed
     FROM organizations o
-    LEFT JOIN l ON l.org_id = o.id LEFT JOIN cc ON cc.org_id = o.id LEFT JOIN m ON m.org_id = o.id LEFT JOIN s ON s.org_id = o.id
-    WHERE l.org_id IS NOT NULL OR cc.org_id IS NOT NULL OR m.org_id IS NOT NULL OR s.org_id IS NOT NULL
+    LEFT JOIN l ON l.org_id = o.id LEFT JOIN cc ON cc.org_id = o.id LEFT JOIN m ON m.org_id = o.id LEFT JOIN am ON am.org_id = o.id LEFT JOIN s ON s.org_id = o.id
+    WHERE l.org_id IS NOT NULL OR cc.org_id IS NOT NULL OR m.org_id IS NOT NULL OR am.org_id IS NOT NULL OR s.org_id IS NOT NULL
     ORDER BY o.name
-    LIMIT 1000`)) as unknown as { org_id: string; org_name: string; leads: number; campaign_contacts: number; messages: number; suppressed: boolean }[];
-  const [listed] = await db.select({ id: globalSuppressions.id }).from(globalSuppressions).where(eq(globalSuppressions.email, e)).limit(1);
+    LIMIT 1000`)) as unknown as { org_id: string; org_name: string; leads: number; campaign_contacts: number; messages: number; anonymised_messages: number; suppressed: boolean }[];
+  const workspaces = [...rows].map((r) => ({
+    orgId: String(r.org_id),
+    orgName: String(r.org_name),
+    leads: Number(r.leads) || 0,
+    campaignContacts: Number(r.campaign_contacts) || 0,
+    messages: Number(r.messages) || 0,
+    anonymisedMessages: Number(r.anonymised_messages) || 0,
+    suppressed: r.suppressed === true,
+  }));
   return {
     email: e,
-    globallySuppressed: !!listed,
-    workspaces: [...rows].map((r) => ({ orgId: String(r.org_id), orgName: String(r.org_name), leads: Number(r.leads) || 0, campaignContacts: Number(r.campaign_contacts) || 0, messages: Number(r.messages) || 0, suppressed: r.suppressed === true })),
+    globallySuppressed: await onPlatformList(e, db),
+    held: workspaces.some((w) => w.leads > 0 || w.campaignContacts > 0 || w.messages > 0),
+    workspaces,
   };
 }
 
@@ -178,14 +208,16 @@ export async function dataSubjectReport(email: string): Promise<{ email: string;
  * Erase a person from every workspace and put their address on the platform list.
  *
  * The address goes on the list FIRST: from that moment no workspace can email it, even if
- * the rest of this is interrupted - and running it again finishes the job.
+ * the rest of this is interrupted - and running it again finishes the job. Plus-tagged
+ * variants of the address (see platformBase) are the same person and are erased with it.
  */
 export async function eraseDataSubject(email: string, note = "Erased at the person's request"): Promise<{ workspaces: number; leadsDeleted: number; messagesAnonymised: number; eventsDeleted: number }> {
   const { db } = getDb();
   const e = email.trim().toLowerCase();
+  const base = platformBase(e);
   await db.insert(globalSuppressions).values({ email: e, reason: "erasure_request", note: note.slice(0, 500) }).onConflictDoNothing();
 
-  const holders = await db.select({ id: leads.id, orgId: leads.orgId }).from(leads).where(sql`lower(${leads.email}) = ${e}`);
+  const holders = await db.select({ id: leads.id, orgId: leads.orgId }).from(leads).where(sameMailbox(sql`${leads.email}`, base));
   const byOrg = new Map<string, string[]>();
   for (const h of holders) byOrg.set(h.orgId, [...(byOrg.get(h.orgId) ?? []), h.id]);
   const touched = new Set<string>();
@@ -201,13 +233,13 @@ export async function eraseDataSubject(email: string, note = "Erased at the pers
   }
   // Copies with no lead behind them any more: messages left by an earlier plain delete,
   // events carrying the address, provenance rows.
-  const orphans = await db.update(messages).set(anonymisedMessage).where(sql`lower(${messages.toEmail}) = ${e}`).returning({ orgId: messages.orgId });
+  const orphans = await db.update(messages).set(anonymisedMessage).where(sameMailbox(sql`${messages.toEmail}`, base)).returning({ orgId: messages.orgId });
   messagesAnonymised += orphans.length;
   for (const o of orphans) touched.add(o.orgId);
-  const ev = await db.delete(events).where(sql`lower(${events.data}->>'email') = ${e} OR lower(${events.data}->>'to') = ${e}`).returning({ orgId: events.orgId });
+  const ev = await db.delete(events).where(sql`${sameMailbox(sql`${events.data}->>'email'`, base)} OR ${sameMailbox(sql`${events.data}->>'to'`, base)}`).returning({ orgId: events.orgId });
   eventsDeleted += ev.length;
   for (const o of ev) touched.add(o.orgId);
-  await db.delete(scrapedLeads).where(sql`lower(${scrapedLeads.email}) = ${e}`);
+  await db.delete(scrapedLeads).where(sameMailbox(sql`${scrapedLeads.email}`, base));
   // The workspaces' own do-not-contact entries for this address stay: they are what keeps
   // it from being emailed, and they hold nothing but the address.
   return { workspaces: touched.size, leadsDeleted, messagesAnonymised, eventsDeleted };

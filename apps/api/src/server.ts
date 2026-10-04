@@ -1,5 +1,5 @@
 import { serve } from "@hono/node-server";
-import { getDb, runMigrations, startWorker } from "@prospex/db";
+import { databaseTlsHint, getDb, runMigrations, startWorker } from "@prospex/db";
 import { env } from "./env.js";
 import { createApp } from "./app.js";
 import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.js";
@@ -38,15 +38,22 @@ async function main() {
   const app = createApp();
   const { db } = getDb();
   await ensureRecurringJobs();
-  // Report-link tokens still stored in plaintext are encrypted (and their plaintext column
-  // cleared) once the schema is in place. Idempotent and safe with several instances; a
+  // Report-link tokens from before the upgrade get a lookup hash and an encrypted copy once
+  // the schema is in place. Their readable copy is removed only when
+  // LINK_TOKENS_CLEAR_PLAINTEXT=true: left in place (the default), the previous release can
+  // still serve those links after a rollback. Idempotent and safe with several instances; a
   // failure here must not stop the server from starting - legacy links keep working as they
   // are and the next start tries again.
+  const clearsPlaintext = String(process.env.LINK_TOKENS_CLEAR_PLAINTEXT ?? "").trim().toLowerCase() === "true";
   await migrateLegacyLinkTokens()
     .then((r) => {
-      if (r.clientLinks || r.inviteHashes) console.log(`[api] link tokens: ${r.clientLinks} report link(s) moved out of plaintext, ${r.inviteHashes} invite(s) given a lookup hash`);
+      if (r.clientLinks || r.inviteHashes) {
+        console.log(
+          `[api] link tokens: ${r.clientLinks} report link(s) given a lookup hash and an encrypted copy (${clearsPlaintext ? "readable copy removed" : "readable copy kept, so a rollback can still serve them"}), ${r.inviteHashes} invite(s) given a lookup hash`,
+        );
+      }
     })
-    .catch((e) => console.warn(`[api] could not finish moving link tokens out of plaintext (will retry on next start): ${(e as Error).name}`));
+    .catch((e) => console.warn(`[api] could not finish preparing link tokens (will retry on next start): ${(e as Error).name}`));
 
   // In single-process deployments (Render free tier: one web service), run the worker in-process too.
   let stop: (() => Promise<void>) | null = null;
@@ -92,5 +99,8 @@ async function main() {
 
 main().catch((e) => {
   console.error(`[api] could not start: ${errLine(e)}${errWhere(e)}`);
+  // When the reason is the database's TLS certificate (or TLS itself), the fix is one setting.
+  const hint = databaseTlsHint(e);
+  if (hint) console.error(hint);
   process.exit(1);
 });

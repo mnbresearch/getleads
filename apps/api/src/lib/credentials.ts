@@ -17,8 +17,14 @@ import { CredentialUnreadableError, decrypt, encrypt } from "./crypto.js";
  * Blobs written before this change have no binding (the legacy 3-part format, and v2 blobs
  * written without AAD). They MUST keep opening, so reads fall back to "no AAD" for them -
  * lib/crypto.ts decrypt() does exactly that: an unbound blob opens with or without AAD, a
- * bound one only with its own. A legacy blob is rewritten bound the first time it is read
- * successfully (`rebindOnRead`), so the unbound population shrinks as credentials are used.
+ * bound one only with its own.
+ *
+ * What is written when: a credential SAVED on this release is always written bound. A legacy
+ * blob that is merely READ is left exactly as it is, byte for byte, unless the operator has
+ * turned on CREDENTIAL_REBIND_ON_READ=true - then it is rewritten bound the first time it is
+ * read successfully (`rebindOnRead`). That is opt-in because the previous release cannot open
+ * a bound blob: rewriting existing credentials on our own initiative would turn a rollback
+ * into "every sender and integration that was used has to be reconnected".
  *
  * Key derivation is unchanged: this adds AAD, nothing else.
  */
@@ -79,12 +85,16 @@ export function isUnboundSecret(blob: string): boolean {
 }
 
 /**
- * Operator switch for the lazy upgrade below. A release from before this change reads
- * credentials without a binding and cannot open a bound blob, so an operator who wants a
- * clean way back for the first days of a rollout can turn the upgrade off; credentials that
- * are newly saved are bound either way.
+ * Operator switch for the lazy upgrade below. OFF unless CREDENTIAL_REBIND_ON_READ is exactly
+ * "true" (any case, spaces ignored).
+ *
+ * Off is the default because the upgrade rewrites EXISTING stored credentials in a format
+ * the previous release cannot read back. With it off, the only bound credentials are the
+ * ones customers saved on this release; everything older stays readable by both releases.
+ * Read on every call, so it takes effect without a restart where the platform allows that.
  */
-const rebindEnabled = () => !["false", "0", "off"].includes(String(process.env.CREDENTIAL_REBIND_ON_READ ?? "").trim().toLowerCase());
+export const rebindOnReadEnabled = (): boolean => String(process.env.CREDENTIAL_REBIND_ON_READ ?? "").trim().toLowerCase() === "true";
+const rebindEnabled = rebindOnReadEnabled;
 
 const STORES = {
   "email-account": { table: emailAccounts, column: emailAccounts.configEncrypted, field: "configEncrypted" },
@@ -93,7 +103,8 @@ const STORES = {
 } as const;
 
 /**
- * Lazy upgrade: a legacy (unbound) blob that was just read successfully is rewritten bound
+ * Lazy upgrade (only with CREDENTIAL_REBIND_ON_READ=true; otherwise this does nothing and
+ * returns false): a legacy (unbound) blob that was just read successfully is rewritten bound
  * to its workspace.
  *
  * One row, one UPDATE, guarded by the old value: if anything else changed the credential in

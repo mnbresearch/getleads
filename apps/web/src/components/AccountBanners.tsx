@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { ProspexError, apiFetch, fmtDay } from "../lib/api";
 import { CANCEL_DELETION_CONFIRM, cancelDeletion, loadDeletion, useDeletion } from "../lib/account";
+import { clearRecoveryCodeNotice, noteRecoveryCodeUsed, useRecoveryCodeNotice } from "../lib/recoveryNotice";
 
 /** Stretches a text-sized control to a thumb-sized one without changing how it reads. */
 const TAP = "inline-flex min-h-[40px] items-center";
@@ -142,34 +143,20 @@ export function DeletionBanner({ isOwner }: { isOwner: boolean }) {
   );
 }
 
-const RECOVERY_KEY = "gl.recoveryCodeUsed";
-
-/** Called by the sign-in step when the server says a recovery code was what got the person in. */
-export function noteRecoveryCodeUsed(left: unknown) {
-  try {
-    sessionStorage.setItem(RECOVERY_KEY, typeof left === "number" && left >= 0 ? String(left) : "?");
-  } catch {}
-}
+// The notice itself lives in lib/recoveryNotice.ts, which also knows when it stops applying.
+export { noteRecoveryCodeUsed };
 
 /**
  * "You signed in with a recovery code", once, after such a sign-in. A recovery code is a
  * spare key: it is gone now, and the person should know how many are left before the last
- * one is a surprise.
+ * one is a surprise. It goes away when dismissed, on sign-out, when a new set of codes is
+ * made and when two-factor sign-in is turned off.
  */
 export function RecoveryCodeNotice() {
-  const [left, setLeft] = useState<string | null>(() => {
-    try {
-      return sessionStorage.getItem(RECOVERY_KEY);
-    } catch {
-      return null;
-    }
-  });
+  const left = useRecoveryCodeNotice();
   if (left === null) return null;
   const n = left === "?" ? null : Number(left);
-  const close = () => {
-    try { sessionStorage.removeItem(RECOVERY_KEY); } catch {}
-    setLeft(null);
-  };
+  const close = () => clearRecoveryCodeNotice();
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-amber-200 bg-amber-50 px-4 py-1.5 text-sm text-amber-900" role="status" data-testid="recovery-notice">
       <span className="min-w-0 flex-1 basis-64">
