@@ -1017,6 +1017,15 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
       const events = await req("GET", "/v1/events?type=lead.unsubscribed", o.token);
       expect(events.body.events[0].data).toMatchObject({ email: null, recipientRemoved: true });
       for (const r of [list, dnc, events]) expect(r.text).not.toContain("sha256:");
+      // The workspace's own export follows the same rule: no fingerprint, the flag instead.
+      const exported = await app.request("/v1/account/export", { headers: { authorization: `Bearer ${o.token}`, "x-confirm-password": PASSWORD, "cf-connecting-ip": `198.51.100.${1 + Math.floor(Math.random() * 250)}` } });
+      expect(exported.status).toBe(200);
+      const dump = await exported.text();
+      expect(dump).not.toContain("sha256:");
+      const doc = JSON.parse(dump);
+      expect(doc.messages.filter((m: any) => m.recipientRemoved === true && m.toEmail === null)).toHaveLength(1);
+      expect(doc.messages.filter((m: any) => m.recipientRemoved === false && m.toEmail === stays.lead.email)).toHaveLength(1);
+      expect(doc.suppressions).toEqual([expect.objectContaining({ email: null, recipientRemoved: true })]);
       // A normal entry is unchanged, with the flag false.
       await req("POST", "/v1/leads/suppressions", o.token, { emails: [`plain-${u8()}@prospect.example`] });
       const dnc2 = await req("GET", "/v1/leads/suppressions/all", o.token);

@@ -1,5 +1,17 @@
 import * as S from "@prospex/db";
 import { and, eq, getDb, gt, sql, type Organization } from "@prospex/db";
+import { shownAddress } from "../lib/privacySuppression.js";
+import { isLiveShareCopy } from "../lib/linkTokens.js";
+
+/**
+ * A removed contact's address is kept as a one-way fingerprint so the do-not-contact entry
+ * and the unsubscribe link keep working. The fingerprint is not an address and is not
+ * exported: the field is null and `recipientRemoved` says why, the same as the list routes.
+ */
+const withoutFingerprint = (field: string) => (r: Record<string, unknown>) => {
+  const shown = shownAddress(typeof r[field] === "string" ? (r[field] as string) : null);
+  return { [field]: shown.address, recipientRemoved: shown.recipientRemoved };
+};
 
 /**
  * "Export all data": everything a workspace owns, as one JSON document.
@@ -66,7 +78,7 @@ export const EXPORT_TABLES: TableSpec[] = [
   { key: "invites", table: S.invites },
   { key: "companies", table: S.companies },
   { key: "icps", table: S.icps },
-  { key: "clients", table: S.clients, derive: (r) => ({ sharing: !!(r.shareTokenHash || r.shareToken) }), deriveFrom: ["shareTokenHash", "shareToken"] },
+  { key: "clients", table: S.clients, derive: (r) => ({ sharing: !!(r.shareToken || (r.shareTokenHash && isLiveShareCopy(r.shareTokenEncrypted as string | null))) }), deriveFrom: ["shareTokenHash", "shareToken", "shareTokenEncrypted"] },
   { key: "leads", table: S.leads },
   { key: "lists", table: S.lists },
   { key: "listLeads", table: S.listLeads, scope: viaParent(S.listLeads.listId, "lists"), cursor: [S.listLeads.listId, S.listLeads.leadId] },
@@ -77,8 +89,8 @@ export const EXPORT_TABLES: TableSpec[] = [
   { key: "campaigns", table: S.campaigns },
   { key: "sequenceSteps", table: S.sequenceSteps, scope: viaParent(S.sequenceSteps.campaignId, "campaigns") },
   { key: "campaignContacts", table: S.campaignContacts, scope: viaParent(S.campaignContacts.campaignId, "campaigns") },
-  { key: "messages", table: S.messages },
-  { key: "suppressions", table: S.suppressions },
+  { key: "messages", table: S.messages, derive: withoutFingerprint("toEmail") },
+  { key: "suppressions", table: S.suppressions, derive: withoutFingerprint("email") },
   { key: "tasks", table: S.tasks },
   { key: "autopilots", table: S.autopilots },
   { key: "signals", table: S.signals },
