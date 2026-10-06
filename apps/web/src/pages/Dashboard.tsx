@@ -26,6 +26,19 @@ export function Dashboard() {
   const [err, setErr] = useState<string | null>(null);
   const [hot, setHot] = useState<HotLead[] | null>(null);
   const [hotErr, setHotErr] = useState<string | null>(null);
+  // People the plays have found who are waiting for a yes or no. An extra, never a
+  // dependency: an older server without Plays, or a failed request, shows nothing at all.
+  const [waiting, setWaiting] = useState(0);
+  useEffect(() => {
+    let live = true;
+    apiFetch<{ plays?: { counts?: { pending?: unknown } }[] }>("GET", "/v1/plays")
+      .then((r) => {
+        const n = Array.isArray(r?.plays) ? r.plays.reduce((sum, p) => sum + (typeof p?.counts?.pending === "number" && p.counts.pending > 0 ? p.counts.pending : 0), 0) : 0;
+        if (live) setWaiting(n);
+      })
+      .catch(() => {});
+    return () => { live = false; };
+  }, []);
   const loadHot = useCallback(() => {
     setHotErr(null);
     apiFetch<{ leads: HotLead[] }>("GET", "/v1/leads/hot/list?limit=6").then((r) => setHot(expectLists(r, "leads").leads)).catch((e) => setHotErr((e as Error).message));
@@ -47,6 +60,16 @@ export function Dashboard() {
         <Stat label="Emails sent" value={fmtNum(d.messages.sent)} hint={`${d.messages.sent ? Math.round((d.messages.opened / d.messages.sent) * 100) : 0}% opened · ${d.messages.sent ? Math.round((d.messages.replied / d.messages.sent) * 100) : 0}% replied`} />
         <Stat label="Active campaigns" value={fmtNum(d.campaigns.active)} hint={`${plural(d.companies, "company")} tracked`} />
       </div>
+
+      {waiting > 0 && (
+        <Link to="/plays" className="card mt-6 flex flex-wrap items-center justify-between gap-3 p-4 transition hover:border-brand-300" data-testid="plays-waiting">
+          <span className="min-w-0">
+            <span className="block font-medium text-ink-50">{plural(waiting, "person", "people")} waiting for review in Plays</span>
+            <span className="block text-xs text-ink-400">Each comes with the reason they are relevant and the proof. Approve or skip.</span>
+          </span>
+          <span className="btn-primary shrink-0 py-1.5">Review</span>
+        </Link>
+      )}
 
       {/* The hot list failing used to hide the card, which reads as "nobody to contact today". */}
       {hotErr && (

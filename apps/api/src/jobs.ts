@@ -1125,7 +1125,12 @@ export const handlers: Record<string, JobHandler> = {
     const runId = job.payload.runId;
     if (!isUuid(playId) || !isUuid(runId)) return { skipped: "bad payload" };
     const play = await ctx.db.query.plays.findFirst({ where: eq(plays.id, playId) });
-    if (!play) return { skipped: "missing" };
+    if (!play) {
+      // Deleted while its run was waiting (the run row went with it). The search charged for
+      // a run that will never happen is given back to the workspace that was charged.
+      if (job.payload.charged === true && job.orgId) await consume(ctx.db, job.orgId, "searches", -1, { allowOverage: true }).catch(() => {});
+      return { skipped: "missing" };
+    }
     if (foreign(job, play.orgId)) return ORG_MISMATCH;
     return runPlay(play, runId, { log: ctx.log, charged: job.payload.charged === true });
   },
@@ -1164,14 +1169,40 @@ export const handlers: Record<string, JobHandler> = {
       : [];
     const ids = own.map((l) => l.id);
     if (!ids.length) return { enrolled: 0, asked: asked.length };
-    const later = (payload: Record<string, unknown>) => enqueue(db, "play.enroll", { playId, campaignId, leadIds: ids, ...payload }, { orgId: play.orgId, priority: 1, runAt: new Date(Date.now() + 2 * 60_000) });
+    /**
+     * Everything below can be done twice - this job is retried when it fails part-way, and
+     * the same people can be approved in two requests - and must come to the same thing:
+     *  - a lead is not looked up again while a lookup for it is waiting, running, or
+     *    finished within the last hour (each lookup may cost a verification);
+     *  - the visit this job schedules for later is scheduled once (`follows` + `waits`);
+     *  - enrolling is "insert unless already there", so nobody is enrolled twice.
+     */
+    const chain = isUuid(job.payload.follows) ? job.payload.follows : job.id;
+    const later = async (waits: number) => {
+      const [queued] = await db
+        .select({ id: jobs.id })
+        .from(jobs)
+        .where(and(eq(jobs.orgId, play.orgId), eq(jobs.type, "play.enroll"), inArray(jobs.status, ["queued", "running"]), dsql`${jobs.payload}->>'follows' = ${chain}`, dsql`${jobs.payload}->>'waits' = ${String(waits)}`))
+        .limit(1);
+      if (!queued) await enqueue(db, "play.enroll", { playId, campaignId, leadIds: ids, lookedUp: true, waits, follows: chain }, { orgId: play.orgId, priority: 1, runAt: new Date(Date.now() + 2 * 60_000) });
+    };
     if (job.payload.lookedUp !== true) {
       // Only leads an enrichment can find an address for: a name and a company to look at.
       const lookups = own.filter((l) => !l.email && l.companyId && l.firstName && l.lastName);
       if (lookups.length) {
-        for (const l of lookups) await enqueue(db, "lead.enrich", { leadId: l.id }, { orgId: play.orgId });
-        await later({ lookedUp: true, waits: 0 });
-        return { lookupsQueued: lookups.length, toEnroll: ids.length };
+        const recent = await db
+          .select({ leadId: dsql<string>`${jobs.payload}->>'leadId'` })
+          .from(jobs)
+          .where(and(eq(jobs.orgId, play.orgId), eq(jobs.type, "lead.enrich"), inArray(dsql`${jobs.payload}->>'leadId'`, lookups.map((l) => l.id)), dsql`(${jobs.status} IN ('queued', 'running') OR ${jobs.createdAt} > now() - interval '1 hour')`));
+        const lookedUp = new Set(recent.map((r) => r.leadId));
+        let queuedNow = 0;
+        for (const l of lookups) {
+          if (lookedUp.has(l.id)) continue;
+          await enqueue(db, "lead.enrich", { leadId: l.id }, { orgId: play.orgId });
+          queuedNow++;
+        }
+        await later(0);
+        return { lookupsQueued: queuedNow, lookupsAlreadyUnderWay: lookups.length - queuedNow, toEnroll: ids.length };
       }
     } else {
       const waits = Number(job.payload.waits) || 0;
@@ -1181,7 +1212,7 @@ export const handlers: Record<string, JobHandler> = {
         .where(and(eq(jobs.orgId, play.orgId), eq(jobs.type, "lead.enrich"), inArray(jobs.status, ["queued", "running"]), inArray(dsql`${jobs.payload}->>'leadId'`, ids)));
       // Still looking: come back, at most ten times (twenty minutes), then enrol whoever is ready.
       if (Number(open) > 0 && waits < 10) {
-        await later({ lookedUp: true, waits: waits + 1 });
+        await later(waits + 1);
         return { waitingForLookups: Number(open) };
       }
     }

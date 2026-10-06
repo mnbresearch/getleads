@@ -4,7 +4,7 @@ import { apiFetch, expectLists, expectShape, ProspexError } from "../lib/api";
 import { useMe } from "../lib/me";
 import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { plural } from "../lib/plural";
-import { clean, isForbidden, isMissingRoute, isQuota, messageOf, runFailed, runSentence, type PlayOut, type PlayRun, type PlayTypeInfo } from "../lib/plays";
+import { clean, isForbidden, isMissingRoute, isQuota, messageOf, runFailed, runIdOf, runSentence, type PlayOut, type PlayRun, type PlayTypeInfo } from "../lib/plays";
 import { PlanFlow } from "../components/plays/PlanFlow";
 import { PlayCard, type RunProblem } from "../components/plays/PlayCard";
 import { PlayForm } from "../components/plays/PlayForm";
@@ -19,6 +19,13 @@ const SUBTITLE = "Find the people who need you this week - with the proof.";
 /** How often a started run is checked, and for how long, before the page stops waiting. */
 const POLL_MS = 15_000;
 const POLL_FOR_MS = 5 * 60_000;
+/**
+ * After that, only while the server itself still says the play is running: a slower check,
+ * so the card does not sit on "Running" for ever, up to a little past the point where the
+ * server stops counting a run as in progress.
+ */
+const SLOW_POLL_MS = 60_000;
+const SLOW_POLL_FOR_MS = 16 * 60_000;
 
 type Named = { id: string; name: string };
 
@@ -48,6 +55,8 @@ export function PlaysPage() {
   const [lists, setLists] = useState<Named[]>([]);
   const [campaigns, setCampaigns] = useState<Named[]>([]);
   const [pickErr, setPickErr] = useState<string | null>(null);
+  // Offered in the form only when the workspace works for clients (as on Find leads).
+  const [clients, setClients] = useState<(Named & { status?: string })[]>([]);
 
   const [homeTab, setHomeTab] = useState<Tab | null>(null);
   const [showPlan, setShowPlan] = useState(false);
@@ -72,6 +81,7 @@ export function PlaysPage() {
   const playsSeq = useRef(0);
   const firstLoad = useRef(true);
   const refreshTimer = useRef<number | null>(null);
+  const reported = useRef<Set<string>>(new Set());
   useEffect(() => {
     alive.current = true;
     return () => {
@@ -121,6 +131,7 @@ export function PlaysPage() {
       apiFetch<{ lists: Named[] }>("GET", "/v1/leads/lists/all").then((r) => setLists(expectLists(r, "lists").lists)).catch((e) => { fails.push(`lists (${messageOf(e)})`); }),
       apiFetch<{ campaigns: Named[] }>("GET", "/v1/campaigns").then((r) => setCampaigns(expectLists(r, "campaigns").campaigns)).catch((e) => { fails.push(`campaigns (${messageOf(e)})`); }),
     ]).then(() => { if (alive.current) setPickErr(fails.length ? `Couldn't load ${fails.join(", ")}.` : null); });
+    apiFetch<{ clients: (Named & { status?: string })[] }>("GET", "/v1/clients").then((r) => { if (alive.current) setClients(expectLists(r, "clients").clients); }).catch(() => {});
   }, []);
 
   const loadAll = useCallback(() => { loadTypes(); void loadPlays(); loadPickers(); }, [loadTypes, loadPlays, loadPickers]);
@@ -159,27 +170,38 @@ export function PlaysPage() {
     if (timers.current[id]) clearTimeout(timers.current[id]);
     delete timers.current[id];
     setRunning((s) => { const n = new Set(s); n.delete(id); return n; });
+    // What this page last heard from the server about "running" is now out of date; the
+    // re-read that follows every stop says whether a run is (still) going.
+    setPlays((list) => (list.some((p) => p.id === id && p.running) ? list.map((p) => (p.id === id ? { ...p, running: false } : p)) : list));
   }, []);
 
-  const finished = useCallback((play: PlayOut, run: Pick<PlayRun, "status" | "found" | "added" | "duplicates" | "note" | "error">) => {
+  const finished = useCallback((play: PlayOut, run: Pick<PlayRun, "status" | "found" | "added" | "duplicates" | "note" | "error"> & { id?: string }) => {
     stopWatching(play.id);
+    // One announcement per run, however many times it is seen to have ended.
+    if (run.id) {
+      if (reported.current.has(run.id)) return;
+      reported.current.add(run.id);
+    }
     toast(`${clean(play.name, 80)}: ${runSentence(run)}`, runFailed(run.status) ? "err" : "ok");
     void loadPlays();
     setEpoch((e) => e + 1);
   }, [loadPlays, stopWatching, toast]);
 
   /** Check on a started run every 15 seconds, for up to 5 minutes, and report how it ended. */
-  const watch = useCallback((play: PlayOut, runId: string | null) => {
+  const watch = useCallback((play: PlayOut, runId: string | null, announce = true) => {
     const started = Date.now();
     let watched = runId;
+    let slow = false;
     if (timers.current[play.id]) clearTimeout(timers.current[play.id]);
     setRunning((s) => new Set(s).add(play.id));
     const tick = async () => {
       if (!alive.current) return;
       let done: PlayRun | null = null;
+      let serverSays: boolean | undefined;
       try {
         const r = await apiFetch<{ play: PlayOut; runs: PlayRun[] }>("GET", `/v1/plays/${encodeURIComponent(play.id)}`);
         const runs = Array.isArray(r.runs) ? r.runs : [];
+        serverSays = typeof r.play?.running === "boolean" ? r.play.running : undefined;
         // With no run id (a schedule or a teammate started it), the run in progress is the
         // one to follow; if it already ended before this check, the newest run is it.
         if (!watched) watched = runs.find((x) => x.status === "running")?.id ?? null;
@@ -190,16 +212,31 @@ export function PlaysPage() {
       }
       if (!alive.current) return;
       if (done) { finished(play, done); return; }
-      if (Date.now() - started >= POLL_FOR_MS) {
-        stopWatching(play.id);
-        toast(`${clean(play.name, 80)} is still running. Its result will be on the play when it finishes - check back in a few minutes.`);
-        void loadPlays();
+      // Nothing to follow and the server says nothing is running: there is no result to wait for.
+      if (!watched && serverSays === false) { stopWatching(play.id); void loadPlays(); return; }
+      const waited = Date.now() - started;
+      if (waited >= POLL_FOR_MS) {
+        if (!slow) {
+          slow = true;
+          if (announce) toast(`${clean(play.name, 80)} is still running. Its result will appear on the play when it finishes.`);
+        }
+        // Keep looking, slowly, only while the server confirms it is still going.
+        if (serverSays !== true || waited >= SLOW_POLL_FOR_MS) { stopWatching(play.id); void loadPlays(); return; }
+        timers.current[play.id] = window.setTimeout(tick, SLOW_POLL_MS);
         return;
       }
       timers.current[play.id] = window.setTimeout(tick, POLL_MS);
     };
     timers.current[play.id] = window.setTimeout(tick, POLL_MS);
   }, [finished, loadPlays, stopWatching, toast]);
+
+  // A run started before this page was opened (or reloaded) is picked up again: the card says
+  // "Running" and the result arrives the same way as for a run started here.
+  const watchNow = useRef(watch);
+  watchNow.current = watch;
+  useEffect(() => {
+    for (const p of plays) if (p.running === true && !timers.current[p.id]) watchNow.current(p, null, false);
+  }, [plays]);
 
   const runNow = useCallback(async (play: PlayOut): Promise<boolean> => {
     setProblems((m) => { const n = { ...m }; delete n[play.id]; return n; });
@@ -218,7 +255,7 @@ export function PlaysPage() {
       if (e instanceof ProspexError && e.status === 409) {
         // Already running (a schedule, or a teammate): not a failure, so wait for that run.
         toast(said);
-        watch(play, null);
+        watch(play, runIdOf(e));
         return true;
       }
       stopWatching(play.id);
@@ -266,7 +303,8 @@ export function PlaysPage() {
 
   const closeForm = () => { setFormOpen(false); setJustCreated(null); };
   const campaignNames = useMemo(() => new Map(campaigns.map((c) => [c.id, c.name])), [campaigns]);
-  const pickers = { icps, lists, campaigns, error: pickErr, retry: loadPickers };
+  const pickers = { icps, lists, campaigns, clients: clients.filter((c) => c.status !== "archived"), error: pickErr, retry: loadPickers };
+  const clientNames = useMemo(() => new Map(clients.map((c) => [c.id, c.name])), [clients]);
   const anyDialog = formOpen || !!editing || !!uploadFor;
   const website = clean(me?.org?.settings?.website ?? me?.org?.settings?.domain ?? "", 200);
 
@@ -294,7 +332,7 @@ export function PlaysPage() {
       {Toast}
       {forbidden && (
         <div className="mb-3 flex flex-wrap items-start gap-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert" data-testid="plays-forbidden">
-          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">You can look at plays here but that change was not allowed: {forbidden}</span>
+          <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">That change was not allowed: {forbidden}</span>
           <button type="button" className="shrink-0 underline" onClick={() => setForbidden(null)}>Dismiss</button>
         </div>
       )}
@@ -326,6 +364,8 @@ export function PlaysPage() {
                   types={types}
                   defaultWebsite={website}
                   runningIds={running}
+                  pendingOf={(id) => plays.find((p) => p.id === id)?.counts?.pending ?? 0}
+                  onReview={(p) => go("review", { playId: p.id })}
                   onCreated={onCreated}
                   onRun={runNow}
                   onForbidden={onForbidden}
@@ -344,7 +384,8 @@ export function PlaysPage() {
                         play={p}
                         types={types}
                         campaignName={p.campaignId ? campaignNames.get(p.campaignId) : undefined}
-                        running={running.has(p.id)}
+                        clientName={p.clientId ? clientNames.get(p.clientId) : undefined}
+                        running={running.has(p.id) || p.running === true}
                         problem={problems[p.id]}
                         toggling={toggling.has(p.id)}
                         onRun={() => { void runNow(p); }}
@@ -373,7 +414,7 @@ export function PlaysPage() {
             <p className="mt-1 text-sm text-ink-400">
               {justCreated.type === "engagers_upload"
                 ? "It is fed by you: upload the people who engaged and they will land in Review with what they did as the reason."
-                : "Run it now to fill your review queue. A run counts as one search on your plan, and nobody is contacted until you approve them."}
+                : "Run it now to fill your review queue. A run counts as one search on your plan, and it contacts nobody."}
             </p>
             <div className="mt-4 flex flex-wrap gap-2">
               {justCreated.type === "engagers_upload"

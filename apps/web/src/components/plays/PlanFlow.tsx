@@ -45,11 +45,14 @@ function blockedByEdits(p: PlanPlay): string | null {
  * created, and nothing runs until Run is pressed.
  */
 export function PlanFlow({
-  types, defaultWebsite, runningIds, onCreated, onRun, onForbidden, onDone, onClose, onManual,
+  types, defaultWebsite, runningIds, pendingOf, onReview, onCreated, onRun, onForbidden, onDone, onClose, onManual,
 }: {
   types: PlayTypeInfo[] | null;
   defaultWebsite?: string;
   runningIds: Set<string>;
+  /** How many people a created play has waiting, so the card can offer "Review N". */
+  pendingOf: (playId: string) => number;
+  onReview: (play: PlayOut) => void;
   /** A play was created: the page adds it to its list. */
   onCreated: (play: PlayOut) => void;
   /** Resolves true when the run started (or already finished), false when it could not start. */
@@ -243,7 +246,9 @@ export function PlanFlow({
                             runningIds.has(made.id)
                               ? <span className="text-sm text-ink-300" role="status">Run started - the people it finds will appear in Review.</span>
                               : ran[i] === "started"
-                                ? <span className="text-sm text-ink-300" role="status">The run has finished. Its result is on the play, under Plays.</span>
+                                ? (pendingOf(made.id) > 0
+                                  ? <button type="button" className="btn-primary py-1.5" onClick={() => onReview(made)}>Review {plural(pendingOf(made.id), "person", "people")}</button>
+                                  : <span className="text-sm text-ink-300" role="status">The run has finished with nobody new to review. What it said is on the play, under Your plays.</span>)
                                 : <button type="button" className="btn-primary py-1.5" disabled={ran[i] === "starting"} onClick={() => run(i, made)}>{ran[i] === "starting" ? "Starting…" : "Run now"}</button>
                           )}
                         </>
@@ -256,7 +261,7 @@ export function PlanFlow({
               })}
             </ul>
           )}
-          {createdCount > 0 && <p className="text-xs text-ink-400">Created plays run when you press Run. To put one on a schedule, open it under Plays and choose how often.</p>}
+          {createdCount > 0 && <p className="text-xs text-ink-400">Created plays run when you press Run. To put one on a schedule, press Edit on the play and choose how often.</p>}
         </div>
       )}
     </div>

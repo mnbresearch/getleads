@@ -36,6 +36,8 @@ export interface PlayOut {
   createdAt: string;
   updatedAt: string;
   counts: PlayCounts;
+  /** A run of this play is in progress. Absent on a server that does not say. */
+  running?: boolean;
 }
 
 export interface PlayRun {
@@ -122,6 +124,8 @@ export interface DecideResult {
   enrolled: number;
   queuedForEmail: number;
   notApplied: { id: string; reason: string }[];
+  /** The ids whose decision was applied. Absent on a server that only sends the counts. */
+  applied?: string[];
   stopped?: { reason: "quota" | "error" | string; message: string };
 }
 
@@ -412,6 +416,7 @@ export function normalizeDecide(raw: unknown): DecideResult {
     enrolled: n(r.enrolled),
     queuedForEmail: n(r.queuedForEmail),
     notApplied: Array.isArray(r.notApplied) ? r.notApplied.filter((x) => x && typeof x.id === "string").map((x) => ({ id: x.id, reason: clean(x.reason, 300) || "The server did not apply this one." })) : [],
+    ...(Array.isArray(r.applied) ? { applied: r.applied.filter((x): x is string => typeof x === "string") } : {}),
     ...(stopped ? { stopped } : {}),
   };
 }
@@ -427,6 +432,12 @@ export const isQuota = (e: unknown) => e instanceof ProspexError && (e.status ==
 /** This API has no such route: an older server that does not have Plays yet. */
 export const isMissingRoute = (e: unknown) => e instanceof ProspexError && (e.status === 404 || e.status === 405);
 export const isForbidden = (e: unknown) => e instanceof ProspexError && e.status === 403;
+/** The run a "this play is already running" answer points at, when the server names it. */
+export function runIdOf(e: unknown): string | null {
+  const body = e instanceof ProspexError ? (e.details as { error?: { details?: { runId?: unknown }; runId?: unknown } } | null) : null;
+  const id = body?.error?.details?.runId ?? body?.error?.runId ?? (body as { runId?: unknown } | null)?.runId;
+  return typeof id === "string" && id ? id : null;
+}
 export const messageOf = (e: unknown) => clean((e as { message?: unknown } | null)?.message, 400) || "Something went wrong.";
 
 export const pct = (n: number | null | undefined) => (n === null || n === undefined || !Number.isFinite(n) ? "-" : `${Math.round(n * 100)}%`);

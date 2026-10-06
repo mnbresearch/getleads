@@ -32,6 +32,7 @@ import {
   playPerformance,
   playTypes,
   runInProgress,
+  runningPlays,
 } from "../services/plays.js";
 import { mapImportRow } from "./leads.js";
 
@@ -191,8 +192,9 @@ playRoutes.get("/", async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const rows = await db.select().from(plays).where(eq(plays.orgId, oid)).orderBy(desc(plays.createdAt)).limit(500);
-  const counts = await countsByPlay(oid, rows.map((r) => r.id));
-  return c.json({ plays: rows.map((p) => playOut(p, counts.get(p.id))) });
+  const ids = rows.map((r) => r.id);
+  const [counts, running] = await Promise.all([countsByPlay(oid, ids), runningPlays(oid, ids)]);
+  return c.json({ plays: rows.map((p) => playOut(p, counts.get(p.id), running.has(p.id))) });
 });
 
 playRoutes.post("/", zValidator("json", playCreateInput), async (c) => {
@@ -231,7 +233,7 @@ playRoutes.get("/:id", async (c) => {
   const { db } = getDb();
   const runs = await db.select().from(playRuns).where(and(eq(playRuns.playId, play.id), eq(playRuns.orgId, play.orgId))).orderBy(desc(playRuns.startedAt)).limit(10);
   const counts = await countsByPlay(play.orgId, [play.id]);
-  return c.json({ play: playOut(play, counts.get(play.id)), runs });
+  return c.json({ play: playOut(play, counts.get(play.id), !!(await runInProgress(play))), runs });
 });
 
 playRoutes.patch("/:id", zValidator("json", playPatchInput), async (c) => {
@@ -264,7 +266,7 @@ playRoutes.patch("/:id", zValidator("json", playPatchInput), async (c) => {
   if (!row) throw notFound("Play");
   if (b.autoApprove !== undefined && b.autoApprove !== play.autoApprove) await audit(c, "play.auto_approve_changed", { targetType: "play", targetId: row.id, data: { autoApprove: row.autoApprove, minScore: row.minScore } });
   const counts = await countsByPlay(oid, [row.id]);
-  return c.json({ play: playOut(row, counts.get(row.id)) });
+  return c.json({ play: playOut(row, counts.get(row.id), !!(await runInProgress(row))) });
 });
 
 /** Delete a play and what is waiting in it. Leads it already created stay. */
@@ -282,7 +284,9 @@ playRoutes.post("/:id/run", rateLimit({ perMinute: 12, name: "plays-run" }), asy
   const play = await ownPlay(c);
   if (play.type === "engagers_upload") throw badRequest("This play is fed by uploads - add people with Upload.");
   const { db } = getDb();
-  if (await runInProgress(play)) throw new ApiError(409, "This play is already running. Its result will appear here when it finishes.", "already_running");
+  const going = await runInProgress(play);
+  // `runId` lets a client that lost track of the run it started pick it up again.
+  if (going) throw new ApiError(409, "This play is already running. Its result will appear here when it finishes.", "already_running", { runId: going });
   // Before the charge and before the run row: "try again" must leave nothing behind.
   await guardJobCapacity(db, oid, "play.run");
   await consume(db, oid, "searches", 1);
@@ -363,19 +367,24 @@ playRoutes.post("/:id/upload", rateLimit({ perMinute: 12, name: "plays-upload" }
       else rejected.push({ row: i + 1, reason: m.reason });
     });
   } else {
-    // No list: the post itself, when it is a LinkedIn post anyone can open without signing in.
-    if (!b.postUrl || !normalizeLinkedinPostUrl(b.postUrl)) throw badRequest("Add the people as a list or a CSV, or give the link of a public LinkedIn post.");
-    let post: Awaited<ReturnType<ReturnType<typeof playEngines>["linkedinPostEngagers"]>>;
-    try {
-      post = await playEngines().linkedinPostEngagers(b.postUrl);
-    } catch (e) {
-      console.warn(`[plays] could not read a post for play ${play.id}: ${(e as Error)?.name ?? "Error"}`);
-      post = { people: [], publicPage: false };
+    // No list: the post itself. Only a LinkedIn post anyone can open without signing in can be
+    // read; for any other link the answer says so, as a run that could not look.
+    if (!b.postUrl) throw badRequest("Add the people as a list or a CSV, or give the link of a public LinkedIn post.");
+    if (!normalizeLinkedinPostUrl(b.postUrl)) {
+      blockedNote = "Who engaged can only be read from the link of a public LinkedIn post, and this link is not one. Paste the profile links or upload a CSV instead.";
+    } else {
+      let post: Awaited<ReturnType<ReturnType<typeof playEngines>["linkedinPostEngagers"]>>;
+      try {
+        post = await playEngines().linkedinPostEngagers(b.postUrl);
+      } catch (e) {
+        console.warn(`[plays] could not read a post for play ${play.id}: ${(e as Error)?.name ?? "Error"}`);
+        post = { people: [], publicPage: false };
+      }
+      if (post.refused) blockedNote = customerText(post.refused, 300);
+      else if (!post.publicPage) blockedNote = "LinkedIn did not show that post without signing in, so nobody could be read from it. Paste the profile links or upload a CSV instead.";
+      else if (!post.people.length) blockedNote = "That post is public, but it did not show who engaged with it. Paste the profile links or upload a CSV instead.";
+      post.people.slice(0, UPLOAD_MAX_ROWS).forEach((p, i) => rows.push({ row: i + 1, data: { fullName: p.fullName, firstName: p.firstName, lastName: p.lastName, title: p.title, companyName: p.companyName, linkedinUrl: p.linkedinUrl, location: p.location } }));
     }
-    if (post.refused) throw badRequest(customerText(post.refused, 300));
-    if (!post.publicPage) blockedNote = "LinkedIn did not show that post without signing in, so nobody could be read from it. Paste the profile links or upload a CSV instead.";
-    else if (!post.people.length) blockedNote = "That post is public, but it did not show who engaged with it. Paste the profile links or upload a CSV instead.";
-    post.people.slice(0, UPLOAD_MAX_ROWS).forEach((p, i) => rows.push({ row: i + 1, data: { fullName: p.fullName, firstName: p.firstName, lastName: p.lastName, title: p.title, companyName: p.companyName, linkedinUrl: p.linkedinUrl, location: p.location } }));
   }
 
   const r = await ingestEngagers(play, { engagement: b.engagement, postUrl: b.postUrl, postTitle: b.postTitle, postAuthor: b.postAuthor, rows, rejected, blockedNote });

@@ -188,16 +188,29 @@ export type PlayCreateInput = {
   [T in PlayType]: PlayOptions & { name: string; type: T } & ({} extends PlayConfigByType[T] ? { config?: PlayConfigByType[T] } : { config: PlayConfigByType[T] });
 }[PlayType];
 
-/** Every field optional; at least one is needed. `config` must fit the play's type. */
-export interface PlayUpdateInput extends PlayOptions {
+/**
+ * Every field optional; at least one is needed.
+ *  - `type` cannot change: sending a different one is refused (400). Create a new play instead.
+ *  - `config` replaces the whole config (it is not merged) and must fit the play's type.
+ *  - `null` clears `icpId`, `listId`, `campaignId` or `clientId`; `runEveryHours: null` stops the schedule.
+ */
+export interface PlayUpdateInput extends Omit<PlayOptions, "icpId" | "listId" | "campaignId" | "clientId"> {
   name?: string;
   type?: PlayType;
   config?: PlayConfig | Record<string, unknown>;
+  icpId?: string | null;
+  listId?: string | null;
+  campaignId?: string | null;
+  clientId?: string | null;
 }
 
 export interface PlayLastResult {
-  /** done | failed | blocked. `blocked` means the play could not look anywhere - not that it found nobody. */
-  status: string;
+  /**
+   * `blocked` means the play could not look anywhere - not that it found nobody. `skipped` is a
+   * scheduled run that did not happen (the plan's search allowance was spent, or the play was
+   * paused first); `note` says which.
+   */
+  status: "done" | "failed" | "blocked" | "skipped" | (string & {});
   found: number;
   added: number;
   duplicates: number;
@@ -226,6 +239,8 @@ export interface Play {
   updatedAt: string;
   /** Candidates of this play by decision. */
   counts: { pending: number; approved: number; skipped: number };
+  /** True while a run of this play is under way (started less than 15 minutes ago and not finished). */
+  running: boolean;
 }
 
 export interface PlayRun {
@@ -286,8 +301,9 @@ export interface PlayCandidate {
 export interface PlayTypeField {
   key: string;
   label: string;
+  /** `select`: choose any number of `options` and send their values as an array (one value only when `max` is 1). */
   kind: "tags" | "text" | "number" | "competitors" | "select";
-  options?: unknown[];
+  options?: { value: string; label: string }[];
   required?: boolean;
   max?: number;
   placeholder?: string;
@@ -368,6 +384,8 @@ export interface DecideResult {
   queuedForEmail: number;
   /** Decisions that changed nothing (not pending any more, or not this workspace's). */
   notApplied: { id: string; reason: string }[];
+  /** The ids whose decision was applied, in the order they were sent. An id is here or in `notApplied`, never both. */
+  applied: string[];
   /** Present when the batch stopped early; the remaining candidates are still pending. */
   stopped?: { reason: "quota" | "error"; message: string };
 }
@@ -393,9 +411,13 @@ export interface PlayUploadInput {
   postUrl?: string;
   postTitle?: string;
   postAuthor?: string;
-  /** Up to 2,000 rows. Give `people` or `csv`, not both. */
+  /**
+   * Up to 2,000 rows. Give exactly one of `people` or `csv` - or neither, when `postUrl` is
+   * given: Scout then reads the public post itself, and the result's `run` is `blocked` with a
+   * plain `note` when it could not. An upload does not use a search unit.
+   */
   people?: PlayEngagerRow[];
-  /** CSV text with a header row. Give `people` or `csv`, not both. */
+  /** CSV text with a header row. */
   csv?: string;
 }
 
@@ -618,7 +640,11 @@ export class Prospex {
     update: (id: string, patch: PlayUpdateInput) => this.request<{ play: Play }>("PATCH", `/v1/plays/${idSegment(id, "playId")}`, patch),
     /** Deletes the play and its candidates. Leads already created from it stay. */
     delete: (id: string) => this.request<{ ok: true }>("DELETE", `/v1/plays/${idSegment(id, "playId")}`),
-    /** Run now. Uses one search unit. Puts what it finds in the review queue; creates no leads. */
+    /**
+     * Run now. Uses one search unit. Puts what it finds in the review queue; creates no leads.
+     * While a run of the play is under way this is refused with 409 `already_running`, and the
+     * error's `details.runId` is the run that is going.
+     */
     run: (id: string) => this.request<PlayRunStarted>("POST", `/v1/plays/${idSegment(id, "playId")}/run`),
     /** The last 20 runs of a play. */
     runs: (id: string) => this.request<{ runs: PlayRun[] }>("GET", `/v1/plays/${idSegment(id, "playId")}/runs`),

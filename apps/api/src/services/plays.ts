@@ -1,5 +1,5 @@
 import { and, campaigns, companies, consume, currentPeriod, desc, enqueue, eq, getDb, icps, inArray, leads, listLeads, lists, organizations, pixels, PLAY_TYPES, playCandidates, playRuns, plays, sql, tasks, withStatementTimeout, type Organization, type Play, type PlayCandidate, type PlayRun, type PlayType } from "@prospex/db";
-import { hasAi, redact, scoreLeadRules, wilsonInterval, type AiProvider, type IcpCriteria } from "@prospex/core";
+import { hasAi, pMap, redact, scoreLeadRules, wilsonInterval, type AiProvider, type IcpCriteria } from "@prospex/core";
 import { z, ZodError, type ZodTypeAny } from "zod";
 import { env } from "../env.js";
 import { aiForOrg } from "../lib/ai.js";
@@ -39,6 +39,10 @@ export const RUN_DEADLINE_INLINE_MS = 40_000;
 export const PEOPLE_SEARCHES_PER_RUN = 15;
 /** People kept per company. */
 const PEOPLE_PER_COMPANY = 3;
+/** Companies searched for people at the same time. */
+const PEOPLE_SEARCH_CONCURRENCY = 3;
+/** When a run will also look for people, the share of its time the source engine may use; the rest is kept for the people. */
+const ENGINE_SHARE_WITH_PEOPLE = 0.6;
 /** A run of a play that is still "running" blocks another one for this long. */
 export const RUN_BUSY_MS = 15 * 60_000;
 /** Plays the scheduler starts per tick. */
@@ -321,7 +325,7 @@ export interface PlayCounts {
 }
 const noCounts = (): PlayCounts => ({ pending: 0, approved: 0, skipped: 0 });
 
-export function playOut(p: Play, counts: PlayCounts = noCounts()) {
+export function playOut(p: Play, counts: PlayCounts = noCounts(), running = false) {
   const last = p.lastResult as Record<string, unknown> | null;
   return {
     id: p.id,
@@ -343,7 +347,22 @@ export function playOut(p: Play, counts: PlayCounts = noCounts()) {
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
     counts,
+    /** A run of this play is under way (started less than fifteen minutes ago and not finished). */
+    running,
   };
+}
+
+/** Of these plays, the ones with a run under way. One query. Read-only. */
+export async function runningPlays(orgId: string, playIds: string[]): Promise<Set<string>> {
+  const out = new Set<string>();
+  if (!playIds.length) return out;
+  const { db } = getDb();
+  const rows = await db
+    .selectDistinct({ playId: playRuns.playId })
+    .from(playRuns)
+    .where(and(eq(playRuns.orgId, orgId), inArray(playRuns.playId, playIds), eq(playRuns.status, "running"), stillRunning));
+  for (const r of rows) out.add(r.playId);
+  return out;
 }
 
 /** Candidate counts by status for these plays of this workspace (one grouped query). */
@@ -438,19 +457,22 @@ type Normalised = Omit<CandidateValues, "orgId" | "playId" | "runId"> & { dedupe
 
 const KINDS = new Set(["person", "company", "post"]);
 
-/** The documented key rule, used when the engine gave none: profile > address > name at company > company > page. */
+/**
+ * The key rule, for the case core's `playDedupeKey` gave none: the same order and the same
+ * prefixes (li: profile, em: address, pn: person at company, co: company domain, cn: company
+ * name, ev: evidence page), so a key made here and one made there for the same finding agree
+ * wherever the plain rules do.
+ */
 function fallbackDedupeKey(f: { kind: string; linkedinUrl?: string | null; email?: string | null; fullName?: string | null; companyName?: string | null; companyDomain?: string | null; evidenceUrl?: string | null }): string {
-  const slug = f.linkedinUrl?.match(/linkedin\.com\/(?:in|pub)\/([^/?#]+)/i)?.[1];
-  if (f.kind === "person") {
-    if (slug) return `li:${slug}`;
-    if (f.linkedinUrl) return `url:${f.linkedinUrl}`;
-    if (f.email) return `em:${f.email}`;
-    const at = f.companyDomain ?? f.companyName;
-    if (f.fullName && at) return `nm:${f.fullName}@${at}`;
-    return "";
-  }
-  if (f.kind === "company") return f.companyDomain ? `co:${f.companyDomain}` : f.companyName ? `co:${f.companyName.replace(/[^\p{L}\p{N}]+/gu, " ").trim()}` : "";
-  return f.evidenceUrl ? `url:${f.evidenceUrl}` : "";
+  const slug = f.linkedinUrl?.match(/linkedin\.com\/in\/([^/?#]+)/i)?.[1];
+  if (slug) return `li:${slug}`;
+  if (f.email) return `em:${f.email}`;
+  const page = (f.evidenceUrl ?? "").replace(/^https?:\/\/(www\.)?/i, "").replace(/[#?].*$/, "").replace(/\/+$/, "");
+  if (f.kind === "post") return page ? `ev:${page}` : "";
+  const company = (f.companyName ?? "").replace(/[^\p{L}\p{N}]+/gu, "");
+  const person = f.kind === "person" ? (f.fullName ?? "").replace(/[^\p{L}\p{N}]+/gu, " ").trim() : "";
+  if (person) return f.companyDomain ? `pn:${person}@${f.companyDomain}` : company ? `pn:${person}@${company}` : page ? `ev:${page}#${person}` : "";
+  return f.companyDomain ? `co:${f.companyDomain}` : company ? `cn:${company}` : page ? `ev:${page}` : "";
 }
 
 /**
@@ -650,6 +672,8 @@ export interface DecideResult {
   enrolled: number;
   queuedForEmail: number;
   notApplied: { id: string; reason: string }[];
+  /** The ids whose decision was applied, in the order they were sent. */
+  applied: string[];
   stopped?: { reason: "quota" | "error"; message: string };
 }
 
@@ -728,7 +752,7 @@ export function decideCandidates(orgId: string, userId: string | null, decisions
 
 async function decideNow(orgId: string, userId: string | null, decisions: Decision[], opts: { enroll?: boolean }): Promise<DecideResult> {
   const { db } = getDb();
-  const out: DecideResult = { approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, notApplied: [] };
+  const out: DecideResult = { approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, notApplied: [], applied: [] };
   const ids = [...new Set(decisions.map((d) => d.id))];
   const before = new Map<string, { status: string }>();
   for (const part of chunked(ids, 500)) {
@@ -773,8 +797,10 @@ async function decideNow(orgId: string, userId: string | null, decisions: Decisi
         .set({ status: "skipped", skipReason: cleanText(d.skipReason, 200), decidedBy: userId, decidedAt: sql`now()` })
         .where(and(eq(playCandidates.id, d.id), eq(playCandidates.orgId, orgId), eq(playCandidates.status, "pending"), unclaimed))
         .returning({ id: playCandidates.id });
-      if (done.length) out.skipped++;
-      else out.notApplied.push({ id: d.id, reason: await whyNot(d.id) });
+      if (done.length) {
+        out.skipped++;
+        out.applied.push(d.id);
+      } else out.notApplied.push({ id: d.id, reason: await whyNot(d.id) });
       continue;
     }
     const [claimed] = await db
@@ -797,6 +823,7 @@ async function decideNow(orgId: string, userId: string | null, decisions: Decisi
     }
     if (r.result === "approved") {
       out.approved++;
+      out.applied.push(d.id);
       if (r.created) out.leadsCreated++;
       if (r.existing) out.leadsExisting++;
       if (r.task) out.tasksCreated++;
@@ -1028,7 +1055,7 @@ export function engineOptions(org: Pick<Organization, "id" | "plan" | "settings"
 
 const BLOCKED_DEFAULT = "Nothing could be looked at this time, so this is not a result about your market. Try again later.";
 
-function runNote(input: { found: number; counts: Record<FindingOutcome, number>; covered: number; autoApproved?: DecideResult | null; trace: PlayRunTrace; blocked: boolean }): string {
+function runNote(input: { found: number; counts: Record<FindingOutcome, number>; covered: number; autoApproved?: DecideResult | null; trace: PlayRunTrace; blocked: boolean; own?: string[] }): string {
   const { found, counts, trace } = input;
   const parts: string[] = [];
   if (input.blocked) parts.push(customerText(trace.blockedReason, 400) || BLOCKED_DEFAULT);
@@ -1045,6 +1072,7 @@ function runNote(input: { found: number; counts: Record<FindingOutcome, number>;
     if (auto.approved) parts.push(`${plural(auto.approved, "person was", "people were")} approved automatically.`);
     if (auto.stopped) parts.push(auto.stopped.message);
   }
+  for (const n of input.own ?? []) if (!parts.includes(n)) parts.push(n);
   const notes = (trace.notes ?? []).map((n) => customerText(n, 240)).filter(Boolean);
   for (const n of [...new Set(notes)].slice(0, 3)) if (!parts.includes(n)) parts.push(n);
   return parts.join(" ").slice(0, 1_500);
@@ -1114,6 +1142,18 @@ export async function runPlay(play: Play, runId: string, ctx: { log?: (m: string
 
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, play.orgId) });
   if (!org || org.status !== "active") return stop("organization not active", "This workspace is not active, so the play did not run.");
+  // Paused after the schedule queued this run: a paused play is never run by the schedule.
+  // (A run a person starts on a paused play is their own decision and goes ahead.) The run
+  // never started, so there is no run to show - the play says why, and the search is given back.
+  if (run.trigger === "schedule" && play.status !== "active") {
+    await db.delete(playRuns).where(and(eq(playRuns.id, run.id), eq(playRuns.orgId, play.orgId)));
+    await db
+      .update(plays)
+      .set({ lastResult: { status: "skipped", found: 0, added: 0, duplicates: 0, note: "Not run on schedule: the play was paused before its run started." } })
+      .where(and(eq(plays.id, play.id), eq(plays.orgId, play.orgId)));
+    await refund();
+    return { skipped: "paused" };
+  }
   if (play.type === "engagers_upload") return stop("upload play", "This play is fed by uploads - add people with Upload.");
   const cfg = PLAY_CONFIG[play.type].safeParse(play.config ?? {});
   if (!cfg.success) return stop("invalid settings", "This play's settings are no longer valid. Open it, check the fields and save it again.");
@@ -1124,13 +1164,18 @@ export async function runPlay(play: Play, runId: string, ctx: { log?: (m: string
     const icp = (icpRow?.criteria as IcpCriteria | undefined) ?? null;
     // With no worker (inline mode) the run happens inside a request that the platform cuts
     // off after about a minute, so it stops starting new work well before that.
-    const deadlineAt = Date.now() + (env.jobMode === "inline" ? RUN_DEADLINE_INLINE_MS : RUN_DEADLINE_MS);
-    const opts = engineOptions(org, deadlineAt);
+    const startedAt = Date.now();
+    const allowed = env.jobMode === "inline" ? RUN_DEADLINE_INLINE_MS : RUN_DEADLINE_MS;
+    const deadlineAt = startedAt + allowed;
+    // A play that names who to look for keeps part of its time for looking: a source engine
+    // that used all of it would leave every company without its people.
+    const willLookForPeople = (play.targetTitles ?? []).length > 0;
+    const opts = engineOptions(org, willLookForPeople ? startedAt + Math.floor(allowed * ENGINE_SHARE_WITH_PEOPLE) : deadlineAt);
 
     const outcome: EngineOutcome = await runPlayEngine({ type: play.type, config: cfg.data as Record<string, unknown>, org, opts });
     let trace = outcome.trace;
     // An engine's hard maximum is 200 findings; whatever comes back, no more than that is read.
-    const expanded = await expandCompanies(play, outcome.findings.slice(0, 200), opts, deadlineAt);
+    const expanded = await expandCompanies(play, outcome.findings.slice(0, 200), { ...opts, deadlineAt }, deadlineAt);
     trace = addTrace(trace, expanded.trace);
 
     const stored = await storeFindings(play, run.id, expanded.findings, icp);
@@ -1142,7 +1187,7 @@ export async function runPlay(play: Play, runId: string, ctx: { log?: (m: string
       found,
       added: stored.counts.added,
       duplicates: stored.counts.duplicate + expanded.covered,
-      note: runNote({ found, counts: stored.counts, covered: expanded.covered, autoApproved: auto, trace, blocked }),
+      note: runNote({ found, counts: stored.counts, covered: expanded.covered, autoApproved: auto, trace, blocked, own: expanded.notes }),
     };
     await finishRun(play, run.id, result);
     if (blocked) await refund();
@@ -1166,11 +1211,16 @@ export async function runPlay(play: Play, runId: string, ctx: { log?: (m: string
  * met before - one already waiting as a candidate, or whose people it already holds, is
  * not searched again (a reviewer can still press "Find people" on it). A company where
  * nobody was found stays a company candidate.
+ *
+ * One company can cost up to eleven web searches (its website, then one or two per title),
+ * so the searches run a few at a time and none is started after the run's deadline; the
+ * engine itself gives up on a search still in flight when the deadline passes. Whatever
+ * was not reached stays a company candidate, and the run's note says how many.
  */
-async function expandCompanies(play: Play, findings: ApiFinding[], opts: PlayEngineOptions, deadlineAt: number): Promise<{ findings: ApiFinding[]; covered: number; trace: Partial<PlayRunTrace> }> {
+async function expandCompanies(play: Play, findings: ApiFinding[], opts: PlayEngineOptions, deadlineAt: number): Promise<{ findings: ApiFinding[]; covered: number; trace: Partial<PlayRunTrace>; notes: string[] }> {
   const titles = (play.targetTitles ?? []).map((t) => cleanText(t, 100)).filter((t): t is string => !!t).slice(0, 10);
   const companiesFound = findings.map((f, index) => ({ index, n: f?.kind === "company" ? normaliseFinding(f) : null })).filter((x): x is { index: number; n: Normalised } => !!x.n);
-  if (!titles.length || !companiesFound.length) return { findings, covered: 0, trace: {} };
+  if (!titles.length || !companiesFound.length) return { findings, covered: 0, trace: {}, notes: [] };
   const { db } = getDb();
   const mine = and(eq(playCandidates.playId, play.id), eq(playCandidates.orgId, play.orgId));
   const waiting = new Set<string>();
@@ -1187,48 +1237,68 @@ async function expandCompanies(play: Play, findings: ApiFinding[], opts: PlayEng
     for (const r of await db.selectDistinct({ domain: playCandidates.companyDomain }).from(playCandidates).where(and(mine, eq(playCandidates.kind, "person"), inArray(playCandidates.companyDomain, part)))) if (r.domain) withPeople.add(`d:${r.domain}`);
   }
 
+  /* What becomes of each finding: kept as it is, already represented by its people, or searched. */
   const byIndex = new Map(companiesFound.map((c) => [c.index, c.n]));
-  const out: ApiFinding[] = [];
-  let trace: PlayRunTrace = { searches: 0, failedSearches: 0, pagesFetched: 0, pagesRefused: 0, aiCalls: 0, notes: [], blocked: false };
-  let covered = 0;
-  let budget = PEOPLE_SEARCHES_PER_RUN;
-  let failed = 0;
+  type Slot = { f: ApiFinding; search?: boolean; covered?: boolean; people?: ApiFinding[] };
+  const slots: Slot[] = [];
+  const meeting = new Set<string>();
+  let overBudget = 0;
   for (let i = 0; i < findings.length; i++) {
     const f = findings[i];
     const n = byIndex.get(i);
-    if (!n) {
-      out.push(f);
-      continue;
+    // Not a company; one already waiting in the queue; or the same company twice in this run: stored (or counted as a duplicate) as it is.
+    if (!n || waiting.has(n.dedupeKey) || meeting.has(n.dedupeKey)) slots.push({ f });
+    else if ((n.companyDomain && withPeople.has(`d:${n.companyDomain}`)) || (n.companyName && withPeople.has(`n:${n.companyName.toLowerCase()}`))) slots.push({ f, covered: true });
+    else {
+      meeting.add(n.dedupeKey);
+      if (meeting.size <= PEOPLE_SEARCHES_PER_RUN) slots.push({ f, search: true });
+      else {
+        overBudget++;
+        slots.push({ f });
+      }
     }
-    if (waiting.has(n.dedupeKey)) {
-      out.push(f); // stored as a duplicate
-      continue;
-    }
-    if ((n.companyDomain && withPeople.has(`d:${n.companyDomain}`)) || (n.companyName && withPeople.has(`n:${n.companyName.toLowerCase()}`))) {
-      covered++;
-      continue;
-    }
-    if (budget <= 0 || Date.now() >= deadlineAt) {
-      out.push(f);
-      continue;
-    }
-    budget--;
-    let people: ApiFinding[] = [];
-    try {
-      const r = await playEngines().findPeopleForFinding(f, { titles, limit: PEOPLE_PER_COMPANY }, opts);
-      trace = addTrace(trace, r?.trace);
-      people = Array.isArray(r?.people) ? r.people.slice(0, PEOPLE_PER_COMPANY) : [];
-    } catch {
-      failed++;
-    }
-    if (!people.length) {
-      out.push(f);
-      continue;
-    }
-    for (const p of people) out.push(inheritFrom(f, p));
   }
-  if (failed) trace.notes.push(`The people search could not run for ${plural(failed, "company", "companies")}; ${failed === 1 ? "it is" : "they are"} listed as ${failed === 1 ? "a company" : "companies"} instead.`);
-  return { findings: out, covered, trace };
+
+  /* The searches, a few at a time, none started after the deadline. One company's search can take several web searches. */
+  const toSearch = slots.filter((x) => x.search);
+  const traces: (Partial<PlayRunTrace> | undefined)[] = [];
+  let searched = 0;
+  let failed = 0;
+  await pMap(
+    toSearch,
+    async (slot) => {
+      if (Date.now() >= deadlineAt) return;
+      searched++;
+      try {
+        const r = await playEngines().findPeopleForFinding(slot.f, { titles, limit: PEOPLE_PER_COMPANY }, opts);
+        traces.push(r?.trace);
+        slot.people = Array.isArray(r?.people) ? r.people.slice(0, PEOPLE_PER_COMPANY) : [];
+        // "Could not search" is not "nobody works there": counted, and said in the run's note.
+        if (!slot.people.length && r?.trace?.blocked === true) failed++;
+      } catch {
+        failed++;
+      }
+    },
+    PEOPLE_SEARCH_CONCURRENCY,
+  );
+
+  const out: ApiFinding[] = [];
+  let covered = 0;
+  for (const slot of slots) {
+    if (slot.covered) covered++;
+    else if (slot.people?.length) for (const p of slot.people) out.push(inheritFrom(slot.f, p));
+    else out.push(slot.f);
+  }
+  let trace: PlayRunTrace = { searches: 0, failedSearches: 0, pagesFetched: 0, pagesRefused: 0, aiCalls: 0, notes: [], blocked: false };
+  for (const t of traces) trace = addTrace(trace, t);
+
+  // Said first, in the run's own words: what the reviewer will see in the queue and what to do about it.
+  const notes: string[] = [];
+  const unreached = toSearch.length - searched;
+  if (unreached > 0) notes.push(`The run reached its time limit, so people were looked for at ${searched} of ${plural(toSearch.length, "company", "companies")}. The other ${unreached === 1 ? "one is" : `${unreached} are`} listed as ${unreached === 1 ? "a company" : "companies"} - press Find people on ${unreached === 1 ? "it" : "any of them"}.`);
+  if (overBudget > 0) notes.push(`People were looked for at the first ${PEOPLE_SEARCHES_PER_RUN} new companies. The other ${overBudget === 1 ? "one is" : `${overBudget} are`} listed as ${overBudget === 1 ? "a company" : "companies"} - press Find people on ${overBudget === 1 ? "it" : "any of them"}.`);
+  if (failed) notes.push(`The people search could not run for ${plural(failed, "company", "companies")}; ${failed === 1 ? "it is" : "they are"} listed as ${failed === 1 ? "a company" : "companies"} instead.`);
+  return { findings: out, covered, trace, notes };
 }
 
 /** A person found at a company carries the company's reason and proof - never their own invented one. */
@@ -1667,13 +1737,17 @@ export async function closeStaleRuns(): Promise<number> {
   return stale.length;
 }
 
-/** Is a run of this play still going (started less than `RUN_BUSY_MS` ago and not finished)? */
-export async function runInProgress(play: Pick<Play, "id" | "orgId">): Promise<boolean> {
+/** Started recently enough to still count as under way. */
+const stillRunning = sql`${playRuns.startedAt} > now() - ${sql.raw(`interval '${Math.floor(RUN_BUSY_MS / 1000)} seconds'`)}`;
+
+/** The run of this play that is still going (started less than `RUN_BUSY_MS` ago and not finished), or null. */
+export async function runInProgress(play: Pick<Play, "id" | "orgId">): Promise<string | null> {
   const { db } = getDb();
   const [row] = await db
     .select({ id: playRuns.id })
     .from(playRuns)
-    .where(and(eq(playRuns.playId, play.id), eq(playRuns.orgId, play.orgId), eq(playRuns.status, "running"), sql`${playRuns.startedAt} > now() - ${sql.raw(`interval '${Math.floor(RUN_BUSY_MS / 1000)} seconds'`)}`))
+    .where(and(eq(playRuns.playId, play.id), eq(playRuns.orgId, play.orgId), eq(playRuns.status, "running"), stillRunning))
+    .orderBy(desc(playRuns.startedAt))
     .limit(1);
-  return !!row;
+  return row?.id ?? null;
 }

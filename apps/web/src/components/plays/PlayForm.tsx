@@ -8,7 +8,7 @@ import {
 } from "../../lib/plays";
 import { plural } from "../../lib/plural";
 
-export interface Pickers { icps: { id: string; name: string }[]; lists: { id: string; name: string }[]; campaigns: { id: string; name: string }[]; error: string | null; retry: () => void }
+export interface Pickers { icps: { id: string; name: string }[]; lists: { id: string; name: string }[]; campaigns: { id: string; name: string }[]; clients: { id: string; name: string }[]; error: string | null; retry: () => void }
 
 const FINDS: Record<string, string> = { people: "Finds people", companies: "Finds companies", conversations: "Finds conversations" };
 
@@ -136,6 +136,7 @@ export function PlayForm({
   const [icpId, setIcpId] = useState(initial?.icpId ?? "");
   const [listId, setListId] = useState(initial?.listId ?? "");
   const [campaignId, setCampaignId] = useState(initial?.campaignId ?? "");
+  const [clientId, setClientId] = useState(initial?.clientId ?? "");
   const [every, setEvery] = useState<number | null>(initial?.runEveryHours ?? null);
   const [autoApprove, setAutoApprove] = useState(initial?.autoApprove ?? false);
   const [minScore, setMinScore] = useState<string>(String(initial?.minScore ?? 70));
@@ -200,6 +201,10 @@ export function PlayForm({
     : numberErr ? `${numberErr.label} must be a number${numberErr.max !== undefined ? ` from 0 to ${numberErr.max}` : ""}.`
     : autoApprove && (!Number.isInteger(scoreNum) || scoreNum < 0 || scoreNum > 100) ? "The minimum score must be a whole number from 0 to 100."
     : null;
+  // Like Find leads: offered only to a workspace that works for clients. A play already
+  // delivering to a client this list does not show (archived since) keeps it, named as such.
+  const showClient = pickers.clients.length > 0;
+  const clientMissing = !!clientId && !pickers.clients.some((c) => c.id === clientId);
   const schedules = SCHEDULES.some((s) => s.value === every) ? SCHEDULES : [...SCHEDULES, { value: every, label: `Every ${plural(every ?? 0, "hour")}` }];
 
   const save = async () => {
@@ -223,8 +228,10 @@ export function PlayForm({
         runEveryHours: upload ? null : every,
       };
       // A picker left on "none" is sent only when it clears something the play already had.
-      const ref = (key: "icpId" | "listId" | "campaignId", v: string) => (v ? { [key]: v } : initial?.[key] ? { [key]: null } : {});
-      const body = { ...shared, ...ref("icpId", icpId), ...ref("listId", listId), ...ref("campaignId", campaignId) };
+      const ref = (key: "icpId" | "listId" | "campaignId" | "clientId", v: string) => (v ? { [key]: v } : initial?.[key] ? { [key]: null } : {});
+      // The client is only sent when its picker was on screen (or to keep what is saved).
+      const client = showClient ? ref("clientId", clientId) : {};
+      const body = { ...shared, ...ref("icpId", icpId), ...ref("listId", listId), ...ref("campaignId", campaignId), ...client };
       const r = initial
         ? await apiFetch<{ play: PlayOut }>("PATCH", `/v1/plays/${encodeURIComponent(initial.id)}`, body)
         : await apiFetch<{ play: PlayOut }>("POST", "/v1/plays", { ...body, type });
@@ -270,6 +277,17 @@ export function PlayForm({
         <select id="play-campaign" className="input" value={campaignId} onChange={(e) => setCampaignId(e.target.value)}><option value="">No campaign</option>{pickers.campaigns.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}</select>
         <p className="mt-1 text-xs text-ink-400">Nobody is added on their own. When you approve, you choose whether they join it.</p>
       </div>
+      {showClient && (
+        <div>
+          <label className="label" htmlFor="play-client">Deliver approved people to a client</label>
+          <select id="play-client" className="input" value={clientId} onChange={(e) => setClientId(e.target.value)}>
+            <option value="">No client (pool)</option>
+            {clientMissing && <option value={clientId}>The client it delivers to now</option>}
+            {pickers.clients.map((c) => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <p className="mt-1 text-xs text-ink-400">People you approve from this play are assigned to this client.</p>
+        </div>
+      )}
       {!upload && (
         <div>
           <label className="label" htmlFor="play-schedule">How often to run</label>

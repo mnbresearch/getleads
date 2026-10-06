@@ -279,7 +279,7 @@ server.tool(
 );
 server.tool(
   "update_play",
-  `Change a saved play: rename it, pause or resume it (status), or change its settings, target titles, ICP, list, campaign, schedule or auto-approve. Pass only what changes. To change settings, send the complete config for the play's type. ${PLAY_CONFIG_HELP} runEveryHours: null stops the schedule. Pass null for icpId, listId, campaignId or clientId to detach it. Contacts nobody. ${AUTO_APPROVE_HELP}`,
+  `Change a saved play: rename it, pause or resume it (status), or change its settings, target titles, ICP, list, campaign, schedule or auto-approve. Pass only what changes. A play's type cannot be changed: create a new play instead. To change settings, send the complete config for the play's type - it replaces the old one, nothing is merged. ${PLAY_CONFIG_HELP} runEveryHours: null stops the schedule. Pass null for icpId, listId, campaignId or clientId to detach it. Contacts nobody. ${AUTO_APPROVE_HELP}`,
   {
     id: uid(),
     name: z.string().min(1).max(120).optional(),
@@ -303,7 +303,7 @@ server.tool(
 );
 server.tool(
   "run_play",
-  "Step 3 of Plays: run a play now. It looks at its source (public pages and search results, or the workspace's own data) and puts what it finds in the review queue as candidates, each with a one-sentence reason and the page that proves it. Uses one search unit. Creates no leads and contacts nobody. It usually runs in the background for one to four minutes: call list_plays with playId to see the run's status and note, then review_queue. A play of type engagers_upload is not run; give it people with upload_engagers.",
+  "Step 3 of Plays: run a play now. It looks at its source (public pages and search results, or the workspace's own data) and puts what it finds in the review queue as candidates, each with a one-sentence reason and the page that proves it. Uses one search unit. Creates no leads and contacts nobody. It usually runs in the background for one to four minutes: call list_plays with playId to see the run's status and note (running: true means it is still going), then review_queue. Do not start it again while it is running: that is refused as already_running. A play of type engagers_upload is not run; give it people with upload_engagers.",
   { id: uid() },
   LOOKUP,
   (a) => wrap(() => gl.plays.run(a.id)),
@@ -317,7 +317,7 @@ server.tool(
 );
 server.tool(
   "decide_candidates",
-  `Step 5 of Plays: record the user's decisions on candidates from review_queue. Approve only candidates the user has seen and said yes to. Approving a person creates a lead that keeps the reason and the evidence link (one lead unit for each new person, none for someone who was already a lead); approving a company saves the company; approving a post creates a task to answer that conversation. Skipping only marks the candidate skipped. Approving creates leads and never sends anything by itself. The answer says exactly what happened: leadsCreated, leadsExisting, tasksCreated, notApplied (decisions that changed nothing, with the reason) and stopped (the plan's lead allowance ran out or something failed: the candidates not reached are still waiting). Leave enroll false unless the user asked for it. With enroll: true, approved people are also added to the play's campaign (those with no address yet are looked up first and counted in queuedForEmail), and a campaign that is running will email them.${CONFIRM}`,
+  `Step 5 of Plays: record the user's decisions on candidates from review_queue. Approve only candidates the user has seen and said yes to. Approving a person creates a lead that keeps the reason and the evidence link (one lead unit for each new person, none for someone who was already a lead); approving a company saves the company; approving a post creates a task to answer that conversation. Skipping only marks the candidate skipped. Approving creates leads and never sends anything by itself. The answer says exactly what happened: applied (the ids whose decision went through), leadsCreated, leadsExisting, tasksCreated, notApplied (decisions that changed nothing, with the reason) and stopped (the plan's lead allowance ran out or something failed: the candidates not reached are still waiting). Leave enroll false unless the user asked for it. With enroll: true, approved people are also added to the play's campaign (those with no address yet are looked up first and counted in queuedForEmail), and a campaign that is running will email them.${CONFIRM}`,
   { decisions: z.array(z.object({ id: uid(), decision: z.enum(["approve", "skip"]), skipReason: z.string().max(200).optional() }).strict()).min(1).max(200), enroll: z.boolean().default(false) },
   OUTREACH,
   (a) => wrap(() => gl.plays.decide(a.decisions, { enroll: a.enroll })),
@@ -331,7 +331,7 @@ server.tool(
 );
 server.tool(
   "upload_engagers",
-  "Give a play of type engagers_upload a list of people the user already has: people who reacted to, commented on or reposted a post, followed, signed up or attended. Pass exactly one of people (rows, up to 2,000) or csv (text with a header row). Each row needs a LinkedIn profile link, or an email, or a name together with a company. postUrl, postTitle and postAuthor describe the post and become the evidence. The rows become candidates in the review queue with a reason such as: Commented on the post \"<title>\". Rows that cannot be used come back in rejected with the reason. Creates no leads and contacts nobody. Scout does not log in to LinkedIn or any other site to collect these people: the user supplies the list.",
+  "Give a play of type engagers_upload a list of people the user already has: people who reacted to, commented on or reposted a post, followed, signed up or attended. Pass exactly one of people (rows, up to 2,000) or csv (text with a header row) - or neither, with postUrl set to a public LinkedIn post: Scout then reads who the public page shows, without signing in, and the run comes back blocked with a plain note when the page could not be read. An upload uses no search unit. Each row needs a LinkedIn profile link, or an email, or a name together with a company. postUrl, postTitle and postAuthor describe the post and become the evidence. The rows become candidates in the review queue with a reason such as: Commented on the post \"<title>\". Rows that cannot be used come back in rejected with the reason. Creates no leads and contacts nobody. Scout does not log in to LinkedIn or any other site to collect these people: the user supplies the list.",
   {
     playId: uid(),
     engagement: z.enum(ENGAGEMENTS),
@@ -344,7 +344,8 @@ server.tool(
   WRITE,
   ({ playId, ...input }) =>
     wrap(() => {
-      if ((input.people === undefined) === (input.csv === undefined)) refuse("Pass exactly one of people or csv.");
+      if (input.people !== undefined && input.csv !== undefined) refuse("Pass people or csv, not both.");
+      if (input.people === undefined && input.csv === undefined && !input.postUrl) refuse("Pass people or csv - or, with neither, the postUrl of a public LinkedIn post to read.");
       return gl.plays.upload(playId, input);
     }),
 );

@@ -13,11 +13,12 @@ export interface RunProblem { message: string; quota: boolean }
  * nobody out there". It gets an amber banner with the server's own sentence instead.
  */
 export function PlayCard({
-  play, types, campaignName, running, problem, toggling, onRun, onUpload, onEdit, onToggle, onDelete, onReview, onError,
+  play, types, campaignName, clientName, running, problem, toggling, onRun, onUpload, onEdit, onToggle, onDelete, onReview, onError,
 }: {
   play: PlayOut;
   types: PlayTypeInfo[] | null;
   campaignName?: string;
+  clientName?: string;
   running: boolean;
   problem?: RunProblem;
   toggling: boolean;
@@ -76,6 +77,7 @@ export function PlayCard({
         {upload ? "Fed by your uploads" : paused ? `Paused - ${play.runEveryHours ? "its schedule is on hold" : "runs when you press Run"}` : scheduleLabel(play.runEveryHours)}
         {!upload && !paused && play.runEveryHours && play.nextRunAt ? ` · next ${ago(play.nextRunAt) || fmtDate(play.nextRunAt)}` : ""}
         {play.campaignId ? ` · campaign: ${clean(campaignName, 60) || "attached"}` : ""}
+        {play.clientId ? ` · for client: ${clean(clientName, 60) || "assigned"}` : ""}
       </p>
       {play.autoApprove && <p className="mt-1 text-xs font-medium text-amber-700">Approves on its own: people scoring {play.minScore} or more become leads without review.</p>}
 

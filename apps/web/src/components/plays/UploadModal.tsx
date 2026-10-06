@@ -19,7 +19,7 @@ export function UploadModal({ play, onClose, onDone, onReview, onForbidden }: { 
   const [postUrl, setPostUrl] = useState("");
   const [postTitle, setPostTitle] = useState("");
   const [postAuthor, setPostAuthor] = useState("");
-  const [mode, setMode] = useState<"paste" | "csv">("paste");
+  const [mode, setMode] = useState<"paste" | "csv" | "post">("paste");
   const [pasted, setPasted] = useState("");
   const [csv, setCsv] = useState<{ name: string; text: string } | null>(null);
   const [busy, setBusy] = useState(false);
@@ -41,6 +41,8 @@ export function UploadModal({ play, onClose, onDone, onReview, onForbidden }: { 
   const tooLong = lines.findIndex((l) => l.length > 600);
   const problem =
     !postOk ? "The post link must start with http:// or https://."
+    : mode === "post" && !postUrl.trim() ? "Add the link to the post above."
+    : mode === "post" && !/linkedin\.com\//i.test(postUrl) ? "This only works for a LinkedIn post. Paste the people or upload a CSV for anything else."
     : mode === "paste" && lines.length === 0 ? "Paste at least one profile link."
     : mode === "paste" && tooLong >= 0 ? `Line ${tooLong + 1} is too long to be a profile link. Put one link on each line.`
     : mode === "paste" && lines.length > UPLOAD_MAX_PEOPLE ? `That is ${plural(lines.length, "line")}. One upload takes up to ${UPLOAD_MAX_PEOPLE.toLocaleString()} - split the list and upload it in parts.`
@@ -75,7 +77,8 @@ export function UploadModal({ play, onClose, onDone, onReview, onForbidden }: { 
       if (postAuthor.trim()) body.postAuthor = postAuthor.trim();
       // One row per pasted line, in order, so "row 3" in the answer is the third line pasted.
       if (mode === "paste") body.people = lines.map((l) => (/^[^\s@/]+@[^\s@/]+\.[^\s@/]+$/.test(l) ? { email: l } : { linkedinUrl: l }));
-      else body.csv = csv?.text ?? "";
+      else if (mode === "csv") body.csv = csv?.text ?? "";
+      // "Read a public post": neither a list nor a file - the server opens the post link.
       const r = await apiFetch<UploadResult>("POST", `/v1/plays/${encodeURIComponent(play.id)}/upload`, body, undefined, { timeoutMs: 120_000 });
       const rejected = Array.isArray(r.rejected) ? r.rejected.filter((x) => x && typeof x.row === "number") : [];
       setResult({ run: r.run ?? null, added: Number(r.added) || 0, duplicates: Number(r.duplicates) || 0, rejected, rejectedCount: typeof r.rejectedCount === "number" ? r.rejectedCount : rejected.length });
@@ -100,7 +103,7 @@ export function UploadModal({ play, onClose, onDone, onReview, onForbidden }: { 
             <div className="rounded-lg bg-cream p-3"><div className="text-xs text-ink-400">Already in this play</div><div className="text-xl font-semibold" data-testid="upload-duplicates">{result.duplicates.toLocaleString()}</div></div>
             <div className={`rounded-lg p-3 ${result.rejectedCount > 0 ? "bg-amber-50" : "bg-cream"}`}><div className="text-xs text-ink-400">Not used</div><div className="text-xl font-semibold" data-testid="upload-rejected">{result.rejectedCount.toLocaleString()}</div></div>
           </div>
-          {result.run && runFailed(result.run.status) && <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">{runNote || "The upload could not be processed. Nothing was added."}</div>}
+          {result.run && runFailed(result.run.status) && <div className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert" data-testid="upload-note">{runNote || "The upload could not be processed. Nothing was added."}</div>}
           {result.run && !runFailed(result.run.status) && runNote && <p className="mt-3 text-sm text-ink-300 [overflow-wrap:anywhere]">{runNote}</p>}
           {result.added === 0 && result.rejectedCount === 0 && result.duplicates > 0 && <p className="mt-3 text-sm text-ink-300">Everyone in this upload was already in the play, so nothing new was added.</p>}
           {result.rejected.length > 0 && (
@@ -116,19 +119,19 @@ export function UploadModal({ play, onClose, onDone, onReview, onForbidden }: { 
           )}
           <div className="mt-5 flex flex-wrap gap-2">
             {result.added > 0 && <button type="button" className="btn-primary" onClick={() => onReview(play)}>Review {plural(result.added, "person", "people")}</button>}
-            <button type="button" className="btn-secondary" onClick={() => { setResult(null); setPasted(""); setCsv(null); }}>Upload more</button>
+            <button type="button" className={result.added > 0 ? "btn-secondary" : "btn-primary"} onClick={() => { setResult(null); setPasted(""); setCsv(null); if (mode === "post" && result.added === 0) setMode("paste"); }}>{mode === "post" && result.added === 0 ? "Paste the people instead" : "Upload more"}</button>
             <button type="button" className="btn-secondary" onClick={onClose}>Done</button>
           </div>
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2" data-testid="upload-form">
-          <p className="text-sm text-ink-300 sm:col-span-2">Bring the list of people who engaged - from a post&apos;s reactions and comments, a sign-up sheet, an event. Each one lands in Review with what they did as the reason. Nobody is contacted until you approve them.</p>
+          <p className="text-sm text-ink-300 sm:col-span-2">Bring the list of people who engaged - from a post&apos;s reactions and comments, a sign-up sheet, an event. Each one lands in Review with what they did as the reason. Uploading contacts nobody.</p>
           <div>
             <label className="label" htmlFor="up-engagement">What did they do?</label>
             <select id="up-engagement" className="input" value={engagement} onChange={(e) => setEngagement(e.target.value)}>{ENGAGEMENTS.map((x) => <option key={x.value} value={x.value}>{x.label}</option>)}</select>
           </div>
           <div>
-            <label className="label" htmlFor="up-url">Link to the post (optional)</label>
+            <label className="label" htmlFor="up-url">Link to the post{mode === "post" ? "" : " (optional)"}</label>
             <input id="up-url" className="input" inputMode="url" maxLength={2000} placeholder="https://www.linkedin.com/posts/…" value={postUrl} onChange={(e) => setPostUrl(e.target.value)} />
             <p className="mt-1 text-xs text-ink-400">Shown as the proof on each person.</p>
           </div>
@@ -140,12 +143,17 @@ export function UploadModal({ play, onClose, onDone, onReview, onForbidden }: { 
             <div className="mb-2 flex flex-wrap gap-4 text-sm">
               <label className="flex items-center gap-2"><input type="radio" name="up-mode" checked={mode === "paste"} onChange={() => setMode("paste")} /> Paste profile links</label>
               <label className="flex items-center gap-2"><input type="radio" name="up-mode" checked={mode === "csv"} onChange={() => setMode("csv")} /> Upload a CSV</label>
+              <label className="flex items-center gap-2"><input type="radio" name="up-mode" checked={mode === "post"} onChange={() => setMode("post")} /> Read a public post</label>
             </div>
             {mode === "paste" ? (
               <>
                 <textarea className="input h-40 font-mono text-xs" aria-label="LinkedIn profile links, one per line" placeholder={"https://www.linkedin.com/in/priya-raman\nhttps://www.linkedin.com/in/james-okafor"} value={pasted} onChange={(e) => setPasted(e.target.value)} />
                 <p className="mt-1 text-xs text-ink-400">One LinkedIn profile link per line{lines.length > 0 ? ` - ${plural(lines.length, "line")} so far` : ""}. An email address on a line works too.</p>
               </>
+            ) : mode === "post" ? (
+              <p className="rounded-lg bg-cream px-3 py-2 text-sm text-ink-200" data-testid="upload-post-mode">
+                Scout opens the post link above the way anyone without a LinkedIn account can, and adds the people it can see there. This only works when the post and the people who engaged are publicly readable, which LinkedIn often does not allow. If it cannot be read, Scout says so and adds nobody - paste the list or upload a CSV instead.
+              </p>
             ) : (
               <>
                 <input ref={fileRef} type="file" accept=".csv,text/csv,text/plain" aria-label="CSV file of people" className="block w-full text-sm text-ink-200 file:mr-3 file:rounded-lg file:border file:border-black/10 file:bg-black/[0.03] file:px-3 file:py-2 file:text-sm file:font-medium file:text-ink-100" onChange={(e) => pickFile(e.target.files?.[0])} />
@@ -156,11 +164,11 @@ export function UploadModal({ play, onClose, onDone, onReview, onForbidden }: { 
 
           {error && (
             <div className={`rounded-lg px-3 py-2 text-sm sm:col-span-2 ${error.quota ? "bg-amber-50 text-amber-800" : "bg-red-50 text-red-700"}`} role="alert" data-testid="upload-error">
-              Nothing was uploaded: {error.message} {error.quota && <Link className="font-medium underline" to="/settings/billing">See plan &amp; usage</Link>}
+              {mode === "post" ? "Nothing was read" : "Nothing was uploaded"}: {error.message} {error.quota && <Link className="font-medium underline" to="/settings/billing">See plan &amp; usage</Link>}
             </div>
           )}
           <div className="sm:col-span-2">
-            <button type="button" className="btn-primary w-full justify-center" disabled={busy || !!problem} onClick={submit}>{busy ? "Uploading…" : "Upload"}</button>
+            <button type="button" className="btn-primary w-full justify-center" disabled={busy || !!problem} onClick={submit}>{busy ? (mode === "post" ? "Reading the post…" : "Uploading…") : mode === "post" ? "Read the post" : "Upload"}</button>
             {problem && <p className="mt-1 text-center text-xs text-ink-400">{problem}</p>}
           </div>
         </div>

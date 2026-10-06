@@ -109,12 +109,23 @@ export function openapi(apiUrl: string) {
       runEveryHours: { type: ["integer", "null"] },
       lastRunAt: nullable(dateTime),
       nextRunAt: nullable(dateTime),
-      lastResult: { type: ["object", "null"], description: "What the last run did", properties: { status: str, found: int, added: int, duplicates: int, note: nullable(str) } },
+      lastResult: {
+        type: ["object", "null"],
+        description: "What the last run did",
+        properties: {
+          status: { ...str, enum: ["done", "failed", "blocked", "skipped"], description: "`blocked`: the run could not look anywhere. `skipped`: a scheduled run that did not happen (the plan's search allowance was spent, or the play was paused first); `note` says which" },
+          found: int,
+          added: int,
+          duplicates: int,
+          note: nullable(str),
+        },
+      },
       createdAt: dateTime,
       updatedAt: dateTime,
       counts: { ...playCounts, description: "This play's candidates by decision" },
+      running: { ...bool, description: "true while a run of this play is under way: started less than 15 minutes ago and not finished" },
     },
-    ["id", "name", "type", "status", "config", "targetTitles", "autoApprove", "minScore", "createdAt", "updatedAt", "counts"],
+    ["id", "name", "type", "status", "config", "targetTitles", "autoApprove", "minScore", "createdAt", "updatedAt", "counts", "running"],
   );
   const candidateOut = obj(
     {
@@ -317,7 +328,7 @@ export function openapi(apiUrl: string) {
         post: { tags: ["Admin"], security: adminSec, summary: "Add an address to the platform-wide list. Answers 201 when it was added and 200 when it was already there", requestBody: j(obj({ email: str, reason: str, note: str }, ["email"])), responses: ok(obj({ suppression: { type: "object" }, created: bool })) },
       },
       "/v1/admin/suppressions/{id}": { delete: { tags: ["Admin"], security: adminSec, summary: "Remove an address from the platform-wide list", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok(obj({ ok: bool })) } },
-      "/v1/admin/data-subject": { get: { tags: ["Admin"], security: adminSec, summary: "Where one person's address appears: counts per workspace, and whether it is on the platform-wide list. No content is returned", parameters: [{ name: "email", in: "query", required: true, schema: str }], responses: ok(obj({ email: str, globallySuppressed: bool, held: { ...bool, description: "true when some workspace still holds the person: a lead, a campaign contact, or a message that still carries the address" }, workspaces: arr(obj({ orgId: str, orgName: str, leads: { type: "integer" }, campaignContacts: { type: "integer" }, messages: { type: "integer", description: "messages that still carry the address" }, anonymisedMessages: { type: "integer", description: "message records kept without content after an erase" }, suppressed: bool })) }, ["email", "globallySuppressed", "held", "workspaces"])) } },
+      "/v1/admin/data-subject": { get: { tags: ["Admin"], security: adminSec, summary: "Where one person's address appears: counts per workspace, and whether it is on the platform-wide list. No content is returned", parameters: [{ name: "email", in: "query", required: true, schema: str }], responses: ok(obj({ email: str, globallySuppressed: bool, held: { ...bool, description: "true when some workspace still holds the person: a lead, a campaign contact, a message that still carries the address, or a play candidate" }, workspaces: arr(obj({ orgId: str, orgName: str, leads: { type: "integer" }, campaignContacts: { type: "integer" }, messages: { type: "integer", description: "messages that still carry the address" }, anonymisedMessages: { type: "integer", description: "message records kept without content after an erase" }, candidates: { type: "integer", description: "play candidates carrying the address: people a play found, whatever was decided about them" }, suppressed: bool })) }, ["email", "globallySuppressed", "held", "workspaces"])) } },
       "/v1/admin/data-subject/erase": { post: { tags: ["Admin"], security: adminSec, summary: "Erase a person from every workspace and add their address to the platform-wide list. `confirm` must repeat the address. Cannot be undone", requestBody: j(obj({ email: str, confirm: str }, ["email", "confirm"])), responses: ok(obj({ ok: bool, workspaces: { type: "integer" }, leadsDeleted: { type: "integer" }, globallySuppressed: bool })) } },
       "/v1/admin/audit-log": {
         get: {
@@ -615,7 +626,21 @@ export function openapi(apiUrl: string) {
                       available: bool,
                       unavailableReason: str,
                       setupHint: str,
-                      fields: arr(obj({ key: str, label: str, kind: { ...str, enum: ["tags", "text", "number", "competitors", "select"] }, options: arr({}), required: bool, max: num, placeholder: str, help: str }, ["key", "label", "kind"])),
+                      fields: arr(
+                        obj(
+                          {
+                            key: str,
+                            label: str,
+                            kind: { ...str, enum: ["tags", "text", "number", "competitors", "select"], description: "`select`: choose any number of `options` and send their values as an array (one value only when `max` is 1)" },
+                            options: arr(obj({ value: str, label: str }, ["value", "label"])),
+                            required: bool,
+                            max: num,
+                            placeholder: str,
+                            help: str,
+                          },
+                          ["key", "label", "kind"],
+                        ),
+                      ),
                       defaultTitles: arr(),
                     },
                     ["type", "name", "summary", "finds", "needsSearch", "available", "fields"],
@@ -698,9 +723,10 @@ export function openapi(apiUrl: string) {
                 enrolled: int,
                 queuedForEmail: int,
                 notApplied: arr(obj({ id: str, reason: str }, ["id", "reason"])),
+                applied: { ...arr(uuid), description: "The ids whose decision was applied, in the order they were sent. An id is in `applied` or in `notApplied`, never both" },
                 stopped: obj({ reason: { ...str, enum: ["quota", "error"] }, message: str }, ["reason", "message"]),
               },
-              ["approved", "skipped", "leadsCreated", "leadsExisting", "tasksCreated", "enrolled", "queuedForEmail", "notApplied"],
+              ["approved", "skipped", "leadsCreated", "leadsExisting", "tasksCreated", "enrolled", "queuedForEmail", "notApplied", "applied"],
             ),
           ),
         },
@@ -739,7 +765,13 @@ export function openapi(apiUrl: string) {
       },
       "/v1/plays/{id}": {
         get: { tags: ["Plays"], summary: "One play with its last 10 runs", parameters: [idParam("The play")], responses: ok(obj({ play: playOut, runs: arr(playRunOut) }, ["play", "runs"])) },
-        patch: { tags: ["Plays"], summary: "Change a play. The same fields as creating one, all optional; at least one is needed", parameters: [idParam("The play")], requestBody: j(obj(playInputProps)), responses: { ...ok(obj({ play: playOut }, ["play"])), ...res("400", "validation_error", errorBody) } },
+        patch: {
+          tags: ["Plays"],
+          summary: "Change a play. The same fields as creating one, all optional; at least one is needed. `type` cannot change (400: create a new play instead). `config` replaces the whole config and is checked against the play's type. `null` clears `icpId`, `listId`, `campaignId` or `clientId`; `runEveryHours: null` stops the schedule",
+          parameters: [idParam("The play")],
+          requestBody: j(obj({ ...playInputProps, icpId: nullable(playInputProps.icpId), clientId: nullable(playInputProps.clientId), listId: nullable(playInputProps.listId), campaignId: nullable(playInputProps.campaignId) })),
+          responses: { ...ok(obj({ play: playOut }, ["play"])), ...res("400", "validation_error, or bad_request when `type` differs from the play's type", errorBody) },
+        },
         delete: { tags: ["Plays"], summary: "Delete a play and its candidates. Leads already created from it stay", parameters: [idParam("The play")], responses: ok(obj({ ok: bool }, ["ok"])) },
       },
       "/v1/plays/{id}/run": {
@@ -752,7 +784,7 @@ export function openapi(apiUrl: string) {
             ...ok(obj({ run: playRunOut }, ["run"])),
             ...res("400", "This play is fed by uploads", errorBody),
             ...res("402", "quota_exceeded: no search units left this month", errorBody),
-            ...res("409", "already_running: a run of this play started less than 15 minutes ago and has not finished", errorBody),
+            ...res("409", "already_running: a run of this play started less than 15 minutes ago and has not finished. `error.details.runId` is that run", errorBody),
             ...res("429", "rate_limited, or queue_full when too many jobs are waiting", errorBody),
           },
         },
@@ -761,7 +793,7 @@ export function openapi(apiUrl: string) {
       "/v1/plays/{id}/upload": {
         post: {
           tags: ["Plays"],
-          summary: "Add people who engaged with a post - or signed up, followed, attended - to a play of type engagers_upload (the only type that takes uploads). Send `people` or `csv` (with a header row), not both. Each row needs a LinkedIn profile URL, or an email, or a name with a company; rows that cannot be used are counted in `rejectedCount` and the first 50 are listed with the reason. The people become candidates in the review queue. Body up to 2 MB. When only `postUrl` is sent and it is a public LinkedIn post, the people shown on the public page are read; the answer says plainly when that page was not publicly readable",
+          summary: "Add people who engaged with a post - or signed up, followed, attended - to a play of type engagers_upload (the only type that takes uploads). Send exactly one of `people` or `csv` (with a header row) - or neither, when `postUrl` is given: the server then reads the public post itself. An upload does not use a search unit. Each row needs a LinkedIn profile URL, or an email, or a name with a company; rows that cannot be used are counted in `rejectedCount` and the first 50 are listed with the reason. The people become candidates in the review queue. Body up to 2 MB. When only `postUrl` is sent and it is a public LinkedIn post, the people shown on the public page are read; when the page could not be read (a sign-in wall, or a link that is not a LinkedIn post) the answer is still 200, with a `run` whose status is `blocked` and whose `note` says so plainly",
           parameters: [idParam("The play (type engagers_upload)")],
           requestBody: j(
             obj(

@@ -187,6 +187,8 @@ interface SubjectWorkspace {
   messages?: number;
   /** Message rows kept as records, with the address and the text removed. Absent on an older server. */
   anonymisedMessages?: number;
+  /** People waiting in (or skipped from) a play's review queue who carry the address. Absent on an older server. */
+  candidates?: number;
   suppressed?: boolean;
 }
 interface SubjectReport {
@@ -206,8 +208,8 @@ interface EraseResult {
 
 const count = (n: unknown) => (typeof n === "number" ? fmtNum(n) : "-");
 const num = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : 0);
-/** A workspace still holds the person when it has a lead, a campaign contact or a message with their address. */
-const holds = (w: SubjectWorkspace) => num(w.leads) > 0 || num(w.campaignContacts) > 0 || num(w.messages) > 0;
+/** A workspace still holds the person when it has a lead, a campaign contact, a message with their address, or has them in a play's review queue. */
+const holds = (w: SubjectWorkspace) => num(w.leads) > 0 || num(w.campaignContacts) > 0 || num(w.messages) > 0 || num(w.candidates) > 0;
 
 /**
  * What a lookup found, in the terms the request is asked in: is this person's data still
@@ -282,6 +284,8 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
   const found = summary ? summary.holding : 0;
   const listed = report ? report.workspaces.length : 0;
   const showKept = !!report && report.workspaces.some((w) => typeof w.anonymisedMessages === "number");
+  // Plays hold a person before they are a lead. Shown only when the server reports it.
+  const showCandidates = !!report && report.workspaces.some((w) => typeof w.candidates === "number");
   // Erased already: nothing held, and the address is on the platform list.
   const alreadyErased = !!report && !!summary && !summary.held && report.globallySuppressed === true;
   const totalLeads = report ? report.workspaces.reduce((n, w) => n + (typeof w.leads === "number" ? w.leads : 0), 0) : 0;
@@ -347,7 +351,7 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
           {listed > 0 && (
             <div className="overflow-x-auto">
               <table className="w-full text-sm" data-testid="subject-table">
-                <thead><tr><th className="th">Workspace</th><th className="th text-right">Leads</th><th className="th text-right">In campaigns</th><th className="th text-right">Messages</th>{showKept && <th className="th text-right">Kept without content</th>}<th className="th">Do-not-contact there</th></tr></thead>
+                <thead><tr><th className="th">Workspace</th><th className="th text-right">Leads</th><th className="th text-right">In campaigns</th><th className="th text-right">Messages</th>{showCandidates && <th className="th text-right">Plays</th>}{showKept && <th className="th text-right">Kept without content</th>}<th className="th">Do-not-contact there</th></tr></thead>
                 <tbody className="divide-y divide-black/5">
                   {report.workspaces.map((w) => (
                     <tr key={w.orgId}>
@@ -355,6 +359,7 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
                       <td className="td text-right tabular-nums">{count(w.leads)}</td>
                       <td className="td text-right tabular-nums">{count(w.campaignContacts)}</td>
                       <td className="td text-right tabular-nums">{count(w.messages)}</td>
+                      {showCandidates && <td className="td text-right tabular-nums" data-testid="subject-candidates" title={num(w.candidates) > 0 ? "Found by a play and not yet a lead. This still counts as holding the person's data." : undefined}>{num(w.candidates) > 0 ? `${fmtNum(num(w.candidates))} held by Plays (in review, skipped or approved)` : count(w.candidates)}</td>}
                       {showKept && <td className="td text-right tabular-nums">{count(w.anonymisedMessages)}</td>}
                       <td className="td">{w.suppressed === true ? "Yes" : w.suppressed === false ? "No" : "-"}</td>
                     </tr>
@@ -369,7 +374,7 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
           <form onSubmit={erase} className="space-y-3 border-t border-black/5 bg-red-50/40 p-4" data-testid="subject-erase">
             <div className="text-sm font-medium text-red-800">Erase this person everywhere</div>
             <p className="text-sm text-ink-200">
-              This removes {found === 0 ? "any record of" : totalLeads > 0 ? `the ${fmtNum(totalLeads)} lead ${totalLeads === 1 ? "record" : "records"} for` : "every record of"} <b className="[overflow-wrap:anywhere]">{report.email}</b> from every workspace, together with the copies of their details in messages and activity, and adds the address to the platform suppression list so nobody can email it again. The workspaces are not asked first. It cannot be undone.
+              This removes {found === 0 ? "any record of" : totalLeads > 0 ? `the ${fmtNum(totalLeads)} lead ${totalLeads === 1 ? "record" : "records"} for` : "every record of"} <b className="[overflow-wrap:anywhere]">{report.email}</b> from every workspace, together with the copies of their details in messages{showCandidates ? ", activity and play review queues" : " and activity"}, and adds the address to the platform suppression list so nobody can email it again. The workspaces are not asked first. It cannot be undone.
             </p>
             <div>
               <label className="label" htmlFor="subject-confirm">Type the address to confirm</label>

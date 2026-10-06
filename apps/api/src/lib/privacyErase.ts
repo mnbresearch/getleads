@@ -161,6 +161,8 @@ export interface DataSubjectWorkspace {
   messages: number;
   /** Message rows kept WITHOUT content: the address is a fingerprint, subject and body are removed. */
   anonymisedMessages: number;
+  /** Play candidates carrying the address: people a play found who are waiting for review, were skipped, or were approved. */
+  candidates: number;
   suppressed: boolean;
 }
 
@@ -179,6 +181,9 @@ const sameMailbox = (column: ReturnType<typeof sql>, base: string) => sql`regexp
  * are records ABOUT a removal, not the person's data, so a person who appears only in
  * those is not held. They are still listed, with their own counts, so the operator can see
  * what remains and why.
+ *
+ * A person a play found, who is waiting in a review queue and was never made a lead, IS
+ * held: the candidate carries their name and address (`candidates`).
  */
 export async function dataSubjectReport(email: string): Promise<{ email: string; globallySuppressed: boolean; held: boolean; workspaces: DataSubjectWorkspace[] }> {
   const { db } = getDb();
@@ -191,13 +196,14 @@ export async function dataSubjectReport(email: string): Promise<{ email: string;
          cc AS (SELECT le.org_id, count(*)::int AS n FROM campaign_contacts c JOIN leads le ON le.id = c.lead_id WHERE ${sameMailbox(sql`le.email`, base)} GROUP BY le.org_id),
          m AS (SELECT org_id, count(*)::int AS n FROM messages WHERE ${sameMailbox(sql`to_email`, base)} GROUP BY org_id),
          am AS (SELECT org_id, count(*)::int AS n FROM messages WHERE ${inArray(sql`to_email`, prints)} GROUP BY org_id),
+         pc AS (SELECT org_id, count(*)::int AS n FROM play_candidates WHERE email IS NOT NULL AND ${sameMailbox(sql`email`, base)} GROUP BY org_id),
          s AS (SELECT DISTINCT org_id FROM suppressions WHERE ${inArray(sql`email`, listKeys)})
-    SELECT o.id AS org_id, o.name AS org_name, coalesce(l.n, 0) AS leads, coalesce(cc.n, 0) AS campaign_contacts, coalesce(m.n, 0) AS messages, coalesce(am.n, 0) AS anonymised_messages, (s.org_id IS NOT NULL) AS suppressed
+    SELECT o.id AS org_id, o.name AS org_name, coalesce(l.n, 0) AS leads, coalesce(cc.n, 0) AS campaign_contacts, coalesce(m.n, 0) AS messages, coalesce(am.n, 0) AS anonymised_messages, coalesce(pc.n, 0) AS candidates, (s.org_id IS NOT NULL) AS suppressed
     FROM organizations o
-    LEFT JOIN l ON l.org_id = o.id LEFT JOIN cc ON cc.org_id = o.id LEFT JOIN m ON m.org_id = o.id LEFT JOIN am ON am.org_id = o.id LEFT JOIN s ON s.org_id = o.id
-    WHERE l.org_id IS NOT NULL OR cc.org_id IS NOT NULL OR m.org_id IS NOT NULL OR am.org_id IS NOT NULL OR s.org_id IS NOT NULL
+    LEFT JOIN l ON l.org_id = o.id LEFT JOIN cc ON cc.org_id = o.id LEFT JOIN m ON m.org_id = o.id LEFT JOIN am ON am.org_id = o.id LEFT JOIN pc ON pc.org_id = o.id LEFT JOIN s ON s.org_id = o.id
+    WHERE l.org_id IS NOT NULL OR cc.org_id IS NOT NULL OR m.org_id IS NOT NULL OR am.org_id IS NOT NULL OR pc.org_id IS NOT NULL OR s.org_id IS NOT NULL
     ORDER BY o.name
-    LIMIT 1000`)) as unknown as { org_id: string; org_name: string; leads: number; campaign_contacts: number; messages: number; anonymised_messages: number; suppressed: boolean }[];
+    LIMIT 1000`)) as unknown as { org_id: string; org_name: string; leads: number; campaign_contacts: number; messages: number; anonymised_messages: number; candidates: number; suppressed: boolean }[];
   const workspaces = [...rows].map((r) => ({
     orgId: String(r.org_id),
     orgName: String(r.org_name),
@@ -205,12 +211,13 @@ export async function dataSubjectReport(email: string): Promise<{ email: string;
     campaignContacts: Number(r.campaign_contacts) || 0,
     messages: Number(r.messages) || 0,
     anonymisedMessages: Number(r.anonymised_messages) || 0,
+    candidates: Number(r.candidates) || 0,
     suppressed: r.suppressed === true,
   }));
   return {
     email: e,
     globallySuppressed: await onPlatformList(e, db),
-    held: workspaces.some((w) => w.leads > 0 || w.campaignContacts > 0 || w.messages > 0),
+    held: workspaces.some((w) => w.leads > 0 || w.campaignContacts > 0 || w.messages > 0 || w.candidates > 0),
     workspaces,
   };
 }

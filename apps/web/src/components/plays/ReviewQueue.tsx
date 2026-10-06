@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, expectLists, fmtDate } from "../../lib/api";
 import { EmailStatusBadge, Empty, LoadError, ScoreBar, Spinner } from "../ui";
@@ -10,6 +10,8 @@ import {
 } from "../../lib/plays";
 
 type Decision = { id: string; decision: "approve" | "skip"; skipReason?: string };
+/** When this few are left on screen and the server holds more, the next ones are fetched. */
+const TOP_UP_AT = 10;
 type Notice = { message: string; detail?: string; quota?: boolean; tone: "amber" | "red" };
 
 const KIND_LABEL: Record<string, string> = { person: "Person", company: "Company", post: "Conversation" };
@@ -70,12 +72,15 @@ export function ReviewQueue({
   const [enroll, setEnroll] = useState(false);
   const [reasonFor, setReasonFor] = useState<string | null>(null);
   const [titlesFor, setTitlesFor] = useState<string | null>(null);
+  const [stale, setStale] = useState(false);
 
   const key = `${playId}|${kind}`;
   const seq = useRef(0);
   const shownFor = useRef<string | null>(null);
   const rowsRef = useRef<Candidate[]>([]);
   rowsRef.current = rows;
+  const totalRef = useRef(0);
+  totalRef.current = total;
   // Ids the server has confirmed as decided. A slower, older read of the queue must not put
   // one of them back on screen.
   const gone = useRef<Set<string>>(new Set());
@@ -93,9 +98,9 @@ export function ReviewQueue({
   const playsById = useMemo(() => new Map(plays.map((p) => [p.id, p])), [plays]);
   const hasCampaign = useCallback((c: Candidate) => !!playsById.get(c.playId)?.campaignId, [playsById]);
 
-  const load = useCallback((mode: "replace" | "more" = "replace") => {
+  const load = useCallback((mode: "replace" | "more" = "replace", from?: number) => {
     const mine = ++seq.current;
-    const offset = mode === "more" ? rowsRef.current.length : 0;
+    const offset = mode === "more" ? from ?? rowsRef.current.length : 0;
     if (mode === "more") setLoadingMore(true);
     else if (shownFor.current !== key) setLoading(true);
     const qs = new URLSearchParams({ status: "pending", limit: String(REVIEW_PAGE), offset: String(offset) });
@@ -112,6 +117,7 @@ export function ReviewQueue({
         setTotal(Math.max(next.length, (typeof r.total === "number" ? r.total : next.length) - hidden));
         shownFor.current = key;
         setErr(null);
+        if (mode === "replace") setStale(false);
         const ids = new Set(next.map((c) => c.id));
         setSel((s) => new Set([...s].filter((id) => ids.has(id))));
         setCardErr((m) => Object.fromEntries(Object.entries(m).filter(([id]) => ids.has(id))));
@@ -130,7 +136,17 @@ export function ReviewQueue({
       .finally(() => { if (mine === seq.current) { setLoading(false); setLoadingMore(false); } });
   }, [key, playId, kind]);
 
-  useEffect(() => { load(); }, [load, epoch]);
+  useEffect(() => { load(); }, [load]);
+  // Something outside the queue added to it (a run finished). An empty queue is simply
+  // re-read. A queue someone is working through is NOT rearranged under them - the card a
+  // keystroke is about to decide must not change - so it offers the refresh instead.
+  const seenEpoch = useRef(epoch);
+  useEffect(() => {
+    if (epoch === seenEpoch.current) return;
+    seenEpoch.current = epoch;
+    if (rowsRef.current.length === 0) load();
+    else setStale(true);
+  }, [epoch, load]);
   // A different filter is a different list: nothing stays selected across it.
   useEffect(() => { setSel(new Set()); setReasonFor(null); setTitlesFor(null); setNotice(null); }, [key]);
 
@@ -159,6 +175,8 @@ export function ReviewQueue({
     const wantEnroll = enroll && items.some((i) => i.decision === "approve" && rowsRef.current.some((c) => c.id === i.id && hasCampaign(c)));
     const sum: DecideResult = { approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, notApplied: [] };
     const answered: Decision[] = [];
+    // The ids the server says it applied - or null as soon as one answer does not say.
+    let named: string[] | null = [];
     let failure: unknown = null;
     for (let i = 0; i < items.length; i += DECIDE_MAX) {
       const chunk = items.slice(i, i + DECIDE_MAX);
@@ -167,6 +185,8 @@ export function ReviewQueue({
         sum.approved += r.approved; sum.skipped += r.skipped; sum.leadsCreated += r.leadsCreated; sum.leadsExisting += r.leadsExisting;
         sum.tasksCreated += r.tasksCreated; sum.enrolled += r.enrolled; sum.queuedForEmail += r.queuedForEmail;
         sum.notApplied.push(...r.notApplied);
+        if (named && r.applied) named.push(...r.applied);
+        else named = null;
         answered.push(...chunk);
         if (r.stopped) { sum.stopped = r.stopped; break; }
       } catch (e) {
@@ -179,17 +199,24 @@ export function ReviewQueue({
 
     const refused = new Map(sum.notApplied.map((x) => [x.id, x.reason]));
     const changed = sum.approved + sum.skipped;
-    // The answer names what it refused, and counts what it did. When those add up to what
-    // was sent, every card is accounted for; when they do not (it stopped part-way), which
-    // cards were applied is not something this page may guess.
-    const exact = !sum.stopped && changed + refused.size === answered.length && [...refused.keys()].every((id) => answered.some((a) => a.id === id));
-    const applied = exact ? answered.filter((a) => !refused.has(a.id)).map((a) => a.id) : [];
+    const sent = new Set(answered.map((a) => a.id));
+    // Which cards leave: the ones the server names as applied. A server that only counts is
+    // read the careful way - what it refused plus what it counted must add up to what was
+    // sent - and when that does not hold (it stopped part-way), which cards were applied is
+    // not something this page may guess: the queue is read again instead.
+    const byName = named !== null && answered.length > 0;
+    const inferred = !sum.stopped && changed + refused.size === answered.length && [...refused.keys()].every((id) => sent.has(id));
+    const exact = byName || inferred;
+    const applied = byName ? (named ?? []).filter((id) => sent.has(id)) : inferred ? answered.filter((a) => !refused.has(a.id)).map((a) => a.id) : [];
 
     const notChanged = (why: string) => `Still waiting - this was not changed: ${why}`;
     const errs: Record<string, string> = {};
-    // When the server stopped part-way it lists everything it did not reach; one notice
-    // says that once, rather than the same sentence on every remaining card.
-    if (!sum.stopped) for (const [id, reason] of refused) errs[id] = notChanged(reason);
+    // When the server stopped part-way it lists everything it did not reach, all with the
+    // same sentence; the notice says that once. A reason only one or two cards carry is
+    // theirs, and is shown on them.
+    const shared = new Map<string, number>();
+    for (const reason of refused.values()) shared.set(reason, (shared.get(reason) ?? 0) + 1);
+    for (const [id, reason] of refused) if (!sum.stopped || (shared.get(reason) ?? 0) <= 2) errs[id] = notChanged(reason);
     if (failure) {
       const said = messageOf(failure);
       const unanswered = items.filter((i) => !answered.includes(i));
@@ -215,12 +242,16 @@ export function ReviewQueue({
       setSel((s) => new Set([...s].filter((id) => !gone.current.has(id))));
       setActiveId(nextCard?.id ?? null);
       wantFocus.current = nextCard ? nextCard.id : "empty";
+      const remaining = Math.max(left.length, totalRef.current - applied.length);
       // The page is empty but the server may hold more: fetch them and focus the first.
       if (left.length === 0) { refocus.current = true; load(); }
+      // Running low with more waiting: bring the next ones in underneath, so a reviewer
+      // working down a long queue never reaches the bottom of a page.
+      else if (exact && left.length <= TOP_UP_AT && remaining > left.length) load("more", left.length);
     }
     if (changed > 0) onPendingChange(changed);
     if (!failure || !bulk) {
-      if (changed > 0) toast(decisionSummary(sum.stopped ? { ...sum, notApplied: [] } : sum), "ok");
+      if (changed > 0) toast(decisionSummary({ ...sum, notApplied: sum.notApplied.filter((x) => errs[x.id]) }), "ok");
       else if (refused.size > 0 && !sum.stopped) toast(decisionSummary(sum), "err");
       else if (sum.stopped) toast("Nothing was changed.", "err");
     }
@@ -259,6 +290,25 @@ export function ReviewQueue({
       setBusy((b) => { const n = { ...b }; delete n[c.id]; return n; });
     }
   }, [kind, onForbidden, onPendingChange, toast]);
+
+  // The cards are memoised: with a couple of hundred on screen, moving the highlight or
+  // deciding one must redraw that card, not all of them. So what a card calls never changes
+  // identity - it reaches the current functions through this ref.
+  const now = useRef({ decide, findPeople, playsById });
+  now.current = { decide, findPeople, playsById };
+  const handlers = useMemo<CardHandlers>(() => ({
+    register: (id, el) => { if (el) cardEls.current[id] = el; else delete cardEls.current[id]; },
+    active: (id) => setActiveId(id),
+    select: (id, on) => setSel((s) => { const n = new Set(s); if (on) n.add(id); else n.delete(id); return n; }),
+    approve: (id) => { void now.current.decide([{ id, decision: "approve" }], false); },
+    skip: (id, why) => { void now.current.decide([{ id, decision: "skip", ...(why ? { skipReason: why } : {}) }], false); },
+    toggleReason: (id) => setReasonFor((r) => (r === id ? null : id)),
+    findPeople: (c, titles) => {
+      // The search needs job titles. A play that has none asks for them here, once.
+      if (!titles && !(now.current.playsById.get(c.playId)?.targetTitles ?? []).length) setTitlesFor((t) => (t === c.id ? null : c.id));
+      else void now.current.findPeople(c, titles);
+    },
+  }), []);
 
   // ── Keyboard: A approve, S skip, J / K move ─────────────────────────────────────────────
   const live = useRef({ rows, activeId, busy, decide });
@@ -337,6 +387,13 @@ export function ReviewQueue({
         </div>
       )}
 
+      {stale && rows.length > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-brand-50 px-3 py-2 text-sm text-ink-200" role="status" data-testid="review-stale">
+          <span className="min-w-0 flex-1">A play has just finished running and may have found more people.</span>
+          <button type="button" className="shrink-0 font-medium text-brand-600 underline" onClick={() => { refocus.current = true; load(); }}>Refresh the queue</button>
+        </div>
+      )}
+
       {selected.length > 0 && !loading && (
         <div className="sticky top-2 z-10 mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-brand-50 px-3 py-2 text-sm shadow-card ring-1 ring-brand-100" data-testid="bulk-bar">
           <span className="font-medium text-brand-600">{selected.length} selected</span>
@@ -389,18 +446,8 @@ export function ReviewQueue({
                 error={cardErr[c.id]}
                 reasonOpen={reasonFor === c.id}
                 willEnroll={enroll && hasCampaign(c)}
-                innerRef={(el) => { cardEls.current[c.id] = el; }}
-                onActive={() => setActiveId(c.id)}
-                onSelect={(on) => setSel((s) => { const n = new Set(s); if (on) n.add(c.id); else n.delete(c.id); return n; })}
-                onApprove={() => decide([{ id: c.id, decision: "approve" }], false)}
-                onSkip={(why) => decide([{ id: c.id, decision: "skip", ...(why ? { skipReason: why } : {}) }], false)}
-                onToggleReason={() => setReasonFor((r) => (r === c.id ? null : c.id))}
                 titlesOpen={titlesFor === c.id}
-                onFindPeople={(titles) => {
-                  // The search needs job titles. A play that has none asks for them here, once.
-                  if (!titles && !(playsById.get(c.playId)?.targetTitles ?? []).length) setTitlesFor((t) => (t === c.id ? null : c.id));
-                  else void findPeople(c, titles);
-                }}
+                h={handlers}
               />
             ))}
           </ul>
@@ -418,8 +465,18 @@ function Kbd({ children }: { children: string }) {
   return <kbd className="rounded border border-black/10 bg-surface px-1 py-px font-sans text-[11px] font-medium text-ink-200">{children}</kbd>;
 }
 
-function CandidateCard({
-  c, types, active, selected, busy, error, reasonOpen, titlesOpen, willEnroll, innerRef, onActive, onSelect, onApprove, onSkip, onToggleReason, onFindPeople,
+interface CardHandlers {
+  register: (id: string, el: HTMLElement | null) => void;
+  active: (id: string) => void;
+  select: (id: string, on: boolean) => void;
+  approve: (id: string) => void;
+  skip: (id: string, why?: string) => void;
+  toggleReason: (id: string) => void;
+  findPeople: (c: Candidate, titles?: string[]) => void;
+}
+
+const CandidateCard = memo(function CandidateCard({
+  c, types, active, selected, busy, error, reasonOpen, titlesOpen, willEnroll, h,
 }: {
   c: Candidate;
   types: PlayTypeInfo[] | null;
@@ -430,14 +487,15 @@ function CandidateCard({
   reasonOpen: boolean;
   titlesOpen: boolean;
   willEnroll: boolean;
-  innerRef: (el: HTMLElement | null) => void;
-  onActive: () => void;
-  onSelect: (on: boolean) => void;
-  onApprove: () => void;
-  onSkip: (why?: string) => void;
-  onToggleReason: () => void;
-  onFindPeople: (titles?: string[]) => void;
+  h: CardHandlers;
 }) {
+  const innerRef = useCallback((el: HTMLElement | null) => h.register(c.id, el), [h, c.id]);
+  const onActive = () => h.active(c.id);
+  const onSelect = (on: boolean) => h.select(c.id, on);
+  const onApprove = () => h.approve(c.id);
+  const onSkip = (why?: string) => h.skip(c.id, why);
+  const onToggleReason = () => h.toggleReason(c.id);
+  const onFindPeople = (titles?: string[]) => h.findPeople(c, titles);
   const [other, setOther] = useState<string | null>(null);
   const [titleDraft, setTitleDraft] = useState("");
   const wanted = titleDraft.split(",").map((t) => t.trim().slice(0, 100)).filter(Boolean).slice(0, 10);
@@ -559,4 +617,4 @@ function CandidateCard({
       </article>
     </li>
   );
-}
+});

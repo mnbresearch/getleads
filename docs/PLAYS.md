@@ -138,6 +138,8 @@ creates a task to go and answer it, never a lead.
 - **Evidence:** the post link you supplied.
 - **Good to know:** this type is never "run". It is fed by uploads. Rows that cannot be used
   are listed back to you with the reason.
+- **One upload, one source:** send the list as rows or as a CSV, not both - or send neither
+  and only the post link, and Scout reads the public post itself. An upload uses no search unit.
 
 ## The review rule
 
@@ -160,7 +162,8 @@ found; a person whose address cannot be found is not added. Adding someone to a 
 not start the campaign: sending only ever happens from a campaign you have started.
 
 A decision on a candidate that somebody else already decided changes nothing and is reported
-back as not applied. Nothing is shown as approved unless it really was.
+back as not applied. Nothing is shown as approved unless it really was: the answer lists the
+ids whose decision went through (`applied`) and, separately, the ones that did not.
 
 **Auto-approve** is a switch on each play and is off by default. When you turn it on, the
 people a run finds become leads without anyone reviewing them (you can set a minimum score).
@@ -218,6 +221,8 @@ Plays use the allowances your plan already has. There is no separate charge for 
   your workspace, plays work from their built-in rules and no AI message is used.
 - When your search units for the month are used up, a run is refused with a clear message. A
   scheduled run is skipped, and the play's last result says why.
+- A play's last result is one of: done, failed, blocked (it could not look anywhere - not the
+  same as finding nobody) or skipped (a scheduled run that did not happen).
 - When your lead units run out in the middle of a batch of approvals, Scout stops there. The
   candidates it did not reach stay in the queue, and you are told how many were approved and
   why it stopped. It never stops silently part way.
@@ -226,7 +231,13 @@ Other limits:
 
 - Up to 200 plays per workspace.
 - A play can run on a schedule, from every 6 hours to every 30 days, or only when you press
-  Run. A play that is still running is not started a second time.
+  Run. A play that is still running is not started a second time: the play shows as running,
+  and a second Run is refused and names the run that is going.
+- A run has four minutes. When a play looks for people at the companies it finds, part of that
+  time is kept for the people; if it runs out, the companies not reached stay in the queue as
+  companies and the run's note says how many.
+- A play's type cannot be changed once it exists. Changing its settings replaces them whole;
+  clearing its ICP, list, campaign or client detaches it.
 - Up to 5,000 candidates waiting for review per play. A run that reaches the limit stops
   adding and says so.
 - When a play has target job titles, a run looks for people at up to 15 of the companies it
@@ -246,7 +257,8 @@ Candidates are personal data, and Scout treats them the way it treats leads.
 - **Do not contact.** An address on the platform-wide do-not-contact list is never stored as
   a candidate. An address on your workspace's own do-not-contact list is not added either.
 - **Erasure.** When a person is erased - you delete the lead, or a data-subject request is
-  carried out - their candidates are erased with them.
+  carried out - their candidates are erased with them. A data-subject lookup counts a person's
+  candidates too: someone who is only waiting in a review queue is reported as held.
 - **Export and deletion.** Plays, their runs and their candidates are included in the
   workspace export, and are deleted when the workspace is deleted.
 - **Public pages only, read politely.** One request per page, short timeouts, and a limit on
@@ -308,7 +320,7 @@ for (const c of candidates) console.log(c.relevantBecause, c.evidenceUrl);
 
 // After a person has looked at them:
 const result = await gl.plays.decide([{ id: candidates[0].id, decision: "approve" }]);
-// result.leadsCreated, result.notApplied, result.stopped - nothing has been sent
+// result.applied, result.leadsCreated, result.notApplied, result.stopped - nothing has been sent
 
 const { plays, best } = await gl.plays.performance(90);          // sufficient: false means not enough sends yet
 ```
