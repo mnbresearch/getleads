@@ -21,6 +21,7 @@ import { env } from "../env.js";
 import { writeAudit } from "./audit.js";
 import { sendMail, systemMailerConfig } from "./mailer.js";
 import { windowHit, windowRemaining } from "./rateWindow.js";
+import { errorLine, redactMessage } from "./errors.js";
 
 /** Where a customer writes when they need a person. */
 export const SECURITY_CONTACT_EMAIL = "contact@mnbresearch.com";
@@ -220,10 +221,10 @@ export async function notifySecurity(userOrEmail: { email: string } | string | n
     }
     const mail = securityMail(kind, to, details);
     const r = await sendMail(null, { from: env.mailFrom, to, subject: mail.subject, text: mail.text });
-    if (!r.ok) console.warn(`[security-mail] ${kind} notice could not be sent: ${String(r.error ?? "unknown error").slice(0, 200)}`);
+    if (!r.ok) console.warn(`[security-mail] ${kind} notice could not be sent: ${redactMessage(String(r.error ?? "unknown error")).slice(0, 200)}`);
     return !!r.ok;
   } catch (e) {
-    console.warn(`[security-mail] ${kind} notice failed: ${(e as Error).message?.slice(0, 200)}`);
+    console.warn(`[security-mail] ${kind} notice failed: ${errorLine(e).slice(0, 200)}`);
     return false;
   }
 }

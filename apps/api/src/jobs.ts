@@ -27,6 +27,7 @@ import { blockedByProvidersNote, plural } from "./services/notes.js";
 import { sendMail } from "./lib/mailer.js";
 import { purgeDueWorkspaces } from "./services/accountDeletion.js";
 import { migrateLegacyLinkTokens } from "./lib/linkTokens.js";
+import { errorLine } from "./lib/errors.js";
 
 /** Org's plan, for plan-gated features. A missing org is treated as free. */
 async function planOf(db: Db, orgId: string | null | undefined): Promise<string> {
@@ -570,7 +571,24 @@ export const handlers: Record<string, JobHandler> = {
     if (hook.orgId !== ev.orgId || foreign(job, hook.orgId)) return ORG_MISMATCH;
     const body = JSON.stringify({ id: ev.id, type: ev.type, createdAt: ev.createdAt, data: ev.data, entity: { type: ev.entityType, id: ev.entityId } });
     const ts = String(Date.now());
-    const safeUrl = redact(hook.url, { max: 300 });
+    // A hook's address is often itself the credential (Slack and Zapier style: the secret is
+    // the path). Log lines and the job's stored error name the origin only; the hook's id is
+    // what identifies it.
+    const safeUrl = originOf(hook.url);
+    /** Any text that may echo the address (a network error can) with the address cut to its origin. */
+    const withoutHookPath = (text: string) => {
+      let out = hook.url.length > safeUrl.length ? text.split(hook.url).join(safeUrl) : text;
+      // Also the path on its own, however the rest of the address was spelled in the message.
+      try {
+        const u = new URL(hook.url);
+        const path = `${u.pathname}${u.search}`;
+        if (path.length >= 6) out = out.split(path).join("");
+        if (u.pathname.length >= 6) out = out.split(u.pathname).join("");
+      } catch {
+        /* not a URL: nothing more to strip */
+      }
+      return out;
+    };
 
     /** Record a delivery that will not be retried against the hook, and disable it past the limit. */
     const countFailure = async (lastError: string) => {
@@ -675,7 +693,7 @@ export const handlers: Record<string, JobHandler> = {
         } else outcome = { ok: res.ok, status: res.status, statusText: res.statusText };
       }
     } catch (e) {
-      outcome = { ok: false, status: 0, statusText: redact((e as Error).message, { max: 200 }) };
+      outcome = { ok: false, status: 0, statusText: redact(withoutHookPath((e as Error).message ?? ""), { max: 200 }) };
     }
 
     if (refused) {
@@ -888,7 +906,7 @@ export const handlers: Record<string, JobHandler> = {
         // paid call. A free plan has none and is not scanned at all.
         const premiumBudget = await remainingPremiumBudget(db, org.id).catch(() => 0);
         const r = await scanJobChanges(org.id, { limit: budget, deadlineAt: startedAt + DEADLINE_MS, premiumBudget }).catch((e) => {
-          ctx.log(`job change scan failed for ${org.id}: ${(e as Error).message}`);
+          ctx.log(`job change scan failed for ${org.id}: ${errorLine(e)}`);
           return null;
         });
         // Counted, not just logged. A tick where all 25 orgs threw used to return exactly
@@ -1213,11 +1231,11 @@ export function startRecurringJobKeeper(opts: { intervalMs?: number; log?: (m: s
 export async function runMaintenanceTick(opts: { maxMs?: number } = {}): Promise<{ revived: string[]; reaped: { failed: number; requeued: number }; processed: number }> {
   const { db } = getDb();
   const revived = await ensureRecurringJobs().catch((e) => {
-    console.warn(`[jobs] ensureRecurringJobs failed: ${(e as Error).message}`);
+    console.warn(`[jobs] ensureRecurringJobs failed: ${errorLine(e)}`);
     return [] as string[];
   });
   const reaped = await reapStaleJobs(db).catch((e) => {
-    console.warn(`[jobs] reapStaleJobs failed: ${(e as Error).message}`);
+    console.warn(`[jobs] reapStaleJobs failed: ${errorLine(e)}`);
     return { failed: 0, requeued: 0 };
   });
   const processed = await drainJobs(db, handlers, opts.maxMs ?? 25_000);

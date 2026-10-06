@@ -149,8 +149,12 @@ export async function webSearchDetailed(query: string, opts: WebSearchOptions = 
       attempts.length ? `tried ${describeAttempts(attempts)}` : "no providers were eligible",
       unavailable.length ? `unavailable: ${unavailable.join(",")}` : "",
     ].filter(Boolean);
-    console.warn(`[search] no results for ${JSON.stringify(query.slice(0, 120))} - ${parts.join("; ")}`);
-  } else if (process.env.DEBUG_SEARCH) {
+    // The search text is what a customer typed - a person's name, "@theirdomain.com" - and a
+    // provider's error can echo it back. Neither belongs in the log: by default the line
+    // says how long the text was and which providers did what. DEBUG_SEARCH=true (an
+    // operator's choice, for a debugging session) puts the text and the details back.
+    console.warn(searchDebugOn() ? `[search] no results for ${JSON.stringify(query.slice(0, 120))} - ${parts.join("; ")}` : `[search] no results for a ${query.length}-character query - ${attempts.length ? `tried ${describeAttemptsBriefly(attempts)}` : "no providers were eligible"}${unavailable.length ? `; unavailable: ${unavailable.join(",")}` : ""}`);
+  } else if (searchDebugOn()) {
     console.log(`[search] ${JSON.stringify(query.slice(0, 120))} -> ${describeAttempts(attempts)}`);
   }
 
@@ -167,6 +171,16 @@ export async function webSearchDetailed(query: string, opts: WebSearchOptions = 
   // Otherwise: cache nothing. The next caller gets a real attempt rather than our bad day.
 
   return done({ results: deduped, attempts, everyProviderFailed, nothingConfigured });
+}
+
+/** DEBUG_SEARCH=true (or 1): log lines may carry the search text and providers' own words. */
+export function searchDebugOn(): boolean {
+  return /^(true|1)$/i.test((process.env.DEBUG_SEARCH ?? "").trim());
+}
+
+/** Provider, result count or kind of failure - never a provider's message, which can echo the query. */
+function describeAttemptsBriefly(attempts: WebSearchAttempt[]): string {
+  return attempts.map((a) => (a.ok ? `${a.provider}=${a.count}${a.ms !== undefined ? ` (${a.ms}ms)` : ""}` : `${a.provider}=${a.outcome ?? "failed"}`)).join(", ");
 }
 
 function describeAttempts(attempts: WebSearchAttempt[]): string {
@@ -203,6 +217,10 @@ export function summarizeWebSearchFailures(outcomes: WebSearchOutcome[]): string
   const last = new Map<string, string>();
   for (const o of outcomes) for (const a of o.attempts) if (!a.ok) last.set(a.provider, a.error ?? a.outcome ?? "failed");
   const detail = [...last].map(([p, e]) => `${p}: ${e}`).join("; ");
+  // For the log: which fallbacks failed and how, without their messages (see searchDebugOn).
+  const lastOutcome = new Map<string, string>();
+  for (const o of outcomes) for (const a of o.attempts) if (!a.ok) lastOutcome.set(a.provider, a.outcome ?? "failed");
+  const logDetail = searchDebugOn() ? detail.slice(0, 300) : [...lastOutcome].map(([p, e]) => `${p}: ${e}`).join("; ");
   const n = outcomes.length;
   if (outcomes.every((o) => o.nothingConfigured)) {
     // The operator's version - which settings are missing, and what the keyless fallbacks
@@ -210,7 +228,7 @@ export function summarizeWebSearchFailures(outcomes: WebSearchOutcome[]): string
     // The returned sentence is shown to customers and carries neither.
     if (Date.now() - lastNoSearchLogAt > 60_000) {
       lastNoSearchLogAt = Date.now();
-      console.warn(`[search] ${NO_WEB_SEARCH_CONFIGURED_OPERATOR}${detail ? `; the keyless fallbacks also failed (${detail.slice(0, 300)})` : ""}`);
+      console.warn(`[search] ${NO_WEB_SEARCH_CONFIGURED_OPERATOR}${logDetail ? `; the keyless fallbacks also failed (${logDetail})` : ""}`);
     }
     return NO_WEB_SEARCH_CONFIGURED;
   }

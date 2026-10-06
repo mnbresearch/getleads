@@ -2,8 +2,9 @@ import bcrypt from "bcryptjs";
 import { sign, verify } from "hono/jwt";
 import { apiKeys, eq, getDb, organizations, sql, users, type ApiKey, type Organization, type User } from "@prospex/db";
 import { env } from "../env.js";
-import { ApiError } from "./errors.js";
+import { ApiError, isClientDataError, logDatabaseUnavailable, temporarilyUnavailable } from "./errors.js";
 import { randomToken, sha256 } from "./crypto.js";
+import { bcryptOnWorker, PasswordWorkerUnavailable, passwordWorkerStats, type BcryptTask } from "./passwordWorkers.js";
 
 /**
  * bcrypt gate: a small cap on how many password hashes/compares run at once, with a bounded
@@ -18,6 +19,11 @@ import { randomToken, sha256 } from "./crypto.js";
  * pile of pending hashes.
  *
  * The hashes themselves are unchanged bcrypt - every existing stored hash still verifies.
+ *
+ * The rounds themselves now run on worker threads (lib/passwordWorkers.ts), one
+ * worker per slot of this gate, so they no longer take time from the thread that answers
+ * every other request. The gate, the bounded wait and the "busy" answer are unchanged. If a
+ * worker cannot be used, the task is done here on the main thread exactly as before.
  */
 const HASH_CONCURRENCY = (() => {
   const n = Number(process.env.PASSWORD_HASH_CONCURRENCY);
@@ -68,6 +74,24 @@ async function withHashSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
+/**
+ * One bcrypt task inside a gate slot: on a worker thread when the pool can take it, on the
+ * main thread (the async form, which yields between rounds) when it cannot. A bcrypt error
+ * about the input itself is passed on unchanged either way.
+ */
+async function runBcrypt(task: BcryptTask): Promise<string | boolean> {
+  try {
+    return await bcryptOnWorker(task, HASH_CONCURRENCY);
+  } catch (e) {
+    if (!(e instanceof PasswordWorkerUnavailable)) throw e;
+    passwordWorkerStats.fallbacks++;
+    return task.op === "hash" ? bcrypt.hash(task.password, task.rounds) : bcrypt.compare(task.password, task.hash);
+  }
+}
+
+const bcryptHash = (password: string, rounds = 10) => withHashSlot(() => runBcrypt({ op: "hash", password, rounds }) as Promise<string>);
+const bcryptCompare = (password: string, hash: string) => withHashSlot(() => runBcrypt({ op: "compare", password, hash }) as Promise<boolean>);
+
 export interface AuthContext {
   org: Organization;
   user: User | null;
@@ -76,9 +100,8 @@ export interface AuthContext {
 }
 
 export async function hashPassword(p: string) {
-  // The async (callback/promise) form yields to the event loop between rounds; `hashSync`
-  // does not. Gated so a burst cannot pin the loop.
-  return withHashSlot(() => bcrypt.hash(p, 10));
+  // Gated so a burst cannot pile up; the rounds run on a worker thread (see runBcrypt).
+  return bcryptHash(p, 10);
 }
 
 /**
@@ -91,7 +114,7 @@ export async function hashPassword(p: string) {
 export const NO_PASSWORD_PREFIX = "!nopassword:";
 
 export async function unusablePasswordHash(seed: string) {
-  return `${NO_PASSWORD_PREFIX}${await withHashSlot(() => bcrypt.hash(`${seed}:${randomToken(32)}`, 10))}`;
+  return `${NO_PASSWORD_PREFIX}${await bcryptHash(`${seed}:${randomToken(32)}`, 10)}`;
 }
 
 export function hasUsablePassword(hash: string) {
@@ -100,7 +123,7 @@ export function hasUsablePassword(hash: string) {
 
 export async function checkPassword(p: string, hash: string) {
   if (!hasUsablePassword(hash)) return false;
-  return withHashSlot(() => bcrypt.compare(p, hash));
+  return bcryptCompare(p, hash);
 }
 
 /**
@@ -285,9 +308,18 @@ export async function claimAdminTotpStep(step: number): Promise<boolean> {
  */
 let dummyHash: Promise<string> | null = null;
 export async function burnPasswordCheck(p: string): Promise<void> {
-  dummyHash ??= bcrypt.hash(randomToken(24), 10);
-  const h = await dummyHash;
-  await withHashSlot(() => bcrypt.compare(p, h)).catch(() => false);
+  // Made once, through the same gate and workers as every other hash. If that one attempt
+  // fails (busy), it is forgotten so the next call makes it again.
+  dummyHash ??= bcryptHash(randomToken(24), 10).catch((e) => {
+    dummyHash = null;
+    throw e;
+  });
+  try {
+    const h = await dummyHash;
+    await bcryptCompare(p, h);
+  } catch {
+    /* the result is never used; only the time spent matters */
+  }
 }
 
 /** bcrypt reads at most 72 bytes; anything after that is silently ignored. */
@@ -342,33 +374,61 @@ export function looksLikeApiKey(token: string): boolean {
   return API_KEY_PREFIXES.some((p) => token.startsWith(p));
 }
 
+/**
+ * Who is this request from? `null` means "nobody we recognise" (the caller answers 401).
+ *
+ * Only the CREDENTIAL can make this null: a token that does not verify, has expired, is of
+ * the wrong kind or was revoked; an API key that does not exist or was revoked. A database
+ * that cannot be asked is not an answer about the credential - it used to be reported as
+ * one (every database error was swallowed here), so during an outage a valid session got a
+ * 401 and the web app signed the person out. Now that case is a 503 that says to try again.
+ */
 export async function authenticate(header: string | undefined): Promise<AuthContext | null> {
   if (!header) return null;
   const [scheme, token] = header.split(" ");
   if (!token) return null;
   const { db } = getDb();
+  /** Run the database part: a value the token supplied that the database cannot use is still "not recognised"; anything else is "try again". */
+  const ask = async <T>(fn: () => Promise<T>): Promise<T | null> => {
+    try {
+      return await fn();
+    } catch (e) {
+      if (isClientDataError(e)) return null;
+      logDatabaseUnavailable("checking a session or API key", e);
+      throw temporarilyUnavailable();
+    }
+  };
   if (looksLikeApiKey(token)) {
-    const key = await db.query.apiKeys.findFirst({ where: eq(apiKeys.keyHash, sha256(token)) });
-    if (!key || key.revokedAt) return null;
-    const org = await db.query.organizations.findFirst({ where: eq(organizations.id, key.orgId) });
-    if (!org) return null;
-    void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, key.id)).catch(() => {});
-    return { org, user: null, apiKey: key, via: "api_key" };
+    return ask(async () => {
+      const key = await db.query.apiKeys.findFirst({ where: eq(apiKeys.keyHash, sha256(token)) });
+      if (!key || key.revokedAt) return null;
+      const org = await db.query.organizations.findFirst({ where: eq(organizations.id, key.orgId) });
+      if (!org) return null;
+      void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, key.id)).catch(() => {});
+      return { org, user: null, apiKey: key, via: "api_key" } satisfies AuthContext;
+    });
   }
   if (scheme.toLowerCase() !== "bearer") return null;
+  let payload: { sub?: unknown; org?: unknown; aud?: unknown; tv?: unknown; role?: unknown; iat?: unknown };
   try {
-    const payload = (await verify(token, env.jwtSecret, "HS256")) as { sub?: unknown; org?: unknown; aud?: unknown; tv?: unknown; role?: unknown; iat?: unknown };
-    // Only a session token is a session. A token issued before `aud` existed has none and is
-    // treated as a session (so the deploy signs nobody out); one that names any other
-    // audience - an admin session, an OAuth state, a two-factor challenge - is not, whatever
-    // else it contains.
-    if (payload.aud !== undefined && payload.aud !== "session") return null;
-    if (payload.role === "admin" || typeof payload.sub !== "string" || !payload.sub) return null;
-    // An absolute cap on a session's age, whatever its `exp` says: nothing signed with this
-    // secret is a session for longer than a session is issued for. (Every token this API has
-    // issued carries `iat`; one without it is judged on `exp` alone, as before.)
-    if (sessionTooOld(payload.iat)) return null;
-    const user = await db.query.users.findFirst({ where: eq(users.id, payload.sub) });
+    payload = (await verify(token, env.jwtSecret, "HS256")) as typeof payload;
+  } catch {
+    // Bad signature, expired, not a token at all.
+    return null;
+  }
+  // Only a session token is a session. A token issued before `aud` existed has none and is
+  // treated as a session (so the deploy signs nobody out); one that names any other
+  // audience - an admin session, an OAuth state, a two-factor challenge - is not, whatever
+  // else it contains.
+  if (payload.aud !== undefined && payload.aud !== "session") return null;
+  if (payload.role === "admin" || typeof payload.sub !== "string" || !payload.sub) return null;
+  // An absolute cap on a session's age, whatever its `exp` says: nothing signed with this
+  // secret is a session for longer than a session is issued for. (Every token this API has
+  // issued carries `iat`; one without it is judged on `exp` alone, as before.)
+  if (sessionTooOld(payload.iat)) return null;
+  const sub = payload.sub;
+  return ask(async () => {
+    const user = await db.query.users.findFirst({ where: eq(users.id, sub) });
     if (!user) return null;
     // Revocation: the token must carry the user's current token version. A legacy token has
     // none and counts as version 0, so it keeps working until the user's version first moves.
@@ -376,10 +436,8 @@ export async function authenticate(header: string | undefined): Promise<AuthCont
     if (typeof tv !== "number" || tv !== (user.tokenVersion ?? 0)) return null;
     const org = await db.query.organizations.findFirst({ where: eq(organizations.id, user.orgId) });
     if (!org) return null;
-    return { org, user, apiKey: null, via: "jwt" };
-  } catch {
-    return null;
-  }
+    return { org, user, apiKey: null, via: "jwt" } satisfies AuthContext;
+  });
 }
 
 /**

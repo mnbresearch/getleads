@@ -1,6 +1,7 @@
 import type { Context } from "hono";
-import { auditLog, getDb } from "@prospex/db";
+import { auditLog, getDb, sql } from "@prospex/db";
 import { clientIp } from "../middleware.js";
+import { ApiError, errorLine } from "./errors.js";
 
 /**
  * Security audit log.
@@ -50,7 +51,7 @@ export async function writeAudit(entry: AuditEntry): Promise<void> {
       data: entry.data ?? {},
     });
   } catch (e) {
-    console.warn(`[audit] could not record ${entry.action}: ${(e as Error).message}`);
+    console.warn(`[audit] could not record ${entry.action}: ${errorLine(e)}`);
   }
 }
 
@@ -74,4 +75,37 @@ export async function audit(c: Context, action: string, over: Omit<AuditEntry, "
     ip: over.ip ?? clientIp(c),
     requestId: over.requestId ?? c.req.header("x-request-id") ?? c.req.header("cf-ray") ?? null,
   });
+}
+
+/**
+ * "At most N in a window", counted from the security log - so it holds across every API
+ * instance and across a restart.
+ *
+ * The hourly allowances for mail the platform sends on someone's say-so (confirmation
+ * emails, team invitations) are counted in the memory of one process (lib/rateWindow.ts).
+ * A second instance on the same database had its own count, and a restart reset it: the
+ * same person got a fourth confirmation email within the hour. Each of those sends already
+ * writes a row here, so the rows are the shared count. The in-memory check stays in front
+ * (it is what stops a burst arriving at the same instant); this is the backstop behind it.
+ *
+ * `where` selects the rows that count (it should start from an indexed column: org_id or
+ * action). Throws the same 429 `rate_limited` the in-memory limiter throws. If the log
+ * cannot be read the check is skipped, never failed: the in-memory limiter still applies.
+ */
+export async function enforceLoggedWindow(where: ReturnType<typeof sql>, limit: number, windowMs: number, message: string): Promise<void> {
+  let times: Date[];
+  try {
+    const { db } = getDb();
+    const rows = (await db.execute(
+      sql`SELECT created_at FROM audit_log WHERE ${where} AND created_at > now() - ${`${Math.ceil(windowMs / 1000)} seconds`}::interval ORDER BY created_at DESC LIMIT ${limit}`,
+    )) as unknown as { created_at: string | Date }[];
+    times = [...rows].map((r) => new Date(r.created_at));
+  } catch (e) {
+    console.warn(`[audit] could not read the shared allowance (the per-instance one still applies): ${errorLine(e)}`);
+    return;
+  }
+  if (times.length < limit) return;
+  const oldest = times[times.length - 1].getTime();
+  const retryAfterSeconds = Math.max(1, Math.ceil((oldest + windowMs - Date.now()) / 1000));
+  throw new ApiError(429, message, "rate_limited", { retryAfterSeconds });
 }

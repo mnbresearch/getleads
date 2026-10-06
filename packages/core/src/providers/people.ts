@@ -257,7 +257,9 @@ export async function searchProvidersDetailed(q: PeopleProviderQuery): Promise<P
     } catch (e) {
       const message = (e as Error).message ?? String(e);
       failures.push({ provider: p.name, message: message.slice(0, 200) });
-      if (process.env.DEBUG_SEARCH) console.warn(`[provider:${p.name}]`, message);
+      // The message can echo the search (a name, a company). Only with DEBUG_SEARCH=true -
+      // the same switch, read the same way, as the web search log (search/index.ts).
+      if (/^(true|1)$/i.test((process.env.DEBUG_SEARCH ?? "").trim())) console.warn(`[provider:${p.name}]`, message);
     }
     if (out.length >= (q.limit ?? 25)) break;
   }

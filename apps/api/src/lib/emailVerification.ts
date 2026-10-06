@@ -23,7 +23,7 @@
 import type { Context } from "hono";
 import { and, emailVerificationTokens, eq, getDb, isNull, sql, users, type User } from "@prospex/db";
 import { env } from "../env.js";
-import { ApiError } from "./errors.js";
+import { ApiError, errorLine, redactMessage } from "./errors.js";
 import { randomToken, sha256 } from "./crypto.js";
 import { sendMail, systemMailerConfig } from "./mailer.js";
 import type { AuthContext } from "./auth.js";
@@ -76,10 +76,10 @@ export async function sendVerificationEmail(user: Pick<User, "id" | "email" | "e
         `This link works once and expires in 24 hours. Until you confirm, your workspace cannot send team invitations or use Scout's shared sending address; everything else works.\n\n` +
         `If you did not create a Scout account, ignore this email - nothing will be sent from this address.`,
     });
-    if (!r.ok) console.warn(`[auth] verification email to user ${user.id} could not be sent: ${String(r.error ?? "unknown error").slice(0, 200)}`);
+    if (!r.ok) console.warn(`[auth] verification email to user ${user.id} could not be sent: ${redactMessage(String(r.error ?? "unknown error")).slice(0, 200)}`);
     return { emailed: !!r.ok };
   } catch (e) {
-    console.warn(`[auth] verification email to user ${user.id} failed: ${(e as Error).message?.slice(0, 200)}`);
+    console.warn(`[auth] verification email to user ${user.id} failed: ${errorLine(e).slice(0, 200)}`);
     return { emailed: false };
   }
 }

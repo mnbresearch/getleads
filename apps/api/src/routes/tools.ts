@@ -7,7 +7,7 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { effectiveLimits } from "@prospex/db";
-import { and, or, autopilots, campaignContacts, campaigns, clients, companies, consume, desc, enqueue, eq, getDb, icps, inArray, invites, leads, limitsFor, listLeads, lists, remainingPremiumBudget, savedSearches, sql, tasks, users, organizations, type Invite } from "@prospex/db";
+import { and, or, autopilots, campaignContacts, campaigns, clients, companies, consume, desc, enqueue, eq, getDb, icps, inArray, invites, leads, limitsFor, listLeads, lists, remainingPremiumBudget, savedSearches, sql, tasks, users, organizations, type Db, type Invite } from "@prospex/db";
 import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, redact, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
 import { env } from "../env.js";
 import { hashPassword, issueJwt, passwordProblem } from "../lib/auth.js";
@@ -23,7 +23,7 @@ import { advanceContact } from "../services/campaigns.js";
 import { runAutopilot } from "../services/autopilot.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
-import { audit } from "../lib/audit.js";
+import { audit, enforceLoggedWindow } from "../lib/audit.js";
 import { emailField } from "../lib/fields.js";
 import { storedSearchQuerySchema } from "../lib/searchQuery.js";
 import { assertRowCap, guardJobCapacity, TEXT_CAPS, withOrgLock } from "../lib/limits.js";
@@ -493,8 +493,8 @@ const ACTIVE_INVITE = sql`${invites.acceptedAt} IS NULL AND ${invites.revokedAt}
  * every one of them could be accepted - the limit was checked at invite time against a
  * number the invites themselves never changed.
  */
-async function seatUsage(orgIdValue: string) {
-  const { db } = getDb();
+async function seatUsage(orgIdValue: string, handle?: Db) {
+  const db = handle ?? getDb().db;
   const [{ m }] = await db.select({ m: sql<number>`count(*)::int` }).from(users).where(eq(users.orgId, orgIdValue));
   const [{ p }] = await db.select({ p: sql<number>`count(*)::int` }).from(invites).where(and(eq(invites.orgId, orgIdValue), ACTIVE_INVITE));
   return { members: m, pending: p };
@@ -538,11 +538,34 @@ async function sendInviteEmail(a: { orgName: string; inviter: string }, email: s
  * reset it.
  */
 const INVITE_WINDOW_MS = 3_600_000;
+const INVITE_ORG_LIMIT_MESSAGE = "This workspace has sent 20 invitation emails in the last hour. Wait a while before sending more.";
+const INVITE_ADDRESS_LIMIT_MESSAGE = "That address has already been sent 3 invitations in the last hour. Share the invite link with them directly, or try again later.";
+/**
+ * The same two allowances counted from the security log (every invitation sent or re-sent
+ * writes a row), so they hold on every instance and across a restart. Read-only, and called
+ * BEFORE the "seats" lock is taken: it uses its own database connection, and a request that
+ * waits for a second connection while holding the lock can leave every connection in the
+ * pool held by requests waiting for that lock.
+ */
+async function inviteMailAllowance(orgIdValue: string, email: string): Promise<ApiError | null> {
+  const sent = sql`action IN ('team.invited', 'team.invite_resent') AND result = 'ok'`;
+  try {
+    await enforceLoggedWindow(sql`org_id = ${orgIdValue} AND ${sent}`, 20, INVITE_WINDOW_MS, INVITE_ORG_LIMIT_MESSAGE);
+    await enforceLoggedWindow(sql`${sent} AND lower(data->>'email') = ${email.toLowerCase()}`, 3, INVITE_WINDOW_MS, INVITE_ADDRESS_LIMIT_MESSAGE);
+    return null;
+  } catch (e) {
+    // Handed back rather than thrown: the caller raises it where the allowance has always
+    // been checked - last, after the reasons that say more ("already invited", "no seats").
+    if (e instanceof ApiError) return e;
+    throw e;
+  }
+}
+/** The in-memory count: what stops a burst arriving at the same instant. Counts one use when it passes. */
 function limitInviteMail(orgIdValue: string, email: string) {
   enforceWindows(
     [
-      { key: `invite:org:${orgIdValue}`, limit: 20, message: "This workspace has sent 20 invitation emails in the last hour. Wait a while before sending more." },
-      { key: `invite:to:${email.toLowerCase()}`, limit: 3, message: "That address has already been sent 3 invitations in the last hour. Share the invite link with them directly, or try again later." },
+      { key: `invite:org:${orgIdValue}`, limit: 20, message: INVITE_ORG_LIMIT_MESSAGE },
+      { key: `invite:to:${email.toLowerCase()}`, limit: 3, message: INVITE_ADDRESS_LIMIT_MESSAGE },
     ],
     INVITE_WINDOW_MS,
   );
@@ -576,19 +599,29 @@ toolRoutes.post("/team/invite", requireUser, roleGate("team.invited", "owner", "
   if (existingUser) {
     throw new ApiError(409, existingUser.orgId === a.org.id ? `${email} is already a member of this workspace.` : `${email} already has a Scout account in another workspace, so it cannot be invited here. They would need to use a different email address.`, "already_registered");
   }
-  const dupe = await db.query.invites.findFirst({ where: and(eq(invites.orgId, a.org.id), eq(invites.email, email), ACTIVE_INVITE) });
-  if (dupe) throw new ApiError(409, `${email} already has a pending invite. Re-send it from the team list instead.`, "already_invited");
   const limits = effectiveLimits(a.org);
-  const seats = await seatUsage(a.org.id);
-  if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) {
-    throw badRequest(`Seat limit reached (${limits.seats}: ${seats.members} ${seats.members === 1 ? "member" : "members"} and ${seats.pending} pending ${seats.pending === 1 ? "invite" : "invites"}). Revoke a pending invite or upgrade the plan to add more.`);
-  }
-  // Checked last, so only an invite that is actually about to be sent uses the allowance.
-  limitInviteMail(a.org.id, email);
+  const overAllowance = await inviteMailAllowance(a.org.id, email);
   // Only the hash of the token is stored: the link exists in this response and in the email,
   // and a copy of the invites table is not a list of working links.
   const token = randomToken(24);
-  const [inv] = await db.insert(invites).values({ orgId: a.org.id, email, role: b.role, token: null, tokenHash: hashLinkToken(token), invitedBy: a.user!.id, expiresAt: new Date(Date.now() + INVITE_TTL_MS) }).returning();
+  // The count and the insert happen under the workspace's "seats" lock - the same one the
+  // accept step takes (POST /v1/auth/join). Without it, twenty invitations sent at the same
+  // moment each counted the seats before any of them had been saved, and a workspace with
+  // two free seats ended up with fifteen pending invites. Invites that already exist are
+  // never touched here; only a new one past the limit is refused.
+  const inv = await withOrgLock(db, a.org.id, "seats", async (tx) => {
+    const dupe = await tx.query.invites.findFirst({ where: and(eq(invites.orgId, a.org.id), eq(invites.email, email), ACTIVE_INVITE) });
+    if (dupe) throw new ApiError(409, `${email} already has a pending invite. Re-send it from the team list instead.`, "already_invited");
+    const seats = await seatUsage(a.org.id, tx);
+    if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) {
+      throw badRequest(`Seat limit reached (${limits.seats}: ${seats.members} ${seats.members === 1 ? "member" : "members"} and ${seats.pending} pending ${seats.pending === 1 ? "invite" : "invites"}). Revoke a pending invite or upgrade the plan to add more.`);
+    }
+    // Checked last, so only an invite that is actually about to be sent uses the allowance.
+    if (overAllowance) throw overAllowance;
+    limitInviteMail(a.org.id, email);
+    const [row] = await tx.insert(invites).values({ orgId: a.org.id, email, role: b.role, token: null, tokenHash: hashLinkToken(token), invitedBy: a.user!.id, expiresAt: new Date(Date.now() + INVITE_TTL_MS) }).returning();
+    return row;
+  });
   // sendMail answers { ok: false } rather than throwing; that used to be ignored, so the UI
   // said "Invite sent" for mail that never left. The link is returned either way so it can
   // be shared by hand.
@@ -623,22 +656,30 @@ async function resendInvite(c: import("hono").Context<Env>) {
   const { db } = getDb();
   const inv = await db.query.invites.findFirst({ where: and(eq(invites.id, c.req.param("id")!), eq(invites.orgId, a.org.id), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`) });
   if (!inv) throw notFound("Pending invite");
-  // An expired invite no longer holds a seat, so renewing one has to fit under the limit.
-  if (inviteExpiry(inv).getTime() <= Date.now()) {
-    const limits = effectiveLimits(a.org);
-    const seats = await seatUsage(a.org.id);
-    if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) throw badRequest(`Seat limit reached (${limits.seats}). Revoke another invite or upgrade the plan first.`);
-  }
-  limitInviteMail(a.org.id, inv.email);
+  const overAllowance = await inviteMailAllowance(a.org.id, inv.email);
   const expiresAt = new Date(Date.now() + INVITE_TTL_MS);
   const token = randomToken(24);
-  // Still pending at the moment of writing: an invite accepted or revoked in between is not
-  // handed a fresh link.
-  const renewed = await db
-    .update(invites)
-    .set({ expiresAt, token: null, tokenHash: hashLinkToken(token) })
-    .where(and(eq(invites.id, inv.id), eq(invites.orgId, a.org.id), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`))
-    .returning({ id: invites.id });
+  // An expired invite no longer holds a seat, so renewing one has to fit under the limit -
+  // counted and written under the same "seats" lock as a new invite (see POST /team/invite),
+  // so several renewals at once cannot each take the last seat.
+  const expired = inviteExpiry(inv).getTime() <= Date.now();
+  const renew = async (h: Db) => {
+    if (expired) {
+      const limits = effectiveLimits(a.org);
+      const seats = await seatUsage(a.org.id, h);
+      if (limits.seats > 0 && seats.members + seats.pending >= limits.seats) throw badRequest(`Seat limit reached (${limits.seats}). Revoke another invite or upgrade the plan first.`);
+    }
+    if (overAllowance) throw overAllowance;
+    limitInviteMail(a.org.id, inv.email);
+    // Still pending at the moment of writing: an invite accepted or revoked in between is not
+    // handed a fresh link.
+    return h
+      .update(invites)
+      .set({ expiresAt, token: null, tokenHash: hashLinkToken(token) })
+      .where(and(eq(invites.id, inv.id), eq(invites.orgId, a.org.id), sql`${invites.acceptedAt} IS NULL`, sql`${invites.revokedAt} IS NULL`))
+      .returning({ id: invites.id });
+  };
+  const renewed = expired ? await withOrgLock(db, a.org.id, "seats", renew) : await renew(db);
   if (!renewed.length) throw notFound("Pending invite");
   const sent = await sendInviteEmail({ orgName: a.org.name, inviter: a.user?.name || a.user?.email || a.org.name }, inv.email, token);
   await audit(c, "team.invite_resent", { targetType: "invite", targetId: inv.id, data: { email: inv.email, emailed: sent.emailed } });

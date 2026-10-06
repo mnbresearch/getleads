@@ -17,7 +17,7 @@ import { orgId, requireAuth, type Env } from "../middleware.js";
 import { canonicalEmail, companyDomainOrNull, findExistingLead, leadWithCompany, upsertCompany, upsertLead, verifierOf } from "../services/leads.js";
 import { emitEvent } from "../lib/events.js";
 import { eraseLeads } from "../lib/privacyErase.js";
-import { onPlatformList, shownAddress } from "../lib/privacySuppression.js";
+import { onPlatformList, platformListed, shownAddress } from "../lib/privacySuppression.js";
 
 /** What a caller is told when an address is on the platform-wide do-not-contact list. */
 const PLATFORM_LISTED = "This person has asked not to be contacted through Scout, so their address cannot be stored.";
@@ -709,7 +709,9 @@ leadRoutes.post("/:id/find-email", async (c) => {
     await db.update(leads).set({ email: canonicalEmail(r.email) ?? undefined, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: r.verifiedBy ? new Date() : null, emailVerifiedBy: r.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id));
     if (co && r.pattern && !co.emailPattern) await db.update(companies).set({ emailPattern: r.pattern }).where(eq(companies.id, co.id));
   }
-  return c.json(r);
+  // Runner-up candidates that are on the platform's list are not handed out either.
+  const listedCandidates = r.candidates?.length ? await platformListed(r.candidates.map((x) => x.email), db) : new Set<string>();
+  return c.json(listedCandidates.size ? { ...r, candidates: r.candidates.filter((x) => !listedCandidates.has(x.email.trim().toLowerCase())) } : r);
 });
 
 // ── helpers ──

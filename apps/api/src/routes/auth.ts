@@ -21,13 +21,13 @@ import {
   type GoogleIdentity,
   type GoogleResolution,
 } from "../lib/googleAuth.js";
-import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors.js";
+import { ApiError, badRequest, notFound, requireSomeFields, errorLine, redactMessage } from "../lib/errors.js";
 import { mailingAddressOf } from "../services/campaigns.js";
 import { clientIp, rateLimit, requireAuth, requireRole, requireUser, type Env } from "../middleware.js";
 import { randomToken, safeEqual, sha256 } from "../lib/crypto.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
-import { audit } from "../lib/audit.js";
+import { audit, enforceLoggedWindow } from "../lib/audit.js";
 import { attemptQueue, clearLock, forgetOtherKnownAddresses, humanWait, ipKey, isNewAddressFor, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
 import { beginTwoFactorSetup, checkSecondFactor, clearTwoFactor, confirmSecondFactor, recoveryCodesLeft, replaceRecoveryCodes, twoFactorEnabled } from "../lib/twoFactor.js";
 import { confirmVerificationToken, emailVerificationAvailable, sendVerificationEmail, sendVerificationEmailWithin } from "../lib/emailVerification.js";
@@ -446,7 +446,11 @@ authRoutes.post("/verify/resend", requireAuth, requireUser, rateLimit({ perMinut
   const user = c.get("auth").user!;
   if (user.emailVerifiedAt) return c.json({ ok: true, emailed: false, alreadyVerified: true });
   if (!emailVerificationAvailable()) return c.json({ ok: true, emailed: false });
-  enforceWindows([{ key: `verify-resend:${user.id}`, limit: 3, message: "We have already sent 3 confirmation emails in the last hour. Check your inbox and spam folder, or try again later." }], 60 * 60 * 1000);
+  const RESEND_LIMIT_MESSAGE = "We have already sent 3 confirmation emails in the last hour. Check your inbox and spam folder, or try again later.";
+  // The same allowance counted from the security log, so it holds on every instance and
+  // across a restart (each re-send writes the row below); then the in-memory count.
+  await enforceLoggedWindow(sql`org_id = ${user.orgId} AND action = 'auth.verification_sent' AND target_id = ${user.id} AND data->>'on' = 'resend'`, 3, 60 * 60 * 1000, RESEND_LIMIT_MESSAGE);
+  enforceWindows([{ key: `verify-resend:${user.id}`, limit: 3, message: RESEND_LIMIT_MESSAGE }], 60 * 60 * 1000);
   const r = await sendVerificationEmail(user);
   await audit(c, "auth.verification_sent", { targetType: "user", targetId: user.id, result: r.emailed ? "ok" : "failed", data: { email: user.email, on: "resend" } });
   return c.json({ ok: true, emailed: r.emailed, ...(r.emailed ? {} : { message: "The email could not be sent from our side. Please try again in a few minutes." }) });
@@ -487,8 +491,9 @@ authRoutes.post("/password/forgot", rateLimit({ perMinute: 5, name: "password-fo
         subject: "Reset your Scout password",
         text: `Someone (hopefully you) asked to reset the password for ${user.email} on Scout.\n\nSet a new password: ${link}\n\nThis link works once and expires in 1 hour. If you did not ask for this, ignore this email - your password has not changed.`,
       }).catch((e) => ({ ok: false, error: (e as Error).message }));
-      // Logged, not returned: the response must look the same either way.
-      if (!r.ok) console.error(`[auth] password reset email to user ${user.id} failed: ${r.error}`);
+      // Logged, not returned: the response must look the same either way. A mail server's
+      // refusal usually quotes the recipient, so the address is masked in the log line.
+      if (!r.ok) console.error(`[auth] password reset email to user ${user.id} failed: ${redactMessage(String(r.error ?? "unknown error"))}`);
       await audit(c, "auth.password_reset_requested", { orgId: user.orgId, actorType: "anonymous", actorUserId: null, targetType: "user", targetId: user.id, result: r.ok ? "ok" : "failed", data: { email, emailed: !!r.ok } });
     }
   }
@@ -533,7 +538,7 @@ authRoutes.post("/password/reset", rateLimit({ perMinute: 10, name: "password-re
   const needsCode = twoFactorEnabled(user);
   // With a code still to come, this address has not finished signing in: forget every known
   // address and lift the lock, but do not make this one known yet (see /login).
-  await forgetOtherKnownAddresses(user.email, needsCode ? null : clientIp(c)).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a password reset: ${(e as Error).message}`));
+  await forgetOtherKnownAddresses(user.email, needsCode ? null : clientIp(c)).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a password reset: ${errorLine(e)}`));
   await clearLock(user.email, needsCode ? null : clientIp(c));
   await audit(c, "auth.password_reset", { orgId: user.orgId, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, data: { email: user.email, sessionsRevoked: true, ...(needsCode ? { twoFactorRequired: true } : {}) } });
   void notifySecurity(user, "password_reset", { ip: clientIp(c) });
@@ -580,7 +585,7 @@ authRoutes.post("/password/change", requireAuth, requireUser, rateLimit({ perMin
   await audit(c, "auth.password_changed", { targetType: "user", targetId: user.id, data: { hadPassword, sessionsRevoked: true } });
   // Same as a reset: addresses that were known for the OLD password are forgotten, whether or
   // not there was a password before (an account claimed through Google sets its first one here).
-  await forgetOtherKnownAddresses(user.email, clientIp(c)).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a password change: ${(e as Error).message}`));
+  await forgetOtherKnownAddresses(user.email, clientIp(c)).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a password change: ${errorLine(e)}`));
   if (hadPassword) {
     // They proved the old password. Earlier wrong guesses - here or on the login form - were
     // at a password that no longer exists, and this address has earned being known.

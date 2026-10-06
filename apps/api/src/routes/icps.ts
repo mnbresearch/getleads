@@ -54,10 +54,13 @@ icpRoutes.post("/", zValidator("json", icpInput), async (c) => {
   const { db } = getDb();
   await assertRowCap(db, icps, oid, "icps");
   await assertOwned(clients, b.clientId, oid, "Client", c);
+  // Checked before the insert: a "queue is full, try again" answer must not leave the ICP
+  // saved, or the retry makes a second one.
+  const build = !!(b.buildWithAi && (b.description || b.seedDomains?.length));
+  if (build) await guardJobCapacity(db, oid, "icp.build");
   const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description ?? null, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [], clientId: b.clientId ?? null }).returning();
   let jobId: string | null = null;
-  if (b.buildWithAi && (b.description || b.seedDomains?.length)) {
-    await guardJobCapacity(db, oid, "icp.build");
+  if (build) {
     jobId = (await enqueue(db, "icp.build", { icpId: row.id, product: b.product }, { orgId: oid })).id;
   }
   return c.json({ icp: row, jobId }, 201);

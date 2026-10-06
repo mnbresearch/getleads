@@ -154,8 +154,21 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
   }
 
   beforeAll(async () => {
+    // Its own Postgres schema. This file calls the job runner (/internal/jobs/run), which
+    // runs whatever is queued in the database it is pointed at: in the shared schema that was
+    // every other test file's leftover jobs, and one slow one made the test time out now and
+    // then. The admin sign-in lock (one subject for the whole platform) is isolated the same way.
+    try {
+      const { default: postgres } = await import("postgres");
+      const adminSql = postgres(TEST_DB!, { max: 1, onnotice: () => {} });
+      await adminSql.unsafe(`CREATE SCHEMA IF NOT EXISTS "sec_auth"`);
+      await adminSql.end({ timeout: 2 });
+      process.env.DATABASE_URL = `${TEST_DB}${TEST_DB!.includes("?") ? "&" : "?"}search_path=sec_auth`;
+    } catch {
+      process.env.DATABASE_URL = TEST_DB;
+    }
     S = await import("@prospex/db");
-    await S.runMigrations(TEST_DB);
+    await S.runMigrations(process.env.DATABASE_URL);
     db = S.getDb().db;
     G = await import("./lib/googleAuth.js");
     A = await import("./lib/auth.js");

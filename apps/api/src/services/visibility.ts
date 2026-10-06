@@ -23,7 +23,7 @@ import {
   type TemplateContext,
   type VisibilityObservation,
 } from "@prospex/core";
-import { ApiError } from "../lib/errors.js";
+import { ApiError, errorLine } from "../lib/errors.js";
 
 /** What a customer is told when the platform has no AI engine switched on. Names no server setting. */
 export const AI_NOT_SWITCHED_ON = "AI drafting isn't switched on for this workspace yet. Contact support to enable it.";
@@ -222,7 +222,7 @@ export async function sampleAcrossEngines(
    * written - the opposite of what this comment used to claim.
    */
   const billable = results.filter((r) => r.ok).length;
-  if (billable > 0) await consume(db, orgIdValue, "aiMessages", billable, { allowOverage: true }).catch((e) => console.warn(`[visibility] usage not recorded for ${orgIdValue}: ${(e as Error).message}`));
+  if (billable > 0) await consume(db, orgIdValue, "aiMessages", billable, { allowOverage: true }).catch((e) => console.warn(`[visibility] usage not recorded for ${orgIdValue}: ${errorLine(e)}`));
   return {
     engines: providers.map((p) => p.name),
     samplesPerEngine: samples,

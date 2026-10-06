@@ -3,6 +3,7 @@ import { z } from "zod";
 import { and, auditLog, desc, eq, getDb, sql, users } from "@prospex/db";
 import { zValidator } from "../lib/validate.js";
 import { badRequest } from "../lib/errors.js";
+import { auditForResponse } from "../lib/privacySuppression.js";
 import { rateLimit, requireAuth, requireRole, requireUser, type Env } from "../middleware.js";
 
 /**
@@ -73,13 +74,13 @@ auditRoutes.get(
         actorType: r.actorType,
         actorEmail: r.actorEmail ?? null,
         targetType: r.targetType ?? null,
-        targetId: r.targetId ?? null,
         result: r.result,
         // An admin row is the platform operator acting on this workspace. What they did is the
         // customer's business; the address they did it from is not, and it was being shown.
         ip: r.actorType === "admin" ? null : r.ip ?? null,
         createdAt: r.createdAt,
-        data: r.data ?? {},
+        // targetId and data, with any address fingerprint left out (see auditForResponse).
+        ...auditForResponse(r.targetId, r.data),
       })),
       hasMore,
       nextBefore: hasMore && page.length ? page[page.length - 1].cursor : null,

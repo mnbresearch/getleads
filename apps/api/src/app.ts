@@ -6,6 +6,7 @@ import { randomBytes } from "node:crypto";
 import { databaseTlsHint, getDb } from "@prospex/db";
 import { env } from "./env.js";
 import { describeError, errorHandler } from "./lib/errors.js";
+import { withReservationScope } from "./lib/limits.js";
 import { requireInternalToken, type Env } from "./middleware.js";
 import { authRoutes } from "./routes/auth.js";
 import { leadRoutes } from "./routes/leads.js";
@@ -89,6 +90,10 @@ export function redactRequestLine(path: string, rawQuery = ""): string {
         // An undecodable key cannot be checked against the list, so its value is not trusted.
         return `${REDACTED}=${REDACTED}`;
       }
+      // An address sent as the NAME of a parameter ("?sara@example.com" or
+      // "?sara%40example.com=1" - a mistyped link does this) is no more loggable than one
+      // sent as a value. Without this it was written with "@" turned into "_", still readable.
+      if (ADDRESS_SHAPED.test(key) || ADDRESS_SHAPED.test(rawKey)) return eq === -1 ? REDACTED : `${REDACTED}=${REDACTED}`;
       const safeKey = key.replace(/[^\w.\-[\]]/g, "_").slice(0, 40);
       if (eq === -1) return safeKey;
       const k = key.trim().toLowerCase();
@@ -293,6 +298,9 @@ export function createApp(opts: AppOptions = {}) {
   );
   // Before anything reads a body.
   app.use("*", requestBodyLimit());
+  // Slots a create reserved against a per-workspace ceiling are given back with the answer
+  // (lib/limits.ts, "Reservations").
+  app.use("*", (_c, next) => withReservationScope(next));
 
   app.get("/", (c) => c.json({ name: "Scout API", version: "1.0.0", docs: `${env.apiUrl}/docs`, openapi: `${env.apiUrl}/openapi.json`, health: `${env.apiUrl}/health` }));
   app.get("/health", async (c) => {

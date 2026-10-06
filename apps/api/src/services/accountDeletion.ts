@@ -253,7 +253,13 @@ export async function purgeDueWorkspaces(opts: { now?: Date; onlyOrgIds?: string
         const still = (await tx.execute(sql`SELECT id FROM workspace_deletion_requests WHERE id = ${req.id} AND cancelled_at IS NULL AND completed_at IS NULL FOR UPDATE`)) as unknown as unknown[];
         if (!still.length) return false;
         // Rows that name this workspace's people but do not hang off the organization row.
-        await tx.execute(sql`DELETE FROM login_attempts WHERE subject IN (SELECT lower(email) FROM users WHERE org_id = ${org.id})`);
+        // Sign-in attempts are keyed by the address; wrong two-factor codes and wrong
+        // current-password attempts are keyed by the member's id ("2fa:<id>", "pwchange:<id>").
+        await tx.execute(sql`
+          DELETE FROM login_attempts
+          WHERE subject IN (SELECT lower(email) FROM users WHERE org_id = ${org.id})
+             OR subject IN (SELECT '2fa:' || id::text FROM users WHERE org_id = ${org.id})
+             OR subject IN (SELECT 'pwchange:' || id::text FROM users WHERE org_id = ${org.id})`);
         // Upgrade requests: the workspace's own, and any its people sent from the public
         // pricing page while signed out (those carry no workspace id, only the address).
         await tx.execute(sql`DELETE FROM upgrade_requests WHERE org_id = ${org.id} OR lower(email) IN (SELECT lower(email) FROM users WHERE org_id = ${org.id})`);

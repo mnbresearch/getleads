@@ -109,8 +109,10 @@ signalRoutes.post("/subscriptions", zValidator("json", subInput), async (c) => {
   // foreign campaign id would put our leads into someone else's sequence, which emails them.
   await assertOwned(campaigns, b.campaignId, oid, "Campaign", c);
   await assertOwned(icps, b.icpId, oid, "ICP", c);
-  const [row] = await db.insert(signalSubscriptions).values({ orgId: oid, ...b }).returning();
+  // Before the insert: a "queue is full, try again" answer must not leave the subscription
+  // saved, or the retry makes a second one.
   await guardJobCapacity(db, oid, "signals.subscription");
+  const [row] = await db.insert(signalSubscriptions).values({ orgId: oid, ...b }).returning();
   await enqueue(db, "signals.subscription", { subscriptionId: row.id }, { orgId: row.orgId, priority: 2 });
   return c.json(row, 201);
 });
@@ -161,8 +163,9 @@ signalRoutes.post("/monitors", zValidator("json", monitorInput), async (c) => {
   const { db } = getDb();
   await assertRowCap(db, monitors, orgId(c), "monitors");
   assertMonitorTarget(c.req.valid("json").type, c.req.valid("json").target);
-  const [row] = await db.insert(monitors).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
+  // Before the insert, for the same reason as subscriptions above.
   await guardJobCapacity(db, orgId(c), "monitor.run");
+  const [row] = await db.insert(monitors).values({ orgId: orgId(c), ...c.req.valid("json") }).returning();
   await enqueue(db, "monitor.run", { monitorId: row.id }, { orgId: row.orgId, priority: 2 });
   return c.json(row, 201);
 });

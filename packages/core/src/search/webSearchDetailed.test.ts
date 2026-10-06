@@ -97,3 +97,65 @@ describe("webSearchDetailed", () => {
     expect(r.failureMessage).toMatch(/serper/);
   });
 });
+
+/**
+ * The search text is what a customer typed (a person's name, "@theirdomain.com"), and a
+ * provider's error can echo it. Neither goes to the log unless an operator asked for it.
+ */
+describe("the search log does not carry the search text", () => {
+  const QUERY = '"Priya Raman" "@zz-customer-domain.example" head of growth';
+  const echoing = (name: string): SearchProvider => ({
+    name,
+    available: () => true,
+    search: async (q: string) => {
+      throw new ProviderUnavailableError(name, "unsupported_query", `400 Query not allowed: ${q}`);
+    },
+  });
+  const answering = (name: string): SearchProvider => ({ name, available: () => true, search: async () => [{ title: "t", url: "https://example.com/a", snippet: "s" }] });
+  const logged = (spy: { mock: { calls: unknown[][] } }) => spy.mock.calls.map((c) => c.map(String).join(" ")).join("\n");
+
+  afterEach(() => {
+    delete process.env.DEBUG_SEARCH;
+  });
+
+  it("by default: the length of the text, the providers and what each did - no text, no provider message", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const o = await webSearchDetailed(QUERY, { providers: [echoing("serper"), failing("brave", "rate_limit")] });
+    expect(o.everyProviderFailed).toBe(true);
+    const out = `${logged(warn)}\n${logged(log)}`;
+    expect(out).toContain(`[search] no results for a ${QUERY.length}-character query`);
+    expect(out).toContain("serper=unsupported_query");
+    expect(out).toContain("brave=rate_limit");
+    for (const piece of ["Priya", "Raman", "zz-customer-domain", "head of growth", "Query not allowed"]) expect(out, piece).not.toContain(piece);
+    // The caller still gets each provider's own words (they go to the search's error, not the log).
+    expect(o.attempts[0].error).toContain("Query not allowed");
+  });
+
+  it("a search that found something logs nothing at all by default", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const o = await webSearchDetailed(QUERY, { providers: [answering("serper")] });
+    expect(o.results).toHaveLength(1);
+    expect(`${logged(warn)}${logged(log)}`).toBe("");
+  });
+
+  it("DEBUG_SEARCH=true puts the text and the details back; any other value does not", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    process.env.DEBUG_SEARCH = "true";
+    await webSearchDetailed(QUERY, { providers: [echoing("serper")] });
+    expect(logged(warn)).toContain("Priya Raman");
+    expect(logged(warn)).toContain("Query not allowed");
+    warn.mockClear();
+    resetSearchCache();
+    resetProviderSkips();
+    for (const off of ["false", "0", "no", ""]) {
+      process.env.DEBUG_SEARCH = off;
+      resetSearchCache();
+      resetProviderSkips();
+      await webSearchDetailed(QUERY, { providers: [echoing("serper")] });
+    }
+    expect(logged(warn)).not.toContain("Priya");
+    expect(logged(warn)).toContain("-character query");
+  });
+});

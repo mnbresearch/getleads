@@ -358,6 +358,21 @@ A report link from before the upgrade keeps its readable copy by default, and th
 
 **Visitor identification capacity:** with the plain-HTTP provider off, the free HTTPS provider allows about 1,000 look-ups a day. Set `IPINFO_TOKEN` (ipinfo.io, free for 50,000 a month) for more. Without it, visits beyond the free allowance are recorded and simply not matched to a company.
 
+#### Tuning switches (none needs setting)
+
+These have sensible defaults and are not in `render.yaml`. Add one in Render's Environment only to change a default. None of them touches stored data, so none of them matters for a rollback (the previous release ignores the ones it does not know).
+
+| Variable | Default | What it does |
+|---|---|---|
+| `PASSWORD_HASH_CONCURRENCY` | 2 | How many password checks run at once (1 to 32). Each runs on its own worker thread, so sign-ins no longer slow other requests down. More sign-ins than this wait their turn for up to 30 seconds; with more than 200 waiting, the next one is told the service is busy (503) and can retry. Raise it only on an instance with more CPU cores than the default plan. If a worker thread cannot start, the server logs one line starting `[auth]` and checks passwords on the main thread as before - sign-in keeps working. |
+| `LIST_QUERY_TIMEOUT_MS` | 8000 | The longest one list or search read may run before the user is told to narrow the search (503). Accepted range 250 to 60000; a value outside it is moved to the nearest end, and one log line starting `[config]` says so at start. |
+| `ROW_CAP_<KIND>` | see below | The most of one kind of thing a workspace may hold. Past it, creating another is refused with a sentence naming the limit; existing ones are never removed. `<KIND>` is one of `LISTS` (2,000), `ICPS` (500), `SAVEDSEARCHES` (1,000), `AUTOPILOTS` (500), `MONITORS` (500), `SIGNALSUBSCRIPTIONS` (500), `TASKS` (100,000), `WEBHOOKS` (100), `APIKEYS` (100, active keys only), `CLIENTS` (5,000), `PIXELS` (200), `VISIBILITYPROMPTS` (1,000), `CAMPAIGNS` (5,000). A whole number, 1 or more. |
+| `JOB_OPEN_TYPE_CAP` | 10000 | The most background jobs of one type a workspace may have waiting or running. Past it a request that would queue another is answered 429 with `Retry-After: 30` and saves nothing. |
+| `JOB_OPEN_TOTAL_CAP` | 20000 | The same, across all job types of one workspace. |
+| `DEBUG_SEARCH` | off | `true` (or `1`): the server log includes the text of web and people searches and the search providers' own error messages. Off, the log says only how long the search text was and which providers answered. Search text is what customers type (names, companies), so turn it on only while debugging and turn it off afterwards. |
+
+The row and job limits are checked per server process: requests that arrive at the same moment are counted together within one process. With more than one API instance, a burst can exceed a limit by at most the number of instances times the requests each is handling at that instant; the next request sees the real count.
+
 #### What a rollback costs
 
 Rolling back means: redeploy the previous API build, then the previous web build. The database needs nothing undone. In the rehearsal, on the old release against the upgraded database:

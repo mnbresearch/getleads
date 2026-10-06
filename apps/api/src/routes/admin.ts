@@ -47,7 +47,7 @@ import { notifySecurity } from "../lib/securityMail.js";
 import { aiDisabled } from "../lib/ai.js";
 import { canonicalEmail } from "../services/leads.js";
 import { mailingAddressOf } from "../services/campaigns.js";
-import { addressFingerprint } from "../lib/privacySuppression.js";
+import { addressFingerprint, auditForResponse } from "../lib/privacySuppression.js";
 import { dataSubjectReport, eraseDataSubject } from "../lib/privacyErase.js";
 
 export const adminRoutes = new Hono<Env>();
@@ -449,11 +449,11 @@ adminRoutes.get("/audit-log", zValidator("query", AUDIT_QUERY), async (c) => {
       actorType: r.actorType,
       actorEmail: r.actorEmail ?? null,
       targetType: r.targetType ?? null,
-      targetId: r.targetId ?? null,
       result: r.result,
       ip: r.ip ?? null,
       createdAt: r.createdAt,
-      data: r.data ?? {},
+      // targetId and data, with any address fingerprint left out (see auditForResponse).
+      ...auditForResponse(r.targetId, r.data),
     })),
     hasMore,
     nextBefore: hasMore && page.length ? page[page.length - 1].cursor : null,
@@ -883,9 +883,26 @@ adminRoutes.patch("/tools/:provider", zValidator("json", TOOL_LIMIT_SCHEMA), asy
 // Every send path of every workspace checks it (lib/privacySuppression.ts).
 
 const emailInput = z.string().max(320);
+/**
+ * An address the product itself would not accept for a lead, but that is a real address all
+ * the same: the mailbox part may use the characters the mail standard allows beyond the usual
+ * ones (% ! # $ & * / = ? ^ ` { | } ~). Such an address can still be sitting in data that
+ * was collected rather than typed (a scraped record, an old import, an event), and its owner
+ * can still ask to be erased - which the stricter rule refused with "enter one email
+ * address". Used by the admin's data-subject and do-not-contact routes only. Every match on
+ * the address is an exact comparison, so "%" here is a character, never a wildcard.
+ */
+const UNUSUAL_ADDRESS = /^(?!\.)(?!.*\.\.)[a-z0-9!#$%&'*+/=?^_`{|}~.-]{0,63}[a-z0-9!#$%&'*+/=?^_`{|}~-]@(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/;
+function adminAddress(raw: unknown): string | null {
+  const usual = canonicalEmail(raw);
+  if (usual) return usual;
+  if (typeof raw !== "string") return null;
+  const s = raw.trim().toLowerCase();
+  return s.length <= 254 && UNUSUAL_ADDRESS.test(s) ? s : null;
+}
 /** The address as both lists store it, or a 400 that says what is wrong. */
 function oneAddress(raw: string): string {
-  const email = canonicalEmail(raw);
+  const email = adminAddress(raw);
   if (!email) throw badRequest("Enter one email address, like jane@example.com.");
   return email;
 }
@@ -952,7 +969,7 @@ adminRoutes.get("/data-subject", rateLimit({ perMinute: 30, name: "admin-data-su
 adminRoutes.post("/data-subject/erase", rateLimit({ perMinute: 10, name: "admin-data-subject-erase" }), zValidator("json", z.object({ email: emailInput, confirm: z.string().max(320) })), async (c) => {
   const b = c.req.valid("json");
   const email = oneAddress(b.email);
-  if (canonicalEmail(b.confirm) !== email) throw new ApiError(400, "The confirmation does not match the address. Type the same address again to confirm.", "confirm_mismatch");
+  if (adminAddress(b.confirm) !== email) throw new ApiError(400, "The confirmation does not match the address. Type the same address again to confirm.", "confirm_mismatch");
   const r = await eraseDataSubject(email);
   await adminAudit(c, "admin.data_subject_erased", null, { targetType: "data_subject", targetId: addressFingerprint(email), data: { workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, eventsDeleted: r.eventsDeleted } });
   return c.json({ ok: true, workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, globallySuppressed: true });

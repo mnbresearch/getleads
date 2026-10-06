@@ -1,5 +1,5 @@
 import { and, companies, desc, eq, getDb, inArray, isNull, or, signalMatches, signalSubscriptions, signals, sql, type SignalSubscription } from "@prospex/db";
-import { companyNews, domainHintFromUrl, findPeopleDetailed, resolveCompanyDomain, scanSignals, scoreLeadRules, type IcpCriteria, type ParsedSignal, type SignalType } from "@prospex/core";
+import { companyNews, domainHintFromUrl, findPeopleDetailed, resolveCompanyDomain, scanSignals, scoreLeadRules, searchDebugOn, type IcpCriteria, type ParsedSignal, type SignalType } from "@prospex/core";
 import { upsertCompany, upsertLead } from "./leads.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
@@ -91,7 +91,9 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
   const found = await findPeopleDetailed({ companyName, titles: sub.targetTitles, limit: 3 });
   const people = found.people;
   const searchFailed = people.length === 0 && found.everySearchFailed;
-  if (searchFailed) console.warn(`[signals] subscription ${sub.id}: people search failed for ${companyName}: ${found.failureMessage ?? "every search failed"}`);
+  // The company's name and the providers' own words (which can echo the search) stay out of
+  // the log unless an operator turned search debugging on; the signal id finds the company.
+  if (searchFailed) console.warn(searchDebugOn() ? `[signals] subscription ${sub.id}: people search failed for ${companyName}: ${found.failureMessage ?? "every search failed"}` : `[signals] subscription ${sub.id}: people search failed for the company of signal ${signalId}`);
   let created = 0;
   let stoppedBecause: string | null = null;
   const ids: string[] = [];

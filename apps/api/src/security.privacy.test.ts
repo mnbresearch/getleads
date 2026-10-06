@@ -685,6 +685,17 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
       await seedPerson(o.orgId, campaign.id, `lead-${u8()}@purged-prospect.example`);
       // Rows that do not hang off the organization row.
       await db.insert(S.loginAttempts).values([{ subject: o.email.toLowerCase(), ip: "203.0.113.9", succeeded: true }, { subject: member.email.toLowerCase(), ip: "203.0.113.9", succeeded: false }]);
+      // Wrong two-factor codes and wrong current-password attempts are keyed by the member's
+      // id, not the address ("2fa:<id>", "pwchange:<id>"): they used to be left behind.
+      await db.insert(S.loginAttempts).values([
+        { subject: `2fa:${o.userId}`, ip: "203.0.113.9", succeeded: false },
+        { subject: `pwchange:${o.userId}`, ip: "203.0.113.9", succeeded: false },
+        { subject: `2fa:${member.id}`, ip: null, succeeded: true },
+        { subject: `pwchange:${member.id}`, ip: "203.0.113.10", succeeded: false },
+      ]);
+      // Another workspace's rows of the same kinds must survive the purge.
+      const bystander = await signup("purge-bystander");
+      await db.insert(S.loginAttempts).values([{ subject: `2fa:${bystander.userId}`, ip: "203.0.113.11", succeeded: false }, { subject: `pwchange:${bystander.userId}`, ip: "203.0.113.11", succeeded: false }]);
       await db.insert(S.upgradeRequests).values([
         { orgId: o.orgId, name: "Owner", email: o.email, mobile: "+919999900000", country: "IN", planId: "growth" },
         { orgId: null, name: "Owner, signed out", email: o.email.toUpperCase(), mobile: "+919999900000", country: "IN", planId: "growth" },
@@ -699,7 +710,8 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
       expect(await purgeDueWorkspaces({ onlyOrgIds: [o.orgId] })).toMatchObject({ reminded: [o.orgId], purged: [] });
       expect(await purgeDueWorkspaces({ onlyOrgIds: [o.orgId], now: new Date(Date.now() + 2 * 86_400_000) })).toMatchObject({ purged: [o.orgId], failed: [] });
 
-      for (const needle of [o.email, member.email, o.userId, "purged-prospect.example", "+919999900000"]) expect(await tablesContaining(needle), needle).toEqual(needle === o.userId ? { audit_log: 1 } : {});
+      for (const needle of [o.email, member.email, o.userId, member.id, "purged-prospect.example", "+919999900000"]) expect(await tablesContaining(needle), needle).toEqual(needle === o.userId ? { audit_log: 1 } : {});
+      expect((await q`SELECT count(*)::int AS n FROM login_attempts WHERE subject IN (${`2fa:${bystander.userId}`}, ${`pwchange:${bystander.userId}`})`)[0].n).toBe(2);
       // The one record kept: that it happened, with the workspace's name and counts - no person's address.
       expect(await tablesContaining(o.orgId)).toEqual({ audit_log: 1 });
       const [kept] = await q`SELECT action, org_id, data FROM audit_log WHERE target_id = ${o.orgId}`;

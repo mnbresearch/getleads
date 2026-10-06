@@ -102,7 +102,7 @@ async function testSender(row: EmailAccount, opts: { retest?: boolean } = {}): P
   const raw = await testMailer(resolved.mailer);
   if (raw.ok) return { kind: "tested", test: { ok: true } };
   // The driver's text can echo what was typed into the form (a username, a key in a URL): redacted before it is logged.
-  console.warn(`[campaigns] email account ${row.id} test failed: ${redact(String(raw.error ?? "unknown error"), { max: 300 })}`);
+  console.warn(`[campaigns] email account ${row.id} test failed: ${redact(String(raw.error ?? "unknown error"), { max: 300, maskEmails: true })}`);
   const error =
     raw.refused && raw.error
       ? raw.error

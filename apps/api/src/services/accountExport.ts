@@ -1,6 +1,6 @@
 import * as S from "@prospex/db";
 import { and, eq, getDb, gt, sql, type Organization } from "@prospex/db";
-import { shownAddress } from "../lib/privacySuppression.js";
+import { auditForResponse, shownAddress } from "../lib/privacySuppression.js";
 import { isLiveShareCopy } from "../lib/linkTokens.js";
 
 /**
@@ -118,7 +118,8 @@ export const EXPORT_TABLES: TableSpec[] = [
   { key: "events", table: S.events },
   { key: "upgradeRequests", table: S.upgradeRequests },
   { key: "deletionRequests", table: S.workspaceDeletionRequests },
-  { key: "auditLog", table: S.auditLog },
+  // The security log, with any address fingerprint left out (see auditForResponse).
+  { key: "auditLog", table: S.auditLog, derive: (r) => auditForResponse(typeof r.targetId === "string" ? r.targetId : null, r.data) },
 ];
 
 /** Tables with an org_id that are deliberately not exported, and why. */

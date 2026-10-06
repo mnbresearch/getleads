@@ -43,6 +43,38 @@ export function shownAddress(stored: string | null | undefined): { address: stri
   return isAddressFingerprint(stored) ? { address: null, recipientRemoved: true } : { address: stored ?? null, recipientRemoved: false };
 }
 
+/**
+ * A security-log row as it may leave the server (the customer's log, the admin's log, the
+ * workspace export).
+ *
+ * Some rows are keyed by a fingerprint of an address instead of the address: the "new sign-in
+ * notice was sent" row (lib/securityMail.ts needs it to send one notice a day), and the
+ * platform admin's do-not-contact and data-subject rows. The fingerprint is bookkeeping for
+ * the server. Shown to a reader it is at best noise, and at worst a way to test a guess
+ * ("is this row about sara@example.com?"), so it never goes out:
+ *  - a `targetId` that is a fingerprint becomes null;
+ *  - a fingerprint anywhere in `data` is dropped, and `<key>Hidden: true` says something was
+ *    recorded there (`address` -> `addressHidden: true`).
+ * The stored row is not changed.
+ */
+export function auditForResponse(targetId: string | null | undefined, data: unknown): { targetId: string | null; data: Record<string, unknown> } {
+  const scrub = (v: unknown, depth: number): unknown => {
+    if (depth > 6 || v === null || typeof v !== "object") return v;
+    if (Array.isArray(v)) return v.filter((x) => !(typeof x === "string" && isAddressFingerprint(x))).map((x) => scrub(x, depth + 1));
+    const out: Record<string, unknown> = {};
+    for (const [k, x] of Object.entries(v as Record<string, unknown>)) {
+      if (typeof x === "string" && isAddressFingerprint(x)) out[`${k}Hidden`] = true;
+      else out[k] = scrub(x, depth + 1);
+    }
+    return out;
+  };
+  const clean = scrub(data ?? {}, 0);
+  return {
+    targetId: isAddressFingerprint(targetId) ? null : (targetId ?? null),
+    data: clean && typeof clean === "object" && !Array.isArray(clean) ? (clean as Record<string, unknown>) : {},
+  };
+}
+
 /** Every form of these addresses that either list may hold: as given, and as a fingerprint. */
 export function addressSpellings(addresses: (string | null | undefined)[]): string[] {
   const out = new Set<string>();

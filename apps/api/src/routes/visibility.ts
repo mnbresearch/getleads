@@ -159,14 +159,15 @@ visibilityRoutes.post(
     const oid = orgId(c);
     const { db } = getDb();
     const body = c.req.valid("json");
-    await assertRowCap(db, visibilityPrompts, oid, "visibilityPrompts");
-
     // Re-check against what is already tracked. The client sends back a set it was shown
     // moments ago, and the user may have added one of them by hand in between.
     const existing = await db.select({ text: visibilityPrompts.text }).from(visibilityPrompts).where(eq(visibilityPrompts.orgId, oid));
     const seen = new Set(existing.map((r) => r.text.trim().toLowerCase()));
     const fresh = body.prompts.filter((p) => !seen.has(p.text.trim().toLowerCase()));
     if (fresh.length === 0) return c.json({ created: [], skipped: body.prompts.length });
+    // The ceiling, checked once it is known how many rows this request adds: all of them are
+    // counted for requests arriving together (lib/limits.ts, "Reservations").
+    await assertRowCap(db, visibilityPrompts, oid, "visibilityPrompts", fresh.length);
 
     const rows = await db
       .insert(visibilityPrompts)

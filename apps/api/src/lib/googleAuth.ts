@@ -42,7 +42,7 @@ import { sign, verify } from "hono/jwt";
 import { createHash } from "node:crypto";
 import { and, apiKeys, eq, events, getDb, isNull, sql, users, type User } from "@prospex/db";
 import { env } from "../env.js";
-import { ApiError } from "./errors.js";
+import { ApiError, errorLine } from "./errors.js";
 import { hasUsablePassword, unusablePasswordHash } from "./auth.js";
 import { randomToken, safeEqual } from "./crypto.js";
 import { forgetOtherKnownAddresses } from "./loginGuard.js";
@@ -327,7 +327,7 @@ export async function resolveGoogleUser(identity: GoogleIdentity, opts: { ip?: s
   // password sign-in write one). Left in place, that address kept a private allowance of
   // guesses at the account it no longer owns, exempt from the account-wide lock. They go
   // with the password; only the address completing this Google sign-in is kept.
-  await forgetOtherKnownAddresses(u.email, opts.ip ?? null).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a Google claim: ${(e as Error).message}`));
+  await forgetOtherKnownAddresses(u.email, opts.ip ?? null).catch((e) => console.warn(`[auth] could not clear known sign-in addresses after a Google claim: ${errorLine(e)}`));
   let apiKeysRevoked = 0;
   if (soleUser) {
     const gone = await db.update(apiKeys).set({ revokedAt: now }).where(and(eq(apiKeys.orgId, u.orgId), isNull(apiKeys.revokedAt))).returning({ id: apiKeys.id });

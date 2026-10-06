@@ -110,6 +110,11 @@ services:
       #                                release. Default on; it cannot be rolled back
       #   IP_LOOKUP_ALLOW_PLAIN_HTTP   "true" re-enables the plain-HTTP visitor look-up provider
       #                                as a last resort. Default off; prefer IPINFO_TOKEN
+      #   PASSWORD_HASH_CONCURRENCY password checks at once, each on a worker thread (default 2)
+      #   LIST_QUERY_TIMEOUT_MS     longest one list or search read may run (250-60000, default 8000)
+      #   ROW_CAP_<KIND>            most of one kind of thing per workspace (DEPLOY.md B11)
+      #   JOB_OPEN_TYPE_CAP / JOB_OPEN_TOTAL_CAP   most queued jobs per workspace (10000 / 20000)
+      #   DEBUG_SEARCH              "true" puts customers' search text in the log; debugging only
       #   SHUTDOWN_GRACE_MS         how long requests and jobs get to finish on a restart
       #                             (default 25000; Render stops the process after 30 s)
       #   HTTP_KEEPALIVE_TIMEOUT_MS / HTTP_REQUEST_TIMEOUT_MS / HTTP_HEADERS_TIMEOUT_MS

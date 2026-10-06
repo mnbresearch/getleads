@@ -5,6 +5,7 @@ import { emitEvent } from "../lib/events.js";
 import { tryConsume, type QuotaOutcome } from "../lib/quota.js";
 import { httpUrlOrNull, stripNul } from "../lib/sanitize.js";
 import { addressFingerprint, onPlatformList } from "../lib/privacySuppression.js";
+import { errorLine } from "../lib/errors.js";
 
 /**
  * The one definition of "an email address we will store and later send to".
@@ -363,7 +364,7 @@ export async function chargeNewLead(orgId: string, source?: string | null): Prom
   const charge = await tryConsume(db, orgId, "leads", 1);
   if (!charge.ok) return charge;
   if (source?.startsWith("provider:")) {
-    await consume(db, orgId, "premiumLeads", 1, { allowOverage: true }).catch((e) => console.warn(`[leads] premium usage not recorded for ${orgId}: ${(e as Error).message}`));
+    await consume(db, orgId, "premiumLeads", 1, { allowOverage: true }).catch((e) => console.warn(`[leads] premium usage not recorded for ${orgId}: ${errorLine(e)}`));
   }
   return charge;
 }

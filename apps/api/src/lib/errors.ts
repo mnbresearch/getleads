@@ -34,6 +34,81 @@ export function requireSomeFields(body: Record<string, unknown> | undefined | nu
  */
 const CLIENT_DATA_ERRORS = new Set(["22P02", "22003", "22007", "22008", "22001", "22021", "22P05", "54000"]);
 
+/*
+ * "The database cannot be reached right now" - as opposed to "the database refused this
+ * request". A dropped or refused connection, a failed name lookup, the server shutting down
+ * or out of connections. These pass; the caller should simply try again.
+ *
+ * It matters which one it is: a signed-in request during an outage used to be answered 401
+ * (the session check swallowed the error and reported "no such session"), and the web app
+ * signs a person out on 401. An outage must never look like a bad session, and never like a
+ * broken server (500) either: it is a 503 with a sentence that says to try again.
+ */
+/** Node's socket and name-lookup failures. Anything that opens a connection can raise these - not only the database. */
+const SOCKET_ERROR_CODES = new Set(["ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN", "EPIPE", "EHOSTUNREACH", "ENETUNREACH", "ECONNABORTED"]);
+/** The Postgres driver's own connection failures: nothing else uses these names. */
+const DRIVER_ERROR_CODES = new Set(["CONNECTION_CLOSED", "CONNECTION_ENDED", "CONNECTION_DESTROYED", "CONNECT_TIMEOUT", "CONNECTION_CONNECT_TIMEOUT"]);
+/** Postgres itself: connection exceptions (class 08), shutting down, starting up, out of connections. */
+const isUnavailableSqlState = (code: string) => /^08[0-9A-Z]{3}$/.test(code) || code === "57P01" || code === "57P02" || code === "57P03" || code === "53300";
+
+/** Host and port of the configured database, to recognise a failed connection to it. */
+function databaseEndpoint(): { host: string; port: number } | null {
+  try {
+    const u = new URL(process.env.DATABASE_URL ?? "");
+    return { host: u.hostname.toLowerCase(), port: Number(u.port) || 5432 };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Is this "the database cannot be reached"?
+ *
+ * Care is needed because the same low-level error (connection refused, name not found) is
+ * raised by every outbound connection this server makes - a customer's webhook, a mail
+ * server, a website being read. Those must not be reported as a database outage. So a plain
+ * socket error only counts when it demonstrably comes from the database:
+ *  - it arrived wrapped by the ORM ("Failed query: ..."), which only wraps database calls;
+ *  - or it carries one of the driver's own codes, or a Postgres "cannot connect" SQLSTATE;
+ *  - or it is a bare connect / lookup failure naming the database's own host or port (what
+ *    opening a transaction raises, which the ORM does not wrap).
+ * A failed `fetch` ("fetch failed", with the socket error as its cause) never counts.
+ */
+export function isDatabaseUnavailable(err: unknown): boolean {
+  const top = err as { message?: unknown; name?: unknown; constructor?: { name?: string } } | null | undefined;
+  if (!top || typeof top !== "object") return false;
+  if (top.name === "TypeError" && typeof top.message === "string" && /fetch failed/i.test(top.message)) return false;
+  const fromOrm = top.constructor?.name === "DrizzleQueryError" || (typeof top.message === "string" && /^Failed query:/i.test(top.message));
+  const db = databaseEndpoint();
+  const namesDatabase = (e: { port?: unknown; hostname?: unknown; address?: unknown; host?: unknown }) =>
+    !!db && ((typeof e.port === "number" && e.port === db.port) || [e.hostname, e.address, e.host].some((h) => typeof h === "string" && h.toLowerCase() === db.host));
+  for (let e: unknown = err, depth = 0; e && depth < 6; e = (e as { cause?: unknown }).cause, depth++) {
+    const x = e as { code?: unknown; errors?: unknown; port?: unknown; hostname?: unknown; address?: unknown; host?: unknown };
+    const code = typeof x.code === "string" ? x.code : "";
+    if (DRIVER_ERROR_CODES.has(code) || isUnavailableSqlState(code)) return true;
+    // Node reports "tried every address, all refused" as one error holding the attempts.
+    const attempts = Array.isArray(x.errors) ? (x.errors as { code?: unknown; port?: unknown; hostname?: unknown; address?: unknown }[]) : [];
+    const socketFailure = SOCKET_ERROR_CODES.has(code) || attempts.some((a) => typeof a?.code === "string" && SOCKET_ERROR_CODES.has(a.code));
+    if (socketFailure && (fromOrm || namesDatabase(x) || attempts.some((a) => a && namesDatabase(a)))) return true;
+  }
+  return false;
+}
+
+/** What a caller is told while the database cannot be reached. The same sentence the web app uses for a gateway's 503. */
+export const TEMPORARILY_UNAVAILABLE = "The server is temporarily unavailable. Try again in a minute.";
+export const UNAVAILABLE_RETRY_SECONDS = 10;
+export const temporarilyUnavailable = () => new ApiError(503, TEMPORARILY_UNAVAILABLE, "service_unavailable", { retryAfterSeconds: UNAVAILABLE_RETRY_SECONDS });
+
+/** At most one log line per 30 seconds for an outage: every request during it fails the same way. */
+let lastUnavailableLog = 0;
+export function logDatabaseUnavailable(where: string, err: unknown): void {
+  const now = Date.now();
+  if (now - lastUnavailableLog < 30_000) return;
+  lastUnavailableLog = now;
+  const d = describeError(err);
+  console.error(`[api] database unavailable (${where}): ${d.name}${d.code ? ` [${d.code}]` : ""}: ${d.message}. Requests are being answered 503 until it is back.`);
+}
+
 /** The sentence a caller gets when the database refused one of their values. */
 export const UNUSABLE_VALUE_MESSAGE = "Something in that request wasn't in a form we can use. Reload the page and try again.";
 
@@ -71,6 +146,16 @@ export function describeError(err: unknown): { name: string; code?: string; cons
     ...(pg ? { code: pg.code, ...(pg.constraint ? { constraint: pg.constraint } : {}) } : {}),
     message: redactMessage(msg),
   };
+}
+
+/**
+ * One log line's worth of an unexpected error: class, SQLSTATE, redacted message. Use this
+ * instead of `e.message` wherever the error may come from the database - the ORM's message
+ * is the whole statement and every bound value (addresses, names, hashes).
+ */
+export function errorLine(err: unknown): string {
+  const d = describeError(err);
+  return `${d.name}${d.code ? ` [${d.code}]` : ""}${d.constraint ? ` (${d.constraint})` : ""}: ${d.message}`;
 }
 
 /** Cut a message at the point a query, its parameters or a credential would begin. */
@@ -112,7 +197,13 @@ const UNIQUE_MESSAGES: Record<string, string> = {
 };
 
 export function errorHandler(err: Error, c: Context) {
-  if (err instanceof ApiError) return c.json({ error: { code: err.code, message: err.message, details: err.details } }, err.status as 400);
+  if (err instanceof ApiError) {
+    // "Try again later" answers say when: a 429 or 503 whose details carry a wait also
+    // carries it as a Retry-After header, the place clients and proxies look for it.
+    const wait = (err.details as { retryAfterSeconds?: unknown } | null | undefined)?.retryAfterSeconds;
+    if ((err.status === 429 || err.status === 503) && typeof wait === "number" && Number.isFinite(wait) && wait > 0) c.header("retry-after", String(Math.ceil(wait)));
+    return c.json({ error: { code: err.code, message: err.message, details: err.details } }, err.status as 400);
+  }
   if (err instanceof QuotaExceededError) return c.json({ error: { code: "quota_exceeded", message: err.message, metric: err.metric, used: err.used, limit: err.limit } }, 402);
   // A ZodError thrown from inside a handler (a schema parsed by hand) gets the same readable
   // sentence as one caught by the request validator, instead of a bare "Invalid input".
@@ -122,6 +213,13 @@ export function errorHandler(err: Error, c: Context) {
   // code so this file does not import the crypto module.
   if ((err as { code?: string }).code === "ECREDUNREADABLE") {
     return c.json({ error: { code: "credential_unreadable", message: "A saved credential could not be read. Reconnect that sender or integration in Settings." } }, 409);
+  }
+
+  // The database cannot be reached: not this request's fault and not a bug - 503, try again.
+  if (isDatabaseUnavailable(err)) {
+    logDatabaseUnavailable(`${c.req.method} ${c.req.routePath ?? c.req.path}`, err);
+    c.header("retry-after", String(UNAVAILABLE_RETRY_SECONDS));
+    return c.json({ error: { code: "service_unavailable", message: TEMPORARILY_UNAVAILABLE, details: { retryAfterSeconds: UNAVAILABLE_RETRY_SECONDS } } }, 503);
   }
 
   // Postgres rejecting a value the CLIENT supplied is a bad request, not a server fault.

@@ -195,8 +195,39 @@ export function redactJobError(text: unknown): string {
     .replace(/[A-Za-z0-9+_-]{40,}={0,2}/g, (m) => (/[0-9]/.test(m) && /[A-Za-z]/.test(m) ? "[redacted-token]" : m));
 }
 
+/**
+ * The text of an error without a database statement or its bound values.
+ *
+ * The ORM words a database failure as `Failed query: <the whole SQL> params: <every value>`,
+ * so a job that failed on a write logged - and stored in jobs.error - the addresses and
+ * names it was writing. What identifies the failure is kept: the driver's own one-line
+ * message (found on the error's cause) and its SQLSTATE.
+ */
+export function jobErrorText(err: unknown): string {
+  const own = err instanceof Error ? err.message : String(err);
+  if (!/Failed query:/i.test(own)) return own;
+  let driver = "";
+  let code = "";
+  for (let x: unknown = (err as { cause?: unknown } | null)?.cause, depth = 0; x && depth < 5; x = (x as { cause?: unknown }).cause, depth++) {
+    const m = (x as { message?: unknown }).message;
+    if (typeof m === "string" && m && !/Failed query:/i.test(m)) driver = m;
+    const c = (x as { code?: unknown }).code;
+    if (typeof c === "string" && /^[0-9A-Z]{5}$/.test(c)) code = c;
+  }
+  const head = own.slice(0, own.search(/Failed query:/i)).trim();
+  return [head, `database query failed${code ? ` [${code}]` : ""}${driver ? `: ${driver}` : ""}`, "[query omitted]"].filter(Boolean).join(" ");
+}
+
+/** For LOG lines: as stored, and with email addresses masked and the length bounded. */
+export function jobErrorForLog(err: unknown): string {
+  return redactJobError(jobErrorText(err))
+    .replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, "[email]")
+    .replace(/\s+/g, " ")
+    .slice(0, 500);
+}
+
 export async function failJob(db: Db, job: Job, err: unknown) {
-  const message = redactJobError(err instanceof Error ? `${err.message}` : String(err));
+  const message = redactJobError(jobErrorText(err));
   const retry = job.attempts < job.maxAttempts;
   const backoffMs = Math.min(60_000 * 2 ** (job.attempts - 1), 30 * 60_000);
   // A final failure leaves run_at alone. Writing job.runAt back used to crash the whole
@@ -265,7 +296,7 @@ export function startWorker(db: Db, handlers: Record<string, JobHandler>, opts: 
   const tick = async () => {
     while (running && active < concurrency) {
       const job = await claimJob(db, workerId, opts.types ?? Object.keys(handlers)).catch((e) => {
-        log(`claim error: ${e.message}`);
+        log(`claim error: ${jobErrorForLog(e)}`);
         return null;
       });
       if (!job) break;
@@ -274,16 +305,16 @@ export function startWorker(db: Db, handlers: Record<string, JobHandler>, opts: 
       // DB fault while recording an outcome is logged, never an unhandled rejection that
       // takes the whole process (and the API embedded with it) down.
       void runJob(db, job, handlers, log)
-        .catch((e) => log(`job ${job.id} bookkeeping error: ${e instanceof Error ? e.message : String(e)}`))
+        .catch((e) => log(`job ${job.id} bookkeeping error: ${jobErrorForLog(e)}`))
         .finally(() => {
           active--;
         });
     }
   };
 
-  const interval = setInterval(() => void tick().catch((e) => log(`tick error: ${e instanceof Error ? e.message : String(e)}`)), pollMs);
+  const interval = setInterval(() => void tick().catch((e) => log(`tick error: ${jobErrorForLog(e)}`)), pollMs);
   const reaper = setInterval(() => reapStaleJobs(db).catch(() => {}), 60_000);
-  void tick().catch((e) => log(`tick error: ${e instanceof Error ? e.message : String(e)}`));
+  void tick().catch((e) => log(`tick error: ${jobErrorForLog(e)}`));
   log(`started ${workerId} concurrency=${concurrency} types=${(opts.types ?? Object.keys(handlers)).join(",")}`);
 
   return async () => {
@@ -298,7 +329,7 @@ export async function runJob(db: Db, job: Job, handlers: Record<string, JobHandl
   const handler = handlers[job.type];
   if (!handler) {
     await failJob(db, { ...job, attempts: job.maxAttempts }, new Error(`no handler for ${job.type}`)).catch((e) =>
-      log(`[${job.type}:${job.id.slice(0, 8)}] could not record failure: ${e instanceof Error ? e.message : String(e)}`),
+      log(`[${job.type}:${job.id.slice(0, 8)}] could not record failure: ${jobErrorForLog(e)}`),
     );
     return;
   }
@@ -342,11 +373,11 @@ export async function runJob(db: Db, job: Job, handlers: Record<string, JobHandl
       const owned = await completeJob(db, job.id, result ?? undefined, job.lockedBy);
       ctx.log(owned ? `done in ${Date.now() - started}ms` : `finished in ${Date.now() - started}ms, but the job had been reaped and reclaimed; result not recorded`);
     } else {
-      ctx.log(`failed: ${redactJobError(failure instanceof Error ? failure.message : String(failure))}`);
+      ctx.log(`failed: ${jobErrorForLog(failure)}`);
       await failJob(db, job, failure);
     }
   } catch (e) {
-    ctx.log(`could not record outcome: ${e instanceof Error ? e.message : String(e)}`);
+    ctx.log(`could not record outcome: ${jobErrorForLog(e)}`);
   } finally {
     clearInterval(heartbeat);
   }
@@ -384,12 +415,12 @@ export async function drainJobs(db: Db, handlers: Record<string, JobHandler>, ma
     try {
       job = await claimJob(db, workerId, Object.keys(handlers));
     } catch (e) {
-      console.warn(`[queue] drain claim error: ${e instanceof Error ? e.message : String(e)}`);
+      console.warn(`[queue] drain claim error: ${jobErrorForLog(e)}`);
       break;
     }
     if (!job) break;
     // One bad job must not end the drain (or the request driving it).
-    await runJob(db, job, handlers).catch((e) => console.warn(`[queue] job ${job!.id} bookkeeping error: ${e instanceof Error ? e.message : String(e)}`));
+    await runJob(db, job, handlers).catch((e) => console.warn(`[queue] job ${job!.id} bookkeeping error: ${jobErrorForLog(e)}`));
     processed++;
   }
   return processed;

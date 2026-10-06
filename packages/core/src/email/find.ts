@@ -3,7 +3,7 @@ import { candidatesFor, inferPatternFromEmails, PATTERNS } from "./pattern.js";
 import { hasVerifierConfigured, isCatchAll, isVerifierVerdict, resolveMxDetailed, smtpProbe, verifyEmail, type VerifyOptions } from "./verify.js";
 import { hunterEmailVerdict } from "../providers/people.js";
 import { fetchJson } from "../util/http.js";
-import { webSearch } from "../search/index.js";
+import { searchDebugOn, webSearch } from "../search/index.js";
 import { meter } from "../util/meter.js";
 
 export interface FindEmailInput {
@@ -109,7 +109,9 @@ export async function findEmail(input: FindEmailInput, opts: FindEmailOptions = 
     }
   } catch (e) {
     // Best-effort step: the pattern path below still runs. Logged so it is not invisible.
-    console.warn(`[findEmail] web search step failed for ${domain}: ${(e as Error).message}`);
+    // The domain is who the customer is prospecting, and the message can echo the search
+    // text: both stay out of the log unless an operator turned search debugging on.
+    console.warn(searchDebugOn() ? `[findEmail] web search step failed for ${domain}: ${(e as Error).message}` : `[findEmail] web search step failed: ${(e as Error)?.name ?? "Error"}`);
   }
 
   const { hosts: mx, answered: dnsAnswered } = await resolveMxDetailed(domain);

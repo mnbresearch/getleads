@@ -912,15 +912,35 @@ function orgSenderDefaults(org: Organization | null | undefined) {
  *
  * Stored as `organizations.settings.mailingAddress` (Settings > Workspace). Plain text: at
  * most 300 characters over at most six lines, control characters removed - it is written
- * into every email this workspace sends, so it is cleaned here as well as where it is saved.
+ * into every email this workspace sends, so it is cleaned here as well as where it is saved
+ * (the save routes call this same function, so both sides apply the same rules).
+ *
+ * Characters that cannot be seen are removed too: the ones that reorder text on screen
+ * (direction overrides, embeddings and isolates, direction marks), zero-width spaces and
+ * joiners, the byte-order mark, soft hyphens, invisible operators, "tag" characters and the
+ * second block of control characters. With them a footer could show one thing and say
+ * another to whatever reads the bytes, or carry text nobody can see. One exception: a
+ * zero-width joiner or non-joiner between two letters of a script that needs it (Persian,
+ * Hindi and others spell words with them) is kept.
  */
+// eslint-disable-next-line no-control-regex
+const INVISIBLE_CHARS = /[\u0080-\u009F\u00AD\u061C\u115F\u1160\u17B4\u17B5\u180E\u200B\u200E\u200F\u202A-\u202E\u2060-\u206F\u3164\uFEFF\uFFA0\uFFF9-\uFFFB]|[\u{E0000}-\u{E007F}]/gu;
+const NON_LATIN_LETTER = /[^\u0000-\u024F]/u;
+const isLetterOrMark = (ch: string | undefined) => !!ch && /[\p{L}\p{M}]/u.test(ch) && NON_LATIN_LETTER.test(ch);
+export function withoutInvisibleCharacters(text: string): string {
+  const chars = Array.from(text.replace(INVISIBLE_CHARS, ""));
+  return chars.filter((ch, i) => (ch === "\u200C" || ch === "\u200D" ? isLetterOrMark(chars[i - 1]) && isLetterOrMark(chars[i + 1]) : true)).join("");
+}
+
 export function mailingAddressOf(org: { settings?: unknown } | null | undefined): string {
   const raw = org?.settings && typeof org.settings === "object" ? (org.settings as Record<string, unknown>).mailingAddress : undefined;
   if (typeof raw !== "string") return "";
-  return raw
-    .replace(/\r\n?/g, "\n")
-    // eslint-disable-next-line no-control-regex
-    .replace(/[\u0000-\u0009\u000B-\u001F\u007F\u0085\u2028\u2029]/g, " ")
+  return withoutInvisibleCharacters(
+    raw
+      .replace(/\r\n?/g, "\n")
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\u0000-\u0009\u000B-\u001F\u007F\u0085\u2028\u2029]/g, " "),
+  )
     .split("\n")
     .map((l) => l.replace(/\s+/g, " ").trim())
     .filter(Boolean)
@@ -1073,7 +1093,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
       // retried the job three times and then left the contact active with no next send.
       await bumpStat(campaign.id, "failed");
       // Upstream text is kept for operators (redacted, in the log); the contact gets a category.
-      console.warn(`[campaigns] WhatsApp send failed for contact ${cc.id}: ${redact(r.error ?? "send failed", { max: 300 })}`);
+      console.warn(`[campaigns] WhatsApp send failed for contact ${cc.id}: ${redact(r.error ?? "send failed", { max: 300, maskEmails: true })}`);
       const waError = "WhatsApp: the provider rejected the message";
       const f = await recordSendFailure(cc.id, waError);
       return { failed: true, error: waError, channel: "whatsapp", failures: f.failures, stopped: f.stopped };
@@ -1305,7 +1325,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
       }).catch((e) => {
         // The tenant gets a category. What the provider actually said - which can echo the
         // platform's key and account id - goes to the operator's log, redacted.
-        console.warn(`[campaigns] AI personalization failed for contact ${cc.id}: ${redact((e as Error)?.message ?? String(e), { max: 300 })}`);
+        console.warn(`[campaigns] AI personalization failed for contact ${cc.id}: ${redact((e as Error)?.message ?? String(e), { max: 300, maskEmails: true })}`);
         aiNote = "AI personalization failed (AI unavailable); sent the template instead";
         return null;
       });
@@ -1401,7 +1421,7 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
     // tenant can read back - the message row, the contact's lastError, this job's result -
     // carries a category: provider error text echoes API keys and account identifiers.
     const category = sendFailureCategory(res);
-    console.warn(`[campaigns] send failed for contact ${cc.id} via ${account.provider}: ${redact(res.error ?? "unknown error", { max: 300 })}`);
+    console.warn(`[campaigns] send failed for contact ${cc.id} via ${account.provider}: ${redact(res.error ?? "unknown error", { max: 300, maskEmails: true })}`);
     await db.update(messages).set({ status: "failed", error: category }).where(eq(messages.id, msg.id));
     await releaseDailySlot(account.id, today);
     await refundQuota();

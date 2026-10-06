@@ -1,6 +1,7 @@
 import { hostname } from "node:os";
 import { closeDb, getDb, sql, type Db } from "@prospex/db";
 import { describeError } from "./lib/errors.js";
+import { stopPasswordWorkers } from "./lib/passwordWorkers.js";
 
 /**
  * Stopping without dropping work.
@@ -38,6 +39,8 @@ export interface ShutdownParts {
   releaseLocks?: (workerId: string) => Promise<number>;
   /** Defaults to closing the shared pool. */
   closePool?: () => Promise<void>;
+  /** Defaults to terminating the password-hashing worker threads. */
+  stopPasswordWorkers?: () => Promise<void>;
   log?: (line: string) => void;
 }
 
@@ -184,6 +187,15 @@ export async function gracefulShutdown(parts: ShutdownParts): Promise<ShutdownRe
     );
     log(`[shutdown] ${jobsReleased} job(s) were still running after ${Math.round(graceMs / 1000)} s and were returned to the queue`);
   }
+
+  // 4b. The password-hashing worker threads. They never keep the process alive on their own
+  //     (they are unref'ed), but they are ended here so nothing is left running. A sign-in
+  //     still in flight at this point finishes its hash on the main thread.
+  await within(
+    (parts.stopPasswordWorkers ?? stopPasswordWorkers)().catch((e) => safe("could not stop the password workers", e)),
+    2_000,
+    undefined,
+  );
 
   // 5. Close the pool, so the database sees clean disconnects rather than dropped sockets.
   const closePool = parts.closePool ?? (() => closeDb(3));

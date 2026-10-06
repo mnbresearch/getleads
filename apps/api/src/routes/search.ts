@@ -7,7 +7,8 @@ import { crawlCompanyWebsite, findCompanies, findEmail, findPeople, hasAi, resol
 import { AI_OFF_NOTE, aiDisabled, aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
-import { badRequest, notFound } from "../lib/errors.js";
+import { ApiError, badRequest, notFound } from "../lib/errors.js";
+import { platformListed } from "../lib/privacySuppression.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { companyDomainOrNull, upsertCompany } from "../services/leads.js";
 import { searchQuerySchema } from "../lib/searchQuery.js";
@@ -212,7 +213,17 @@ searchRoutes.post("/find-email", rateLimit({ perMinute: 60 }), zValidator("json"
   if (!domain) throw badRequest("Invalid domain");
   const { db } = getDb();
   await consume(db, orgId(c), "verifications", 1);
-  return c.json(await findEmail({ firstName: b.firstName, lastName: b.lastName, domain }, verifyOpts()));
+  const r = await findEmail({ firstName: b.firstName, lastName: b.lastName, domain }, verifyOpts());
+  // The platform's do-not-contact list applies to this tool exactly as it does to "find
+  // email" on a lead (routes/leads.ts): an address on it is not handed out, and the look-up
+  // is not charged. Other candidates that are on the list are left out of the answer too.
+  const listed = await platformListed([r.email, ...(r.candidates ?? []).map((x) => x.email)], db);
+  const isListed = (e: string | null | undefined) => typeof e === "string" && listed.has(e.trim().toLowerCase());
+  if (isListed(r.email)) {
+    await consume(db, orgId(c), "verifications", -1, { allowOverage: true }).catch(() => {});
+    throw new ApiError(409, "This person has asked not to be contacted through Scout, so their address is not shown.", "suppressed");
+  }
+  return c.json(listed.size ? { ...r, candidates: r.candidates.filter((x) => !isListed(x.email)) } : r);
 });
 
 /** Job status (any job type owned by org). */

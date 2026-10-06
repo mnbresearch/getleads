@@ -287,7 +287,8 @@ miscRoutes.post("/integrations/:provider/sync", requireAuth, ownerOrAdmin("integ
   // as queued reported work that was never going to happen.
   const requested = [...new Set(c.req.valid("json").leadIds)];
   const owned = (await db.select({ id: leads.id }).from(leads).where(and(eq(leads.orgId, oid), inArray(leads.id, requested)))).map((r) => r.id);
-  if (owned.length) await guardJobCapacity(db, oid, "integration.sync");
+  // One job per lead: all of them are counted against the ceiling for requests arriving together.
+  if (owned.length) await guardJobCapacity(db, oid, "integration.sync", false, owned.length);
   for (const leadId of owned) await enqueue(db, "integration.sync", { integrationId: integ.id, leadId }, { orgId: oid, maxAttempts: 3 });
   await audit(c, "integration.synced", { targetType: "integration", targetId: integ.id, data: { provider: integ.provider, requested: requested.length, queued: owned.length } });
   return c.json({ queued: owned.length, requested: requested.length, notFound: requested.length - owned.length }, 202);
