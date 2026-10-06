@@ -1,9 +1,9 @@
-import { useMemo, useState, type KeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, expectShape } from "../../lib/api";
 import { LoadError, Spinner, TagInput } from "../ui";
 import {
-  clean, competitorsOf, isForbidden, isQuota, lookup, messageOf, SCHEDULES, typeTone,
+  clean, competitorsOf, fieldMin, findsCompanies, isForbidden, isQuota, lookup, messageOf, SCHEDULES, typeTone,
   type Competitor, type FieldOption, type PlayOut, type PlayTypeField, type PlayTypeInfo,
 } from "../../lib/plays";
 import { plural } from "../../lib/plural";
@@ -84,7 +84,7 @@ function FieldInput({ field, value, onChange }: { field: PlayTypeField; value: u
       </select>
     );
   } else if (field.kind === "number") {
-    control = <input id={id} type="number" inputMode="numeric" min={0} max={field.max} className="input" placeholder={field.placeholder} value={typeof value === "number" || typeof value === "string" ? String(value) : ""} onChange={(e) => onChange(e.target.value)} />;
+    control = <input id={id} type="number" inputMode="numeric" min={fieldMin(field)} max={field.max} className="input" placeholder={field.placeholder} value={typeof value === "number" || typeof value === "string" ? String(value) : ""} onChange={(e) => onChange(e.target.value)} />;
   } else {
     control = <input id={id} className="input" maxLength={field.max && field.max > 0 ? field.max : 500} placeholder={field.placeholder} value={typeof value === "string" ? value : ""} onChange={(e) => onChange(e.target.value)} />;
   }
@@ -117,12 +117,14 @@ function fieldValue(field: PlayTypeField, raw: unknown): unknown {
  * and what it needs is more use than not seeing it.
  */
 export function PlayForm({
-  types, typesError, onRetryTypes, initial, pickers, onSaved, onForbidden, toast,
+  types, typesError, onRetryTypes, initial, startType, pickers, onSaved, onForbidden, toast,
 }: {
   types: PlayTypeInfo[] | null;
   typesError: string | null;
   onRetryTypes: () => void;
   initial?: PlayOut;
+  /** Open a new play straight at this kind (when it exists and is available), skipping the picker. */
+  startType?: string;
   pickers: Pickers;
   onSaved: (play: PlayOut, created: boolean) => void;
   onForbidden: (message: string) => void;
@@ -142,6 +144,18 @@ export function PlayForm({
   const [minScore, setMinScore] = useState<string>(String(initial?.minScore ?? 70));
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; quota: boolean } | null>(null);
+
+  const started = useRef(false);
+  useEffect(() => {
+    if (started.current || initial || !startType || !types) return;
+    started.current = true;
+    const t = types.find((x) => x.type === startType && x.available !== false);
+    if (!t) return;
+    setType(t.type);
+    setName(t.name);
+    setConfig({});
+    setTitles(t.defaultTitles ?? []);
+  }, [types, startType, initial]);
 
   if (!types) return typesError ? <LoadError message={typesError} onRetry={onRetryTypes} /> : <Spinner label="Loading the kinds of play…" />;
 
@@ -194,11 +208,14 @@ export function PlayForm({
   const upload = type === "engagers_upload";
   const scoreNum = Number(minScore);
   const missing = fields.filter((f) => f.required && fieldValue(f, config[f.key]) === undefined).map((f) => f.label);
-  const numberErr = fields.find((f) => f.kind === "number" && config[f.key] !== undefined && config[f.key] !== "" && (!Number.isFinite(Number(config[f.key])) || Number(config[f.key]) < 0 || (f.max !== undefined && Number(config[f.key]) > f.max)));
+  const numberErr = fields.find((f) => f.kind === "number" && config[f.key] !== undefined && config[f.key] !== "" && (!Number.isFinite(Number(config[f.key])) || Number(config[f.key]) < fieldMin(f) || (f.max !== undefined && Number(config[f.key]) > f.max)));
+  // Job titles are for plays that find a company first. A play that is handed people (an
+  // upload, job changes) or finds conversations has no use for them, so it is not asked.
+  const wantsTitles = findsCompanies(types, type);
   const problem =
     !name.trim() ? "Give the play a name."
     : missing.length ? `Fill in: ${missing.join(", ")}.`
-    : numberErr ? `${numberErr.label} must be a number${numberErr.max !== undefined ? ` from 0 to ${numberErr.max}` : ""}.`
+    : numberErr ? `${numberErr.label} must be a number ${numberErr.max !== undefined ? `from ${fieldMin(numberErr)} to ${numberErr.max}` : `of ${fieldMin(numberErr)} or more`}.`
     : autoApprove && (!Number.isInteger(scoreNum) || scoreNum < 0 || scoreNum > 100) ? "The minimum score must be a whole number from 0 to 100."
     : null;
   // Like Find leads: offered only to a workspace that works for clients. A play already
@@ -222,7 +239,7 @@ export function PlayForm({
       const shared = {
         name: name.trim(),
         config: cfg,
-        targetTitles: titles,
+        ...(wantsTitles ? { targetTitles: titles } : {}),
         autoApprove,
         ...(autoApprove ? { minScore: scoreNum } : {}),
         runEveryHours: upload ? null : every,
@@ -264,11 +281,11 @@ export function PlayForm({
 
       {fields.map((f) => <FieldInput key={f.key} field={f} value={config[f.key]} onChange={(v) => setConfig((c) => ({ ...c, [f.key]: v }))} />)}
 
-      <div className="sm:col-span-2">
+      {wantsTitles && <div className="sm:col-span-2">
         <label className="label" htmlFor="play-titles">Job titles to look for</label>
         <TagInput inputId="play-titles" value={titles} onChange={setTitles} max={20} placeholder="VP Sales, Head of Growth…" />
         <p className="mt-1 text-xs text-ink-400">When the play finds a company, these are the people Scout looks for there. Leave empty to get the company and choose people yourself.</p>
-      </div>
+      </div>}
 
       <div><label className="label" htmlFor="play-icp">Score against an ideal customer</label><select id="play-icp" className="input" value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">Do not score</option>{pickers.icps.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</select></div>
       <div><label className="label" htmlFor="play-list">Add approved people to a list</label><select id="play-list" className="input" value={listId} onChange={(e) => setListId(e.target.value)}><option value="">No list</option>{pickers.lists.map((l) => <option key={l.id} value={l.id}>{l.name}</option>)}</select></div>

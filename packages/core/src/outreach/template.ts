@@ -27,6 +27,18 @@ export function leadVars(lead: {
     const c = custom[key];
     return typeof c === "string" || typeof c === "number" ? String(c) : "";
   };
+  /**
+   * The company's name: the company record's (its name, else its address), else a custom
+   * column called "company". A lead with no company record at all - one made from a play's
+   * finding that named a company but no website - has the name it was found under in
+   * `custom.company_name`, and that is used last, so a template can still say the company.
+   */
+  const companyName = (): string => {
+    const named = own("company", lead.company?.name ?? lead.company?.domain);
+    if (named || lead.company) return named;
+    const found = custom.company_name;
+    return typeof found === "string" || typeof found === "number" ? String(found) : "";
+  };
   // Custom (CSV / CRM) columns FIRST, so the reserved names below always win. Spread last, a
   // CSV column called "sender_name" or "signature" replaced the sender's own identity in
   // every email sent to that lead. The three sender variables never come from lead data.
@@ -38,7 +50,7 @@ export function leadVars(lead: {
     title: own("title", lead.title),
     email: lead.email ?? "",
     location: own("location", lead.location),
-    company: own("company", lead.company?.name ?? lead.company?.domain),
+    company: companyName(),
     company_domain: own("company_domain", lead.company?.domain),
     industry: own("industry", lead.company?.industry),
     company_description: own("company_description", lead.company?.description),

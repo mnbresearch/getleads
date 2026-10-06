@@ -160,6 +160,8 @@ const net = {
   feed: null as string | null,
   /** The model's answer for a prompt; null means no AI provider should ever be asked. */
   ai: null as null | ((prompt: string) => unknown),
+  /** How LinkedIn answers for a post page: not at all, with its sign-in wall, or (null) with whatever `pages` holds. */
+  linkedin: null as null | "down" | "wall",
 };
 const resetNet = () => {
   net.calls = [];
@@ -168,6 +170,7 @@ const resetNet = () => {
   net.queries = [];
   net.feed = null;
   net.ai = null;
+  net.linkedin = null;
 };
 const keyOf = (url: string) => url.replace(/#.*$/, "").replace(/\/$/, "");
 const html = (body: string, status = 200, type = "text/html; charset=utf-8", url?: string): Response => {
@@ -193,6 +196,9 @@ const fakeFetch = (async (input: unknown, init?: RequestInit): Promise<Response>
   if (host === "news.google.com") return net.feed ? html(net.feed, 200, "application/rss+xml", url) : html("Not found", 404, "text/plain", url);
   // The keyless fallbacks (and anything else that is not part of this web) are unreachable.
   if (/duckduckgo\.com$|bing\.com$/.test(host)) throw new TypeError("fetch failed");
+  // LinkedIn's public post page: unreachable, behind its sign-in wall, or (by default) not there.
+  if (host === "www.linkedin.com" && net.linkedin === "down") throw new TypeError("fetch failed");
+  if (host === "www.linkedin.com" && net.linkedin === "wall") return html(`<html><head><title>Sign in | LinkedIn</title></head><body><form action="/authwall">Sign in to see this post</form></body></html>`, 200, "text/html; charset=utf-8", url);
   const found = net.pages[keyOf(url)];
   return found === undefined ? html("Not found", 404, "text/plain", url) : html(found, 200, "text/html; charset=utf-8", url);
 }) as typeof fetch;
@@ -516,7 +522,8 @@ suite("plays with the real engines", () => {
       expect(await candidatesOf(play.id)).toEqual([]);
       const seen = await req("GET", `/v1/plays/${play.id}`, o.token);
       expect(seen.body.play.lastResult).toEqual({ status: "blocked", found: 0, added: 0, duplicates: 0, note: r.note });
-      expect(seen.text).not.toMatch(/SERPER|serper-test-key|503/);
+      // (A bare "503" can occur by chance inside an id or a timestamp; the status must not appear as a number of its own.)
+      expect(seen.text).not.toMatch(/SERPER|serper-test-key|\b503\b/);
 
       // The same for conversations, which are search and nothing else.
       const asks = await mkPlay(o, { name: "Leaving Acme", type: "public_asks", config: { competitors: ["Acme"] } });
@@ -670,11 +677,24 @@ suite("plays with the real engines", () => {
 
       // Only the post link: Scout asks LinkedIn for the public page once, without signing in.
       // Here it is not publicly readable, and the answer says so instead of pretending nobody engaged.
+      net.linkedin = "wall";
       const only = await req("POST", `/v1/plays/${play.id}/upload`, o.token, { engagement: "reacted", postUrl });
       expect(only.status).toBe(200);
       expect(only.body).toMatchObject({ added: 0, rejectedCount: 0, run: { status: "blocked", found: 0 } });
       expect(only.body.run.note).toMatch(/did not show that post without signing in/);
-      expect(net.calls.map((c) => c.host)).toEqual(["www.linkedin.com"]);
+      // The read, and one small request to learn why it came back empty. Both to LinkedIn, neither signed in.
+      expect(net.calls.map((c) => c.host)).toEqual(["www.linkedin.com", "www.linkedin.com"]);
+      expect(await usageOf(o.orgId, "searches")).toBe(0);
+      // LinkedIn not answering is a different thing from a post that needs a sign-in, and is said differently.
+      net.linkedin = "down";
+      const down = await req("POST", `/v1/plays/${play.id}/upload`, o.token, { engagement: "reacted", postUrl });
+      expect(down.body.run).toMatchObject({ status: "blocked", found: 0 });
+      expect(down.body.run.note).toMatch(/^LinkedIn could not be reached just now, so the post was not read\./);
+      expect(down.body.run.note).not.toMatch(/signing in/);
+      // So is a link with no post behind it.
+      net.linkedin = null;
+      const missing = await req("POST", `/v1/plays/${play.id}/upload`, o.token, { engagement: "reacted", postUrl });
+      expect(missing.body.run.note).toMatch(/^LinkedIn says there is no post at that link\./);
       expect(await usageOf(o.orgId, "searches")).toBe(0);
     });
   });
@@ -718,6 +738,12 @@ suite("plays with the real engines", () => {
       expect(r.body.notes[0]).toMatch(/could not be read/);
       expect(r.body.product).toEqual({ domain: "nowhere-onbordo.com" });
       expect(r.body.plays.map((p: any) => p.type)).toEqual(["funding"]);
+      // General advice for a site nobody could read does not cost a search unit (a run that could not look does not either).
+      expect(await usageOf(o.orgId, "searches")).toBe(0);
+      // A site that was read does.
+      net.pages = { ...ONBORDO_SITE };
+      expect((await req("POST", "/v1/plays/plan", o.token, { website: "onbordo.com" })).status).toBe(200);
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
     });
   });
 

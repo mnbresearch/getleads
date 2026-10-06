@@ -428,6 +428,15 @@ export interface PlayUploadResult {
   /** The first 50 rows that could not be used, with the reason. */
   rejected: { row: number; reason: string }[];
   rejectedCount: number;
+  /**
+   * Usable rows that did not fit in the play (it holds at most 5,000 candidates waiting and
+   * 20,000 that were not approved), with the sentence that says why. Absent when all fitted.
+   */
+  notAdded?: { count: number; reason: string };
+  /** Only for a play that approves by itself: how many people this upload approved (at most 100 per upload). */
+  autoApproved?: number;
+  /** Only for a play that approves by itself: people left in the review queue because of that limit. */
+  leftForReview?: number;
 }
 
 export interface PlayPerformanceRow {

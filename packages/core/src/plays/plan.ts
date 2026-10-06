@@ -6,13 +6,13 @@
  * create as they are or edit. Nothing here is saved, and nothing here is a claim about
  * anyone else: competitors found by a model are suggestions, labelled as such.
  */
-import * as cheerio from "cheerio";
 import type { AiMessage } from "../types.js";
 import { UNTRUSTED_RULE, fence, fenceBlock, plainString, stringList } from "../ai/untrusted.js";
 import type { IcpCriteria } from "../icp/score.js";
 import { extractDomain, rootDomain } from "../util/domain.js";
+import { loadHtml } from "../util/html.js";
 import { isPublicHost } from "../util/publicHost.js";
-import { PlayRun, cleanCompanyName, escapeRegExp, isSameCompany, sameSite, slugToName } from "./shared.js";
+import { MAX_PAGE_CHARS, PlayRun, cleanCompanyName, escapeRegExp, isSameCompany, sameSite, slugToName } from "./shared.js";
 import type { PlayEngineOptions, PlayRunTrace } from "./types.js";
 import { cleanLine, normCompanyName } from "./util.js";
 
@@ -79,7 +79,9 @@ const CATEGORY_WORDS: [RegExp, string][] = [
  * that only says what it does ("finds and verifies B2B leads", "the CRM that ...") gets
  * the category those words belong to.
  */
-export function categoryFrom(text: string): string | undefined {
+export function categoryFrom(said: string): string | undefined {
+  // What a site says it is, it says in a sentence or two: only the first few thousand characters are read.
+  const text = String(said ?? "").slice(0, 4000);
   const m = new RegExp(`\\b(?:is|are)\\s+(?:an?|the|your)\\s+((?:[\\p{L}\\p{N}&/+-]+\\s+){0,4}?(?:${CATEGORY_NOUN}))\\b`, "iu").exec(text) ?? new RegExp(`\\b(?:the|an?)\\s+((?:[\\p{L}\\p{N}&/+-]+\\s+){1,4}?(?:${CATEGORY_NOUN}))\\s+(?:for|that|to|built)\\b`, "iu").exec(text);
   if (m) {
     const c = cleanLine(m[1], 80).replace(/^(?:all-in-one|best|leading|first|only|modern|simple|ultimate|complete|powerful|#1|number one|world's|new|next-generation|ai-powered|ai-first)\s+/i, "").toLowerCase();
@@ -102,9 +104,9 @@ const withoutBoilerplate = (text: string): string => text.replace(BOILERPLATE, "
  */
 export function pickPersona(site: { description?: string; headline?: string; headings?: string[]; text?: string }): { titles: string[]; roles: string[] } {
   const parts: [string, number][] = [
-    [withoutBoilerplate(site.description ?? ""), 3],
-    [withoutBoilerplate(site.headline ?? ""), 2],
-    [withoutBoilerplate((site.headings ?? []).slice(0, 30).join(". ")), 1],
+    [withoutBoilerplate((site.description ?? "").slice(0, 2000)), 3],
+    [withoutBoilerplate((site.headline ?? "").slice(0, 1000)), 2],
+    [withoutBoilerplate((site.headings ?? []).slice(0, 30).map((h) => String(h ?? "").slice(0, 400)).join(". ")), 1],
     [withoutBoilerplate((site.text ?? "").slice(0, 600)), 1],
   ];
   let best = PERSONAS[PERSONAS.length - 1];
@@ -161,7 +163,8 @@ function competitorFromLink(pathname: string, text: string, own: { name?: string
   const tokens = seg.toLowerCase().replace(/\.(?:html?|php)$/, "").split(/[-_]+/).filter(Boolean);
   const ownTokens = new Set(cleanLine(own.name, 80).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
   const rest = tokens.filter((x) => !/^(?:vs|versus|alternatives?|alternative|compare|comparison|to|the|best|top|competitors?|and|or|a|an|for|with)$/.test(x) && !ownTokens.has(x));
-  if (!rest.length || rest.length > 3) return null;
+  // A pattern is built from these words: a name is a few short ones.
+  if (!rest.length || rest.length > 3 || rest.some((x) => x.length > 40)) return null;
   const m = new RegExp(`(?<![\\p{L}\\p{N}])${rest.map(escapeRegExp).join("[\\s\\-_.]{0,2}")}(?![\\p{L}\\p{N}])`, "iu").exec(text);
   const spelled = m ? m[0] : null;
   if (!spelled || !/^[\p{Lu}\p{N}]/u.test(spelled)) return null;
@@ -169,26 +172,50 @@ function competitorFromLink(pathname: string, text: string, own: { name?: string
   return name && !isSameCompany(name, own) ? name : null;
 }
 
+interface Node {
+  type?: string;
+  name?: string;
+  data?: string;
+  children?: Node[];
+}
+
+/** Never part of what a page says: code, styles and content the page does not show. */
+const NOT_SHOWN = new Set(["script", "style", "noscript", "template", "iframe"]);
+/** The site's own furniture, left out of the page's text (its headings are still read). */
+const FURNITURE = new Set(["script", "style", "noscript", "template", "iframe", "nav", "footer", "header", "aside"]);
+
 /**
  * The text of an element with a space between its pieces. A link built as
  * `<a><span>HubSpot</span><span>See how we compare</span></a>` reads "HubSpot See how we
- * compare", not "HubSpotSee how we compare".
+ * compare", not "HubSpotSee how we compare". Elements named in `skip` are stepped over
+ * with everything in them.
  */
-function spacedText($: cheerio.CheerioAPI, el: Parameters<cheerio.CheerioAPI>[0], max = 400): string {
+function spacedText(el: Node | undefined, max = 400, skip?: Set<string>): string {
+  if (!el) return "";
   const out: string[] = [];
   let size = 0;
-  const stack: { type?: string; data?: string; children?: unknown[] }[] = $(el).toArray() as never[];
-  stack.reverse();
-  while (stack.length && size < max * 4) {
-    const n = stack.pop()!;
+  // Children are taken one at a time, so the first words of a huge element are read without touching the rest of it.
+  const lists: Node[][] = [[el]];
+  const at: number[] = [0];
+  while (lists.length && size < max * 4) {
+    const top = lists.length - 1;
+    if (at[top] >= lists[top].length) {
+      lists.pop();
+      at.pop();
+      continue;
+    }
+    const n = lists[top][at[top]++];
     if (n.type === "text") {
       const d = n.data ?? "";
       size += d.length;
       out.push(d);
       continue;
     }
-    const kids = (n.children ?? []) as (typeof stack)[number][];
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    if (skip && n.name && skip.has(n.name)) continue;
+    if (n.children?.length) {
+      lists.push(n.children);
+      at.push(0);
+    }
   }
   return cleanLine(out.join(" "), max);
 }
@@ -198,22 +225,65 @@ function spacedText($: cheerio.CheerioAPI, el: Parameters<cheerio.CheerioAPI>[0]
  * and the button text under it ("See how we compare") are two pieces, so the second can
  * never be taken for part of a name in the first. Bold and italic words stay in their piece.
  */
-function textPieces($: cheerio.CheerioAPI, el: Parameters<cheerio.CheerioAPI>[0], max = 200): string[] {
-  type N = { type?: string; data?: string; children?: unknown[] };
+function textPieces(el: Node, max = 200, skip?: Set<string>): string[] {
   const out: string[] = [];
-  const stack: N[] = ($(el).toArray() as never[]).reverse();
-  while (stack.length && out.length < 20) {
-    const n = stack.pop()!;
-    if (n.type !== "tag" && n.type !== "root") continue;
-    const kids = (n.children ?? []) as N[];
+  const lists: Node[][] = [[el]];
+  const at: number[] = [0];
+  // An element holds at most twenty pieces worth reading; one without any is not searched past its first few thousand elements.
+  let looked = 0;
+  while (lists.length && out.length < 20 && looked < 4000) {
+    const top = lists.length - 1;
+    if (at[top] >= lists[top].length) {
+      lists.pop();
+      at.pop();
+      continue;
+    }
+    const n = lists[top][at[top]++];
+    if ((n.type !== "tag" && n.type !== "root") || (skip && n.name && skip.has(n.name))) continue;
+    looked++;
+    const kids = n.children ?? [];
     if (kids.some((c) => c.type === "text" && /\S/.test(c.data ?? ""))) {
-      const t = spacedText($, n as never, max);
+      const t = spacedText(n, max, skip);
       if (t) out.push(t);
       continue;
     }
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    if (kids.length) {
+      lists.push(kids);
+      at.push(0);
+    }
   }
   return out;
+}
+
+/**
+ * The first `max` headings of a page (h1 to h3) in page order, and its first h1 wherever it
+ * stands. One walk from the top; nothing inside code, styles or hidden content.
+ */
+function headingsOf(root: Node, max: number): { list: Node[]; h1?: Node } {
+  const list: Node[] = [];
+  let h1: Node | undefined;
+  const lists: Node[][] = [[root]];
+  const at: number[] = [0];
+  while (lists.length && (list.length < max || !h1)) {
+    const top = lists.length - 1;
+    if (at[top] >= lists[top].length) {
+      lists.pop();
+      at.pop();
+      continue;
+    }
+    const n = lists[top][at[top]++];
+    if (n.type !== "tag" && n.type !== "root") continue;
+    if (n.name && NOT_SHOWN.has(n.name)) continue;
+    if (n.name === "h1" || n.name === "h2" || n.name === "h3") {
+      if (list.length < max) list.push(n);
+      if (n.name === "h1") h1 ??= n;
+    }
+    if (n.children?.length) {
+      lists.push(n.children);
+      at.push(0);
+    }
+  }
+  return { list, h1 };
 }
 
 interface SiteRead {
@@ -227,8 +297,10 @@ interface SiteRead {
   compareLinks: string[];
 }
 
-function readPage(html: string, pageUrl: string, site: string, own: { name?: string; domain?: string }, first: boolean): SiteRead {
-  const $ = cheerio.load(html.slice(0, 1_500_000));
+/** What one page of the site says, or null when the page is unreadable (see util/html.ts). */
+function readPage(html: string, pageUrl: string, site: string, own: { name?: string; domain?: string }, first: boolean): SiteRead | null {
+  const $ = loadHtml(html, MAX_PAGE_CHARS);
+  if (!$) return null;
   let name: string | undefined;
   let description: string | undefined;
   if (first) {
@@ -266,7 +338,10 @@ function readPage(html: string, pageUrl: string, site: string, own: { name?: str
     for (const n of names) if (!competitors.some((c) => normCompanyName(c) === normCompanyName(n))) competitors.push(n);
   };
   const compareLinks: string[] = [];
+  let compared = 0;
   $("a[href]").each((_, el) => {
+    // Ten names and forty pages are all that is kept: past that, more links change nothing. Nor are more than 400 comparison links read on one page.
+    if ((competitors.length >= 10 && compareLinks.length >= 40) || compared >= 400) return false;
     let u: URL;
     try {
       u = new URL(($(el).attr("href") ?? "").trim(), pageUrl);
@@ -277,24 +352,25 @@ function readPage(html: string, pageUrl: string, site: string, own: { name?: str
     if (!COMPARE_PATH.test(u.pathname) || /\.(?:pdf|png|jpe?g|svg|zip)$/i.test(u.pathname)) return;
     u.hash = "";
     u.search = "";
-    const text = spacedText($, el, 200);
-    for (const piece of textPieces($, el)) addAll(competitorsInText(piece, self));
+    compared++;
+    const text = spacedText(el as unknown as Node, 200);
+    for (const piece of textPieces(el as unknown as Node)) addAll(competitorsInText(piece, self));
     const fromLink = competitorFromLink(u.pathname, text, self);
     if (fromLink) addAll([fromLink]);
     const href = u.toString();
     if (compareLinks.length < 40 && !compareLinks.includes(href)) compareLinks.push(href);
   });
-  $("script, style, noscript, template, iframe").remove();
-  const headline = spacedText($, $("h1").first(), 200) || undefined;
+  // One walk from the top for the headings and one for the text: nothing is taken out of the page, parts are stepped over.
+  const root = $.root().get(0) as unknown as Node;
+  const found = headingsOf(root, 80);
+  const headline = spacedText(found.h1, 200, NOT_SHOWN) || undefined;
   const headings: string[] = [];
-  $("h1, h2, h3").each((i, el) => {
-    if (i >= 80) return;
-    const t = spacedText($, el, 200);
-    for (const piece of textPieces($, el)) addAll(competitorsInText(piece, self));
+  for (const el of found.list) {
+    const t = spacedText(el, 200, NOT_SHOWN);
+    for (const piece of textPieces(el, 200, NOT_SHOWN)) addAll(competitorsInText(piece, self));
     if (t && headings.length < 40) headings.push(t);
-  });
-  $("nav, footer, header, aside").remove();
-  const text = spacedText($, $("body"), 3000);
+  }
+  const text = spacedText($("body").get(0) as unknown as Node | undefined, 3000, FURNITURE);
   return { name, description, headline, headings, text, competitors: competitors.slice(0, 10), compareLinks };
 }
 
@@ -335,19 +411,52 @@ function phrases(value: unknown, maxItems: number, maxLen: number): string[] {
     .slice(0, maxItems);
 }
 
+/** "Google Analytics 4" is Google Analytics: a short number after a name is its version, not part of it. */
+const versionless = (name: string): string => name.replace(/\s+v?\d{1,2}(?:\.\d{1,2}){0,2}$/i, "");
+const nameKey = (name: string): string => name.toLowerCase().replace(/\s+/g, " ").trim();
+
+/**
+ * The competitors a plan names, from everything that was gathered.
+ *
+ * Names the customer saved are kept as they wrote them. Names read off the site or
+ * suggested by a model are tidied, because a comparison page mentions a product in more
+ * than one way:
+ *  - a version number at the end goes ("Google Analytics 4" is "Google Analytics") when
+ *    what is left is still a name of two words or more, or is itself among the names
+ *    ("Level 3" on its own stays "Level 3");
+ *  - a name that is only the start of another name on the list goes ("Google" beside
+ *    "Google Analytics"): the longer one is the product the site compares itself with,
+ *    the shorter one a company that makes many things the customer does not compete with.
+ */
+function settleCompetitors(found: PlayPlan["competitors"]): PlayPlan["competitors"] {
+  const keys = new Set(found.map((c) => nameKey(c.name)));
+  const named: PlayPlan["competitors"] = [];
+  for (const c of found) {
+    let name = c.name;
+    if (c.source !== "saved") {
+      const base = versionless(name);
+      if (base !== name && /\p{L}/u.test(base) && (base.split(" ").length >= 2 || keys.has(nameKey(base)))) name = base;
+    }
+    if (!named.some((n) => normCompanyName(n.name) === normCompanyName(name))) named.push(name === c.name ? c : { ...c, name });
+  }
+  const all = named.map((c) => nameKey(c.name));
+  return named.filter((c, i) => c.source === "saved" || !all.some((other, j) => j !== i && other.startsWith(`${all[i]} `)));
+}
+
 export async function planPlays(input: { website: string; knownCompetitors?: { name: string; domain?: string }[] }, opts: PlayEngineOptions = {}): Promise<PlayPlan> {
   const run = new PlayRun(opts);
   const raw = typeof input?.website === "string" ? input.website.trim().slice(0, 300) : "";
   const literal = raw.replace(/^[a-z][a-z0-9+.-]*:\/\//i, "").split(/[/?#]/)[0];
   const domain = extractDomain(raw) ?? "";
 
-  const competitors: PlayPlan["competitors"] = [];
+  // Gathered first, settled at the end (see `settleCompetitors`): which names stay depends on all of them.
+  const gathered: PlayPlan["competitors"] = [];
   const addCompetitor = (name: string, source: "saved" | "site" | "ai", dom?: string): void => {
     const clean = cleanCompanyName(name, 4);
-    if (!clean || competitors.length >= MAX_COMPETITORS) return;
-    if (competitors.some((c) => normCompanyName(c.name) === normCompanyName(clean))) return;
+    if (!clean || gathered.length >= MAX_COMPETITORS * 3) return;
+    if (gathered.some((c) => normCompanyName(c.name) === normCompanyName(clean))) return;
     const d = dom ? extractDomain(dom) : null;
-    competitors.push({ name: clean, ...(d && isPublicHost(d) ? { domain: d } : {}), source });
+    gathered.push({ name: clean, ...(d && isPublicHost(d) ? { domain: d } : {}), source });
   };
   for (const c of (Array.isArray(input?.knownCompetitors) ? input.knownCompetitors : []).slice(0, 10)) {
     if (c && typeof c.name === "string") addCompetitor(c.name, "saved", typeof c.domain === "string" ? c.domain : undefined);
@@ -364,6 +473,14 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
     if (home.ok) {
       siteDomain = extractDomain(home.url) ?? domain;
       site = readPage(home.body, home.url, siteDomain, { domain: siteDomain }, true);
+    }
+    if (!home.ok) {
+      if (!run.trace.blocked) run.block(`${domain} could not be read (${home.why}), so these suggestions are general. Check the address and try again.`);
+    } else if (!site) {
+      // Fetched, then refused by the parser's own limits: said the same way as a page refused before parsing.
+      run.unreadable(home.url);
+      run.block(`${domain} could not be read (unreadable page), so these suggestions are general. Check the address and try again.`);
+    } else {
       const own = { name: site.name, domain: siteDomain };
       // The site's own comparison pages name its competitors better than anything else can.
       // Asked for where the site really answers (with "www" if that is where it lives), so each is one request.
@@ -381,11 +498,13 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
         const page = await run.fetchPage(url);
         if (!page.ok || !sameSite(page.url, siteDomain)) continue;
         const more = readPage(page.body, page.url, siteDomain, own, false);
+        if (!more) {
+          run.unreadable(page.url);
+          continue;
+        }
         for (const n of more.competitors) if (!site.competitors.some((c) => normCompanyName(c) === normCompanyName(n))) site.competitors.push(n);
       }
       for (const n of site.competitors.slice(0, 8)) addCompetitor(n, "site");
-    } else if (!run.trace.blocked) {
-      run.block(`${domain} could not be read (${home.why}), so these suggestions are general. Check the address and try again.`);
     }
   }
 
@@ -421,6 +540,8 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
   }
   icp.titles = titles;
   if (!site && !run.trace.blocked) run.block("Your website could not be read, so these suggestions are general.");
+
+  const competitors = settleCompetitors(gathered).slice(0, MAX_COMPETITORS);
 
   /* The plays. Funding always; the others only when there is something to fill them with. */
   const targetTitles = titles.slice(0, 6);

@@ -262,7 +262,7 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
       const isHome = !homepageDone && next.score === 100;
       if (isHome) homepageDone = true;
       const asked = asServed(next);
-      let page = await run.fetchPage(asked, { maxRequests: left() });
+      let page = await run.fetchPage(asked, { maxRequests: left(), sitemap: next.kind === "sitemap" });
       if (!page.ok && isHome && page.kind === "failed" && left() > 0) {
         // https reached nothing: some small sites still answer on http only. One try, same page.
         page = await run.fetchPage(`http://${site}/`, { maxRequests: left() });
@@ -272,7 +272,8 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
       if (!page.ok) {
         if (page.kind === "deadline" || page.kind === "budget") break;
         // The home page refusing settles it for the whole site: nothing else is asked for.
-        if (isHome && page.kind === "refused") break;
+        // (A home page that is merely unreadable is our limit, not the site's refusal: its other pages are still tried.)
+        if (isHome && page.kind === "refused" && page.why !== "unreadable page") break;
         continue;
       }
       if (!sameSite(page.url, site)) {
@@ -299,9 +300,14 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
         if (child && ++sitemapChildren <= 1) push(child, 80, "sitemap");
         continue;
       }
+      const out = extractCustomers(page.body, page.url, competitor);
+      if (out.unreadable) {
+        // Fetched, then refused by the parser's own limits: counted and noted like a page refused before parsing.
+        run.unreadable(page.url);
+        continue;
+      }
       pagesExamined++;
       examinedHere++;
-      const out = extractCustomers(page.body, page.url, competitor);
       for (const h of out.hits) keep(h, page.url, out.title, out.customerPage);
       for (const t of out.told) covered.add(t);
       for (const l of out.links) push(l.url, l.score - (inAnotherLanguage(l.url) ? 40 : 0));

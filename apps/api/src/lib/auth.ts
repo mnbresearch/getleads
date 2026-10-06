@@ -2,7 +2,7 @@ import bcrypt from "bcryptjs";
 import { sign, verify } from "hono/jwt";
 import { apiKeys, eq, getDb, organizations, sql, users, type ApiKey, type Organization, type User } from "@prospex/db";
 import { env } from "../env.js";
-import { ApiError, isClientDataError, logDatabaseUnavailable, temporarilyUnavailable } from "./errors.js";
+import { ApiError, isClientDataError, isDatabaseUnavailable, logDatabaseUnavailable, temporarilyUnavailable } from "./errors.js";
 import { randomToken, sha256 } from "./crypto.js";
 import { bcryptOnWorker, PasswordWorkerUnavailable, passwordWorkerStats, type BcryptTask } from "./passwordWorkers.js";
 
@@ -388,14 +388,24 @@ export async function authenticate(header: string | undefined): Promise<AuthCont
   const [scheme, token] = header.split(" ");
   if (!token) return null;
   const { db } = getDb();
-  /** Run the database part: a value the token supplied that the database cannot use is still "not recognised"; anything else is "try again". */
+  /**
+   * Run the database part. Three different failures, three different answers:
+   *  - a value the token supplied that the database cannot use: still "not recognised" (401);
+   *  - the database cannot be reached: "try again in a minute" (503);
+   *  - anything else - a bug, a column that is not there - is a fault and is rethrown as one
+   *    (500, logged with its detail). It used to be reported as "temporarily unavailable"
+   *    too, so a broken deploy looked like an outage that would pass by itself.
+   */
   const ask = async <T>(fn: () => Promise<T>): Promise<T | null> => {
     try {
       return await fn();
     } catch (e) {
       if (isClientDataError(e)) return null;
-      logDatabaseUnavailable("checking a session or API key", e);
-      throw temporarilyUnavailable();
+      if (isDatabaseUnavailable(e)) {
+        logDatabaseUnavailable("checking a session or API key", e);
+        throw temporarilyUnavailable();
+      }
+      throw e;
     }
   };
   if (looksLikeApiKey(token)) {

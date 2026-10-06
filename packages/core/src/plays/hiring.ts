@@ -13,14 +13,14 @@
  * address - and an address that is one run of letters ("paveakatroveinformationtechnologies")
  * is not a name, so that posting is left out rather than shown under a made-up one.
  */
-import * as cheerio from "cheerio";
 import type { SearchResult } from "../types.js";
 import { titleMatch } from "../icp/score.js";
 import { detectHiring } from "../signals/hiring.js";
 import { extractDomain, isSocialOrAggregator, rootDomain } from "../util/domain.js";
+import { loadHtml } from "../util/html.js";
 import { pMap } from "../util/http.js";
 import { isPublicHost } from "../util/publicHost.js";
-import { PlayRun, article, cleanCompanyName, cleanList, findingLimit, finishFinding, rankFindings, safeHttpUrl, slugToName } from "./shared.js";
+import { MAX_PAGE_CHARS, PlayRun, article, cleanCompanyName, cleanList, findingLimit, finishFinding, rankFindings, safeHttpUrl, slugToName } from "./shared.js";
 import type { PlayEngineOptions, PlayEngineResult, PlayFinding } from "./types.js";
 import { cleanLine, normCompanyName } from "./util.js";
 
@@ -80,7 +80,8 @@ const ROLE_STOP = new Set(["of", "the", "and", "a", "an", "for", "in", "at", "to
 
 function roleTokens(text: string): string[] {
   const out: string[] = [];
-  for (const raw of text.toLowerCase().replace(/&/g, " and ").split(/[^a-z0-9+#.]+/)) {
+  // A role or a job title is a line: only its first part is read, whatever a result sends as one.
+  for (const raw of String(text ?? "").slice(0, 400).toLowerCase().replace(/&/g, " and ").split(/[^a-z0-9+#.]+/)) {
     let t = raw.replace(/^\.+|\.+$/g, "");
     if (!t) continue;
     t = SHORT_FORMS[t] ?? t;
@@ -99,7 +100,7 @@ export function roleMatches(title: string, role: string): boolean {
   if (!need.length) return false;
   const have = new Set(roleTokens(title));
   if (need.every((n) => have.has(n))) return true;
-  return titleMatch(title, [role]) === true;
+  return titleMatch(String(title ?? "").slice(0, 400), [String(role ?? "").slice(0, 400)]) === true;
 }
 
 export interface JobPosting {
@@ -222,11 +223,11 @@ export function parseJobResult(r: SearchResult): JobPosting | null {
 
 /** Queries for the roles, ordered so every role gets its first source before any role gets its second. */
 export function buildHiringQueries(roles: string[], keywords: string[] = [], locations: string[] = []): string[] {
-  const extra = [keywords.slice(0, 2).join(" "), locations.length ? `(${locations.slice(0, 3).map((l) => `"${l.replace(/"/g, "")}"`).join(" OR ")})` : ""].filter(Boolean).join(" ");
+  const extra = [keywords.slice(0, 2).map((k) => String(k ?? "").slice(0, 200)).join(" "), locations.length ? `(${locations.slice(0, 3).map((l) => `"${String(l ?? "").slice(0, 200).replace(/"/g, "")}"`).join(" OR ")})` : ""].filter(Boolean).join(" ");
   const out: string[] = [];
   for (const site of QUERY_SITES) {
     for (const role of roles) {
-      const quoted = `"${role.replace(/"/g, " ").replace(/\s+/g, " ").trim()}"`;
+      const quoted = `"${String(role ?? "").slice(0, 200).replace(/"/g, " ").replace(/\s+/g, " ").trim()}"`;
       out.push((site ? `site:${site} ${quoted} ${extra}` : `${quoted} job opening ${extra}`).trim());
     }
   }
@@ -245,7 +246,70 @@ function reasonFor(p: { title: string; board: string }, state: "open" | "uncheck
   return `Has a posting for ${role} on ${p.board}.`;
 }
 
-const LD_JSON = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]{2,300000}?)<\/script>/gi;
+const SCRIPT_OPEN = /<script(?=[\s>])/gi;
+const SCRIPT_CLOSE = /<\/script>/gi;
+const LD_JSON_TYPE = /type\s{0,5}=\s{0,5}["']application\/ld\+json["']/i;
+
+interface TextNode {
+  type?: string;
+  data?: string;
+  children?: TextNode[];
+}
+
+/**
+ * The first `max` characters of the text of the elements a selector finds, in page order
+ * (code and styles aside). Read one child at a time and stopped as soon as there is
+ * enough, so headings that hold the rest of a large page are not each read to their end.
+ */
+function firstText($: NonNullable<ReturnType<typeof loadHtml>>, selector: string, max: number): string {
+  const out: string[] = [];
+  let size = 0;
+  for (const el of $(selector).toArray() as unknown as TextNode[]) {
+    const lists: TextNode[][] = [[el]];
+    const at: number[] = [0];
+    while (lists.length && size < max) {
+      const top = lists.length - 1;
+      if (at[top] >= lists[top].length) {
+        lists.pop();
+        at.pop();
+        continue;
+      }
+      const n = lists[top][at[top]++];
+      if (n.type === "text") {
+        out.push(n.data ?? "");
+        size += (n.data ?? "").length;
+      } else if (n.children?.length && n.type !== "comment" && n.type !== "script" && n.type !== "style") {
+        lists.push(n.children);
+        at.push(0);
+      }
+    }
+    if (size >= max) break;
+  }
+  return out.join("").slice(0, max);
+}
+
+/**
+ * The contents of a page's JSON-LD blocks, found by plain search through its text. Each
+ * search starts where the last one ended and a search that finds nothing ends the scan,
+ * so a page of a hundred thousand unclosed `<script` tags costs one pass, not one per tag.
+ */
+function ldJsonBlocks(body: string): string[] {
+  const out: string[] = [];
+  SCRIPT_OPEN.lastIndex = 0;
+  for (let m = SCRIPT_OPEN.exec(body); m; m = SCRIPT_OPEN.exec(body)) {
+    const gt = body.indexOf(">", m.index);
+    if (gt < 0) break;
+    SCRIPT_OPEN.lastIndex = gt + 1;
+    if (gt - m.index > 2000 || !LD_JSON_TYPE.test(body.slice(m.index, gt))) continue;
+    SCRIPT_CLOSE.lastIndex = gt + 1;
+    const close = SCRIPT_CLOSE.exec(body);
+    if (!close) break;
+    const size = close.index - gt - 1;
+    if (size >= 2 && size <= 300_000) out.push(body.slice(gt + 1, close.index));
+    SCRIPT_OPEN.lastIndex = close.index + close[0].length;
+  }
+  return out;
+}
 
 /**
  * What a posting's own page says: the role and the employer.
@@ -254,13 +318,14 @@ const LD_JSON = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\
  * the page title ("Job Application for X at Y", "X @ Y", "Y - X"), and the board's own
  * record of the company's name. Nothing is guessed: a page that names no employer returns none.
  */
-export function readPostingPage(body: string, slug: string | null, leverStyle: boolean): { role?: string; company?: string } {
+export function readPostingPage(page: string, slug: string | null, leverStyle: boolean): { role?: string; company?: string } {
   let role: string | undefined;
   let company: string | undefined;
-  for (const m of body.slice(0, 1_500_000).matchAll(LD_JSON)) {
+  const body = String(page ?? "").slice(0, MAX_PAGE_CHARS);
+  for (const block of ldJsonBlocks(body)) {
     let data: unknown;
     try {
-      data = JSON.parse(m[1]);
+      data = JSON.parse(block);
     } catch {
       continue;
     }
@@ -284,8 +349,9 @@ export function readPostingPage(body: string, slug: string | null, leverStyle: b
     }
     if (company) break;
   }
-  const $ = cheerio.load(body.slice(0, 300_000));
-  const titles = [cleanLine($("title").first().text(), 240), cleanLine($('meta[property="og:title"]').attr("content"), 240)].filter(Boolean);
+  // The title sits at the top of the page. An unreadable page (see util/html.ts) has no title to go by.
+  const $ = loadHtml(body, 300_000);
+  const titles = $ ? [cleanLine($("title").first().text(), 240), cleanLine($('meta[property="og:title"]').attr("content"), 240)].filter(Boolean) : [];
   for (const t of titles) {
     const parsed = splitJobTitle(t, slug, leverStyle);
     if (!parsed) continue;
@@ -295,7 +361,7 @@ export function readPostingPage(body: string, slug: string | null, leverStyle: b
     }
   }
   if (!company) {
-    const m = /"company_name"\s*:\s*"((?:[^"\\]|\\.){2,80})"/.exec(body.slice(0, 1_500_000));
+    const m = /"company_name"\s{0,20}:\s{0,20}"((?:[^"\\]|\\.){2,80})"/.exec(body);
     if (m) {
       try {
         company = cleanCompanyName(JSON.parse(`"${m[1]}"`), 6) ?? undefined;
@@ -417,20 +483,25 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
           gone++;
           return null;
         }
-        const $ = cheerio.load(page.body.slice(0, 400_000));
-        // Some boards answer for a closed posting with a page that says so.
-        if (CLOSED.test($("title, h1, h2, [role='alert'], .error, .message, .closed, .job-closed").text().slice(0, 4000))) {
-          gone++;
-          return null;
+        const $ = loadHtml(page.body, 400_000);
+        if (!$) {
+          // Fetched but unreadable (see util/html.ts): nothing was learned from it, so the posting stays unchecked.
+          run.unreadable(page.url);
+        } else {
+          // Some boards answer for a closed posting with a page that says so.
+          if (CLOSED.test(firstText($, "title, h1, h2, [role='alert'], .error, .message, .closed, .job-closed", 4000))) {
+            gone++;
+            return null;
+          }
+          const said = readPostingPage(page.body, at[1] ?? null, board.board === "Lever");
+          // The page now advertises a different role: the result was out of date.
+          if (said.role && !roles.some((role) => roleMatches(said.role!, role))) {
+            gone++;
+            return null;
+          }
+          posting = { ...p, title: said.role ?? p.title, ...(said.company ? { companyName: said.company, unnamed: false } : {}) };
+          state = "open";
         }
-        const said = readPostingPage(page.body, at[1] ?? null, board.board === "Lever");
-        // The page now advertises a different role: the result was out of date.
-        if (said.role && !roles.some((role) => roleMatches(said.role!, role))) {
-          gone++;
-          return null;
-        }
-        posting = { ...p, title: said.role ?? p.title, ...(said.company ? { companyName: said.company, unnamed: false } : {}) };
-        state = "open";
       }
     }
     // Still known only by an address that is not a name: not shown under a made-up one.

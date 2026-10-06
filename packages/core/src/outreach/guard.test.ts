@@ -435,6 +435,27 @@ describe("template variables", () => {
     // A custom column still fills a lead field the lead does not have.
     expect(leadVars({ custom: { title: "Head of Ops" } }).title).toBe("Head of Ops");
   });
+
+  it("a lead with no company record says the company it was found under", () => {
+    // A lead made from a play's finding that named a company but no website: the name is kept as `company_name`.
+    const found = leadVars({ firstName: "Pat", custom: { company_name: "Globex" } });
+    expect(found.company).toBe("Globex");
+    expect(renderTemplate("Hi {{first_name}}, a quick idea for {{company | fallback:\"your team\"}}.", found)).toBe("Hi Pat, a quick idea for Globex.");
+    expect(leadVars({ company: null, custom: { company_name: 4711 } }).company).toBe("4711");
+    // Reserved names keep their order: the company record first, then a column called "company", then the name it was found under.
+    expect(leadVars({ company: { name: "Initech", domain: "initech.com" }, custom: { company: "Column Co", company_name: "Globex" } }).company).toBe("Initech");
+    expect(leadVars({ company: { domain: "initech.com" }, custom: { company_name: "Globex" } }).company).toBe("initech.com");
+    expect(leadVars({ custom: { company: "Column Co", company_name: "Globex" } }).company).toBe("Column Co");
+    // A lead that has a company record is never named from `company_name`, even when the record has no name yet.
+    expect(leadVars({ company: {}, custom: { company_name: "Globex" } }).company).toBe("");
+    // Only a plain value is a name; with nothing at all the template's fallback is used.
+    for (const junk of [{ name: "Globex" }, ["Globex"], true, null, undefined, ""]) expect(leadVars({ custom: { company_name: junk } }).company, JSON.stringify(junk)).toBe("");
+    expect(renderTemplate("for {{company | fallback:\"your team\"}}", leadVars({ custom: {} }))).toBe("for your team");
+    // `company_name` itself stays available to a template that asks for it, and never touches the other company fields.
+    const vars = leadVars({ custom: { company_name: "Globex" } });
+    expect((vars as Record<string, unknown>).company_name).toBe("Globex");
+    expect([vars.company_domain, vars.industry, vars.company_description]).toEqual(["", "", ""]);
+  });
 });
 
 describe("clampLeadQuery", () => {

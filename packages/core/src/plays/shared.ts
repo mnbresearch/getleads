@@ -6,7 +6,8 @@
 import type { AiMessage, SearchResult } from "../types.js";
 import { completeJson, hasAi } from "../ai/provider.js";
 import { defaultProviders, webSearchDetailed, type WebSearchOutcome } from "../search/index.js";
-import { fetchPublic, readCapped } from "../util/http.js";
+import { fitHtml, unreadableHtml } from "../util/html.js";
+import { CRAWLER_TOKEN, fetchPublic, readCapped } from "../util/http.js";
 import { extractDomain, normalizeLinkedinUrl, rootDomain } from "../util/domain.js";
 import { isPublicHost, parseHttpUrl } from "../util/publicHost.js";
 import type { PlayEngineOptions, PlayFinding, PlayRunTrace } from "./types.js";
@@ -17,6 +18,8 @@ export const HARD_LIMIT = 200;
 /** One page fetch never waits longer than this. */
 export const PAGE_TIMEOUT_MS = 8_000;
 const MAX_PAGE_BYTES = 1_500_000;
+/** At most this much of a web page is kept and read. A customers page is a few hundred thousand characters; what a larger page says is said in its first part. */
+export const MAX_PAGE_CHARS = 800_000;
 const MAX_NOTE = 300;
 const MAX_NOTES = 30;
 
@@ -51,6 +54,8 @@ export function safeHttpUrl(url: unknown, max = 2000): string | undefined {
 }
 
 export const hostOf = (url: string): string => {
+  // An address longer than any real one is not an address: it is not parsed to find that out.
+  if (typeof url !== "string" || url.length > 4000) return "";
   try {
     return new URL(url).hostname.toLowerCase().replace(/\.$/, "").replace(/^www\./, "");
   } catch {
@@ -61,7 +66,7 @@ export const hostOf = (url: string): string => {
 /** Same site in the sense that matters for following a link: the same registrable domain. */
 export const sameSite = (url: string, domain: string): boolean => {
   const h = hostOf(url);
-  return !!h && rootDomain(h) === rootDomain(domain.toLowerCase().replace(/^www\./, ""));
+  return !!h && typeof domain === "string" && domain.length <= 300 && rootDomain(h) === rootDomain(domain.toLowerCase().replace(/^www\./, ""));
 };
 
 /* ───────────────────────────────── company names ───────────────────────────────── */
@@ -154,7 +159,7 @@ export function isVendorName(name: string): boolean {
   return VENDOR_FIRST.has(first);
 }
 
-const word = (t: string) => t.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").replace(/['\u2019]s$/, "");
+const word = (t: string) => String(t ?? "").slice(0, 100).toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "").replace(/['\u2019]s$/, "");
 
 export const isGenericWord = (t: string): boolean => GENERIC.has(word(t));
 export const isAudienceWord = (t: string): boolean => AUDIENCE.has(word(t));
@@ -315,7 +320,7 @@ export function isSameCompany(name: string, other: { name?: string; domain?: str
   const n = normCompanyName(name);
   if (!n) return false;
   const o = normCompanyName(other.name ?? "");
-  const label = other.domain ? rootDomain(other.domain.toLowerCase().replace(/^www\./, "")).split(".")[0].replace(/[^a-z0-9]/g, "") : "";
+  const label = other.domain ? rootDomain(other.domain.slice(0, 300).toLowerCase().replace(/^www\./, "")).split(".")[0].replace(/[^a-z0-9]/g, "") : "";
   if (o && (n === o || (o.length >= 4 && (n.startsWith(o) || n.endsWith(o))))) return true;
   if (label && (n === label || (label.length >= 5 && (n.startsWith(label) || n.endsWith(label))))) return true;
   return false;
@@ -338,7 +343,7 @@ export function finishFinding(f: PlayFinding): PlayFinding | null {
   const relevantBecause = safeSentence(f.relevantBecause, 300);
   if (!relevantBecause) return null;
   const text = (v: unknown, max: number) => cleanLine(v, max) || undefined;
-  const quote = typeof f.evidenceQuote === "string" ? f.evidenceQuote.replace(/\s+/g, " ").trim().slice(0, 500).trim() : "";
+  const quote = typeof f.evidenceQuote === "string" ? f.evidenceQuote.slice(0, 4000).replace(/\s+/g, " ").trim().slice(0, 500).trim() : "";
   const when = f.signalAt instanceof Date && Number.isFinite(f.signalAt.getTime()) ? f.signalAt : undefined;
   // Identifiers are kept only in their canonical form: a LinkedIn URL on linkedin.com, an email that is one, a public domain.
   const linkedin = typeof f.linkedinUrl === "string" ? normalizeLinkedinUrl(f.linkedinUrl.slice(0, 500)) : null;
@@ -387,19 +392,24 @@ export interface RobotsRules {
 }
 
 const NO_RULES: RobotsRules = { allow: [], disallow: [] };
-/** The name this crawler answers to in a robots.txt group (it is in the user-agent it sends). */
-const ROBOTS_AGENT = "scoutbot";
+/** The name this crawler answers to in a robots.txt group: the product token of the user-agent it sends. */
+const ROBOTS_AGENT = CRAWLER_TOKEN.toLowerCase();
+
+/** "ScoutBot/1.0" and "scoutbot" name the same crawler: a product token is letters, digits, "_" and "-", and what follows it is a version. */
+const productToken = (value: string): string => /^[a-z0-9_-]*/.exec(value.toLowerCase())?.[0] ?? "";
 
 /**
- * The rules of a robots.txt that apply to us: the group that names this crawler when there
- * is one, otherwise the group for `*`. Anything unreadable means no rules.
+ * The rules of a robots.txt that apply to us: the groups that name this crawler by its
+ * product token (in any case, with or without a version) when there are any, otherwise
+ * the groups for `*`. Anything unreadable means no rules.
  */
 export function parseRobots(text: string, agent = ROBOTS_AGENT): RobotsRules {
   const groups: { agents: string[]; allow: string[]; disallow: string[] }[] = [];
   let current: (typeof groups)[number] | null = null;
   let lastWasAgent = false;
   for (const raw of String(text ?? "").slice(0, 500_000).split(/\r?\n/)) {
-    const line = raw.replace(/#.*$/, "").trim();
+    const hash = raw.indexOf("#");
+    const line = (hash < 0 ? raw : raw.slice(0, hash)).trim();
     const at = line.indexOf(":");
     if (at <= 0) continue;
     const field = line.slice(0, at).trim().toLowerCase();
@@ -409,7 +419,7 @@ export function parseRobots(text: string, agent = ROBOTS_AGENT): RobotsRules {
         current = { agents: [], allow: [], disallow: [] };
         groups.push(current);
       }
-      current.agents.push(value.toLowerCase());
+      current.agents.push(value === "*" ? "*" : productToken(value));
       lastWasAgent = true;
       continue;
     }
@@ -418,32 +428,63 @@ export function parseRobots(text: string, agent = ROBOTS_AGENT): RobotsRules {
     if (field === "disallow" && value) current.disallow.push(value.slice(0, 500));
     else if (field === "allow" && value) current.allow.push(value.slice(0, 500));
   }
-  const named = groups.filter((g) => g.agents.some((a) => a !== "*" && a.length >= 3 && agent.includes(a)));
+  const us = productToken(agent);
+  const named = us ? groups.filter((g) => g.agents.includes(us)) : [];
   const chosen = named.length ? named : groups.filter((g) => g.agents.includes("*"));
   return { allow: chosen.flatMap((g) => g.allow).slice(0, 2000), disallow: chosen.flatMap((g) => g.disallow).slice(0, 2000) };
 }
 
-function robotsPattern(pattern: string): RegExp {
+/**
+ * Does a robots.txt pattern match the start of a path? `*` stands for any run of
+ * characters and a final `$` for the end of the path. Matched by hand, one character at a
+ * time with a single place to go back to, so a pattern full of `*` costs at most its
+ * length times the path's - a regular expression built from it could take forever.
+ * `steps` counts the work and is shared by a whole check.
+ */
+function robotsMatch(pattern: string, path: string, steps: { left: number }): boolean {
   const anchored = pattern.endsWith("$");
-  const body = (anchored ? pattern.slice(0, -1) : pattern).split("*").map(escapeRegExp).join(".*");
-  return new RegExp(`^${body}${anchored ? "$" : ""}`);
+  const p = anchored ? pattern.slice(0, -1) : pattern;
+  let pi = 0;
+  let si = 0;
+  let star = -1;
+  let mark = 0;
+  for (;;) {
+    if (--steps.left < 0) return false;
+    if (pi === p.length) {
+      if (!anchored || si === path.length) return true;
+    } else if (p[pi] === "*") {
+      star = pi++;
+      mark = si;
+      continue;
+    } else if (si < path.length && p[pi] === path[si]) {
+      pi++;
+      si++;
+      continue;
+    }
+    // No match this way: let the last `*` take one more character and try again from there.
+    if (star < 0 || mark >= path.length) return false;
+    pi = star + 1;
+    si = ++mark;
+  }
 }
 
-/** May this path be opened? The longest matching rule decides; a tie goes to "allow". */
+/** The work one check of a path may take. A real robots.txt needs a few thousand steps. */
+const MAX_ROBOTS_STEPS = 400_000;
+
+/**
+ * May this path be opened? The longest matching rule decides; a tie goes to "allow". A
+ * file so tangled that it cannot be checked within the allowance closes the path: when
+ * in doubt, a page is not opened.
+ */
 export function robotsAllows(rules: RobotsRules, pathAndQuery: string): boolean {
-  const path = pathAndQuery || "/";
+  const path = (pathAndQuery || "/").slice(0, 2000);
+  const steps = { left: MAX_ROBOTS_STEPS };
   let best = -1;
   let allowed = true;
   const consider = (patterns: string[], verdict: boolean): void => {
     for (const p of patterns) {
       if (p.length < best || (p.length === best && !verdict)) continue;
-      let hit = false;
-      try {
-        hit = robotsPattern(p).test(path);
-      } catch {
-        hit = false;
-      }
-      if (hit) {
+      if (robotsMatch(p, path, steps)) {
         best = p.length;
         allowed = verdict;
       }
@@ -451,7 +492,7 @@ export function robotsAllows(rules: RobotsRules, pathAndQuery: string): boolean 
   };
   consider(rules.disallow, false);
   consider(rules.allow, true);
-  return allowed;
+  return steps.left < 0 ? false : allowed;
 }
 
 /* ───────────────────────────────── the run ───────────────────────────────── */
@@ -463,6 +504,8 @@ export type PageResult =
 export interface FetchPageOptions {
   /** Wire requests this call may make at most (redirect hops and a robots.txt count). */
   maxRequests?: number;
+  /** The body is a sitemap, read as text and never parsed as a page: it is kept whole and not checked as a page is. */
+  sitemap?: boolean;
   /** False for a constant API endpoint that is built to be called. Default true. */
   robots?: boolean;
   /** Accept a JSON body (an API) instead of a page. */
@@ -482,8 +525,19 @@ const MIN_SEARCH_MS = 4_000;
 const MAX_HOPS = 5;
 
 /**
- * The pause between two requests to the same host. 300 ms unless the operator sets
- * PLAYS_HOST_PAUSE_MS (tests set it to 0, so a web that exists in memory is not waited for).
+ * The pause between two requests to the same host, in milliseconds.
+ *
+ * PLAYS_HOST_PAUSE_MS is the operator's knob for it: an environment variable, read when a
+ * run starts, so changing it takes effect on the next run without a deploy of new code.
+ *  - Unset, empty or not a number: 300 (at most about three requests a second to one site).
+ *  - A number: used as given, kept between 0 and 5000 and rounded down to a whole number.
+ *  - Raise it (1000 or more) when sites answer 429 or complain about being crawled; runs
+ *    that read many pages of one site take that much longer per page, inside the same
+ *    time limit, so fewer pages may be read.
+ *  - 0 removes the pause (requests to one host still go out one at a time, never in
+ *    parallel). Meant for tests, where the web exists only in memory; not for production.
+ * It paces page and robots.txt requests of plays only - searches and other crawlers have
+ * their own limits.
  */
 export function hostPauseMs(): number {
   const raw = process.env.PLAYS_HOST_PAUSE_MS;
@@ -495,6 +549,18 @@ const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+
+/** The note for a page that was fetched but not read because of how it is built. */
+function unreadableNote(url: string): string {
+  return `A page on ${hostOf(url) || "a site"} is built in a way that cannot be read quickly (far too many or too deeply nested elements), so it was skipped.`;
+}
+
+/** Is this body going to be parsed as a web page? (As opposed to a sitemap or a text file.) */
+function isHtmlBody(type: string, body: string): boolean {
+  if (/html/i.test(type)) return true;
+  if (/xml|json|plain/i.test(type)) return false;
+  return !/^\s*<\?xml/i.test(body.slice(0, 200));
+}
 
 /** A page that answered 200 with a login wall or a bot check instead of its content. */
 function wallOn(body: string, requested: URL, finalUrl: string): string | null {
@@ -887,6 +953,15 @@ export class PlayRun {
         this.note(`${shown} ${wall} instead of the page, so it was not read. It was not retried.`);
         return { ok: false, kind: "refused", why: wall };
       }
+      if (!o.sitemap && isHtmlBody(type, body)) {
+        // What a parser would be given, checked in one pass before any parser sees it (see util/html.ts).
+        body = fitHtml(body, MAX_PAGE_CHARS);
+        if (unreadableHtml(body)) {
+          this.trace.pagesRefused++;
+          this.note(unreadableNote(finalUrl));
+          return { ok: false, kind: "refused", why: "unreadable page" };
+        }
+      }
       this.trace.pagesFetched++;
     }
     return { ok: true, url: finalUrl, body };
@@ -910,6 +985,15 @@ export class PlayRun {
   discardFetched(): void {
     if (this.trace.pagesFetched > 0) this.trace.pagesFetched--;
     this.trace.pagesRefused++;
+  }
+
+  /**
+   * A page that was fetched and then refused by the parser's own limits (see util/html.ts):
+   * counted as refused, with the same note `fetchPage` writes when it refuses one itself.
+   */
+  unreadable(url: string): void {
+    this.discardFetched();
+    this.note(unreadableNote(url));
   }
 
   /** Is a model available for the next call? Absent, the "none" provider, or stopped: no. */

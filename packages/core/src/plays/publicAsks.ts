@@ -40,7 +40,8 @@ export interface AskSubject {
   value: string;
 }
 
-const q = (s: string): string => s.replace(/["\u201C\u201D]/g, "").trim();
+/** A subject as it goes into a search: its quote marks gone, and no longer than a search can use. */
+const q = (s: string): string => String(s ?? "").slice(0, 200).replace(/["\u201C\u201D]/g, "").trim();
 
 function phrasesFor(s: AskSubject): string[] {
   const v = q(s.value);
@@ -189,11 +190,13 @@ function lines(text: string): string[] {
 
 /**
  * Rules only: is this result a person asking, a person complaining, or neither?
- * `competitor` is needed for a complaint - a complaint about nothing in particular is noise.
+ * `product` (the competitor's name) is needed for a complaint - a complaint about nothing in particular is noise.
  */
-export function classifyAsk(title: string, snippet: string, competitor?: string): AskVerdict | null {
+export function classifyAsk(title: string, snippet: string, product?: string): AskVerdict | null {
   const t = cleanQuote(title, 300);
   const s = cleanQuote(snippet, 600);
+  // A product's name is a few words. A pattern is built from it, so it is never taken longer than that.
+  const competitor = product ? cleanLine(product, 80) : "";
   const all = `${t} ${s}`;
   if (!all.trim() || JOB_AD.test(all) || MARKETING.test(all) || VENDOR_HOOK.test(all) || LAUNCH.test(all)) return null;
   const named = competitor ? new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(competitor)}(?![\\p{L}\\p{N}])`, "iu") : null;

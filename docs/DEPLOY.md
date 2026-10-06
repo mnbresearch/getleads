@@ -98,7 +98,7 @@ The full procedure is DEPLOY.md section B11. In short:
 - **Before:** create a Neon branch (your restore point), check `JWT_SECRET` / `ENCRYPTION_KEY` are 16+ characters, check the admin password is not an example value, run the `openssl` certificate check (or set `DATABASE_SSL=require` as a safety net).
 - **Order:** API first, wait for `/health`, then web.
 - **Switches (all optional):** `CREDENTIAL_REBIND_ON_READ` (default off), `LINK_TOKENS_CLEAR_PLAINTEXT` (default off), `PRIVACY_SWEEP` (default on; `off` to defer), `IP_LOOKUP_ALLOW_PLAIN_HTTP` (default off). Set `IPINFO_TOKEN` for visitor-identification capacity.
-- **Rolling back:** run `node scripts/rollback-restore.mjs --dry-run`, then without `--dry-run`, with the new build and the production values; then redeploy the previous API and web builds. With the default switches the script only has work to do for report links and credentials created or changed on the new release.
+- **Rolling back:** run `node scripts/rollback-restore.mjs --dry-run`, then without `--dry-run`, with the new build and the production values; then redeploy the previous API and web builds. If the script says rows could not be read it exits with status 2 (in a dry run too) and says not to redeploy: fix the key and run it again first. With the default switches the script only has work to do for report links and credentials created or changed on the new release.
 
 ## Operating
 

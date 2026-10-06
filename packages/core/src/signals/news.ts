@@ -3,6 +3,7 @@
  * Google News RSS is free and needs no key; Bing News RSS is a fallback.
  */
 import * as cheerio from "cheerio";
+import { loadHtml, unreadableXml } from "../util/html.js";
 import { fetchText } from "../util/http.js";
 import { extractDomain, isSocialOrAggregator } from "../util/domain.js";
 import { encodeURIComponentSafe, wellFormed } from "../util/text.js";
@@ -50,15 +51,20 @@ export async function fetchBingNews(query: string): Promise<NewsItem[]> {
 }
 
 export function parseRss(xml: string): NewsItem[] {
+  // The same guard as for pages (util/html.ts): a feed nested or crowded beyond any real feed is not parsed.
+  if (unreadableXml(xml)) return [];
   const $ = cheerio.load(xml, { xmlMode: true });
   const out: NewsItem[] = [];
   $("item").each((_, el) => {
-    const title = $(el).find("title").first().text().trim();
-    const link = $(el).find("link").first().text().trim() || $(el).find("guid").first().text().trim();
-    const pub = $(el).find("pubDate").first().text().trim();
-    const source = $(el).find("source").first().text().trim() || undefined;
-    const desc = $(el).find("description").first().text();
-    const summary = desc ? cheerio.load(desc).text().replace(/\s+/g, " ").trim().slice(0, 400) : undefined;
+    // A feed item's fields are lines. Whatever a feed sends, only so much of each is kept.
+    const title = $(el).find("title").first().text().trim().slice(0, 500);
+    const address = $(el).find("link").first().text().trim() || $(el).find("guid").first().text().trim();
+    // An address is not cut short (that would be another address): one longer than any real one is left out.
+    const link = address.length <= 2000 ? address : "";
+    const pub = $(el).find("pubDate").first().text().trim().slice(0, 100);
+    const source = $(el).find("source").first().text().trim().slice(0, 200) || undefined;
+    const desc = $(el).find("description").first().text().slice(0, 20_000);
+    const summary = desc ? (loadHtml(desc)?.text() ?? "").replace(/\s+/g, " ").trim().slice(0, 400) : undefined;
     if (title && link) out.push({ title: title.replace(/\s+-\s+[^-]+$/, ""), url: link, source, publishedAt: pub ? new Date(pub) : undefined, summary });
   });
   return out;

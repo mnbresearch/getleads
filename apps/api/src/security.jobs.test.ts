@@ -1336,6 +1336,69 @@ suite("security: jobs, sending, AI output", () => {
       expect(mail.calls).toHaveLength(0);
     });
 
+    it("a new sender's warm-up cap does not hold back an answer to someone who wrote in - a cold reply is still capped, and every other limit still binds", async () => {
+      const age = (id: string, days: number) => db.execute(schema.sql`UPDATE email_accounts SET created_at = now() - (${days} || ' days')::interval WHERE id = ${id}`);
+      const usedToday = (id: string, n: number) => db.update(schema.emailAccounts).set({ sentToday: n, sentTodayDate: svc.accountDay() }).where(eq(schema.emailAccounts.id, id));
+      const longAgo = (inboundId: string) => db.execute(schema.sql`UPDATE messages SET created_at = now() - interval '15 days' WHERE id = ${inboundId}`);
+
+      // The customer's own sender, one day old: the ladder allows 20 a day and 20 have gone; its own limit is 22.
+      const a = await replySetup({ accountPatch: { provider: "smtp", dailyLimit: 22, configEncrypted: crypto.encryptJson({ host: "smtp.tenantco.example", port: 587 }) } });
+      await age(a.acct.id, 1);
+      await usedToday(a.acct.id, 20);
+      // A reply to a message that arrived fifteen days ago, with nothing from that person since, is a cold send: capped.
+      const cold = await newInbound(a.org.id, a.campaign.id);
+      await longAgo(cold.inbound.id);
+      const refused = await sendReply(a.token, cold.inbound.id);
+      expect([refused.status, refused.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(mail.calls).toHaveLength(0);
+      expect((await account(a.acct.id)).sentToday).toBe(20);
+      // The person who wrote in today gets their answer, and it counts toward the day's total.
+      expect((await sendReply(a.token, a.inbound.id)).status).toBe(200);
+      expect(mail.calls).toHaveLength(1);
+      expect((await account(a.acct.id)).sentToday).toBe(21);
+      expect(await usageOf(a.org.id, "emails")).toBe(1);
+      // An old message from someone who has ALSO written in recently is still an answer.
+      const both = await newInbound(a.org.id, a.campaign.id);
+      await longAgo(both.inbound.id);
+      await db.insert(schema.messages).values({ orgId: a.org.id, campaignId: a.campaign.id, leadId: both.lead.id, direction: "inbound", toEmail: both.lead.email, subject: "Re: again", bodyText: "Any news?", status: "received" });
+      expect((await sendReply(a.token, both.inbound.id)).status).toBe(200);
+      expect((await account(a.acct.id)).sentToday).toBe(22);
+      // The sender's own configured limit still binds an answer.
+      const third = await newInbound(a.org.id, a.campaign.id);
+      const atLimit = await sendReply(a.token, third.inbound.id);
+      expect([atLimit.status, atLimit.body.error.code]).toEqual([429, "daily_limit"]);
+      expect((await account(a.acct.id)).sentToday).toBe(22);
+      // So does the kill switch.
+      await usedToday(a.acct.id, 20);
+      process.env.OUTBOUND_SENDING_ENABLED = "false";
+      expect((await sendReply(a.token, third.inbound.id)).status).toBe(503);
+      delete process.env.OUTBOUND_SENDING_ENABLED;
+      // And the workspace ceiling.
+      await db.update(schema.organizations).set({ planLimits: { emailsPerDay: 20 } }).where(eq(schema.organizations.id, a.org.id));
+      const ceiling = await sendReply(a.token, third.inbound.id);
+      expect([ceiling.status, ceiling.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(ceiling.body.error.message).toMatch(/daily sending ceiling/);
+      expect(mail.calls).toHaveLength(2);
+
+      // The shared platform sender, two days old for this workspace: the same rule.
+      process.env.SYSTEM_SENDER_DAILY_CAP = "30";
+      const s = await replySetup();
+      await age(s.acct.id, 2);
+      await usedToday(s.acct.id, 20);
+      const coldSystem = await newInbound(s.org.id, s.campaign.id);
+      await longAgo(coldSystem.inbound.id);
+      const capped = await sendReply(s.token, coldSystem.inbound.id);
+      expect([capped.status, capped.body.error.code]).toEqual([429, "daily_limit"]);
+      expect((await sendReply(s.token, s.inbound.id)).status).toBe(200);
+      expect((await account(s.acct.id)).sentToday).toBe(21);
+      // The shared sender's own allowance for the workspace still binds an answer.
+      await usedToday(s.acct.id, 30);
+      const next = await newInbound(s.org.id, s.campaign.id);
+      const full = await sendReply(s.token, next.inbound.id);
+      expect([full.status, full.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(full.body.error.message).toMatch(/shared sender's daily limit .* \(30\/day\)/);
+    });
+
     it("replies outside a campaign count toward the shared-sender allowance, and deleting the account does not reset it", async () => {
       process.env.SYSTEM_SENDER_DAILY_CAP = "1";
       const { token, org, acct, inbound } = await replySetup({ noCampaign: true });

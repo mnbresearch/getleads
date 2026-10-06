@@ -2,8 +2,14 @@ import { classifyHttp, classifyThrown, reportProviderCall } from "../providers/h
 import { guardedDispatcher, isSsrfBlocked } from "./egress.js";
 import { isPublicHost, parseHttpUrl } from "./publicHost.js";
 
-const UA =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ScoutBot/1.0 (+https://scout.mnbresearch.com)";
+/**
+ * The name this crawler goes by: the product token at the end of the user-agent every
+ * request carries, and the name a site's robots.txt can address it by
+ * ("User-agent: ScoutBot"). One constant, so what is sent and what is obeyed cannot drift apart.
+ */
+export const CRAWLER_TOKEN = "ScoutBot";
+
+const UA = `Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36 ${CRAWLER_TOKEN}/1.0 (+https://scout.mnbresearch.com)`;
 
 export interface FetchOpts extends RequestInit {
   timeoutMs?: number;

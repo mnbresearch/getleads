@@ -778,20 +778,35 @@ export async function reserveSendSlot(input: {
  * path that could relay unlimited mail through the platform's own address during an incident.
  * It now takes a slot exactly as a sequence send does. Returns a `release` to give the slot
  * back when the send does not go out.
+ *
+ * `answeringInbound`: the recipient wrote to this workspace recently (the caller decides
+ * what "recently" is). See the note on the warm-up ladder below.
  */
-export async function reserveManualSend(org: Organization, account: EmailAccount): Promise<{ ok: true; release: () => Promise<void> } | { ok: false; status: 429 | 503; code: string; message: string }> {
+export async function reserveManualSend(
+  org: Organization,
+  account: EmailAccount,
+  opts: { answeringInbound?: boolean } = {},
+): Promise<{ ok: true; release: () => Promise<void> } | { ok: false; status: 429 | 503; code: string; message: string }> {
   const { db } = getDb();
   if (!outboundSendingEnabled()) return { ok: false, status: 503, code: "sending_paused", message: "Sending is paused platform-wide by the operator. Nothing was sent; try again once sending resumes." };
   const health = await senderHealth(db, org, account);
   if (health.status === "halt") return { ok: false, status: 429, code: "sending_halted", message: `Sending from this sender is halted for deliverability: ${health.reasons[0] ?? "too many bounces or complaints"}.` };
   const today = accountDay();
   const orgCeiling = orgDailySendCeiling(org);
-  const systemCap = account.provider === "system" ? Math.min(health.dailyCap ?? systemSenderDailyCap(org), health.recommendedDailyCap) : null;
+  // The warm-up ladder exists to hold back mail nobody asked for while a new sender earns its
+  // reputation. An answer to someone who wrote in is the opposite of that, and a new sender
+  // on its first days (20 a day) could not answer the replies its own campaign brought in.
+  // So `answeringInbound` lifts the ladder - and only the ladder: the sender's own configured
+  // limit, the cut for poor deliverability, the workspace ceiling and the kill switch all
+  // still bind, and the send still takes a slot, so it counts toward the day's total.
+  const withoutLadder = (configured: number) => (health.status === "warn" ? Math.floor(configured / 2) : configured);
+  const systemConfigured = health.dailyCap ?? systemSenderDailyCap(org);
+  const systemCap = account.provider === "system" ? (opts.answeringInbound ? withoutLadder(systemConfigured) : Math.min(systemConfigured, health.recommendedDailyCap)) : null;
   const slot = await reserveSendSlot({
     orgId: org.id,
     accountId: account.id,
     today,
-    accountCap: Math.min(account.dailyLimit, health.recommendedDailyCap),
+    accountCap: opts.answeringInbound ? withoutLadder(account.dailyLimit) : Math.min(account.dailyLimit, health.recommendedDailyCap),
     orgCeiling,
     system: systemCap !== null ? { cap: systemCap, sentFloor: health.sentToday ?? 0 } : null,
   });

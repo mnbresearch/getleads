@@ -1,4 +1,4 @@
-import * as cheerio from "cheerio";
+import { loadHtml } from "../util/html.js";
 import type { SearchResult } from "../types.js";
 import { fetchJson, fetchText, fetchWithTimeout } from "../util/http.js";
 import { meter } from "../util/meter.js";
@@ -7,6 +7,9 @@ import { classifyHttp, coolOffProvider, ProviderUnavailableError, providerRecent
 // quotes survives the paste. Cleaning at the edge means the value the provider sees is the
 // value the operator thinks they stored. See util/secret.ts.
 import { secret } from "../util/secret.js";
+
+/** A results page, parsed through the shared guard (util/html.ts). One that is unreadable is read as a page with no results. */
+const resultPage = (html: string): NonNullable<ReturnType<typeof loadHtml>> => (loadHtml(html) ?? loadHtml(""))!;
 
 export interface SearchProvider {
   name: string;
@@ -254,7 +257,7 @@ export const duckDuckGoProvider = (): SearchProvider => ({
         if (!html) coolOffProvider("duckduckgo", "network", KEYLESS_COOL_MS);
         throw new ProviderUnavailableError("duckduckgo", "network", "neither the html nor the lite endpoint returned a page");
       }
-      const $l = cheerio.load(lite);
+      const $l = resultPage(lite);
       const outL: SearchResult[] = [];
       $l("a.result-link").each((_, el) => {
         let href = $l(el).attr("href") ?? "";
@@ -267,7 +270,7 @@ export const duckDuckGoProvider = (): SearchProvider => ({
       const onSiteL = rejectDecoys("duckduckgo", query, honorSiteOperator(query, outL));
       return keepOffSite(onSiteL, onSiteL.slice(0, opts.count ?? 20));
     }
-    const $ = cheerio.load(html);
+    const $ = resultPage(html);
     const out: SearchResult[] = [];
     $(".result").each((_, el) => {
       const a = $(el).find("a.result__a");
@@ -355,7 +358,7 @@ export const bingHtmlProvider = (): SearchProvider => ({
       reportProviderCall({ provider: "bing_html", outcome: "network", detail: "no page returned" });
       throw new ProviderUnavailableError("bing_html", "network", "no page returned");
     }
-    const $ = cheerio.load(html);
+    const $ = resultPage(html);
     const out: SearchResult[] = [];
     $("li.b_algo").each((_, el) => {
       const a = $(el).find("h2 a");

@@ -9,11 +9,11 @@
  * footers, integration and partner walls, press and investor rows, review badges and the
  * competitor's own name are never customers.
  */
-import * as cheerio from "cheerio";
 import { plainString } from "../ai/untrusted.js";
 import { isSocialOrAggregator, rootDomain } from "../util/domain.js";
+import { loadHtml } from "../util/html.js";
 import { isPublicHost } from "../util/publicHost.js";
-import { cleanCompanyName, escapeRegExp, isAudienceWord, isDescriptorName, isGenericWord, isSameCompany, isVendorName, sameSite, slugToName } from "./shared.js";
+import { MAX_PAGE_CHARS, cleanCompanyName, escapeRegExp, isAudienceWord, isDescriptorName, isGenericWord, isSameCompany, isVendorName, sameSite, slugToName } from "./shared.js";
 import { cleanLine, cleanQuote, normCompanyName } from "./util.js";
 
 export type CustomerVia = "case_study" | "logo" | "testimonial" | "structured_data" | "ai";
@@ -55,7 +55,10 @@ export interface PageExtraction {
    * in words of the page. Opening such a story again adds nothing.
    */
   told: string[];
+  /** The page was refused before it was read: nested too deeply, too many elements, or a tag the parser cannot read quickly. */
+  unreadable?: boolean;
 }
+
 
 interface Node {
   type: string;
@@ -64,6 +67,20 @@ interface Node {
   attribs?: Record<string, string>;
   children?: Node[];
   parent?: Node | null;
+  /**
+   * Set (by `markBlank`) on an element with no words anywhere inside it: what it adds to the
+   * text around it - a line break, a space or nothing. Reading text steps over such an
+   * element instead of walking through it.
+   */
+  blank?: string;
+  /**
+   * Set (by `markBlank`) on an element with words and many children: its children with
+   * every run of blank ones replaced by the gap the run leaves. Reading its text goes
+   * through this list, so thousands of empty children are stepped over at once.
+   */
+  words?: (Node | string)[];
+  /** Set (by `markBlank`) on an element with words: how many characters of them it holds, counted up to 1,000. */
+  solid?: number;
 }
 
 /* ───────────────────────────────── paths ───────────────────────────────── */
@@ -74,12 +91,18 @@ const NOT_CUSTOMER_PATH = /customer-(?:support|service|portal|login|care|experie
 const FILE_EXT = /\.(?:pdf|png|jpe?g|gif|svg|webp|avif|ico|zip|gz|mp4|mov|webm|mp3|wav|docx?|xlsx?|pptx?|csv|json|xml|rss|atom|css|js|woff2?|ttf|eot)$/i;
 const NOT_A_SLUG = /^(?:page|category|categories|tag|tags|industry|industries|all|index|feed|search|filter|type|types|topic|topics|region|regions|use-cases?|solutions?|products?|features?|roles?|teams?|size|segment|segments|by-industry|by-size|by-role|video|videos|\d+)$/i;
 
+/** Addresses are at most 2,000 characters everywhere else in the plays; a path is a part of one. */
+const MAX_PATH = 2000;
+
 export function isCustomerPath(pathname: string): boolean {
+  // A path longer than any address may be is not looked through.
+  if (pathname.length > MAX_PATH) return false;
   return pathname.split("/").filter(Boolean).some((s) => CUSTOMER_SEGMENT.test(s));
 }
 
 /** The last path segment of one case study (`/customers/globex` gives `globex`), or null for anything else. */
 export function caseSlugOf(pathname: string): string | null {
+  if (pathname.length > MAX_PATH) return null;
   const segs = pathname.split("/").filter(Boolean);
   let idx = -1;
   for (let i = segs.length - 1; i >= 0; i--) {
@@ -142,29 +165,61 @@ const BLOCK = new Set("address article aside blockquote br cite dd div dl dt fig
 const SPACED = new Set("a button label option img svg picture".split(" "));
 const MAX_TEXT = 200_000;
 
-/** Readable text of a subtree, with line breaks between blocks so words of neighbours never run together. */
-function rawText(root: Node): string {
+/**
+ * Readable text of a subtree, with line breaks between blocks so words of neighbours never
+ * run together. Stops once `need` characters that are not line breaks have been gathered,
+ * and takes an element's children one at a time, so asking for the first line of an
+ * element with tens of thousands of children reads only its first few.
+ */
+function rawText(root: Node, need = Infinity): string {
   const out: string[] = [];
   let size = 0;
-  const stack: (Node | string)[] = [root];
-  while (stack.length && size < MAX_TEXT) {
-    const n = stack.pop()!;
+  let got = 0;
+  // The lists of children being read, how far into each, and what closes each.
+  const lists: (Node | string)[][] = [];
+  const at: number[] = [];
+  const closer: string[] = [];
+  const read = (n: Node | string): void => {
     if (typeof n === "string") {
       out.push(n);
-      continue;
+      if (n === " ") got++;
+      return;
     }
     if (n.type === "text") {
       const d = n.data ?? "";
       size += d.length;
+      got += d.length;
+      if (need !== Infinity) for (let i = d.indexOf("\n"); i >= 0; i = d.indexOf("\n", i + 1)) got--;
       out.push(d);
+      return;
+    }
+    if (n.type !== "tag" && n.type !== "root") return;
+    if (n.blank !== undefined) {
+      // Nothing to read in there: only the gap it leaves between its neighbours.
+      if (n.blank) out.push(n.blank);
+      if (n.blank === " ") got++;
+      return;
+    }
+    const sep = n.type === "tag" && BLOCK.has(n.name ?? "") ? "\n" : n.type === "tag" && SPACED.has(n.name ?? "") ? " " : "";
+    if (sep) out.push(sep);
+    if (sep === " ") got++;
+    lists.push(n.words ?? n.children ?? []);
+    at.push(0);
+    closer.push(sep);
+  };
+  read(root);
+  while (lists.length && size < MAX_TEXT && got < need) {
+    const top = lists.length - 1;
+    if (at[top] < lists[top].length) {
+      read(lists[top][at[top]++]);
       continue;
     }
-    if (n.type !== "tag" && n.type !== "root") continue;
-    const sep = n.type === "tag" && BLOCK.has(n.name ?? "") ? "\n" : n.type === "tag" && SPACED.has(n.name ?? "") ? " " : "";
-    if (sep) stack.push(sep);
-    const kids = n.children ?? [];
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    const sep = closer[top];
+    lists.pop();
+    at.pop();
+    closer.pop();
     if (sep) out.push(sep);
+    if (sep === " ") got++;
   }
   return out.join("");
 }
@@ -176,8 +231,8 @@ const tidyLines = (s: string): string =>
     .filter(Boolean)
     .join("\n");
 
-/** One element's text as a single line. */
-const lineOf = (n: Node, max = 300): string => cleanQuote(rawText(n).replace(/\n+/g, " "), max);
+/** One element's text as a single line. Only as much of the element is read as the line can show (`cleanQuote` looks at four times `max` and a little more). */
+const lineOf = (n: Node, max = 300): string => cleanQuote(rawText(n, max * 4 + 401).replace(/\n+/g, " "), max);
 
 const attr = (n: Node, name: string): string => (n.attribs?.[name] ?? "").trim();
 const isTag = (n: Node | null | undefined, ...names: string[]): boolean => !!n && n.type === "tag" && names.includes(n.name ?? "");
@@ -202,15 +257,184 @@ const contains = (ancestor: Node, n: Node): boolean => {
   return false;
 };
 
+const NOT_CONTENT = new Set("script style noscript template iframe object embed select dialog nav aside".split(" "));
+const NOT_CONTENT_ROLE = new Set(["navigation", "banner", "contentinfo", "dialog", "search"]);
+/** A header inside one of these is the content's own heading block, not the site's. */
+const CONTENT_ROOT = new Set(["main", "article", "section"]);
+/** A footer inside one of these is an attribution, not the site's footer. */
+const QUOTE_ROOT = new Set(["blockquote", "figure", "article"]);
+
+/** The attributes this file reads, and the longest value any of them is read to. Real ones are a few hundred characters. */
+const READ_ATTRIBUTES = ["class", "id", "role", "alt", "title", "aria-label", "src", "data-src", "data-lazy-src", "srcset", "href"];
+const MAX_ATTRIBUTE = 4000;
+
+interface Measure {
+  /** Characters of text inside the element. */
+  text: number;
+  /** The length `rawText` gives for it (text plus the breaks between blocks), when the text is under `MAX_TEXT`. */
+  raw: number;
+}
+
+/**
+ * Takes what is not the page's own content out of the tree: scripts and styles, navigation
+ * and sidebars, the site's header and footer. A header inside the main content, and a
+ * footer inside a quote or an article, belong to the content and stay.
+ *
+ * One walk from the top that carries down what each element is inside of, so no element
+ * is ever searched upwards from (which, on a page of deeply nested elements, costs the
+ * depth again for every one of them). Returns how much text every element left holds.
+ */
+function dropNonContent(root: Node): Map<Node, Measure> {
+  const sizes = new Map<Node, Measure>();
+  interface Frame {
+    node: Node;
+    kids: Node[];
+    at: number;
+    kept: Node[];
+    inContent: boolean;
+    inQuote: boolean;
+    text: number;
+    raw: number;
+  }
+  const frame = (node: Node, inContent: boolean, inQuote: boolean): Frame => ({ node, kids: node.children ?? [], at: 0, kept: [], inContent, inQuote, text: 0, raw: 0 });
+  const stack: Frame[] = [frame(root, false, false)];
+  while (stack.length) {
+    const f = stack[stack.length - 1];
+    if (f.at < f.kids.length) {
+      const c = f.kids[f.at++];
+      if (c.type === "text") {
+        const size = (c.data ?? "").length;
+        f.text += size;
+        f.raw += size;
+        f.kept.push(c);
+        continue;
+      }
+      const name = c.type === "tag" || c.type === "script" || c.type === "style" ? (c.name ?? "") : null;
+      if (name === null) {
+        f.kept.push(c);
+        continue;
+      }
+      if (NOT_CONTENT.has(name) || NOT_CONTENT_ROLE.has(c.attribs?.role ?? "") || (name === "header" && !f.inContent) || (name === "footer" && !f.inQuote)) {
+        c.parent = null;
+        continue;
+      }
+      f.kept.push(c);
+      // Attributes are read many times over (a class by every element under it), so one of absurd length is cut once here.
+      const attribs = c.attribs;
+      if (attribs) for (const key of READ_ATTRIBUTES) if (attribs[key] !== undefined && attribs[key].length > MAX_ATTRIBUTE) attribs[key] = attribs[key].slice(0, MAX_ATTRIBUTE);
+      stack.push(frame(c, f.inContent || CONTENT_ROOT.has(name), f.inQuote || QUOTE_ROOT.has(name)));
+      continue;
+    }
+    stack.pop();
+    if (f.kept.length !== f.kids.length) f.node.children = f.kept;
+    if (f.node.type === "tag" && (BLOCK.has(f.node.name ?? "") || SPACED.has(f.node.name ?? ""))) f.raw += 2;
+    sizes.set(f.node, { text: f.text, raw: f.raw });
+    const up = stack[stack.length - 1];
+    if (up) {
+      up.text += f.text;
+      up.raw += f.raw;
+    }
+  }
+  return sizes;
+}
+
+/**
+ * Marks every element that has no words inside it (see `Node.blank`). One walk, children
+ * before parents. Run once the tree has its final shape.
+ */
+function markBlank(root: Node): void {
+  // What a subtree without words leaves behind: 0 nothing, 1 a space, 2 a line break. -1: it has words (`solid` of them).
+  interface Frame {
+    node: Node;
+    at: number;
+    gap: number;
+    solid: number;
+  }
+  const stack: Frame[] = [{ node: root, at: 0, gap: 0, solid: 0 }];
+  while (stack.length) {
+    const f = stack[stack.length - 1];
+    const kids = f.node.children ?? [];
+    if (f.at < kids.length) {
+      const c = kids[f.at++];
+      if (c.type === "text") {
+        const d = c.data ?? "";
+        if (/\S/.test(d)) {
+          f.gap = -1;
+          // Counted only while it can still matter: a thousand is already more than any label or name.
+          if (f.solid < 1000) for (let i = 0; i < d.length && f.solid < 1000; i++) if (d.charCodeAt(i) > 32) f.solid++;
+        } else if (f.gap >= 0 && d) f.gap = Math.max(f.gap, d.includes("\n") ? 2 : 1);
+      } else if (c.type === "tag" || c.type === "root") stack.push({ node: c, at: 0, gap: 0, solid: 0 });
+      continue;
+    }
+    stack.pop();
+    const n = f.node;
+    let gap = f.gap;
+    if (gap >= 0 && n.type === "tag") gap = BLOCK.has(n.name ?? "") ? 2 : SPACED.has(n.name ?? "") ? Math.max(gap, 1) : gap;
+    if (gap >= 0) n.blank = gap === 2 ? "\n" : gap === 1 ? " " : "";
+    else n.solid = f.solid;
+    if (gap < 0 && kids.length >= 16) {
+      const words: (Node | string)[] = [];
+      let run = "";
+      for (const c of kids) {
+        const between = c.type === "text" ? (/\S/.test(c.data ?? "") ? null : c.data?.includes("\n") ? "\n" : c.data ? " " : "") : c.type === "tag" || c.type === "root" ? (c.blank ?? null) : "";
+        if (between === null) {
+          if (run) words.push(run);
+          run = "";
+          words.push(c);
+        } else if (between === "\n" || (between === " " && !run)) run = between;
+      }
+      if (run) words.push(run);
+      n.words = words;
+    }
+    const up = stack[stack.length - 1];
+    if (up) {
+      up.gap = gap < 0 || up.gap < 0 ? -1 : Math.max(up.gap, gap);
+      up.solid = Math.min(1000, up.solid + f.solid);
+    }
+  }
+}
+
+/** Takes out the elements `drop` names, each with everything inside it, in one walk from the top in page order. */
+function dropWhere(root: Node, drop: (n: Node) => boolean): void {
+  const stack: Node[] = [root];
+  while (stack.length) {
+    const n = stack.pop()!;
+    const kids = n.children;
+    if (!kids?.length) continue;
+    let kept: Node[] | null = null;
+    for (let i = 0; i < kids.length; i++) {
+      const c = kids[i];
+      if (c.type === "tag" && drop(c)) {
+        kept ??= kids.slice(0, i);
+        c.parent = null;
+      } else {
+        kept?.push(c);
+        if (c.type === "tag" || c.type === "root") stack.push(c);
+      }
+    }
+    if (kept) n.children = kept;
+  }
+}
+
+/** The first `max` elements inside `n`, in page order. Children are taken one at a time, so a short list costs the same under an element with three children or thirty thousand. */
 function descendants(n: Node, max = 5000): Node[] {
   const out: Node[] = [];
-  const stack: Node[] = [...(n.children ?? [])].reverse();
-  while (stack.length && out.length < max) {
-    const c = stack.pop()!;
+  const lists: Node[][] = [n.children ?? []];
+  const at: number[] = [0];
+  while (lists.length && out.length < max) {
+    const top = lists.length - 1;
+    if (at[top] >= lists[top].length) {
+      lists.pop();
+      at.pop();
+      continue;
+    }
+    const c = lists[top][at[top]++];
     if (c.type !== "tag") continue;
     out.push(c);
-    const kids = c.children ?? [];
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    if (c.children?.length) {
+      lists.push(c.children);
+      at.push(0);
+    }
   }
   return out;
 }
@@ -249,7 +473,7 @@ const BASE_VERBS = new Set(
   ).split(/\s+/),
 );
 
-const word = (t: string): string => t.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
+const word = (t: string): string => t.slice(0, 100).toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "");
 const isVerb = (t: string, anyCase = false): boolean => {
   const w = word(t);
   if (VERBS.has(w) || /^\d+(?:\.\d+)?x(?:['\u2019]?d|ed)?$/.test(w)) return true;
@@ -288,6 +512,30 @@ function nameBeforeVerb(tokens: string[], opts: { stopAtTo?: boolean } = {}): st
   return cleanCompanyName(name.join(" "), 4);
 }
 
+interface HeadlineShapes {
+  siteName: RegExp;
+  left: RegExp;
+  right: RegExp;
+  chose: RegExp;
+}
+let shapesFor = "";
+let shapesBuilt: HeadlineShapes | null = null;
+/** The headline patterns that mention the competitor by name. A page is read with one competitor in mind, so the last set is kept. */
+function headlineShapes(competitor: string): HeadlineShapes | null {
+  if (shapesBuilt && shapesFor === competitor) return shapesBuilt;
+  const comp = escapeRegExp(cleanLine(competitor, 80));
+  if (!comp) return null;
+  const joiner = "(?:\\+|\\bx\\b|\\u00D7|<>|\\u2764\\uFE0F?|\\u2665)";
+  shapesBuilt = {
+    siteName: new RegExp(`\\s*[|\\u2013\\u2014-]\\s*${comp}(?:\\s+(?:customers?|case studies|customer stories|stories|blog))?\\s*$`, "i"),
+    left: new RegExp(`^(.{2,60}?)\\s*(?:${joiner}|&|\\band\\b)\\s*${comp}$`, "i"),
+    right: new RegExp(`^${comp}\\s*${joiner}\\s*(.{2,60})$`, "i"),
+    chose: new RegExp(`^(.{2,60}?)\\s+(?:chooses|chose|selects|selected|switches to|switched to|picks|picked|adopts|adopted|deploys|deployed|goes with|went with|standardi[sz]es on|standardi[sz]ed on|moves to|moved to|trusts|relies on|rolls out|rolled out)\\s+${comp}\\b`, "i"),
+  };
+  shapesFor = competitor;
+  return shapesBuilt;
+}
+
 /**
  * The company a case-study headline is about, or null.
  *
@@ -299,10 +547,10 @@ function nameBeforeVerb(tokens: string[], opts: { stopAtTo?: boolean } = {}): st
 export function parseHeadline(raw: string, competitor: string): string | null {
   let t = cleanLine(raw, 220);
   if (t.length < 3) return null;
-  const comp = escapeRegExp(cleanLine(competitor, 80));
-  if (!comp) return null;
+  const shapes = headlineShapes(competitor);
+  if (!shapes) return null;
   // A trailing site name ("... | Acme", "... - Acme Customers") is not part of the headline.
-  t = t.replace(new RegExp(`\\s*[|\\u2013\\u2014-]\\s*${comp}(?:\\s+(?:customers?|case studies|customer stories|stories|blog))?\\s*$`, "i"), "").trim();
+  t = t.replace(shapes.siteName, "").trim();
   let labelled = false;
   const afterLabel = t.replace(LABEL_PREFIX, "");
   if (afterLabel !== t) {
@@ -326,13 +574,12 @@ export function parseHeadline(raw: string, competitor: string): string | null {
   }
   if (labelled && tokens.length <= 4 && !tokens.some((x) => isVerb(x))) return cleanCompanyName(t, 4);
 
-  const joiner = "(?:\\+|\\bx\\b|\\u00D7|<>|\\u2764\\uFE0F?|\\u2665)";
-  const left = new RegExp(`^(.{2,60}?)\\s*(?:${joiner}|&|\\band\\b)\\s*${comp}$`, "i").exec(t);
+  const left = shapes.left.exec(t);
   if (left) return cleanCompanyName(left[1], 3);
-  const right = new RegExp(`^${comp}\\s*${joiner}\\s*(.{2,60})$`, "i").exec(t);
+  const right = shapes.right.exec(t);
   if (right) return cleanCompanyName(right[1], 3);
 
-  const chose = new RegExp(`^(.{2,60}?)\\s+(?:chooses|chose|selects|selected|switches to|switched to|picks|picked|adopts|adopted|deploys|deployed|goes with|went with|standardi[sz]es on|standardi[sz]ed on|moves to|moved to|trusts|relies on|rolls out|rolled out)\\s+${comp}\\b`, "i").exec(t);
+  const chose = shapes.chose.exec(t);
   if (chose) return cleanCompanyName(chose[1], 4);
 
   // "Globex cuts onboarding time by 40% with Acme", "Globex doubles its pipeline".
@@ -352,6 +599,8 @@ const SLUG_FILLER = new Set("case study studies casestudy customer customers sto
  * reported only if the page's own text spells the same name.
  */
 export function slugCustomerName(slug: string, competitor: string): { name: string; tokens: string[]; weak: boolean } | null {
+  // A story's slug is a few words (`caseSlugOf` gives none longer than 120 characters).
+  if (slug.length > 200) return null;
   const compTokens = new Set(cleanLine(competitor, 80).toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
   let tokens = slug.toLowerCase().split(/[-_+.\s]+/).filter(Boolean);
   if (!tokens.length || tokens.length > 8) return null;
@@ -364,13 +613,31 @@ export function slugCustomerName(slug: string, competitor: string): { name: stri
   return { name: slugToName(tokens.join("-")), tokens, weak };
 }
 
-/** The slug's name as the page writes it ("GlobeX", "Globex Corp."), or null when the text does not contain it. */
-function spelledIn(text: string, tokens: string[]): string | null {
-  if (!text || !tokens.length) return null;
+const WORD_CHAR_BEFORE = /[\p{L}\p{N}]$/u;
+const WORD_CHAR_AFTER = /^[\p{L}\p{N}]/u;
+
+/**
+ * Finds a slug's name as a page writes it ("GlobeX", "Globex Corp."): given a text, returns
+ * the name as spelled there, or null when the text does not contain it as a word of its
+ * own. Built once per slug and used on every piece of text around its link. The pattern is
+ * the slug's plain words (always a-z and digits); the letters around a match are checked
+ * afterwards, which keeps the pattern cheap to build for a page with thousands of links.
+ */
+function speller(tokens: string[]): (text: string) => string | null {
+  if (!tokens.length) return () => null;
   // "reed-and-mackay" is "Reed & Mackay" on the page: a joining word the address dropped may stand between the name's words.
-  const re = new RegExp(`(?<![\\p{L}\\p{N}])${tokens.map(escapeRegExp).join("(?:[\\s\\-_.]{0,2}|\\s*(?:&|\\+|and)\\s*)")}(?![\\p{L}\\p{N}])`, "iu");
-  const m = re.exec(text.slice(0, 2000));
-  return m ? m[0] : null;
+  const re = new RegExp(tokens.map(escapeRegExp).join("(?:[\\s\\-_.]{0,2}|\\s{0,20}(?:&|\\+|and)\\s{0,20})"), "gi");
+  return (text) => {
+    if (!text) return null;
+    const t = text.slice(0, 2000);
+    re.lastIndex = 0;
+    for (let m = re.exec(t); m; m = re.exec(t)) {
+      const end = m.index + m[0].length;
+      if (!WORD_CHAR_BEFORE.test(t.slice(Math.max(0, m.index - 2), m.index)) && !WORD_CHAR_AFTER.test(t.slice(end, end + 2))) return m[0];
+      re.lastIndex = m.index + 1;
+    }
+    return null;
+  };
 }
 
 /* ───────────────────────────────── labels and logos ───────────────────────────────── */
@@ -409,11 +676,25 @@ const NEGATIVE_CLASS = /partner|integrat|investor|press|media|award|badge|certif
 
 const CHROME_CLASS = /^(?:nav|header|masthead|navbar[\w-]*|navigation[\w-]*|main-nav[\w-]*|site-nav[\w-]*|top-?nav[\w-]*|menu|main-menu[\w-]*|mobile-menu[\w-]*|mega-?menu[\w-]*|footer[\w-]*|site-footer[\w-]*|site-header[\w-]*|page-footer[\w-]*|global-(?:header|footer|nav)[\w-]*|topbar|top-bar|announcement[\w-]*|cookie[\w-]*|consent[\w-]*|gdpr[\w-]*|breadcrumbs?|sidebar[\w-]*|socials?|social-(?:links?|icons?|media|share)[\w-]*|share-(?:buttons?|links?)[\w-]*|skip-link[\w-]*|modal[\w-]*|popup[\w-]*)$/i;
 
-const classTokens = (n: Node): string[] => `${attr(n, "class")} ${attr(n, "id")}`.split(/\s+/).filter(Boolean);
+/** Asked of the same element again and again (by everything under it), so each is worked out once. */
+const TOKENS = new WeakMap<Node, string[]>();
+const classTokens = (n: Node): string[] => {
+  let tokens = TOKENS.get(n);
+  if (!tokens) TOKENS.set(n, (tokens = `${attr(n, "class")} ${attr(n, "id")}`.split(/\s+/).filter(Boolean)));
+  return tokens;
+};
 
+const LABELS = new WeakMap<Node, string>();
 /** Text of a short, picture-free element that can act as the label of what follows it. */
 function labelText(n: Node): string {
+  let label = LABELS.get(n);
+  if (label === undefined) LABELS.set(n, (label = readLabel(n)));
+  return label;
+}
+function readLabel(n: Node): string {
   if (n.type !== "tag") return "";
+  // A label is 3 to 140 characters. An element with no words, one character of them, or far more than a label's worth is not read to find that out.
+  if (n.blank !== undefined || (n.solid !== undefined && (n.solid < 2 || n.solid > 600))) return "";
   const name = n.name ?? "";
   if (!isHeading(n) && !["p", "span", "div", "strong", "small", "b", "em", "label", "figcaption", "caption"].includes(name)) return "";
   const kids = n.children ?? [];
@@ -436,8 +717,14 @@ interface LogoItem {
   explicit: boolean;
 }
 
+const LOGOS = new WeakMap<Node, LogoItem | null>();
 /** The description a logo carries (alt, aria-label, title), or null for anything that is not a nameable logo. */
 function logoItem(n: Node): LogoItem | null {
+  let item = LOGOS.get(n);
+  if (item === undefined) LOGOS.set(n, (item = readLogo(n)));
+  return item;
+}
+function readLogo(n: Node): LogoItem | null {
   if (n.type !== "tag") return null;
   const up = ancestors(n, 2);
   const around = [n, ...up].map((a) => attr(a, "class")).join(" ");
@@ -491,7 +778,7 @@ export function cleanLogoName(raw: string): string | null {
 const INLINE = new Set("b i em strong u mark small sup sub span abbr code br wbr font time".split(" "));
 const TITLED_CLASS = /(?:^|[\s_-])(?:title|heading|headline)(?:$|[\s_-])/i;
 const NAMED_CLASS = /(?:^|[\s_-])(?:name|company|customer-?name|client-?name)(?:$|[\s_-])/i;
-const NOT_TEXT = ["img", "svg", "picture", "video", "audio", "canvas", "style", "script", "noscript", "template"];
+const NOT_TEXT = new Set(["img", "svg", "picture", "video", "audio", "canvas", "style", "script", "noscript", "template"]);
 
 interface Segment {
   text: string;
@@ -512,19 +799,30 @@ interface Segment {
  */
 function segmentsOf(root: Node, max = 60): Segment[] {
   const out: Segment[] = [];
-  const stack: Node[] = [root];
-  while (stack.length && out.length < max) {
-    const n = stack.pop()!;
-    if (n.type !== "tag" || isTag(n, ...NOT_TEXT)) continue;
+  // The lists of elements being looked into and how far into each (children are taken one at a time).
+  const lists: Node[][] = [[root]];
+  const at: number[] = [0];
+  while (lists.length && out.length < max) {
+    const top = lists.length - 1;
+    if (at[top] >= lists[top].length) {
+      lists.pop();
+      at.pop();
+      continue;
+    }
+    const n = lists[top][at[top]++];
+    // An element with no words in it holds no piece of text.
+    if (n.type !== "tag" || n.blank !== undefined || NOT_TEXT.has(n.name ?? "")) continue;
     const kids = n.children ?? [];
     const ownText = kids.some((c) => c.type === "text" && /\S/.test(c.data ?? ""));
     const structural = kids.some((c) => c.type === "tag" && !INLINE.has(c.name ?? ""));
-    const near = [n, ...ancestors(n, 2)];
-    const heading = near.some((a) => isHeading(a)) || near.slice(0, 2).some((a) => TITLED_CLASS.test(attr(a, "class")));
-    const named = near.slice(0, 2).some((a) => NAMED_CLASS.test(attr(a, "class")));
     if (isHeading(n) || (ownText && !structural)) {
       const text = lineOf(n, 400);
-      if (text) out.push({ text, node: n, heading, named });
+      if (text) {
+        const near = [n, ...ancestors(n, 2)];
+        const heading = near.some((a) => isHeading(a)) || near.slice(0, 2).some((a) => TITLED_CLASS.test(attr(a, "class")));
+        const named = near.slice(0, 2).some((a) => NAMED_CLASS.test(attr(a, "class")));
+        out.push({ text, node: n, heading, named });
+      }
       continue;
     }
     if (ownText) {
@@ -533,7 +831,8 @@ function segmentsOf(root: Node, max = 60): Segment[] {
         if (text) out.push({ text, node: n, heading: false, named: false });
       }
     }
-    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    lists.push(kids);
+    at.push(0);
   }
   return out;
 }
@@ -761,6 +1060,7 @@ const NOT_A_CUSTOMER_ROLE = /\b(?:investor|analyst at|journalist|editor|reporter
  */
 export function storyWorthOpening(url: string, competitor: string): boolean {
   let slug: string | null;
+  if (url.length > MAX_PATH) return false;
   try {
     slug = caseSlugOf(new URL(url).pathname);
   } catch {
@@ -792,7 +1092,8 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
   } catch {
     return empty;
   }
-  const $ = cheerio.load(String(html ?? "").slice(0, 1_500_000));
+  const $ = loadHtml(String(html ?? ""), MAX_PAGE_CHARS);
+  if (!$) return { ...empty, unreadable: true };
   const customerPage = isCustomerPath(base.pathname);
   const pageSlug = caseSlugOf(base.pathname);
   const hits = new Map<string, CustomerHit>();
@@ -844,6 +1145,9 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
       hits.set(key, { ...better, domain: better.domain ?? have.domain ?? next.domain, storyUrl: better.storyUrl ?? have.storyUrl ?? next.storyUrl, dedicated: have.dedicated || next.dedicated || undefined });
     }
   };
+
+  /** No more names are taken from this page: from here on reading it further changes nothing. */
+  const full = (): boolean => hits.size >= MAX_HITS_PER_PAGE;
 
   /** The customer's own site, only when the page links the name straight to it. */
   const linkedDomain = (n: Node, name: string): string | undefined => {
@@ -919,50 +1223,97 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
   });
 
   /* Everything that is not the page's own content goes before any name is read. */
-  $("script, style, noscript, template, iframe, object, embed, select, dialog").remove();
-  $("nav, aside, [role='navigation'], [role='banner'], [role='contentinfo'], [role='dialog'], [role='search']").remove();
-  $("header").filter((_, el) => $(el).closest("main, article, section").length === 0).remove();
-  $("footer").filter((_, el) => $(el).closest("blockquote, figure, article").length === 0).remove();
-  const bodyNode = ($("body").get(0) ?? $.root().get(0)) as unknown as Node | undefined;
-  if (!bodyNode) return { ...empty, links: [...links.values()], title, customerPage };
-  const fullLength = rawText(bodyNode).length || 1;
-  $("[class], [id]").each((_, el) => {
-    const n = el as unknown as Node;
-    if (isTag(n, "body", "html", "main")) return;
-    if (!classTokens(n).some((t) => CHROME_CLASS.test(t))) return;
+  const root = $.root().get(0) as unknown as Node;
+  const bodyEl = $("body").get(0) as unknown as Node | undefined;
+  const sizes = dropNonContent(root);
+  let attached: Node | null | undefined = bodyEl;
+  while (attached && attached !== root) attached = attached.parent;
+  const bodyNode: Node = bodyEl && attached === root ? bodyEl : root;
+  const whole = sizes.get(bodyNode);
+  const fullLength = (whole && whole.text < MAX_TEXT ? whole.raw : rawText(bodyNode).length) || 1;
+  dropWhere(root, (n) => {
+    if (isTag(n, "body", "html", "main")) return false;
+    if (!classTokens(n).some((t) => CHROME_CLASS.test(t))) return false;
     // A wrapper around most of the page that merely mentions "nav" in a class is not the navigation.
-    if (rawText(n).length > fullLength * 0.5) return;
-    $(el).remove();
+    const size = sizes.get(n);
+    return !!size && size.text < MAX_TEXT && size.raw <= fullLength * 0.5;
   });
+  markBlank(root);
 
   const text = tidyLines(rawText(bodyNode)).slice(0, 60_000);
   const flat = text.replace(/\s+/g, " ");
   const all = descendants(bodyNode, 6000);
   const indexOf = new Map<Node, number>();
   all.forEach((n, i) => indexOf.set(n, i));
+  /** For each element of `all`, the place of the last element inside it: its descendants are the stretch in between. */
+  const lastInside = all.map((_, i) => i);
+  for (let i = all.length - 1; i > 0; i--) {
+    const up = all[i].parent ? indexOf.get(all[i].parent as Node) : undefined;
+    if (up !== undefined && lastInside[i] > lastInside[up]) lastInside[up] = lastInside[i];
+  }
+  /** Is `n` inside `ancestor` (or the same element)? Looked up, not walked, for everything in `all`. */
+  const inside = (ancestor: Node, n: Node): boolean => {
+    const a = indexOf.get(ancestor);
+    const b = indexOf.get(n);
+    return a !== undefined && b !== undefined ? a <= b && b <= lastInside[a] : contains(ancestor, n);
+  };
+  /** An element's child elements and where each stands among them, listed once per parent. */
+  const kidsOf = new Map<Node, { list: Node[]; at: Map<Node, number> }>();
+  const tagKids = (parent: Node | null | undefined): { list: Node[]; at: Map<Node, number> } => {
+    if (!parent) return { list: [], at: new Map() };
+    let k = kidsOf.get(parent);
+    if (!k) {
+      const list = (parent.children ?? []).filter((c) => c.type === "tag");
+      const at = new Map<Node, number>();
+      list.forEach((c, i) => at.set(c, i));
+      kidsOf.set(parent, (k = { list, at }));
+    }
+    return k;
+  };
+  const logoNames = new Map<string, string | null>();
+  const logoName = (raw: string): string | null => {
+    let name = logoNames.get(raw);
+    if (name === undefined) logoNames.set(raw, (name = cleanLogoName(raw)));
+    return name;
+  };
 
   /* 1. Case-study links: /customers/globex, with the card around them. */
   const caseLinks = new Map<string, { anchors: Node[]; url: string }>();
+  /** Where each link leads, when that is one of the site's own stories. Worked out once per link: it is asked again for every card around it. */
+  const storyOf = new Map<Node, { key: string; url: URL } | null>();
+  const storyLink = (a: Node): { key: string; url: URL } | null => {
+    let story = storyOf.get(a);
+    if (story === undefined) {
+      const u = resolveLink(attr(a, "href"), base.href);
+      story = u && sameSite(u.href, competitor.domain) && caseSlugOf(u.pathname) ? { key: u.pathname.replace(/\/$/, "").toLowerCase(), url: u } : null;
+      storyOf.set(a, story);
+    }
+    return story;
+  };
   for (const n of all) {
     if (!isTag(n, "a")) continue;
-    const u = resolveLink(attr(n, "href"), base.href);
-    if (!u || !sameSite(u.href, competitor.domain)) continue;
-    const slug = caseSlugOf(u.pathname);
+    const story = storyLink(n);
+    if (!story) continue;
+    const u = story.url;
     // A download ("/assets/customer-stories/Globex.pdf") is a file about a story, not the story's page.
-    if (!slug || NOT_CUSTOMER_PATH.test(u.pathname.toLowerCase()) || FILE_EXT.test(u.pathname)) continue;
-    const key = u.pathname.replace(/\/$/, "").toLowerCase();
-    const have = caseLinks.get(key);
+    if (NOT_CUSTOMER_PATH.test(u.pathname.toLowerCase()) || FILE_EXT.test(u.pathname)) continue;
+    const have = caseLinks.get(story.key);
     if (have) have.anchors.push(n);
-    else caseLinks.set(key, { anchors: [n], url: `${u.origin}${u.pathname}` });
+    else caseLinks.set(story.key, { anchors: [n], url: `${u.origin}${u.pathname}` });
   }
+  const storyCounts = new Map<Node, number>();
+  /** How many different stories the links in an element lead to (its first 400 elements are looked at). */
   const caseLinkCount = (scope: Node): number => {
-    const seen = new Set<string>();
-    for (const d of [scope, ...descendants(scope, 400)]) {
-      if (!isTag(d, "a")) continue;
-      const u = resolveLink(attr(d, "href"), base.href);
-      if (u && sameSite(u.href, competitor.domain) && caseSlugOf(u.pathname)) seen.add(u.pathname.replace(/\/$/, "").toLowerCase());
+    let count = storyCounts.get(scope);
+    if (count === undefined) {
+      const seen = new Set<string>();
+      for (const d of [scope, ...descendants(scope, 400)]) {
+        const story = isTag(d, "a") ? storyLink(d) : null;
+        if (story) seen.add(story.key);
+      }
+      storyCounts.set(scope, (count = seen.size));
     }
-    return seen.size;
+    return count;
   };
   interface Piece {
     text: string;
@@ -979,7 +1330,7 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     const key = normCompanyName(spelled);
     for (const p of pieces) {
       if (!p.logo || !p.explicit) continue;
-      const n = cleanLogoName(p.text);
+      const n = logoName(p.text);
       if (n && n.split(" ").length <= spelled.split(" ").length + 2 && n.toLowerCase().startsWith(`${spelled.toLowerCase()} `) && normCompanyName(n) !== key) return { name: n, from: p };
     }
     for (const p of pieces) {
@@ -991,6 +1342,21 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     return null;
   };
   const mentionOf = (kind: HeadKind): CustomerHit["mention"] => (kind === "attribution" || kind === "title" ? kind : undefined);
+  /** The pieces of text and the pictures in an element. Read once per element: a block shared by many links is not read again for each. */
+  const scopes = new Map<Node, { segments: Piece[]; logos: Piece[] }>();
+  const scopeOf = (scope: Node): { segments: Piece[]; logos: Piece[] } => {
+    let read = scopes.get(scope);
+    if (!read) {
+      const segments: Piece[] = segmentsOf(scope).map((seg) => ({ text: seg.text, node: seg.node, heading: seg.heading, named: seg.named }));
+      const logos: Piece[] = [];
+      for (const d of [scope, ...descendants(scope, 120)]) {
+        const item = logoItem(d);
+        if (item) logos.push({ text: cleanLine(item.raw, 160), node: d, heading: false, logo: true, explicit: item.explicit });
+      }
+      scopes.set(scope, (read = { segments, logos }));
+    }
+    return read;
+  };
 
   for (const [path, entry] of caseLinks) {
     const slug = caseSlugOf(path);
@@ -1005,15 +1371,12 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     const logos: Piece[] = [];
     const rest: Piece[] = [];
     const collect = (scope: Node, skip?: Node): void => {
-      for (const seg of segmentsOf(scope)) {
-        if (skip && contains(skip, seg.node)) continue;
-        (seg.heading ? heads : seg.named ? named : rest).push({ text: seg.text, node: seg.node, heading: seg.heading, named: seg.named });
+      const read = scopeOf(scope);
+      for (const seg of read.segments) {
+        if (skip && inside(skip, seg.node)) continue;
+        (seg.heading ? heads : seg.named ? named : rest).push(seg);
       }
-      for (const d of [scope, ...descendants(scope, 120)]) {
-        if (skip && contains(skip, d)) continue;
-        const item = logoItem(d);
-        if (item) logos.push({ text: cleanLine(item.raw, 160), node: d, heading: false, logo: true, explicit: item.explicit });
-      }
+      for (const logo of read.logos) if (!skip || !inside(skip, logo.node)) logos.push(logo);
     };
     for (const a of anchors.slice(0, 4)) {
       collect(a);
@@ -1036,8 +1399,9 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     let done = false;
     // (a) the slug's name, spelled out by the page: the strongest reading.
     if (fromSlug) {
+      const spelledIn = speller(fromSlug.tokens);
       for (const t of texts) {
-        const spelled = spelledIn(t.text, fromSlug.tokens);
+        const spelled = spelledIn(t.text);
         // A slug made of everyday words ("/customers/remote-teams") only counts when the page capitalises it as a name.
         if (!spelled || (!writtenAsName(spelled) && !(t.heading && !fromSlug.weak && lowerCaseSubject(t.text, spelled))) || (fromSlug.weak && !capitalised(spelled))) continue;
         const fuller = fullerName(spelled, [...logos, ...heads, ...named, ...loose]);
@@ -1082,11 +1446,12 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
   if (pageSlug) {
     const storyUrl = `${base.origin}${base.pathname}`;
     const fromSlug = slugCustomerName(pageSlug, competitor.name);
-    const h1s: Piece[] = all
-      .filter((n) => isTag(n, "h1"))
-      .map((n) => ({ text: lineOf(n, 300), node: n, heading: true }))
-      .filter((p) => p.text)
-      .slice(0, 2);
+    const h1s: Piece[] = [];
+    for (const n of all) {
+      if (h1s.length >= 2) break;
+      const text = isTag(n, "h1") ? lineOf(n, 300) : "";
+      if (text) h1s.push({ text, node: n, heading: true });
+    }
     // The title without the site's name after a bar: "How Globex cut costs | Acme" is a headline, "Globex - Customer Stories" is not.
     const titleHead = cleanLine(title.split(/\s+[|\u00B7]\s+/)[0] ?? "", 200).replace(new RegExp(`\\s*[\\u2013\\u2014-]\\s*${escapeRegExp(cleanLine(competitor.name, 80))}\\s*$`, "i"), "");
     const pieces: Piece[] = [...h1s, ...(title ? [{ text: title, node: bodyNode, heading: false }] : [])];
@@ -1094,8 +1459,9 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
       for (const h of h1s) if (headKind(h.text, { heading: true }) === "headline") return h.text;
       return titleHead && headKind(titleHead, { heading: false, name }) === "headline" ? titleHead : undefined;
     };
+    const spelledIn = speller(fromSlug ? fromSlug.tokens : []);
     for (const h of pieces) {
-      const spelled = fromSlug ? spelledIn(h.text, fromSlug.tokens) : null;
+      const spelled = spelledIn(h.text);
       if (spelled && (writtenAsName(spelled) || (h.heading && !fromSlug?.weak && lowerCaseSubject(h.text, spelled))) && !(fromSlug?.weak && !capitalised(spelled))) {
         const name = fullerName(spelled, pieces)?.name ?? spelled;
         const headline = pageHeadline(name);
@@ -1116,6 +1482,7 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
   /* 3. Labelled headings on a customers page: "Case study: Globex", "Globex case study". */
   if (customerPage) {
     for (const n of all) {
+      if (full()) break;
       if (!isHeading(n)) continue;
       const t = lineOf(n, 240);
       if (!t || t.length > 200 || (!LABEL_PREFIX.test(t) && !LABEL_SUFFIX.test(t))) continue;
@@ -1127,8 +1494,12 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
   }
 
   /* 4. Logos under a label that says they are customers. */
+  /** Pictures looked at so far as possible logos. A real page has a few hundred; this is where looking stops. */
+  let logosSeen = 0;
+  const MAX_LOGOS_SEEN = 20_000;
   const takeLogos = (items: LogoItem[], label: string, confidence: number, declaredOnly = false): void => {
-    const named = items.map((it) => ({ it, name: cleanLogoName(it.raw) })).filter((x): x is { it: LogoItem; name: string } => !!x.name);
+    logosSeen += items.length;
+    const named = items.map((it) => ({ it, name: logoName(it.raw) })).filter((x): x is { it: LogoItem; name: string } => !!x.name);
     // One picture is not a wall of customers: a lone logo under "trusted by" is as often the site's own, a
     // badge or a stray image with a file name for a description. Two different names or nothing.
     if (new Set(named.map((x) => normCompanyName(x.name))).size < 2) return;
@@ -1142,11 +1513,23 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
       add({ name, quote: cleanLine(it.raw, 200), via: "logo", headline: label || undefined, confidence: it.explicit ? confidence : confidence - 0.15, domain: linkedDomain(it.node, name) });
     }
   };
-  const sparse = (n: Node): boolean => {
+  /** Asked of the same blocks by every label near them, so each answer is kept. */
+  const kept = <T>(read: (n: Node) => T): ((n: Node) => T) => {
+    const known = new Map<Node, T>();
+    return (n) => {
+      if (!known.has(n)) known.set(n, read(n));
+      return known.get(n) as T;
+    };
+  };
+  const sparse = kept((n: Node): boolean => {
     const logos = descendants(n, 600).filter((d) => logoItem(d)).length;
     return logos >= 1 && lineOf(n, 4000).length <= 30 * logos + 20;
-  };
-  const hasNegativeLabel = (n: Node): boolean => descendants(n, 300).some((d) => NEGATIVE_LABEL.test(labelText(d))) || classTokens(n).some((t) => NEGATIVE_CLASS.test(t));
+  });
+  const hasNegativeLabel = kept((n: Node): boolean => descendants(n, 300).some((d) => NEGATIVE_LABEL.test(labelText(d))) || classTokens(n).some((t) => NEGATIVE_CLASS.test(t)));
+  /** Is this the block a quote sits in: a quote element, one whose class says so, or one with a quote near its top? */
+  const quoteBlock = kept((a: Node): boolean => isTag(a, "blockquote", "figure") || /testimonial|quote|review/i.test(attr(a, "class")) || descendants(a, 80).some((d) => isTag(d, "blockquote", "q")));
+  /** A quote and who said it make one small block; this is whether a block is too long to be that. */
+  const longBlock = kept((n: Node): boolean => lineOf(n, 1300).length > 1200);
   const negativeBetween = (item: Node, stop: Node): boolean => {
     for (const a of ancestors(item, 8)) {
       if (a === stop) return false;
@@ -1156,15 +1539,17 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
   };
 
   for (let i = 0; i < all.length; i++) {
+    if (full() || logosSeen > MAX_LOGOS_SEEN) break;
     const el = all[i];
     const label = labelText(el);
     if (!label || !POSITIVE_LABEL.test(label) || NEGATIVE_LABEL.test(label)) continue;
     let limit: Node = el;
     for (let k = 0; k < 4 && limit.parent && limit.parent.type === "tag" && limit.parent.name !== "html"; k++) limit = limit.parent;
-    const limitEnd = isTag(limit, "body") ? all.length - 1 : (indexOf.get(limit) ?? i) + descendants(limit, 6000).length;
+    const limitAt = indexOf.get(limit);
+    const limitEnd = isTag(limit, "body") ? all.length - 1 : limitAt !== undefined ? lastInside[limitAt] : i + descendants(limit, 6000).length;
     const end = Math.min(all.length - 1, limitEnd, i + 500);
     const run: LogoItem[] = [];
-    for (let j = i + descendants(el, 200).length + 1; j <= end; j++) {
+    for (let j = i + Math.min(lastInside[i] - i, 200) + 1; j <= end; j++) {
       const e = all[j];
       if (isHeading(e)) break;
       const lt = labelText(e);
@@ -1173,12 +1558,13 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
       if (item) run.push(item);
     }
     if (!run.length) continue;
+    logosSeen += run.length;
     // Start from the first picture that reads as a company, not a screenshot that happens to come first.
-    const first = (run.find((it) => it.explicit && cleanLogoName(it.raw)) ?? run.find((it) => cleanLogoName(it.raw)) ?? run[0]).node;
+    const first = (run.find((it) => it.explicit && logoName(it.raw)) ?? run.find((it) => logoName(it.raw)) ?? run[0]).node;
     const chain: Node[] = [];
     let lca: Node | null = null;
     for (const a of ancestors(first, 12)) {
-      if (contains(a, el)) {
+      if (inside(a, el)) {
         lca = a;
         break;
       }
@@ -1191,8 +1577,8 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     if (group && !hasNegativeLabel(group)) {
       const members: Node[] = [group];
       // Further rows of the same wall: following siblings that are also nothing but logos.
-      const siblings = (group.parent?.children ?? []).filter((c) => c.type === "tag");
-      for (let s = siblings.indexOf(group) + 1; s > 0 && s < siblings.length && members.length < 12; s++) {
+      const { list: siblings, at } = tagKids(group.parent);
+      for (let s = (at.get(group) ?? -1) + 1; s > 0 && s < siblings.length && members.length < 12; s++) {
         const sib = siblings[s];
         if (isHeading(sib) || labelText(sib) || !sparse(sib) || hasNegativeLabel(sib)) break;
         members.push(sib);
@@ -1209,6 +1595,7 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
 
   /* 5. Containers whose class says "customers" / "trusted by", when no label does. */
   for (const n of all) {
+    if (full() || logosSeen > MAX_LOGOS_SEEN) break;
     const tokens = classTokens(n);
     if (!tokens.length || tokens.some((t) => NEGATIVE_CLASS.test(t))) continue;
     const positive = tokens.some((t) => POSITIVE_CLASS.test(t));
@@ -1216,8 +1603,8 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     if (!positive && !generic) continue;
     if (hasNegativeLabel(n)) continue;
     // The label just before the container decides too: "Our partners" above a .logos block is not customers.
-    const before = (n.parent?.children ?? []).filter((c) => c.type === "tag");
-    const prev = before[before.indexOf(n) - 1];
+    const { list: before, at } = tagKids(n.parent);
+    const prev = before[(at.get(n) ?? 0) - 1];
     const prevLabel = prev ? labelText(prev) || lineOf(prev, 160) : "";
     if (prevLabel && prevLabel.length <= 140 && NEGATIVE_LABEL.test(prevLabel)) continue;
     const items = descendants(n, 600)
@@ -1231,12 +1618,13 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
 
   /* 6. Testimonials: "Jane Doe, VP Sales at Globex" under a quote. */
   for (const n of all) {
+    if (full()) break;
     const cls = attr(n, "class");
     const attribution = isTag(n, "cite", "figcaption") || (isTag(n, "footer") && ancestors(n, 2).some((a) => isTag(a, "blockquote", "figure"))) || /author|attribution|byline|(?:testimonial|quote|review)[\w-]*(?:name|role|title|position|company|source|meta)/i.test(cls);
     if (!attribution) continue;
-    const scope = ancestors(n, 4).find((a) => isTag(a, "blockquote", "figure") || /testimonial|quote|review/i.test(attr(a, "class")) || descendants(a, 80).some((d) => isTag(d, "blockquote", "q")));
+    const scope = ancestors(n, 4).find(quoteBlock);
     // The quote and its attribution form one small block; a whole article with a quote somewhere in it does not.
-    if (!scope || lineOf(scope, 1300).length > 1200) continue;
+    if (!scope || longBlock(scope)) continue;
     const t = lineOf(n, 240);
     if (!t || t.length > 180 || NOT_A_CUSTOMER_ROLE.test(t)) continue;
     let company: string | null = null;
@@ -1254,6 +1642,7 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
 
   /* 7. Structured data, only for names the visible page also shows. */
   for (const s of structured.slice(0, 40)) {
+    if (full()) break;
     const name = cleanCompanyName(s.name, 4);
     if (!name || !flat.toLowerCase().includes(name.toLowerCase())) continue;
     add({ name, quote: name, via: "structured_data", confidence: s.review ? 0.7 : 0.65 });
@@ -1274,7 +1663,10 @@ export function customerLinksFromSitemap(xml: string, domain: string): { links: 
   const links = new Map<string, CrawlLink>();
   const children: string[] = [];
   const index = /<sitemapindex[\s>]/i.test(xml.slice(0, 2000));
-  const re = /<loc>\s*(?:<!\[CDATA\[)?\s*([^<\]\s]{1,2000})\s*(?:\]\]>)?\s*<\/loc>/gi;
+  // Every run of spaces has a length limit and no two parts of the pattern can match the same characters, so each
+  // "<loc>" costs at most a few thousand steps. (With unlimited runs side by side, one "<loc>" followed by a hundred
+  // thousand spaces took seconds, and a megabyte of them minutes.)
+  const re = /<loc>\s{0,200}(?:<!\[CDATA\[\s{0,200})?([^<\]\s]{1,2000})\s{0,200}(?:\]\]>\s{0,200})?<\/loc>/gi;
   let m: RegExpExecArray | null;
   for (let seen = 0; (m = re.exec(xml)) && seen < 20_000; seen++) {
     const u = resolveLink(m[1].replace(/&amp;/g, "&"), `https://${domain}/`);
@@ -1297,7 +1689,8 @@ export function customerLinksFromSitemap(xml: string, domain: string): { links: 
  */
 export function verifyAiCustomers(raw: unknown, pageText: string, competitor: { name: string; domain: string }): { hits: CustomerHit[]; dropped: number } {
   const list = raw && typeof raw === "object" && Array.isArray((raw as { customers?: unknown }).customers) ? ((raw as { customers: unknown[] }).customers as unknown[]) : [];
-  const flat = pageText.replace(/\s+/g, " ");
+  // The text a model was shown is a few thousand characters; nothing longer is searched for its quotes.
+  const flat = String(pageText ?? "").slice(0, 60_000).replace(/\s+/g, " ");
   const lower = flat.toLowerCase();
   const hits: CustomerHit[] = [];
   let dropped = 0;

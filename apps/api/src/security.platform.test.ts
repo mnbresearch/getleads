@@ -1513,6 +1513,50 @@ describe.skipIf(!TEST_DB)("rollback restore script", () => {
     const r = await restore({ dbPkg: D, db, openShareToken: L.openShareToken, openOrgSecret: C.openOrgSecret, rawKey: RAW_KEY, orgId: otherOrgId });
     expect(r.failed).toBe(1);
     expect((await db.select().from(D.emailAccounts).where(D.eq(D.emailAccounts.id, acc!.id)))[0]!.configEncrypted).toBe(damaged);
+
+    // A dry run finds the same row, changes nothing, and is a failure too: finding this out first is what it is for.
+    const { summary } = (await import("../../../scripts/rollback-restore.mjs")) as unknown as { summary: (r: Record<string, number>, o?: { dryRun?: boolean; orgId?: string | null }) => { lines: string[]; exitCode: number } };
+    const dry = await restore({ dbPkg: D, db, openShareToken: L.openShareToken, openOrgSecret: C.openOrgSecret, rawKey: RAW_KEY, orgId: otherOrgId, dryRun: true });
+    expect(dry.failed).toBe(1);
+    expect((await db.select().from(D.emailAccounts).where(D.eq(D.emailAccounts.id, acc!.id)))[0]!.configEncrypted).toBe(damaged);
+    for (const dryRun of [true, false]) {
+      const told = summary(dryRun ? dry : r, { dryRun, orgId: otherOrgId });
+      expect(told.exitCode).toBe(2);
+      const text = told.lines.join("\n");
+      expect(text).toMatch(/could not be read \(left untouched\): 1\./);
+      expect(text).toMatch(/DO NOT redeploy the previous build yet/);
+      // Nothing in it tells the operator to go ahead.
+      expect(text).not.toMatch(/Now redeploy|then redeploy the previous build/);
+      expect(text).not.toContain(damaged);
+    }
+  });
+
+  it("the closing lines say to redeploy only when every row was read, and the exit status says the same", async () => {
+    const { summary } = (await import("../../../scripts/rollback-restore.mjs")) as unknown as { summary: (r: Record<string, number>, o?: { dryRun?: boolean; orgId?: string | null }) => { lines: string[]; exitCode: number } };
+    const clean = { links: 2, linksAlready: 1, creds: 3, credsAlready: 4, failed: 0 };
+    const dry = summary(clean, { dryRun: true });
+    expect(dry.exitCode).toBe(0);
+    expect(dry.lines[0]).toBe("[rollback-restore] DRY RUN - nothing was changed.");
+    expect(dry.lines.at(-1)).toBe("  Run again without --dry-run, then redeploy the previous build.");
+    expect(dry.lines.join("\n")).toMatch(/report links that would be given their plaintext token back: 2 \(already readable by the old release: 1\)/);
+    const real = summary(clean);
+    expect(real.exitCode).toBe(0);
+    expect(real.lines.at(-1)).toBe("  Now redeploy the previous build. To roll forward later, just deploy the new build again.");
+    expect(real.lines.join("\n")).toMatch(/credentials rewritten in the old format: 3 \(already in it: 4\)/);
+    expect(real.lines.join("\n")).not.toMatch(/DO NOT|could not be read/);
+    // Unread rows: status 2 whether or not it was a dry run, and whatever else was restored.
+    for (const dryRun of [true, false]) {
+      const bad = summary({ ...clean, failed: 3 }, { dryRun, orgId: "00000000-0000-4000-8000-000000000000" });
+      expect(bad.exitCode).toBe(2);
+      expect(bad.lines[0]).toMatch(/One workspace only\./);
+      expect(bad.lines.at(-1)).toBe("  DO NOT redeploy the previous build yet: fix the key, run this again, and continue only when nothing is left unread.");
+      expect(bad.lines.join("\n")).not.toMatch(/Now redeploy|then redeploy/);
+    }
+    // The script's own last step uses exactly this: the status it exits with is the summary's.
+    const src = read("scripts/rollback-restore.mjs");
+    expect(src).toMatch(/const done = summary\(r, \{ dryRun, orgId \}\);/);
+    expect(src).toMatch(/process\.exit\(done\.exitCode\);/);
+    expect(src).not.toMatch(/process\.exit\(r\.failed && !dryRun/);
   });
 });
 
@@ -1568,6 +1612,12 @@ describe("rollback restore script: the command line and the documentation", () =
     expect(d).toMatch(/\*\*API first\.\*\*/);
     expect(d).toMatch(/\*\*Web second\*\*/);
     expect(d).toMatch(/node scripts\/rollback-restore\.mjs --dry-run/);
+    // Unread rows stop the rollback: the document says what the script says and does.
+    expect(d).toMatch(/prints `DO NOT redeploy the previous build yet`/);
+    expect(d).toMatch(/exits with status 2 - in a dry run as well/);
+    expect(d).toMatch(/\*\*Do not redeploy the previous build while any row is unread:\*\*/);
+    expect(d).toMatch(/\(1\) the script, until it exits with status 0/);
+    expect(d).toMatch(/\| `PLAYS_HOST_PAUSE_MS` \| 300 \|/);
     // Plain hyphens in the new section, as everywhere a person reads.
     const b11 = d.slice(d.indexOf("### B11."), d.indexOf("## Part C"));
     expect(b11).not.toMatch(/—|–/);

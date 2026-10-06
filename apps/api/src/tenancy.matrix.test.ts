@@ -380,6 +380,7 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "GET /v1/auth/google/start": pub(),
     "GET /v1/auth/google/callback": pub(),
     "POST /v1/auth/join": pub(),
+    "POST /v1/auth/join/check": pub("answers only to the holder of an invite link, changes nothing, never says whether an email has an account; covered by fixes.final.test.ts"),
     "POST /v1/auth/google/exchange": pub("one-time code exchange; covered by security.auth.test.ts"),
     "POST /v1/auth/2fa/verify": pub("second step of a two-factor sign-in; covered by security.account.test.ts"),
     "POST /v1/auth/verify/confirm": pub("the emailed token is the credential; covered by security.account.test.ts"),

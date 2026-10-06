@@ -77,7 +77,7 @@ export function cutAtWord(s: string, max: number): string {
 }
 
 /** Long dashes from a page, written the plain way: "fast \u2014 and cheap" becomes "fast - and cheap". */
-export const plainDashes = (s: string): string => s.replace(/\s*[\u2012-\u2015]\s*/g, " - ").replace(/[\u2010\u2011]/g, "-");
+export const plainDashes = (s: string): string => s.replace(/\s{0,20}[\u2012-\u2015]\s{0,20}/g, " - ").replace(/[\u2010\u2011]/g, "-");
 
 /**
  * The shared sanitiser behind every reason sentence.
@@ -89,7 +89,9 @@ export const plainDashes = (s: string): string => s.replace(/\s*[\u2012-\u2015]\
  */
 function sanitiseSentence(value: unknown, max: number, strict: boolean): string {
   if (typeof value !== "string") return "";
-  let s = visible(value.slice(0, MAX_SCAN))
+  // A sentence of at most `max` characters is made from the start of the text: eight times as much is read, which
+  // leaves room for the links and markup that are taken out, and keeps the patterns below to a short text.
+  let s = visible(value.slice(0, Math.min(MAX_SCAN, max * 8 + 800)))
     .replace(/<\/?[a-z!][^<>]{0,200}>/gi, " ")
     .replace(/[<>{}`\\]/g, " ")
     .replace(SCHEME_URL, " ")

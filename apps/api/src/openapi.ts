@@ -264,6 +264,30 @@ export function openapi(apiUrl: string) {
       "/v1/auth/password/forgot": { post: { tags: ["Auth"], security: [], summary: "Email a password-reset link. Always 200 {ok:true}, whether or not the address has an account. One address is mailed at most once a minute and 3 times an hour; past that the answer is the same and nothing is sent", requestBody: j(obj({ email: str }, ["email"])), responses: ok(obj({ ok: bool })) } },
       "/v1/auth/password/reset": { post: { tags: ["Auth"], security: [], summary: "Set a new password from an emailed token (1 hour, single use); returns the same body as /v1/auth/login. With two-factor sign-in on, the password is changed but the answer is `{twoFactorRequired:true, challenge}` instead of a token", requestBody: j(obj({ token: str, password: { ...str, minLength: 8 } }, ["token", "password"])), responses: ok(sessionOrChallenge) } },
       "/v1/auth/password/change": { post: { tags: ["Auth"], summary: "Change your password. currentPassword is required unless the account has never had one (Google sign-up). With two-factor sign-in on, `code` is required as well (400 two_factor_code_required, 403 invalid_2fa_code). Signs out every other session; the response carries a fresh `token` that replaces the caller's", security: [{ bearerAuth: [] }], requestBody: j(obj({ currentPassword: str, newPassword: { ...str, minLength: 8 }, code: twoFactorCode }, ["newPassword"])), responses: ok(obj({ ok: bool, token: str, sessionsRevoked: bool })) } },
+      "/v1/auth/join/check": {
+        post: {
+          tags: ["Auth"],
+          security: [],
+          summary: "Is this team invite link still good? For the join page, before a password is typed. Public; changes nothing and uses nothing up. Never says whether an address has an account. At most 10 a minute per address (429 after that). Always 200 for a well-formed request: `valid: true` with the workspace's name, the invited address masked (j***@example.com) and when the link expires - or `valid: false` with a `reason`",
+          requestBody: j(obj({ token: { ...str, maxLength: 200, description: "The token from the invite link (/join?token=...)" } }, ["token"])),
+          responses: {
+            ...ok(
+              obj(
+                {
+                  valid: bool,
+                  orgName: { ...str, description: "Only when valid" },
+                  email: { ...str, description: "Only when valid. The invited address, masked: first character, ***, then @domain" },
+                  expiresAt: { ...str, format: "date-time", description: "Only when valid" },
+                  reason: { ...str, enum: ["expired", "used", "revoked", "not_found"], description: "Only when not valid. not_found also covers a link replaced by a re-sent one and a workspace that is closed or suspended" },
+                },
+                ["valid"],
+              ),
+            ),
+            ...res("400", "validation_error: no token, or longer than 200 characters", errorBody),
+            ...res("429", "rate_limited", errorBody),
+          },
+        },
+      },
       "/v1/auth/logout-all": { post: { tags: ["Auth"], summary: "Sign out everywhere: every session token for this user stops working, including the caller's. API keys are not affected", security: [{ bearerAuth: [] }], responses: ok(obj({ ok: bool })) } },
       "/v1/auth/google/status": { get: { tags: ["Auth"], security: [], summary: "Whether Sign in with Google is available", responses: ok(obj({ enabled: bool })) } },
       "/v1/auth/google/start": { get: { tags: ["Auth"], security: [], summary: "Browser redirect to Google. `cv` is base64url(SHA-256(verifier)) for a random verifier the web app keeps; `next` is a path in the app", parameters: [{ name: "cv", in: "query", required: true, schema: str }, { name: "next", in: "query", schema: str }], responses: { "302": { description: "Redirect to Google" } } } },
@@ -655,7 +679,7 @@ export function openapi(apiUrl: string) {
       "/v1/plays/plan": {
         post: {
           tags: ["Plays"],
-          summary: "Read a website and suggest plays for it: what the product is, who buys it, its competitors, and ready-to-create plays with the reason for each. Saves nothing. Uses one search unit; AI messages are counted only when a model actually ran. At most 6 a minute (429 after that)",
+          summary: "Read a website and suggest plays for it: what the product is, who buys it, its competitors, and ready-to-create plays with the reason for each. Saves nothing. Uses one search unit - none when the website could not be read (the answer then holds general suggestions and a note saying so); AI messages are counted only when a model actually ran. At most 6 a minute (429 after that)",
           requestBody: j(obj({ website: { ...str, description: "The company's website, e.g. acme.com" } }, ["website"])),
           responses: {
             ...ok(
@@ -777,7 +801,7 @@ export function openapi(apiUrl: string) {
       "/v1/plays/{id}/run": {
         post: {
           tags: ["Plays"],
-          summary: "Run a play now. Uses one search unit. What it finds goes to the review queue; no lead is created and nobody is contacted. Answers 202 with a `jobId` to poll at GET /v1/search/jobs/{jobId} and the `runId` (or 200 with the finished `run` when the server runs jobs inline). At most 12 a minute. A play that is fed by uploads cannot be run (400)",
+          summary: "Run a play now. Uses one search unit. What it finds goes to the review queue; no lead is created and nobody is contacted. Answers 202 with a `jobId` to poll at GET /v1/search/jobs/{jobId} and the `runId` (or 200 with the finished `run` when the server runs jobs inline). Starting is one step per play: of any number of requests arriving together, one starts a run and uses one search unit, and the others get 409 with that run's id. At most 12 a minute. A play that is fed by uploads cannot be run (400)",
           parameters: [idParam("The play")],
           responses: {
             "202": { description: "Queued", ...j(obj({ jobId: uuid, runId: uuid }, ["jobId", "runId"])) },
@@ -793,7 +817,7 @@ export function openapi(apiUrl: string) {
       "/v1/plays/{id}/upload": {
         post: {
           tags: ["Plays"],
-          summary: "Add people who engaged with a post - or signed up, followed, attended - to a play of type engagers_upload (the only type that takes uploads). Send exactly one of `people` or `csv` (with a header row) - or neither, when `postUrl` is given: the server then reads the public post itself. An upload does not use a search unit. Each row needs a LinkedIn profile URL, or an email, or a name with a company; rows that cannot be used are counted in `rejectedCount` and the first 50 are listed with the reason. The people become candidates in the review queue. Body up to 2 MB. When only `postUrl` is sent and it is a public LinkedIn post, the people shown on the public page are read; when the page could not be read (a sign-in wall, or a link that is not a LinkedIn post) the answer is still 200, with a `run` whose status is `blocked` and whose `note` says so plainly",
+          summary: "Add people who engaged with a post - or signed up, followed, attended - to a play of type engagers_upload (the only type that takes uploads). Send exactly one of `people` or `csv` (with a header row) - or neither, when `postUrl` is given: the server then reads the public post itself. An upload does not use a search unit. Each row needs a LinkedIn profile URL, or an email, or a name with a company; rows that cannot be used are counted in `rejectedCount` and the first 50 are listed with the reason. The people become candidates in the review queue. Body up to 2 MB. When only `postUrl` is sent and it is a public LinkedIn post, the people shown on the public page are read; when the page could not be read (a sign-in wall, or a link that is not a LinkedIn post) the answer is still 200, with a `run` whose status is `blocked` and whose `note` says so plainly - and says which it was: LinkedIn could not be reached, the post is not shown without signing in, or there is no post at the link. A `postUrl` with a user name or password in it is refused (400). A play holds at most 5,000 candidates waiting and 20,000 that were not approved: rows that do not fit are counted in `notAdded` with the reason. Into a play that approves by itself, at most 100 people are approved inside the request (`autoApproved`); the rest wait in the review queue (`leftForReview`)",
           parameters: [idParam("The play (type engagers_upload)")],
           requestBody: j(
             obj(
@@ -808,7 +832,7 @@ export function openapi(apiUrl: string) {
               ["engagement"],
             ),
           ),
-          responses: { ...ok(obj({ run: playRunOut, added: int, duplicates: int, rejected: arr(obj({ row: int, reason: str }, ["row", "reason"])), rejectedCount: int }, ["run", "added", "duplicates", "rejected", "rejectedCount"])), ...res("400", "validation_error", errorBody), ...res("413", "payload_too_large", errorBody) },
+          responses: { ...ok(obj({ run: playRunOut, added: int, duplicates: int, rejected: arr(obj({ row: int, reason: str }, ["row", "reason"])), rejectedCount: int, notAdded: obj({ count: int, reason: str }, ["count", "reason"]), autoApproved: int, leftForReview: int }, ["run", "added", "duplicates", "rejected", "rejectedCount"])), ...res("400", "validation_error", errorBody), ...res("413", "payload_too_large", errorBody) },
         },
       },
       "/v1/agent/prospect": { post: { tags: ["Agents"], summary: "One-call agent workflow: describe who you want → verified leads + optional personalized emails", requestBody: j(obj({ query: str, limit: { type: "integer", default: 5, maximum: 10 }, generateEmails: bool, sender: { type: "object" }, save: bool }, ["query"])), responses: ok() } },

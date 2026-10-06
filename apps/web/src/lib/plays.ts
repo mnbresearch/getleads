@@ -89,7 +89,29 @@ export interface Candidate {
 
 export type FieldKind = "tags" | "text" | "number" | "competitors" | "select";
 export type FieldOption = string | { value: string; label?: string };
-export interface PlayTypeField { key: string; label: string; kind: FieldKind | string; options?: FieldOption[]; required?: boolean; max?: number; placeholder?: string; help?: string }
+export interface PlayTypeField { key: string; label: string; kind: FieldKind | string; options?: FieldOption[]; required?: boolean; min?: number; max?: number; placeholder?: string; help?: string }
+
+/**
+ * The smallest value a number field accepts. The server's own `min` when it sends one;
+ * otherwise what the API is known to enforce for the fields that exist today (a count of
+ * days or of companies starts at 1), and 0 for anything else.
+ */
+const KNOWN_MINIMUMS: Record<string, number> = { days: 1, maxPerCompetitor: 1, minIntentScore: 0, minAmountUsd: 0 };
+export function fieldMin(field: PlayTypeField): number {
+  if (typeof field.min === "number" && Number.isFinite(field.min)) return field.min;
+  return lookup(KNOWN_MINIMUMS, field.key) ?? 0;
+}
+
+/**
+ * Whether a play of this type finds companies and then looks for people at them - the only
+ * case in which job titles mean anything. Unknown types are assumed to, so a title field is
+ * never hidden from a play that needs it.
+ */
+export function findsCompanies(types: PlayTypeInfo[] | null | undefined, type: string): boolean {
+  const info = types?.find((t) => t.type === type);
+  if (info) return info.finds === "companies";
+  return !["public_asks", "job_changes", "engagers_upload"].includes(type);
+}
 export interface PlayTypeInfo {
   type: string;
   name: string;
@@ -345,6 +367,17 @@ export function scheduleLabel(runEveryHours: number | null | undefined): string 
 }
 
 /**
+ * When a scheduled play runs next, in words. A time that has already passed is not "2
+ * minutes ago" - the run is simply due, and happens at the scheduler's next pass.
+ */
+export function nextRunLabel(nextRunAt: string | null | undefined, now = Date.now()): string {
+  if (!nextRunAt) return "";
+  const t = new Date(nextRunAt).getTime();
+  if (Number.isNaN(t)) return "";
+  return t <= now ? "next run is due" : `next ${ago(nextRunAt, now)}`;
+}
+
+/**
  * Whether a run did not do its job - it could not search, broke, or was skipped - as opposed
  * to having looked and found little. Only "done" (and a run still going) counts as having
  * looked; a status this build has not met is treated as not having, so it can never be
@@ -373,13 +406,15 @@ export function runSentence(r: { status?: string | null; found?: number | null; 
   if (r.status === "failed") return note || clean(r.error ?? "", 300) || "This run failed before it finished. Try again.";
   if (r.status === "running") return "Running now.";
   if (runFailed(r.status)) return note || "This run did not happen, so nothing was checked.";
+  // The server's note is the whole account of a run ("Found 4: 3 new, 1 already seen. ...").
+  // It is shown as it is; counting again in front of it said everything twice.
+  if (note) return note;
   const found = r.found ?? 0;
   const added = r.added ?? 0;
   const dup = r.duplicates ?? 0;
-  const head = found === 0 && added === 0
+  return found === 0 && added === 0
     ? "Looked and found nobody new this time."
     : `Found ${found.toLocaleString()}: ${added.toLocaleString()} new for review${dup > 0 ? `, ${dup.toLocaleString()} already seen` : ""}.`;
-  return note ? `${head} ${note}` : head;
 }
 
 /** What approving and skipping did, in the server's numbers. Nothing here is inferred. */

@@ -821,4 +821,42 @@ joinRoutes.post("/join", rateLimit({ perMinute: 10 }), zValidator("json", z.obje
   return c.json({ token: await issueJwt(user), user: { id: user.id, email: user.email, name: user.name, role: user.role } });
 });
 
+/** An address as an invitee may be shown it before joining: "j***@example.com". Enough to recognise, not enough to learn. */
+function maskedAddress(email: string): string {
+  const at = email.lastIndexOf("@");
+  if (at < 1) return "***";
+  return `${email.slice(0, 1)}***${email.slice(at)}`;
+}
+
+const NO_SUCH_ORG = "00000000-0000-0000-0000-000000000000";
+
+/**
+ * Is this invite link still good? For the join page, so a link that has expired, was used or
+ * was cancelled says so when the page opens instead of after a password was typed.
+ *
+ * Public, like the join itself, and it answers only to whoever holds the link:
+ *  - it changes nothing and uses nothing up;
+ *  - it never looks at the users table, so it cannot say whether an address has an account
+ *    (that is still only answered by the join);
+ *  - every request makes the same two lookups whatever it finds, so how long the answer
+ *    takes says nothing about how close a guess was;
+ *  - the token is in the body, never in a URL, and is not written to any log or audit row.
+ */
+joinRoutes.post("/join/check", rateLimit({ perMinute: 10, name: "join-check" }), zValidator("json", z.object({ token: z.string().min(1).max(200) })), async (c) => {
+  const { token } = c.req.valid("json");
+  const { db } = getDb();
+  // The same two arms as the join: by the token's hash, or - for an invite an earlier
+  // release created - by the plaintext token where no hash was ever stored.
+  const inv = await db.query.invites.findFirst({ where: or(eq(invites.tokenHash, hashLinkToken(token)), and(sql`${invites.tokenHash} IS NULL`, eq(invites.token, token))) });
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, inv?.orgId ?? NO_SUCH_ORG), columns: { id: true, name: true, status: true } });
+  const no = (reason: "expired" | "used" | "revoked" | "not_found") => c.json({ valid: false as const, reason });
+  // A workspace that is closed or suspended accepts nobody: to the holder of the link that is "no such invite".
+  if (!inv || !org || org.status === "deactivated" || org.status === "revoked") return no("not_found");
+  if (inv.acceptedAt) return no("used");
+  if (inv.revokedAt) return no("revoked");
+  const expiresAt = inviteExpiry(inv);
+  if (expiresAt.getTime() <= Date.now()) return no("expired");
+  return c.json({ valid: true as const, orgName: safeHeaderText(org.name, 80, "a workspace"), email: maskedAddress(inv.email), expiresAt });
+});
+
 export { listLeads, campaignContacts };

@@ -2,6 +2,7 @@ import { and, desc, effectiveLimits, eq, getDb, inArray, leads, pixels, signals,
 import * as core from "@prospex/core";
 import type { EngagerRow, Engagement, PlayEngineOptions, PlayEngineResult, PlayFinding, PlayPlan, PlayRunTrace } from "@prospex/core";
 import { platformListed, workspaceListed } from "../lib/privacySuppression.js";
+import { httpUrlOrNull } from "../lib/sanitize.js";
 
 /**
  * Where a play's findings come from.
@@ -38,8 +39,46 @@ export interface PlayEngines {
   planPlays: typeof core.planPlays;
   playDedupeKey: typeof core.playDedupeKey;
   mailSafeReason: typeof core.mailSafeReason;
-  /** The public page of a LinkedIn post (one guarded fetch; never a login). */
-  linkedinPostEngagers: typeof core.linkedinPostEngagers;
+  /**
+   * The public page of a LinkedIn post (a guarded fetch; never a login). When nobody could be
+   * read from it, `unread` says which of three different things happened - they call for
+   * different sentences, and "sign-in needed" said about a network fault sends a person
+   * looking for a problem with their post.
+   */
+  linkedinPostEngagers: (postUrl: string) => Promise<PostEngagers>;
+}
+
+/** Why a post gave nobody: LinkedIn could not be reached, it asks for a sign-in, or there is no post at the link. */
+export type PostUnread = "network" | "signin" | "missing";
+export type PostEngagers = Awaited<ReturnType<typeof core.linkedinPostEngagers>> & { unread?: PostUnread };
+
+const linkedinHost = (h: string) => h === "linkedin.com" || h.endsWith(".linkedin.com");
+
+/**
+ * Core's reader answers `publicPage: false` both when LinkedIn showed its sign-in wall and
+ * when LinkedIn never answered. One more small request (a few kilobytes, same guard, same
+ * host rule) tells them apart - made only when the read came back empty.
+ */
+async function whyUnread(postUrl: string): Promise<PostUnread> {
+  const url = core.normalizeLinkedinPostUrl(postUrl);
+  if (!url) return "signin";
+  try {
+    const res = await core.fetchPublic(url, { timeoutMs: 8_000, hostAllow: linkedinHost, maxBytes: 4_096 });
+    // Refused before it was sent, or redirected off LinkedIn: not a network fault.
+    if (!res) return "signin";
+    await res.body?.cancel().catch(() => {});
+    if (res.status === 404 || res.status === 410) return "missing";
+    if (res.status >= 500 && res.status !== 999) return "network";
+    return "signin";
+  } catch {
+    return "network";
+  }
+}
+
+async function readPost(postUrl: string): Promise<PostEngagers> {
+  const r = await core.linkedinPostEngagers(postUrl);
+  if (r.publicPage || r.refused) return r;
+  return { ...r, unread: await whyUnread(postUrl) };
 }
 
 /** Looked up on the core module at call time, so the functions are whatever core exports now. */
@@ -53,7 +92,7 @@ const coreEngines: PlayEngines = {
   planPlays: (input, opts) => core.planPlays(input, opts),
   playDedupeKey: (f) => core.playDedupeKey(f),
   mailSafeReason: (text) => core.mailSafeReason(text),
-  linkedinPostEngagers: (url) => core.linkedinPostEngagers(url),
+  linkedinPostEngagers: (url) => readPost(url),
 };
 
 let active: PlayEngines = coreEngines;
@@ -73,6 +112,25 @@ export function setPlayEngines(over: Partial<PlayEngines>): () => void {
 
 // eslint-disable-next-line no-control-regex
 const INVISIBLE = /[\u0000-\u001f\u007f-\u009f\u00ad\u034f\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+
+/**
+ * A link a play may store and show: http(s), with no user name or password in it.
+ *
+ * `https://user:secret@host/` is a valid URL. Kept as evidence it would be shown, exported
+ * and copied into a task with someone's credentials in it, and a browser shows the part
+ * before the `@` as if it were the site.
+ */
+export function linkOrNull(raw: unknown, max = 2000): string | null {
+  const s = httpUrlOrNull(raw, max);
+  if (!s) return null;
+  try {
+    const u = new URL(s);
+    if (u.username || u.password) return null;
+  } catch {
+    return null;
+  }
+  return s;
+}
 
 /** One bounded line of plain text, or null when nothing is left. Never rendered as HTML. */
 export function cleanText(value: unknown, max: number): string | null {

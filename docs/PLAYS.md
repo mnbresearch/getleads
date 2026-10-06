@@ -69,6 +69,8 @@ creates a task to go and answer it, never a lead.
   pages. The posting tells you the company has the problem you solve; Scout then looks for
   your target titles at that company.
 - **Example reason:** Hiring a Sales Development Representative - open posting on Greenhouse.
+  When Scout could not open the posting to check that it is still live, the sentence is
+  "Has a posting for Sales Development Representative on Greenhouse." instead.
 - **Evidence:** the posting itself, with its title. Scout never states a posting date it does
   not have.
 
@@ -94,6 +96,8 @@ creates a task to go and answer it, never a lead.
 - **Example reasons:** Asked on LinkedIn for an alternative to Acme. / Reddit thread asking
   which tool to use for onboarding.
 - **Evidence:** the post, with the line that shows the ask or the complaint.
+- **Hacker News needs no search source.** It is read through its own public search, so this
+  place is looked in even when no web search source is connected.
 - **Good to know:** the author of a public LinkedIn post becomes a person candidate.
   Everything else is a public conversation: there is nobody to email, so approving it gives
   you a task to answer it yourself.
@@ -140,6 +144,9 @@ creates a task to go and answer it, never a lead.
   are listed back to you with the reason.
 - **One upload, one source:** send the list as rows or as a CSV, not both - or send neither
   and only the post link, and Scout reads the public post itself. An upload uses no search unit.
+- **When the post could not be read,** the answer says which of three things happened:
+  LinkedIn could not be reached (try again), the post is not shown without signing in, or
+  there is no post at that link. A post link with a user name or password in it is refused.
 
 ## The review rule
 
@@ -167,7 +174,8 @@ ids whose decision went through (`applied`) and, separately, the ones that did n
 
 **Auto-approve** is a switch on each play and is off by default. When you turn it on, the
 people a run finds become leads without anyone reviewing them (you can set a minimum score).
-Use it only for a play whose results you already trust.
+Use it only for a play whose results you already trust. An upload approves at most 100 people
+by itself; the rest wait in Review, and the answer says how many.
 
 **Using the reason in outreach.** An approved lead's reason is available in campaign steps as
 `{{relevant_because}}`. With AI personalisation on, the opening line may refer to it in one
@@ -210,7 +218,7 @@ Plays use the allowances your plan already has. There is no separate charge for 
 | Action | What it uses |
 |---|---|
 | Running a play (by hand or on a schedule) | One search unit per run |
-| Planning plays from your website | One search unit |
+| Planning plays from your website | One search unit (none when the website could not be read) |
 | "Find people" on a company candidate | One search unit |
 | Approving a person who is new to your workspace | One lead unit |
 | Approving a person who is already a lead | Nothing |
@@ -221,6 +229,9 @@ Plays use the allowances your plan already has. There is no separate charge for 
   your workspace, plays work from their built-in rules and no AI message is used.
 - When your search units for the month are used up, a run is refused with a clear message. A
   scheduled run is skipped, and the play's last result says why.
+- Pressing Run twice, or from two windows at once, starts one run and uses one search unit.
+- A run whose background job was lost is closed as failed after 15 minutes, and its search
+  unit is given back.
 - A play's last result is one of: done, failed, blocked (it could not look anywhere - not the
   same as finding nobody) or skipped (a scheduled run that did not happen).
 - When your lead units run out in the middle of a batch of approvals, Scout stops there. The
@@ -240,6 +251,11 @@ Other limits:
   clearing its ICP, list, campaign or client detaches it.
 - Up to 5,000 candidates waiting for review per play. A run that reaches the limit stops
   adding and says so.
+- Up to 20,000 candidates that were not approved (waiting or skipped) per play. An upload or a
+  run that does not fit says how many were added and why the rest were not; start a new play
+  for more.
+- The schedule starts at most 5 plays of one workspace each hour; the others follow in the
+  next hours. A workspace that is scheduled for deletion starts no scheduled runs.
 - When a play has target job titles, a run looks for people at up to 15 of the companies it
   finds. The other companies stay in the queue as company candidates, where "Find people"
   (up to 5 people at a time) does the same on request.
@@ -252,8 +268,9 @@ Other limits:
 Candidates are personal data, and Scout treats them the way it treats leads.
 
 - **Retention.** Candidates you have not decided on, and candidates you skipped, are deleted
-  after 180 days. An approved candidate is kept for as long as its lead exists. Run history
-  older than 180 days is deleted.
+  180 days after they were found. Approved companies and public conversations are deleted 180
+  days after they were approved (the saved company and the task stay). An approved person is
+  kept for as long as their lead exists. Run history older than 180 days is deleted.
 - **Do not contact.** An address on the platform-wide do-not-contact list is never stored as
   a candidate. An address on your workspace's own do-not-contact list is not added either.
 - **Erasure.** When a person is erased - you delete the lead, or a data-subject request is
@@ -264,8 +281,13 @@ Candidates are personal data, and Scout treats them the way it treats leads.
 - **Public pages only, read politely.** One request per page, short timeouts, and a limit on
   pages per site. When a site refuses - a sign-in wall, a block page - Scout reports that in
   the run's note and stops. It does not retry around the refusal.
+- **Runs pace themselves and obey robots.txt.** Requests to one site go out one at a time with
+  a pause between them, and a page a site's robots.txt disallows is not fetched. Scout's
+  crawler identifies itself with the user-agent token `ScoutBot`: a `User-agent: ScoutBot`
+  group in robots.txt is followed, and otherwise the `User-agent: *` group.
 - **Text from the web is treated as data.** It is shortened, cleaned of control characters and
-  shown as plain text, and links are opened as ordinary external links.
+  shown as plain text, and links are opened as ordinary external links. A link that is not
+  http(s), or that carries a user name or password, is not kept or shown.
 
 ## What Scout does not do
 

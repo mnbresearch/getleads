@@ -4,7 +4,7 @@ import { apiFetch, expectShape } from "../../lib/api";
 import { Spinner, TagInput } from "../ui";
 import { CompetitorsInput } from "./PlayForm";
 import { plural } from "../../lib/plural";
-import { clean, competitorsOf, isForbidden, isQuota, messageOf, playInputs, typeName, typeTone, type Competitor, type PlanPlay, type PlayOut, type PlayPlan, type PlayTypeInfo } from "../../lib/plays";
+import { clean, competitorsOf, findsCompanies, isForbidden, isQuota, messageOf, playInputs, runFailed, runSentence, typeName, typeTone, type Competitor, type PlanPlay, type PlayOut, type PlayPlan, type PlayTypeInfo } from "../../lib/plays";
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => clean(x, 100)) : []);
 
@@ -45,14 +45,16 @@ function blockedByEdits(p: PlanPlay): string | null {
  * created, and nothing runs until Run is pressed.
  */
 export function PlanFlow({
-  types, defaultWebsite, runningIds, pendingOf, onReview, onCreated, onRun, onForbidden, onDone, onClose, onManual,
+  types, defaultWebsite, runningIds, playOf, onReview, onCreated, onRun, onLaunch, onForbidden, onDone, onClose, onManual,
 }: {
   types: PlayTypeInfo[] | null;
   defaultWebsite?: string;
   runningIds: Set<string>;
-  /** How many people a created play has waiting, so the card can offer "Review N". */
-  pendingOf: (playId: string) => number;
+  /** The page's current copy of a created play: what is waiting, and how its last run ended. */
+  playOf: (playId: string) => PlayOut | undefined;
   onReview: (play: PlayOut) => void;
+  /** Run these plays, once each, as one batch. `stay` keeps the flow open (a creation failed and its reason is on screen). */
+  onLaunch: (plays: PlayOut[], stay: boolean) => Promise<void>;
   /** A play was created: the page adds it to its list. */
   onCreated: (play: PlayOut) => void;
   /** Resolves true when the run started (or already finished), false when it could not start. */
@@ -76,6 +78,7 @@ export function PlanFlow({
   const [creating, setCreating] = useState<Record<number, boolean>>({});
   const [createErr, setCreateErr] = useState<Record<number, { message: string; quota: boolean }>>({});
   const [ran, setRan] = useState<Record<number, "starting" | "started">>({});
+  const [launching, setLaunching] = useState(false);
   const headingRef = useRef<HTMLHeadingElement | null>(null);
   const seq = useRef(0);
 
@@ -95,7 +98,7 @@ export function PlanFlow({
       if (mine !== seq.current) return;
       const p = expectShape(r, (x) => Array.isArray(x.plays));
       const planTitles = strings(p.titles);
-      setPlan({ ...p, product: p.product && typeof p.product === "object" ? p.product : { domain: site }, titles: planTitles, competitors: competitorsOf(p.competitors), notes: strings(p.notes).map((n) => clean(n, 400)), plays: p.plays.filter((x) => x && typeof x.type === "string") });
+      setPlan({ ...p, product: p.product && typeof p.product === "object" ? p.product : { domain: site }, titles: planTitles, competitors: competitorsOf(p.competitors), notes: (Array.isArray(p.notes) ? p.notes : []).map((n) => clean(n, 400)).filter(Boolean), plays: p.plays.filter((x) => x && typeof x.type === "string") });
       setCompetitors(competitorsOf(p.competitors));
       setTitles(planTitles);
       setCreated({}); setCreating({}); setCreateErr({}); setRan({});
@@ -112,9 +115,10 @@ export function PlanFlow({
   const suggestions = plan ? plan.plays.map((p) => withEdits(p, competitors, titles, plan.titles)) : [];
   const creatable = suggestions.map((p, i) => ({ p, i })).filter(({ p, i }) => p.available !== false && !created[i] && !blockedByEdits(p));
 
-  const create = async (i: number): Promise<"ok" | "failed" | "quota"> => {
+  const create = async (i: number): Promise<PlayOut | "failed" | "quota"> => {
     const p = suggestions[i];
-    if (!p || created[i] || creating[i]) return "ok";
+    if (!p || creating[i]) return "failed";
+    if (created[i]) return created[i];
     setCreating((m) => ({ ...m, [i]: true }));
     setCreateErr((m) => { const n = { ...m }; delete n[i]; return n; });
     try {
@@ -122,7 +126,7 @@ export function PlanFlow({
       const play = expectShape(r, (x) => typeof x.play?.id === "string").play;
       setCreated((m) => ({ ...m, [i]: play }));
       onCreated(play);
-      return "ok";
+      return play;
     } catch (e) {
       const said = messageOf(e);
       setCreateErr((m) => ({ ...m, [i]: { message: said, quota: isQuota(e) } }));
@@ -132,9 +136,26 @@ export function PlanFlow({
       setCreating((m) => { const n = { ...m }; delete n[i]; return n; });
     }
   };
-  // One after another, and a plan limit (or a refusal) stops the rest: the play that hit it
-  // shows the reason, and the ones after it are left for the reviewer to create or not.
-  const createAll = async () => { for (const { i } of creatable) if ((await create(i)) === "quota") break; };
+  /**
+   * "Create these plays and run them": every available suggestion is created (one after
+   * another - a plan limit or a refusal stops the rest, and the play that hit it shows the
+   * reason), then each one that was created, and has not run yet, is run once. With nothing
+   * in the way the reviewer lands on the Plays tab with the runs in progress.
+   */
+  const launch = async () => {
+    setLaunching(true);
+    const toRun: { i: number; play: PlayOut }[] = suggestions.map((_, i) => ({ i, play: created[i] })).filter((x) => !!x.play && !ran[x.i] && !runningIds.has(x.play.id));
+    let stay = false;
+    for (const { i } of creatable) {
+      const r = await create(i);
+      if (typeof r === "object") toRun.push({ i, play: r });
+      else { stay = true; if (r === "quota") break; }
+    }
+    const runnable = toRun.filter((x) => x.play.type !== "engagers_upload");
+    setRan((m) => ({ ...m, ...Object.fromEntries(runnable.map((x) => [x.i, "started" as const])) }));
+    if (runnable.length) await onLaunch(runnable.map((x) => x.play), stay);
+    setLaunching(false);
+  };
   const run = async (i: number, play: PlayOut) => {
     setRan((m) => ({ ...m, [i]: "starting" }));
     const started = await onRun(play);
@@ -142,6 +163,9 @@ export function PlanFlow({
   };
 
   const anyCreating = Object.keys(creating).length > 0;
+  // What the one button would act on: suggestions still to create, and created ones not yet run.
+  const waitingToRun = suggestions.filter((p, i) => created[i] && created[i].type !== "engagers_upload" && !ran[i] && !runningIds.has(created[i].id)).length;
+  const launchCount = creatable.length + waitingToRun;
   const createdCount = Object.keys(created).length;
   const product = plan?.product;
   const productName = clean(product?.name, 120) || clean(product?.domain, 120);
@@ -209,10 +233,12 @@ export function PlanFlow({
           <div className="flex flex-wrap items-center justify-between gap-2">
             <h3 className="text-base font-semibold text-ink-50">Suggested plays</h3>
             <div className="flex flex-wrap gap-2">
-              {creatable.length > 1 && <button type="button" className="btn-primary" disabled={anyCreating} onClick={createAll}>{anyCreating ? "Creating…" : `Create all ${creatable.length} available`}</button>}
+              {launchCount > 0 && <button type="button" className="btn-primary" data-testid="plan-launch" disabled={anyCreating || launching} onClick={launch}>{launching ? "Creating and starting…" : launchCount === 1 ? "Create this play and run it" : "Create these plays and run them"}</button>}
               {createdCount > 0 && <button type="button" className="btn-secondary" onClick={onDone}>See my {plural(createdCount, "play")}</button>}
             </div>
           </div>
+
+          {launchCount > 0 && <p className="-mt-2 text-xs text-ink-400" data-testid="plan-launch-cost">One press creates {launchCount === 1 ? "the play" : `${creatable.length > 0 && waitingToRun > 0 ? "the rest and runs all" : "all"} ${launchCount}`} and runs {launchCount === 1 ? "it" : "each"} once. A run uses one search from your plan and contacts nobody - what it finds waits for you in Review.</p>}
 
           {suggestions.length === 0 ? (
             <div className="card p-6 text-sm text-ink-300">Scout could not suggest a play from this website. You can still build one yourself. <button type="button" className="text-brand-600 underline" onClick={onManual}>Build one myself</button></div>
@@ -230,7 +256,7 @@ export function PlanFlow({
                     <div className={`mt-1 font-semibold ${unavailable ? "text-ink-400" : "text-ink-50"}`}>{clean(p.name, 120) || typeName(types, p.type)}</div>
                     {p.why && <p className="mt-1 text-sm text-ink-300"><span className="font-medium text-ink-200">Why:</span> {clean(p.why, 400)}</p>}
                     {inputs && <p className="mt-1 text-xs text-ink-400">{inputs}</p>}
-                    {p.targetTitles.length > 0 && <p className="mt-1 text-xs text-ink-400">Looks for: {p.targetTitles.slice(0, 4).join(", ")}{p.targetTitles.length > 4 ? ` and ${p.targetTitles.length - 4} more` : ""}</p>}
+                    {p.targetTitles.length > 0 && findsCompanies(types, p.type) && <p className="mt-1 text-xs text-ink-400">Looks for: {p.targetTitles.slice(0, 4).join(", ")}{p.targetTitles.length > 4 ? ` and ${p.targetTitles.length - 4} more` : ""}</p>}
                     {unavailable && <p className="mt-2 text-xs font-medium text-amber-700">Not available yet: {clean(p.unavailableReason, 300) || "this workspace is not set up for it."}</p>}
                     {blocked && <p className="mt-2 text-xs font-medium text-amber-700">{blocked}</p>}
                     {failed && (
@@ -242,15 +268,7 @@ export function PlanFlow({
                       {made ? (
                         <>
                           <span className="badge bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200">Created</span>
-                          {made.type !== "engagers_upload" && (
-                            runningIds.has(made.id)
-                              ? <span className="text-sm text-ink-300" role="status">Run started - the people it finds will appear in Review.</span>
-                              : ran[i] === "started"
-                                ? (pendingOf(made.id) > 0
-                                  ? <button type="button" className="btn-primary py-1.5" onClick={() => onReview(made)}>Review {plural(pendingOf(made.id), "person", "people")}</button>
-                                  : <span className="text-sm text-ink-300" role="status">The run has finished with nobody new to review. What it said is on the play, under Your plays.</span>)
-                                : <button type="button" className="btn-primary py-1.5" disabled={ran[i] === "starting"} onClick={() => run(i, made)}>{ran[i] === "starting" ? "Starting…" : "Run now"}</button>
-                          )}
+                          {made.type !== "engagers_upload" && <RunOutcome play={playOf(made.id) ?? made} running={runningIds.has(made.id)} state={ran[i]} onRun={() => run(i, made)} onReview={() => onReview(made)} />}
                         </>
                       ) : !unavailable ? (
                         <button type="button" className="btn-secondary py-1.5" disabled={!!creating[i] || !!blocked} onClick={() => create(i)}>{creating[i] ? "Creating…" : "Create"}</button>
@@ -261,9 +279,32 @@ export function PlanFlow({
               })}
             </ul>
           )}
-          {createdCount > 0 && <p className="text-xs text-ink-400">Created plays run when you press Run. To put one on a schedule, press Edit on the play and choose how often.</p>}
+          {createdCount > 0 && <p className="text-xs text-ink-400">Created plays run when you press Run. To put one on a schedule, press Edit on the play, on the Plays tab, and choose how often.</p>}
         </div>
       )}
     </div>
   );
+}
+
+/**
+ * What happened to a created suggestion's first run, said where it was started.
+ *
+ * A run that could not search is not "finished with nobody new" - that would read as "there
+ * is nobody out there". It says it could not search, in the server's sentence.
+ */
+function RunOutcome({ play, running, state, onRun, onReview }: { play: PlayOut; running: boolean; state?: "starting" | "started"; onRun: () => void; onReview: () => void }) {
+  if (running || play.running === true) return <span className="text-sm text-ink-300" role="status">Running now - the people it finds will appear in Review.</span>;
+  if (state !== "started") return <button type="button" className="btn-primary py-1.5" disabled={state === "starting"} onClick={onRun}>{state === "starting" ? "Starting…" : "Run now"}</button>;
+  const last = play.lastResult;
+  const waiting = play.counts?.pending ?? 0;
+  if (last && runFailed(last.status)) {
+    return (
+      <span className="min-w-0 basis-full rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="status" data-testid="plan-run-blocked">
+        <span className="font-medium">{last.status === "blocked" ? "This run could not search." : "This run did not finish."}</span> {runSentence(last)}
+      </span>
+    );
+  }
+  if (waiting > 0) return <button type="button" className="btn-primary py-1.5" onClick={onReview}>Review {plural(waiting, "person", "people")}</button>;
+  if (!last) return <span className="text-sm text-ink-300" role="status">The run was started. Its result will be on the play, on the Plays tab.</span>;
+  return <span className="min-w-0 text-sm text-ink-300" role="status">The run finished. {runSentence(last)}</span>;
 }

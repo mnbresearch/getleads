@@ -1,6 +1,6 @@
 import { Hono, type Context } from "hono";
 import { z } from "zod";
-import { and, campaigns, clients, consume, desc, enqueue, eq, getDb, icps, inArray, lists, playCandidates, playRuns, plays, runJobById, sql, tasks, type Play } from "@prospex/db";
+import { and, campaigns, clients, consume, desc, eq, getDb, icps, inArray, lists, playCandidates, playRuns, plays, runJobById, sql, tasks, type Play } from "@prospex/db";
 import { normalizeLinkedinPostUrl } from "@prospex/core";
 import { env } from "../env.js";
 import { audit } from "../lib/audit.js";
@@ -13,16 +13,18 @@ import { zValidator } from "../lib/validate.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { handlers } from "../jobs.js";
 import { companyDomainOrNull } from "../services/leads.js";
-import { playEngines, type EngagerRow } from "../services/playEngines.js";
+import { playEngines, type EngagerRow, type PostEngagers, type PostUnread } from "../services/playEngines.js";
 import {
   candidateOut,
   cleanText,
+  closeLostRuns,
   countsByPlay,
   customerText,
   decideCandidates,
   ENGAGEMENTS,
   findPeopleForCandidate,
   ingestEngagers,
+  linkOrNull,
   listCandidates,
   parsePlayConfig,
   planFor,
@@ -31,8 +33,10 @@ import {
   playPatchInput,
   playPerformance,
   playTypes,
+  RUN_BUSY_MS,
   runInProgress,
   runningPlays,
+  startRun,
 } from "../services/plays.js";
 import { mapImportRow } from "./leads.js";
 
@@ -41,7 +45,9 @@ import { mapImportRow } from "./leads.js";
  * results per play.
  *
  * Members and full API keys may use everything here, like autopilots. Read-only keys get
- * the GETs (requireAuth refuses them anything else), so no GET in this file writes.
+ * the GETs (requireAuth refuses them anything else), so no GET in this file changes anything
+ * a person made or decided. The one thing a read does is housekeeping: a run still marked
+ * `running` long after its job is gone is closed as failed, with its search given back.
  * Static paths are declared before `/:id`.
  */
 export const playRoutes = new Hono<Env>();
@@ -93,11 +99,17 @@ playRoutes.post("/plan", rateLimit({ perMinute: 6, name: "plays-plan" }), zValid
   const domain = companyDomainOrNull(c.req.valid("json").website);
   if (!domain) throw badRequest("Enter your website as a public address, like example.com.");
   await consume(db, oid, "searches", 1);
+  const giveBack = () => consume(db, oid, "searches", -1, { allowOverage: true }).catch(() => {});
   try {
-    return c.json(await planFor(c.get("auth").org, domain));
+    const { siteRead, ...plan } = await planFor(c.get("auth").org, domain);
+    // A website that could not be read gets general suggestions and a note that says so.
+    // That is not what the search unit is for - a run that could not look gives its unit
+    // back, and so does this.
+    if (!siteRead) await giveBack();
+    return c.json(plan);
   } catch (e) {
     // Nothing was delivered, so the search is given back. The detail is for the operator.
-    await consume(db, oid, "searches", -1, { allowOverage: true }).catch(() => {});
+    await giveBack();
     console.warn(`[plays] planning failed for ${oid}: ${(e as Error)?.name ?? "Error"}`);
     throw new ApiError(502, "We could not read that website to plan from this time. Check the address and try again in a moment.", "plan_unavailable");
   }
@@ -191,10 +203,14 @@ playRoutes.get("/performance", zValidator("query", z.object({ days: z.coerce.num
 playRoutes.get("/", async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
-  const rows = await db.select().from(plays).where(eq(plays.orgId, oid)).orderBy(desc(plays.createdAt)).limit(500);
+  const load = () => db.select().from(plays).where(eq(plays.orgId, oid)).orderBy(desc(plays.createdAt)).limit(500);
+  let rows = await load();
   const ids = rows.map((r) => r.id);
-  const [counts, running] = await Promise.all([countsByPlay(oid, ids), runningPlays(oid, ids)]);
-  return c.json({ plays: rows.map((p) => playOut(p, counts.get(p.id), running.has(p.id))) });
+  const [counts, runs] = await Promise.all([countsByPlay(oid, ids), runningPlays(oid, ids)]);
+  // Housekeeping, and the only thing a read here ever changes: a run whose job is gone is
+  // closed (and its search given back) instead of sitting in the history as "running".
+  if (runs.lost && (await closeLostRunsQuietly({ orgId: oid }))) rows = await load();
+  return c.json({ plays: rows.map((p) => playOut(p, counts.get(p.id), runs.running.has(p.id))) });
 });
 
 playRoutes.post("/", zValidator("json", playCreateInput), async (c) => {
@@ -228,10 +244,29 @@ playRoutes.post("/", zValidator("json", playCreateInput), async (c) => {
   return c.json({ play: playOut(row) }, 201);
 });
 
-playRoutes.get("/:id", async (c) => {
-  const play = await ownPlay(c);
+/** A play's latest runs. One of them still `running` long after a run can be is closed first (see closeLostRuns). */
+async function latestRuns(c: Context<Env>, limit: number): Promise<{ play: Play; runs: (typeof playRuns.$inferSelect)[] }> {
+  let play = await ownPlay(c);
   const { db } = getDb();
-  const runs = await db.select().from(playRuns).where(and(eq(playRuns.playId, play.id), eq(playRuns.orgId, play.orgId))).orderBy(desc(playRuns.startedAt)).limit(10);
+  const load = () => db.select().from(playRuns).where(and(eq(playRuns.playId, play.id), eq(playRuns.orgId, play.orgId))).orderBy(desc(playRuns.startedAt)).limit(limit);
+  let runs = await load();
+  const overdue = runs.some((r) => r.status === "running" && Date.now() - r.startedAt.getTime() > RUN_BUSY_MS);
+  if (overdue && (await closeLostRunsQuietly({ orgId: play.orgId, playId: play.id }))) {
+    runs = await load();
+    play = await ownPlay(c);
+  }
+  return { play, runs };
+}
+
+/** Never fails the read it is part of. */
+const closeLostRunsQuietly = (scope: { orgId: string; playId?: string }) =>
+  closeLostRuns(scope).catch((e) => {
+    console.warn(`[plays] could not close runs whose job is gone: ${errorLine(e)}`);
+    return 0;
+  });
+
+playRoutes.get("/:id", async (c) => {
+  const { play, runs } = await latestRuns(c, 10);
   const counts = await countsByPlay(play.orgId, [play.id]);
   return c.json({ play: playOut(play, counts.get(play.id), !!(await runInProgress(play))), runs });
 });
@@ -284,23 +319,16 @@ playRoutes.post("/:id/run", rateLimit({ perMinute: 12, name: "plays-run" }), asy
   const play = await ownPlay(c);
   if (play.type === "engagers_upload") throw badRequest("This play is fed by uploads - add people with Upload.");
   const { db } = getDb();
-  const going = await runInProgress(play);
-  // `runId` lets a client that lost track of the run it started pick it up again.
-  if (going) throw new ApiError(409, "This play is already running. Its result will appear here when it finishes.", "already_running", { runId: going });
-  // Before the charge and before the run row: "try again" must leave nothing behind.
-  await guardJobCapacity(db, oid, "play.run");
-  await consume(db, oid, "searches", 1);
-  let run: typeof playRuns.$inferSelect;
-  let jobId: string;
-  try {
-    [run] = await db.insert(playRuns).values({ orgId: oid, playId: play.id, status: "running", trigger: "manual" }).returning();
-    // One attempt: a run that breaks is recorded as failed (and its search given back) by
-    // the handler, and running the whole search again unasked would spend it twice.
-    jobId = (await enqueue(db, "play.run", { playId: play.id, runId: run.id, charged: true }, { orgId: oid, priority: 2, maxAttempts: 1 })).id;
-  } catch (e) {
-    await consume(db, oid, "searches", -1, { allowOverage: true }).catch(() => {});
-    throw e;
+  // The check, the charge, the run and its job are one step per play (see startRun): of any
+  // number of requests arriving together, one starts a run and the others are told about it.
+  const r = await startRun(play, "manual");
+  if (!r.started) {
+    if (r.reason === "gone") throw notFound("Play");
+    // `runId` lets a client that lost track of the run it started pick it up again.
+    if (r.reason === "running") throw new ApiError(409, "This play is already running. Its result will appear here when it finishes.", "already_running", { runId: r.runId });
+    throw new ApiError(409, "This play could not be started just now. Try again.", "not_started");
   }
+  const { run, jobId } = r;
   if (env.jobMode === "inline") {
     // Serverless: run this play's own job now, not the whole queue.
     await runJobById(db, handlers, jobId).catch((e) => console.warn(`[plays] inline run of play ${play.id} failed: ${errorLine(e)}`));
@@ -310,12 +338,7 @@ playRoutes.post("/:id/run", rateLimit({ perMinute: 12, name: "plays-run" }), asy
   return c.json({ jobId, runId: run.id }, 202);
 });
 
-playRoutes.get("/:id/runs", async (c) => {
-  const play = await ownPlay(c);
-  const { db } = getDb();
-  const runs = await db.select().from(playRuns).where(and(eq(playRuns.playId, play.id), eq(playRuns.orgId, play.orgId))).orderBy(desc(playRuns.startedAt)).limit(20);
-  return c.json({ runs });
-});
+playRoutes.get("/:id/runs", async (c) => c.json({ runs: (await latestRuns(c, 20)).runs }));
 
 // ── Uploads ──
 
@@ -327,7 +350,10 @@ const engagerRow = z.object({ fullName: cell(300), firstName: cell(300), lastNam
 const uploadInput = z
   .object({
     engagement: z.enum(ENGAGEMENTS),
-    postUrl: httpUrlField(2000).optional(),
+    // A link with a user name or password in it is refused: it would be kept as every row's evidence.
+    postUrl: httpUrlField(2000)
+      .refine((v) => linkOrNull(v, 2000) !== null, { message: "The post link must not contain a user name or password." })
+      .optional(),
     postTitle: z.string().trim().max(200).optional(),
     postAuthor: z.string().trim().max(120).optional(),
     people: z.array(engagerRow).max(UPLOAD_MAX_ROWS).optional(),
@@ -336,6 +362,13 @@ const uploadInput = z
   .refine((v) => !(v.people && v.csv !== undefined), { message: "Send the people as a list or as a CSV, not both." });
 
 const text = (v: unknown) => (typeof v === "string" && v.trim() ? v.trim() : undefined);
+
+/** Why nobody could be read from a post. Three different things, three different sentences. */
+const POST_UNREAD: Record<PostUnread, string> = {
+  network: "LinkedIn could not be reached just now, so the post was not read. This says nothing about the post - try again in a few minutes, or paste the profile links or upload a CSV instead.",
+  signin: "LinkedIn did not show that post without signing in, so nobody could be read from it. Paste the profile links or upload a CSV instead.",
+  missing: "LinkedIn says there is no post at that link. Check the link, or paste the profile links or upload a CSV instead.",
+};
 
 /** One CSV record as an engager row, through the same header names the lead import accepts. */
 function csvRow(record: Record<string, string>): { ok: true; data: EngagerRow } | { ok: false; reason: string } {
@@ -373,15 +406,15 @@ playRoutes.post("/:id/upload", rateLimit({ perMinute: 12, name: "plays-upload" }
     if (!normalizeLinkedinPostUrl(b.postUrl)) {
       blockedNote = "Who engaged can only be read from the link of a public LinkedIn post, and this link is not one. Paste the profile links or upload a CSV instead.";
     } else {
-      let post: Awaited<ReturnType<ReturnType<typeof playEngines>["linkedinPostEngagers"]>>;
+      let post: PostEngagers;
       try {
         post = await playEngines().linkedinPostEngagers(b.postUrl);
       } catch (e) {
         console.warn(`[plays] could not read a post for play ${play.id}: ${(e as Error)?.name ?? "Error"}`);
-        post = { people: [], publicPage: false };
+        post = { people: [], publicPage: false, unread: "network" };
       }
       if (post.refused) blockedNote = customerText(post.refused, 300);
-      else if (!post.publicPage) blockedNote = "LinkedIn did not show that post without signing in, so nobody could be read from it. Paste the profile links or upload a CSV instead.";
+      else if (!post.publicPage) blockedNote = POST_UNREAD[post.unread ?? "signin"];
       else if (!post.people.length) blockedNote = "That post is public, but it did not show who engaged with it. Paste the profile links or upload a CSV instead.";
       post.people.slice(0, UPLOAD_MAX_ROWS).forEach((p, i) => rows.push({ row: i + 1, data: { fullName: p.fullName, firstName: p.firstName, lastName: p.lastName, title: p.title, companyName: p.companyName, linkedinUrl: p.linkedinUrl, location: p.location } }));
     }

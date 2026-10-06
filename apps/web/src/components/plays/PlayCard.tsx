@@ -2,7 +2,7 @@ import { Link } from "react-router-dom";
 import { fmtDate } from "../../lib/api";
 import { DeleteButton } from "../ui";
 import { plural } from "../../lib/plural";
-import { ago, clean, playInputs, runFailed, runProblemTitle, runSentence, scheduleLabel, typeName, typeTone, type PlayOut, type PlayTypeInfo } from "../../lib/plays";
+import { ago, clean, findsCompanies, nextRunLabel, playInputs, runFailed, runProblemTitle, runSentence, scheduleLabel, typeName, typeTone, type PlayOut, type PlayTypeInfo } from "../../lib/plays";
 
 export interface RunProblem { message: string; quota: boolean }
 
@@ -49,7 +49,7 @@ export function PlayCard({
         <span className={`badge shrink-0 ${running ? "bg-brand-50 text-brand-700" : paused ? "bg-black/[0.05] text-ink-300" : "bg-emerald-50 text-emerald-700"}`}>{running ? "running" : paused ? "paused" : "active"}</span>
       </div>
       {inputs && <p className="mt-1 text-sm text-ink-300">{inputs}</p>}
-      {titles.length > 0 && <p className="mt-1 text-xs text-ink-400">Looks for: {titles.slice(0, 4).join(", ")}{titles.length > 4 ? ` and ${titles.length - 4} more` : ""}</p>}
+      {titles.length > 0 && findsCompanies(types, play.type) && <p className="mt-1 text-xs text-ink-400">Looks for: {titles.slice(0, 4).join(", ")}{titles.length > 4 ? ` and ${titles.length - 4} more` : ""}</p>}
 
       <dl className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
         <div className={`rounded-lg p-2 ${counts.pending > 0 ? "bg-brand-50" : "bg-cream"}`}><dt className="text-ink-400">Waiting</dt><dd className="text-base font-semibold tabular-nums" data-testid="count-pending">{(counts.pending ?? 0).toLocaleString()}</dd></div>
@@ -75,7 +75,7 @@ export function PlayCard({
       </p>
       <p className="mt-1 text-xs text-ink-400">
         {upload ? "Fed by your uploads" : paused ? `Paused - ${play.runEveryHours ? "its schedule is on hold" : "runs when you press Run"}` : scheduleLabel(play.runEveryHours)}
-        {!upload && !paused && play.runEveryHours && play.nextRunAt ? ` · next ${ago(play.nextRunAt) || fmtDate(play.nextRunAt)}` : ""}
+        {!upload && !paused && play.runEveryHours && !running && nextRunLabel(play.nextRunAt) ? ` · ${nextRunLabel(play.nextRunAt)}` : ""}
         {play.campaignId ? ` · campaign: ${clean(campaignName, 60) || "attached"}` : ""}
         {play.clientId ? ` · for client: ${clean(clientName, 60) || "assigned"}` : ""}
       </p>

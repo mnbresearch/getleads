@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch, expectLists, fmtDate } from "../../lib/api";
 import { EmailStatusBadge, Empty, LoadError, ScoreBar, Spinner } from "../ui";
@@ -12,6 +12,15 @@ import {
 type Decision = { id: string; decision: "approve" | "skip"; skipReason?: string };
 /** When this few are left on screen and the server holds more, the next ones are fetched. */
 const TOP_UP_AT = 10;
+/**
+ * A refusal that means "this is no longer waiting": someone else decided it, or it was
+ * removed. The server says so in a sentence; these are the openings of the ones it uses.
+ * Such a card has nothing left to decide, so it leaves the queue with a quiet note - it does
+ * not stay behind marked "still waiting", which it is not.
+ */
+const NO_LONGER_WAITING = /^(already (approved|skipped)\b|decided elsewhere\b|this was removed while it was being approved|not found in this workspace|its play no longer exists)/i;
+/** How many "saved company" follow-ups stay on screen. */
+const SAVED_SHOWN = 5;
 type Notice = { message: string; detail?: string; quota?: boolean; tone: "amber" | "red" };
 
 const KIND_LABEL: Record<string, string> = { person: "Person", company: "Company", post: "Conversation" };
@@ -42,10 +51,12 @@ function isTyping(el: EventTarget | null): boolean {
  * reviewer never has to reach for the pointer.
  */
 export function ReviewQueue({
-  plays, types, playId, kind, onFilter, epoch, shortcuts, toast, onPendingChange, onForbidden, onGoToPlays,
+  plays, types, campaignNames, playId, kind, onFilter, epoch, shortcuts, toast, onPendingChange, onForbidden, onGoToPlays,
 }: {
   plays: PlayOut[];
   types: PlayTypeInfo[] | null;
+  /** Campaign id -> name, so the enrol choice can say which campaign it means. */
+  campaignNames: Map<string, string>;
   playId: string;
   kind: string;
   onFilter: (next: { playId?: string; kind?: string }) => void;
@@ -73,6 +84,13 @@ export function ReviewQueue({
   const [reasonFor, setReasonFor] = useState<string | null>(null);
   const [titlesFor, setTitlesFor] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
+  // Companies just approved: saved, but with nobody to contact yet. Each keeps a line with
+  // the next step (Find people) until it is used or dismissed.
+  // `before` is the card that now sits where the company was, so the line appears in place -
+  // under the reviewer's eyes - rather than somewhere up the page.
+  const [saved, setSaved] = useState<{ c: Candidate; before: string | null }[]>([]);
+  const savedRef = useRef<{ c: Candidate; before: string | null }[]>([]);
+  savedRef.current = saved;
 
   const key = `${playId}|${kind}`;
   const seq = useRef(0);
@@ -120,7 +138,7 @@ export function ReviewQueue({
         if (mode === "replace") setStale(false);
         const ids = new Set(next.map((c) => c.id));
         setSel((s) => new Set([...s].filter((id) => ids.has(id))));
-        setCardErr((m) => Object.fromEntries(Object.entries(m).filter(([id]) => ids.has(id))));
+        setCardErr((m) => Object.fromEntries(Object.entries(m).filter(([id]) => ids.has(id) || savedRef.current.some((x) => x.c.id === id))));
         const nextActive = activeRef.current && ids.has(activeRef.current) ? activeRef.current : next[0]?.id ?? null;
         setActiveId(nextActive);
         if (refocus.current) { refocus.current = false; wantFocus.current = nextActive ?? "empty"; }
@@ -148,7 +166,7 @@ export function ReviewQueue({
     else setStale(true);
   }, [epoch, load]);
   // A different filter is a different list: nothing stays selected across it.
-  useEffect(() => { setSel(new Set()); setReasonFor(null); setTitlesFor(null); setNotice(null); }, [key]);
+  useEffect(() => { setSel(new Set()); setReasonFor(null); setTitlesFor(null); setNotice(null); setSaved([]); }, [key]);
 
   // Focus follows the queue: after a card leaves, the next one (or the empty state) takes it.
   useEffect(() => {
@@ -208,6 +226,11 @@ export function ReviewQueue({
     const inferred = !sum.stopped && changed + refused.size === answered.length && [...refused.keys()].every((id) => sent.has(id));
     const exact = byName || inferred;
     const applied = byName ? (named ?? []).filter((id) => sent.has(id)) : inferred ? answered.filter((a) => !refused.has(a.id)).map((a) => a.id) : [];
+    // Refused because it is no longer waiting at all (decided elsewhere, or removed): there
+    // is nothing here to retry, so these leave too - quietly, and never counted as approved.
+    const elsewhere = exact ? [...refused].filter(([, why]) => NO_LONGER_WAITING.test(why)).map(([id]) => id) : [];
+    for (const id of elsewhere) refused.delete(id);
+    const leaving = [...applied, ...elsewhere];
 
     const notChanged = (why: string) => `Still waiting - this was not changed: ${why}`;
     const errs: Record<string, string> = {};
@@ -230,29 +253,52 @@ export function ReviewQueue({
     if (Object.keys(errs).length) setCardErr((m) => ({ ...m, ...errs }));
     if (sum.stopped) setNotice({ tone: "amber", quota: sum.stopped.reason === "quota", message: sum.stopped.message });
 
-    if (applied.length) {
-      for (const id of applied) gone.current.add(id);
+    // Companies that were approved: saved, with nobody to contact yet.
+    const companies = rowsRef.current.filter((c) => c.kind === "company" && applied.includes(c.id) && items.some((i) => i.id === c.id && i.decision === "approve"));
+    if (companies.length || (leaving.length && savedRef.current.length)) {
+      // The first card still in the queue after a given one: where its line goes.
+      const order = rowsRef.current;
+      const nextAfter = (id: string | null): string | null => {
+        if (!id) return null;
+        const at = order.findIndex((c) => c.id === id);
+        if (at < 0) return id;
+        for (let i = at; i < order.length; i++) if (!leaving.includes(order[i].id)) return order[i].id;
+        return null;
+      };
+      setSaved((list) => [
+        ...companies.map((c) => ({ c, before: nextAfter(c.id) })),
+        ...list.filter((x) => !companies.some((c) => c.id === x.c.id)).map((x) => ({ ...x, before: nextAfter(x.before) })),
+      ].slice(0, SAVED_SHOWN));
+    }
+    if (leaving.length) {
+      for (const id of leaving) gone.current.add(id);
       const before = rowsRef.current;
       const left = before.filter((c) => !gone.current.has(c.id));
       // Whoever sat where the first decided card was is next; at the end of the list, the last one.
-      const firstIdx = before.findIndex((c) => applied.includes(c.id));
+      const firstIdx = before.findIndex((c) => leaving.includes(c.id));
       const nextCard = left[Math.min(Math.max(firstIdx, 0), left.length - 1)];
       setRows(left);
-      setTotal((t) => Math.max(left.length, t - applied.length));
+      setTotal((t) => Math.max(left.length, t - leaving.length));
       setSel((s) => new Set([...s].filter((id) => !gone.current.has(id))));
       setActiveId(nextCard?.id ?? null);
       wantFocus.current = nextCard ? nextCard.id : "empty";
-      const remaining = Math.max(left.length, totalRef.current - applied.length);
+      const remaining = Math.max(left.length, totalRef.current - leaving.length);
       // The page is empty but the server may hold more: fetch them and focus the first.
       if (left.length === 0) { refocus.current = true; load(); }
       // Running low with more waiting: bring the next ones in underneath, so a reviewer
       // working down a long queue never reaches the bottom of a page.
       else if (exact && left.length <= TOP_UP_AT && remaining > left.length) load("more", left.length);
     }
-    if (changed > 0) onPendingChange(changed);
+    if (changed + elsewhere.length > 0) onPendingChange(changed + elsewhere.length);
     if (!failure || !bulk) {
-      if (changed > 0) toast(decisionSummary({ ...sum, notApplied: sum.notApplied.filter((x) => errs[x.id]) }), "ok");
-      else if (refused.size > 0 && !sum.stopped) toast(decisionSummary(sum), "err");
+      const withReason = { ...sum, notApplied: sum.notApplied.filter((x) => errs[x.id]) };
+      const extra = [
+        companies.length === 1 ? "Saved the company. Press Find people to look for the right person there." : companies.length > 1 ? `Saved ${companies.length} companies. Press Find people on each to look for the right person there.` : "",
+        elsewhere.length === 1 ? "1 had already been decided elsewhere and has left your queue." : elsewhere.length > 1 ? `${elsewhere.length} had already been decided elsewhere and have left your queue.` : "",
+      ].filter(Boolean).join(" ");
+      if (changed > 0) toast(`${decisionSummary(withReason)}${extra ? ` ${extra}` : ""}`, "ok");
+      else if (withReason.notApplied.length > 0 && !sum.stopped) toast(`${decisionSummary(withReason)}${extra ? ` ${extra}` : ""}`, "err");
+      else if (extra) toast(extra, "ok");
       else if (sum.stopped) toast("Nothing was changed.", "err");
     }
     // Not every card could be matched to the answer: read the truth back.
@@ -271,12 +317,16 @@ export function ReviewQueue({
       const before = rowsRef.current;
       const fresh = fits.filter((p) => !before.some((x) => x.id === p.id));
       if (fresh.length) {
-        const at = before.findIndex((x) => x.id === c.id);
+        // Under the company's card - or, for a company already approved, where its line is.
+        const own = before.findIndex((x) => x.id === c.id);
+        const anchor = savedRef.current.find((x) => x.c.id === c.id)?.before;
+        const anchorAt = anchor ? before.findIndex((x) => x.id === anchor) : -1;
+        const at = own >= 0 ? own : anchorAt >= 0 ? anchorAt - 1 : -1;
         const next = [...before.slice(0, at + 1), ...fresh, ...before.slice(at + 1)];
         setRows(next);
         setTotal((t) => t + fresh.length);
       }
-      if (added > 0) onPendingChange(-added);
+      if (added > 0) { onPendingChange(-added); setSaved((list) => list.filter((x) => x.c.id !== c.id)); }
       const company = candidateName(c);
       const note = clean(r.note, 300);
       if (added > 0) toast(`Found ${plural(added, "person", "people")} at ${company}. ${fresh.length ? "They are next in the queue, with the same reason and proof." : "They are waiting in the queue under People."}${note ? ` ${note}` : ""}`);
@@ -343,14 +393,18 @@ export function ReviewQueue({
   const selected = rows.filter((c) => sel.has(c.id));
   const anyBusy = Object.keys(busy).length > 0;
   const allOnPage = rows.length > 0 && rows.every((c) => sel.has(c.id));
-  const enrollOffered = (selected.length ? selected : rows).some(hasCampaign);
-  const enrollBox = (
-    <label className="flex items-center gap-2 text-sm text-ink-200">
-      <input type="checkbox" checked={enroll} onChange={(e) => setEnroll(e.target.checked)} />
-      Also add approved people to the play&apos;s campaign
-    </label>
-  );
+  const enrollOffered = rows.some(hasCampaign);
+  const enrollInBulk = selected.some(hasCampaign);
+  // Which campaign "the play's campaign" is, for the people on screen.
+  const campaignList = [...new Set(rows.map((c) => playsById.get(c.playId)?.campaignId).filter((id): id is string => !!id))].map((id) => clean(campaignNames.get(id), 60)).filter(Boolean);
+  const campaignWords = campaignList.length === 0 ? "" : campaignList.length <= 2 ? campaignList.join(" and ") : `${campaignList.slice(0, 2).join(", ")} and ${campaignList.length - 2} more`;
   const filtered = !!(playId || kind);
+  const dismissSaved = (id: string) => { setSaved((list) => list.filter((x) => x.c.id !== id)); setCardErr((m) => { const n = { ...m }; delete n[id]; return n; }); };
+  const savedLine = (c: Candidate) => (
+    <SavedCompany key={`saved-${c.id}`} c={c} busy={busy[c.id] === "find"} error={cardErr[c.id]} titlesOpen={titlesFor === c.id} onFind={(titles) => handlers.findPeople(c, titles)} onDismiss={() => dismissSaved(c.id)} />
+  );
+  // A line whose place in the list is gone (the queue emptied, or was re-read) sits above it.
+  const unplaced = saved.filter((x) => !x.before || !rows.some((r) => r.id === x.before));
 
   return (
     <div data-testid="review-queue">
@@ -371,7 +425,6 @@ export function ReviewQueue({
             Select all on this page
           </label>
         )}
-        {rows.length > 0 && selected.length === 0 && enrollOffered && enrollBox}
         {rows.length > 0 && (
           <span className="ml-auto hidden text-xs text-ink-400 md:inline">
             Keys: <Kbd>A</Kbd> approve · <Kbd>S</Kbd> skip · <Kbd>J</Kbd> <Kbd>K</Kbd> move
@@ -387,6 +440,22 @@ export function ReviewQueue({
         </div>
       )}
 
+      {rows.length > 0 && enrollOffered && (
+        <label className="mb-3 flex items-start gap-2 rounded-lg border border-black/[0.06] bg-surface px-3 py-2 text-sm text-ink-200" data-testid="enroll-toggle">
+          <input type="checkbox" className="mt-1 shrink-0" checked={enroll} onChange={(e) => setEnroll(e.target.checked)} />
+          <span className="min-w-0 [overflow-wrap:anywhere]">
+            Also add approved people to the play&apos;s campaign{campaignWords ? <>: <span className="font-medium text-ink-50">{campaignWords}</span></> : null}
+            <span className="block text-xs text-ink-400">Off unless you tick it. Approving sends nothing by itself - a campaign only sends once you have started it.</span>
+          </span>
+        </label>
+      )}
+
+      {unplaced.length > 0 && (
+        <ul className="mb-3 space-y-2" aria-label="Companies you just approved">
+          {unplaced.map((x) => savedLine(x.c))}
+        </ul>
+      )}
+
       {stale && rows.length > 0 && (
         <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-brand-50 px-3 py-2 text-sm text-ink-200" role="status" data-testid="review-stale">
           <span className="min-w-0 flex-1">A play has just finished running and may have found more people.</span>
@@ -398,6 +467,12 @@ export function ReviewQueue({
         <div className="sticky top-2 z-10 mb-3 flex flex-wrap items-center gap-2 rounded-lg bg-brand-50 px-3 py-2 text-sm shadow-card ring-1 ring-brand-100" data-testid="bulk-bar">
           <span className="font-medium text-brand-600">{selected.length} selected</span>
           <button type="button" className="btn-primary py-1.5" disabled={anyBusy} onClick={() => decide(selected.map((c) => ({ id: c.id, decision: "approve" as const })), true)}>Approve {selected.length}</button>
+          {enrollInBulk && (
+            <label className="flex items-center gap-2 text-sm text-ink-200">
+              <input type="checkbox" checked={enroll} onChange={(e) => setEnroll(e.target.checked)} />
+              Also add approved people to the play&apos;s campaign
+            </label>
+          )}
           <button type="button" className="btn-secondary py-1.5" disabled={anyBusy} onClick={() => decide(selected.map((c) => ({ id: c.id, decision: "skip" as const })), true)}>Skip {selected.length}</button>
           <select
             className="input w-48 py-1.5"
@@ -410,7 +485,6 @@ export function ReviewQueue({
             {SKIP_REASONS.map((r) => <option key={r} value={r}>{r}</option>)}
             <option value="Other">Other</option>
           </select>
-          {enrollOffered && enrollBox}
           <button type="button" className="ml-auto text-ink-400 hover:text-ink-100" onClick={() => setSel(new Set())}>Clear</button>
         </div>
       )}
@@ -436,6 +510,8 @@ export function ReviewQueue({
           )}
           <ul className="space-y-3" aria-label="People waiting for review">
             {rows.map((c) => (
+              <Fragment key={c.id}>
+              {saved.filter((x) => x.before === c.id).map((x) => savedLine(x.c))}
               <CandidateCard
                 key={c.id}
                 c={c}
@@ -449,6 +525,7 @@ export function ReviewQueue({
                 titlesOpen={titlesFor === c.id}
                 h={handlers}
               />
+              </Fragment>
             ))}
           </ul>
           <div className="mt-4 flex flex-wrap items-center gap-3 text-sm text-ink-400">
@@ -497,8 +574,6 @@ const CandidateCard = memo(function CandidateCard({
   const onToggleReason = () => h.toggleReason(c.id);
   const onFindPeople = (titles?: string[]) => h.findPeople(c, titles);
   const [other, setOther] = useState<string | null>(null);
-  const [titleDraft, setTitleDraft] = useState("");
-  const wanted = titleDraft.split(",").map((t) => t.trim().slice(0, 100)).filter(Boolean).slice(0, 10);
   useEffect(() => { if (!reasonOpen) setOther(null); }, [reasonOpen]);
   const name = candidateName(c);
   const title = clean(c.title, 160);
@@ -600,16 +675,7 @@ const CandidateCard = memo(function CandidateCard({
               </div>
             )}
 
-            {titlesOpen && (
-              <form className="mt-2 flex flex-wrap items-end gap-2" data-testid="find-titles" onSubmit={(e) => { e.preventDefault(); if (wanted.length) onFindPeople(wanted); }}>
-                <div className="min-w-0 flex-1 basis-56">
-                  <label className="label" htmlFor={`find-titles-${c.id}`}>Which job titles to look for at {name}</label>
-                  <input id={`find-titles-${c.id}`} className="input py-1.5" autoFocus maxLength={600} placeholder="VP Operations, Head of Customer Success" value={titleDraft} onChange={(e) => setTitleDraft(e.target.value)} />
-                </div>
-                <button type="submit" className="btn-secondary py-1.5" disabled={!!busy || wanted.length === 0}>Find</button>
-                <p className="basis-full text-xs text-ink-400">This play has no job titles saved. Separate several with commas - or add them to the play under Edit so you are not asked again.</p>
-              </form>
-            )}
+            {titlesOpen && <FindTitlesForm id={c.id} name={name} busy={!!busy} onFind={onFindPeople} />}
 
             {error && <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-sm text-red-700" role="alert" data-testid="candidate-error">{error}</div>}
           </div>
@@ -618,3 +684,39 @@ const CandidateCard = memo(function CandidateCard({
     </li>
   );
 });
+
+/** Asks which job titles to look for, for a play that has none saved. */
+function FindTitlesForm({ id, name, busy, onFind }: { id: string; name: string; busy: boolean; onFind: (titles: string[]) => void }) {
+  const [draft, setDraft] = useState("");
+  const wanted = draft.split(",").map((t) => t.trim().slice(0, 100)).filter(Boolean).slice(0, 10);
+  return (
+    <form className="mt-2 flex flex-wrap items-end gap-2" data-testid="find-titles" onSubmit={(e) => { e.preventDefault(); if (wanted.length) onFind(wanted); }}>
+      <div className="min-w-0 flex-1 basis-56">
+        <label className="label" htmlFor={`find-titles-${id}`}>Which job titles to look for at {name}</label>
+        <input id={`find-titles-${id}`} className="input py-1.5" autoFocus maxLength={600} placeholder="VP Operations, Head of Customer Success" value={draft} onChange={(e) => setDraft(e.target.value)} />
+      </div>
+      <button type="submit" className="btn-secondary py-1.5" disabled={busy || wanted.length === 0}>Find</button>
+      <p className="basis-full text-xs text-ink-400">This play has no job titles saved. Separate several with commas - or add them to the play under Edit so you are not asked again.</p>
+    </form>
+  );
+}
+
+/**
+ * A company that was just approved. Approving saved it, but a company is nobody to write
+ * to: the line says what happened and keeps the next step - Find people - one press away,
+ * since the card itself has left the queue.
+ */
+function SavedCompany({ c, busy, error, titlesOpen, onFind, onDismiss }: { c: Candidate; busy: boolean; error?: string; titlesOpen: boolean; onFind: (titles?: string[]) => void; onDismiss: () => void }) {
+  const name = candidateName(c);
+  return (
+    <li className="rounded-lg border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-sm [overflow-wrap:anywhere]" data-testid="saved-company" data-id={c.id}>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
+        <span className="min-w-0 flex-1 text-ink-100" role="status">Saved the company <span className="font-medium text-ink-50">{name}</span>. Press Find people to look for the right person there.</span>
+        <button type="button" className="btn-secondary shrink-0 py-1" disabled={busy} aria-expanded={titlesOpen || undefined} onClick={() => onFind()}>{busy ? "Finding people…" : "Find people"}</button>
+        <button type="button" className="shrink-0 text-ink-400 hover:text-ink-100" aria-label={`Dismiss the note about ${name}`} onClick={onDismiss}>✕</button>
+      </div>
+      {titlesOpen && <FindTitlesForm id={c.id} name={name} busy={busy} onFind={onFind} />}
+      {error && <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-red-700" role="alert">{error}</div>}
+    </li>
+  );
+}

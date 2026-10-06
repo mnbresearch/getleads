@@ -35,8 +35,9 @@ export const RETENTION = {
   /** Upgrade requests that were closed (converted or dismissed). */
   closedUpgradeRequestDays: 730,
   /**
-   * What a play found and nobody approved: candidates still waiting or skipped, and the
-   * record of each run. (An approved candidate stays for as long as its lead does.)
+   * What a play found: candidates still waiting or skipped (counted from when they were
+   * found), approved companies and conversations (counted from when they were approved),
+   * and the record of each run. An approved PERSON stays for as long as their lead does.
    */
   playCandidateDays: 180,
 } as const;
@@ -157,6 +158,20 @@ export async function runRetention(db: Db): Promise<RetentionReport> {
         DELETE FROM play_candidates WHERE id IN (
           SELECT id FROM play_candidates
           WHERE status = 'approved' AND kind = 'person' AND lead_id IS NULL AND coalesce(decided_at, created_at) < now() - interval '1 hour'
+          LIMIT ${BATCH})`),
+    ),
+    { repeat: true },
+  );
+  // An approved company or conversation has no lead to live and die with, and it still holds
+  // what was found: an author's name, a quote, a link. Kept for the same period, counted
+  // from the approval. (The company row and the task the approval made are the workspace's
+  // own records and are not touched.)
+  await step("deleted", "approved play companies and conversations", async (tx) =>
+    counted(
+      await tx.execute(sql`
+        DELETE FROM play_candidates WHERE id IN (
+          SELECT id FROM play_candidates
+          WHERE status = 'approved' AND kind IN ('company', 'post') AND coalesce(decided_at, created_at) < now() - ${days(RETENTION.playCandidateDays)}
           LIMIT ${BATCH})`),
     ),
     { repeat: true },

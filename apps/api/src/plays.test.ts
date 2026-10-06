@@ -1419,34 +1419,55 @@ suite("plays", () => {
       expect(r.text).not.toContain(`Other play ${tag}`);
     });
 
-    it("candidates nobody approved are deleted after 180 days; approved ones stay while their lead exists", async () => {
+    it("candidates nobody approved are deleted after 180 days, and so are approved companies and conversations; an approved person stays while their lead exists", async () => {
       const { RETENTION, runRetention } = await import("./lib/privacyRetention.js");
       expect(RETENTION.playCandidateDays).toBe(180);
       const o = await signup("retention");
       const tag = u8();
-      const { play, candidates } = await queued(o, [person(`r-old-pending-${tag}`), person(`r-old-skipped-${tag}`), person(`r-old-approved-${tag}`), person(`r-new-pending-${tag}`), person(`r-orphan-${tag}`), person(`r-fresh-orphan-${tag}`), company(`Old Co ${tag}`)]);
+      const { play, candidates } = await queued(o, [
+        person(`r-old-pending-${tag}`),
+        person(`r-old-skipped-${tag}`),
+        person(`r-old-approved-${tag}`),
+        person(`r-new-pending-${tag}`),
+        person(`r-orphan-${tag}`),
+        person(`r-fresh-orphan-${tag}`),
+        company(`Old Co ${tag}`),
+        company(`Fresh Co ${tag}`),
+        post(`old-${tag}`),
+        post(`fresh-${tag}`),
+        company(`Found Long Ago Approved Today ${tag}`),
+      ]);
       const by = (slug: string) => candidates.find((c: any) => (c.linkedinUrl ?? "").endsWith(`${slug}-${tag}`));
+      const co = (name: string) => candidates.find((c: any) => c.companyName === `${name} ${tag}`);
+      const thread = (id: string) => candidates.find((c: any) => c.kind === "post" && c.evidenceUrl.endsWith(`${id}-${tag}`));
       await decide(o, [{ id: by("r-old-skipped").id, decision: "skip" }]);
-      await approve(o, [by("r-old-approved").id, by("r-orphan").id, by("r-fresh-orphan").id, candidates.find((c: any) => c.kind === "company").id]);
-      const old = [by("r-old-pending").id, by("r-old-skipped").id, by("r-old-approved").id, by("r-orphan").id, candidates.find((c: any) => c.kind === "company").id];
+      const approved = await approve(o, [by("r-old-approved").id, by("r-orphan").id, by("r-fresh-orphan").id, co("Old Co").id, co("Fresh Co").id, thread("old").id, thread("fresh").id, co("Found Long Ago Approved Today").id]);
+      expect(approved.body.approved).toBe(8);
+      const old = [by("r-old-pending").id, by("r-old-skipped").id, by("r-old-approved").id, by("r-orphan").id, co("Old Co").id, thread("old").id];
       await db.execute(S.sql`UPDATE play_candidates SET created_at = now() - interval '181 days', decided_at = CASE WHEN decided_at IS NULL THEN NULL ELSE now() - interval '181 days' END WHERE id IN (${S.sql.join(old.map((id: string) => S.sql`${id}`), S.sql`, `)})`);
+      // Found long ago but approved today: the period for an approved company counts from the approval.
+      await q`UPDATE play_candidates SET created_at = now() - interval '300 days' WHERE id = ${co("Found Long Ago Approved Today").id}`;
       // Two approved people lose their lead to a plain delete (no erasure routine): one long ago, one just now.
       const orphanLeads = [(await candidate(by("r-orphan").id)).leadId, (await candidate(by("r-fresh-orphan").id)).leadId];
       await db.delete(S.leads).where(S.inArray(S.leads.id, orphanLeads));
       const [oldRun] = await db.insert(S.playRuns).values({ orgId: o.orgId, playId: play.id, status: "done", trigger: "manual" }).returning();
       await q`UPDATE play_runs SET started_at = now() - interval '181 days' WHERE id = ${oldRun.id}`;
+      const tasksBefore = (await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId))).length;
+      expect(tasksBefore).toBe(2);
 
       const report = await runRetention(db);
       expect(report.failed).toEqual([]);
       expect(report.deleted["play candidates"]).toBeGreaterThanOrEqual(2);
       expect(report.deleted["play candidates of deleted leads"]).toBeGreaterThanOrEqual(1);
+      expect(report.deleted["approved play companies and conversations"]).toBeGreaterThanOrEqual(2);
       expect(report.deleted["play runs"]).toBeGreaterThanOrEqual(1);
       const left = (await candidatesOf(play.id)).map((c: any) => c.id).sort();
-      expect(left).toEqual([by("r-old-approved").id, by("r-new-pending").id, by("r-fresh-orphan").id, candidates.find((c: any) => c.kind === "company").id].sort());
+      expect(left).toEqual([by("r-old-approved").id, by("r-new-pending").id, by("r-fresh-orphan").id, co("Fresh Co").id, thread("fresh").id, co("Found Long Ago Approved Today").id].sort());
       expect((await db.select().from(S.playRuns).where(S.eq(S.playRuns.id, oldRun.id))).length).toBe(0);
       expect((await db.select().from(S.playRuns).where(S.eq(S.playRuns.playId, play.id))).length).toBe(1);
-      // The lead a kept candidate points at was not touched.
+      // The lead a kept candidate points at was not touched - nor the tasks the approved conversations made.
       expect((await leadsOf(o.orgId)).length).toBe(1);
+      expect((await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId))).length).toBe(tasksBefore);
     });
 
     it("a deleted workspace takes its plays, runs and candidates with it", async () => {
@@ -1995,6 +2016,19 @@ suite("plays", () => {
       expect(walled.body.run).toMatchObject({ status: "blocked", found: 0 });
       expect(walled.body.run.note).toMatch(/did not show that post without signing in/);
       expect(fake.postCalls).toEqual([url]);
+      // "LinkedIn could not be reached" and "there is no such post" are different things, said differently.
+      fake.post = { people: [], publicPage: false, refused: undefined, unread: "network" } as any;
+      const down = await UP(o, play.id, { engagement: "reacted", postUrl: url });
+      expect(down.body.run).toMatchObject({ status: "blocked", found: 0 });
+      expect(down.body.run.note).toMatch(/^LinkedIn could not be reached just now, so the post was not read\. This says nothing about the post/);
+      expect(down.body.run.note).not.toMatch(/signing in/);
+      fake.post = { people: [], publicPage: false, refused: undefined, unread: "missing" } as any;
+      expect((await UP(o, play.id, { engagement: "reacted", postUrl: url })).body.run.note).toMatch(/^LinkedIn says there is no post at that link/);
+      fake.post = { people: [], publicPage: false, refused: undefined, unread: "signin" } as any;
+      expect((await UP(o, play.id, { engagement: "reacted", postUrl: url })).body.run.note).toMatch(/did not show that post without signing in/);
+      fake.postCalls = [];
+      fake.post = { people: [], publicPage: false, refused: undefined };
+      await UP(o, play.id, { engagement: "reacted", postUrl: url });
 
       fake.post = { publicPage: true, refused: undefined, people: [{ fullName: "Ann A", firstName: "Ann", lastName: "A", title: "CEO", linkedinUrl: `https://www.linkedin.com/in/post-a-${tag}`, source: "linkedin:post", confidence: 0.6 }] };
       const ok = await UP(o, play.id, { engagement: "reacted", postUrl: url, postAuthor: "Acme" });
@@ -2084,6 +2118,11 @@ suite("plays", () => {
       const unread = await req("POST", "/v1/plays/plan", o.token, { website: "scout.example" });
       expect(unread.status).toBe(200);
       expect(unread.body.notes[0]).toBe("scout.example did not answer.");
+      // General suggestions for a site nobody could read are not what a search unit is for: it is given back,
+      // as a run that could not look gives its unit back. (Nothing internal is added to the answer.)
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+      expect("siteRead" in unread.body).toBe(false);
+      expect(Object.keys(unread.body).sort()).toEqual(["competitors", "icp", "notes", "plays", "product", "titles"]);
     });
   });
 
@@ -2348,6 +2387,539 @@ suite("plays", () => {
       expect(seen.length, JSON.stringify(r)).toBe(1);
       expect(seen[0].reason).toBe("Hiring a Sales Development Representative - open posting on Greenhouse.");
       expect(seen[0].guard).toBe("enforce");
+    });
+  });
+  // ── 20. The final fix round ────────────────────────────────────────────────────────
+  describe("starting a run is one step per play", () => {
+    it("thirty Run requests at the same moment start one run, charge one search, and tell the rest which run is going", async () => {
+      const o = await signup("race");
+      const play = await mkPlay(o);
+      const rs = await Promise.all(Array.from({ length: 30 }, () => req("POST", `/v1/plays/${play.id}/run`, o.token, {})));
+      const started = rs.filter((r) => r.status === 202);
+      expect(started).toHaveLength(1);
+      const others = rs.filter((r) => r.status !== 202);
+      // Twelve a minute get past the rate limit: one started, the other eleven are told about its run.
+      expect(others.map((r) => r.status).sort()).toEqual([...Array(11).fill(409), ...Array(18).fill(429)]);
+      for (const r of others.filter((x) => x.status === 409)) expect([r.body.error.code, r.body.error.details]).toEqual(["already_running", { runId: started[0].body.runId }]);
+      const runs = await db.select().from(S.playRuns).where(S.eq(S.playRuns.playId, play.id));
+      expect(runs.map((r: any) => [r.id, r.status, r.trigger])).toEqual([[started[0].body.runId, "running", "manual"]]);
+      const jobs = await jobsOf(o.orgId, "play.run");
+      expect(jobs.map((j: any) => [j.id, j.payload.runId, j.maxAttempts])).toEqual([[started[0].body.jobId, started[0].body.runId, 1]]);
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+      // The one run does its work once.
+      fake.findings = [company(`Raced ${u8()}`)];
+      await S.runJobById(db, handlers, jobs[0].id);
+      expect(fake.calls).toHaveLength(1);
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+    });
+
+    it("the same holds without the rate limit in front, and for a double-click", async () => {
+      const o = await signup("race-svc");
+      const play = await mkPlay(o);
+      const rs = await Promise.all(Array.from({ length: 30 }, () => svc.startRun({ id: play.id, orgId: o.orgId }, "manual")));
+      const started = rs.filter((r) => r.started) as any[];
+      expect(started).toHaveLength(1);
+      expect(rs.filter((r) => !r.started)).toEqual(Array(29).fill({ started: false, reason: "running", runId: started[0].run.id }));
+      expect((await db.select().from(S.playRuns).where(S.eq(S.playRuns.playId, play.id))).length).toBe(1);
+      expect((await jobsOf(o.orgId, "play.run")).length).toBe(1);
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+
+      const two = await mkPlay(o, { name: "Double-click" });
+      const [a, b] = await Promise.all([req("POST", `/v1/plays/${two.id}/run`, o.token, {}), req("POST", `/v1/plays/${two.id}/run`, o.token, {})]);
+      expect([a.status, b.status].sort()).toEqual([202, 409]);
+      expect(await usageOf(o.orgId, "searches")).toBe(2);
+      // One search left and two plays started together: each play is its own step, and the allowance holds.
+      const p = await signup("race-quota");
+      const [x, y] = [await mkPlay(p, { name: "X" }), await mkPlay(p, { name: "Y" })];
+      await setLimits(p.orgId, { searchesPerMonth: 1 });
+      const both = await Promise.all([req("POST", `/v1/plays/${x.id}/run`, p.token, {}), req("POST", `/v1/plays/${y.id}/run`, p.token, {})]);
+      expect(both.map((r) => r.status).sort()).toEqual([202, 402]);
+      expect(await usageOf(p.orgId, "searches")).toBe(1);
+      expect((await jobsOf(p.orgId, "play.run")).length).toBe(1);
+      expect((await db.select().from(S.playRuns).where(S.eq(S.playRuns.orgId, p.orgId))).length).toBe(1);
+    });
+
+    it("a start that cannot be finished leaves nothing behind: no charge, no run, no job", async () => {
+      const o = await signup("race-rollback");
+      const play = await mkPlay(o);
+      // The queue is full for this kind of job: refused before anything is written.
+      const other = await mkPlay(o, { name: "Other" });
+      expect((await req("POST", `/v1/plays/${other.id}/run`, o.token, {})).status).toBe(202);
+      process.env.JOB_OPEN_TYPE_CAP = "1";
+      try {
+        const full = await req("POST", `/v1/plays/${play.id}/run`, o.token, {});
+        expect([full.status, full.body.error.code]).toEqual([429, "queue_full"]);
+      } finally {
+        delete process.env.JOB_OPEN_TYPE_CAP;
+      }
+      expect((await db.select().from(S.playRuns).where(S.eq(S.playRuns.playId, play.id))).length).toBe(0);
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+      // The run row cannot be written (the play went away between the check and the insert): the charge is undone with it.
+      const before = await usageOf(o.orgId, "searches");
+      const gone = { id: randomUUID(), orgId: o.orgId };
+      expect(await svc.startRun(gone, "manual")).toEqual({ started: false, reason: "gone" });
+      expect(await usageOf(o.orgId, "searches")).toBe(before);
+      // And the play still starts afterwards.
+      expect((await req("POST", `/v1/plays/${play.id}/run`, o.token, {})).status).toBe(202);
+      expect(await usageOf(o.orgId, "searches")).toBe(before + 1);
+    });
+
+    it("two schedulers ticking at once start each due play once", async () => {
+      const o = await signup("race-tick");
+      const past = new Date("2001-01-01T00:00:00Z");
+      const plays = [await mkPlay(o, { name: "A", runEveryHours: 24 }), await mkPlay(o, { name: "B", runEveryHours: 24 })];
+      await db.update(S.plays).set({ nextRunAt: past }).where(S.eq(S.plays.orgId, o.orgId));
+      const tick = () => handlers["plays.tick"]({ id: randomUUID(), orgId: null, payload: {}, attempts: 1, maxAttempts: 1 }, jobCtx());
+      await Promise.all([tick(), tick(), tick()]);
+      const jobs = await jobsOf(o.orgId, "play.run");
+      expect(jobs.map((j: any) => j.payload.playId).sort()).toEqual(plays.map((p) => p.id).sort());
+      expect(await usageOf(o.orgId, "searches")).toBe(2);
+      expect((await db.select().from(S.playRuns).where(S.eq(S.playRuns.orgId, o.orgId))).length).toBe(2);
+    });
+  });
+
+  describe("a run whose job is gone", () => {
+    const STALE = "This run did not finish. Run the play again.";
+    it("is closed when the play is read, and its search given back once - but not while its job is still waiting or at work", async () => {
+      const o = await signup("lost");
+      const play = await mkPlay(o);
+      const start = await req("POST", `/v1/plays/${play.id}/run`, o.token, {});
+      expect(start.status).toBe(202);
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+      await q`UPDATE play_runs SET started_at = now() - interval '16 minutes' WHERE id = ${start.body.runId}`;
+      // Sixteen minutes on, its job is still in the queue: nothing is closed.
+      const waiting = await req("GET", `/v1/plays/${play.id}`, o.token);
+      expect(waiting.body.runs[0]).toMatchObject({ id: start.body.runId, status: "running" });
+      expect((await req("GET", "/v1/plays", o.token)).body.plays[0].lastResult).toBeNull();
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+      await q`UPDATE jobs SET status = 'running', locked_at = now() WHERE id = ${start.body.jobId}`;
+      expect((await req("GET", `/v1/plays/${play.id}/runs`, o.token)).body.runs[0].status).toBe("running");
+      // The worker died and the queue gave the job up: the run is over, and reading the play says so.
+      await q`UPDATE jobs SET status = 'failed' WHERE id = ${start.body.jobId}`;
+      const read = await req("GET", `/v1/plays/${play.id}`, o.apiKey);
+      expect(read.status).toBe(200);
+      expect(read.body.runs[0]).toMatchObject({ id: start.body.runId, status: "failed", note: STALE });
+      expect(read.body.runs[0].finishedAt).toBeTruthy();
+      expect(read.body.play).toMatchObject({ running: false, lastResult: { status: "failed", note: STALE } });
+      expect(await usageOf(o.orgId, "searches")).toBe(0);
+      // Once: reading again, the list, and a tick give nothing more back.
+      await req("GET", `/v1/plays/${play.id}`, o.token);
+      await req("GET", "/v1/plays", o.token);
+      await req("GET", `/v1/plays/${play.id}/runs`, o.token);
+      await handlers["plays.tick"]({ id: randomUUID(), orgId: null, payload: {}, attempts: 1, maxAttempts: 1 }, jobCtx());
+      expect(await usageOf(o.orgId, "searches")).toBe(0);
+      // If the job turns up after all, it does nothing and gives nothing back.
+      fake.findings = [company("Too Late")];
+      expect(await handlers["play.run"]({ id: randomUUID(), orgId: o.orgId, payload: { playId: play.id, runId: start.body.runId, charged: true }, attempts: 1, maxAttempts: 1 }, jobCtx())).toMatchObject({ skipped: "already finished" });
+      expect(fake.calls).toEqual([]);
+      expect(await usageOf(o.orgId, "searches")).toBe(0);
+      // And the play runs again.
+      const again = await run(o, play.id);
+      expect(again.run.status).toBe("done");
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+    });
+
+    it("is closed from the list and by the scheduler too; an upload that never came back is closed without a refund", async () => {
+      const o = await signup("lost-list");
+      const a = await mkPlay(o, { name: "A" });
+      const b = await mkPlay(o, { name: "B" });
+      const up = await mkPlay(o, { name: "Up", type: "engagers_upload", config: {} });
+      const sa = await req("POST", `/v1/plays/${a.id}/run`, o.token, {});
+      const sb = await req("POST", `/v1/plays/${b.id}/run`, o.token, {});
+      const [upRun] = await db.insert(S.playRuns).values({ orgId: o.orgId, playId: up.id, status: "running", trigger: "upload" }).returning();
+      expect(await usageOf(o.orgId, "searches")).toBe(2);
+      await q`UPDATE play_runs SET started_at = now() - interval '20 minutes' WHERE org_id = ${o.orgId}`;
+      await q`DELETE FROM jobs WHERE id = ${sa.body.jobId}`;
+      // The list: A's job is gone, B's is still queued.
+      const list = (await req("GET", "/v1/plays", o.token)).body.plays;
+      const byName = Object.fromEntries(list.map((p: any) => [p.name, p]));
+      expect(byName.A.lastResult).toMatchObject({ status: "failed", note: STALE });
+      expect(byName.B.lastResult).toBeNull();
+      expect(byName.Up.lastResult).toMatchObject({ status: "failed", note: STALE });
+      const runRow = async (id: string) => (await db.select().from(S.playRuns).where(S.eq(S.playRuns.id, id)))[0];
+      expect((await runRow(sa.body.runId)).status).toBe("failed");
+      expect((await runRow(sb.body.runId)).status).toBe("running");
+      expect((await runRow(upRun.id)).status).toBe("failed");
+      // One search back for A; none for the upload, which was never charged one.
+      expect(await usageOf(o.orgId, "searches")).toBe(1);
+      // The scheduler closes B once its job is gone.
+      await q`UPDATE jobs SET status = 'failed' WHERE id = ${sb.body.jobId}`;
+      const tick = await handlers["plays.tick"]({ id: randomUUID(), orgId: null, payload: {}, attempts: 1, maxAttempts: 1 }, jobCtx());
+      expect(tick.closedStale).toBeGreaterThanOrEqual(1);
+      expect((await runRow(sb.body.runId))).toMatchObject({ status: "failed", note: STALE });
+      expect(await usageOf(o.orgId, "searches")).toBe(0);
+      // Another workspace's reads close nothing of this one's, and a counter never goes below zero.
+      const other = await signup("lost-other");
+      const theirs = await mkPlay(other);
+      const [orphan] = await db.insert(S.playRuns).values({ orgId: other.orgId, playId: theirs.id, status: "running", trigger: "manual" }).returning();
+      await q`UPDATE play_runs SET started_at = now() - interval '20 minutes' WHERE id = ${orphan.id}`;
+      await req("GET", "/v1/plays", o.token);
+      await req("GET", `/v1/plays/${a.id}`, o.token);
+      expect((await runRow(orphan.id)).status).toBe("running");
+      await req("GET", `/v1/plays/${theirs.id}`, other.token);
+      expect((await runRow(orphan.id)).status).toBe("failed");
+      expect(await usageOf(other.orgId, "searches")).toBe(0);
+    });
+  });
+
+  describe("the schedule is shared fairly", () => {
+    const tick = () => handlers["plays.tick"]({ id: randomUUID(), orgId: null, payload: {}, attempts: 1, maxAttempts: 1 }, jobCtx());
+    const duePlays = (o: Org, n: number, at: Date) =>
+      db
+        .insert(S.plays)
+        .values(Array.from({ length: n }, (_, i) => ({ orgId: o.orgId, name: `Due ${i}`, type: "competitor_customers", status: "active", config: COMPETITORS, runEveryHours: 24, nextRunAt: new Date(at.getTime() + i * 1000) })))
+        .returning();
+
+    it("starts at most five plays of one workspace per tick, and none of a workspace that is scheduled for deletion", async () => {
+      expect(svc.PLAYS_PER_ORG_PER_TICK).toBe(5);
+      const o = await signup("fair");
+      const leaving = await signup("fair-leaving");
+      const mine = await duePlays(o, 8, new Date("2001-02-01T00:00:00Z"));
+      await duePlays(leaving, 2, new Date("2001-02-01T00:00:00Z"));
+      const [request] = await db.insert(S.workspaceDeletionRequests).values({ orgId: leaving.orgId, requestedBy: leaving.userId, scheduledFor: new Date(Date.now() + 7 * 86_400_000) }).returning();
+
+      await tick();
+      const first = (await jobsOf(o.orgId, "play.run")).map((j: any) => j.payload.playId).sort();
+      // The five that were due longest.
+      expect(first).toEqual(mine.slice(0, 5).map((p: any) => p.id).sort());
+      expect(await usageOf(o.orgId, "searches")).toBe(5);
+      expect((await jobsOf(leaving.orgId, "play.run")).length).toBe(0);
+      expect(await usageOf(leaving.orgId, "searches")).toBe(0);
+      expect((await db.select().from(S.plays).where(S.eq(S.plays.orgId, leaving.orgId))).every((p: any) => p.lastResult === null && p.nextRunAt.getTime() < Date.now())).toBe(true);
+      // The other three were not skipped or pushed back: they are next.
+      await tick();
+      expect((await jobsOf(o.orgId, "play.run")).length).toBe(8);
+      expect(await usageOf(o.orgId, "searches")).toBe(8);
+      // The deletion is cancelled: the workspace's plays run again.
+      await db.update(S.workspaceDeletionRequests).set({ cancelledAt: new Date() }).where(S.eq(S.workspaceDeletionRequests.id, request.id));
+      await tick();
+      const waiting = await jobsOf(leaving.orgId, "play.run");
+      expect(waiting.length).toBe(2);
+      expect(await usageOf(leaving.orgId, "searches")).toBe(2);
+      // Deletion is asked for again while those two runs wait in the queue: the first is not run, and its search is given back.
+      await db.insert(S.workspaceDeletionRequests).values({ orgId: leaving.orgId, requestedBy: leaving.userId, scheduledFor: new Date(Date.now() + 7 * 86_400_000) });
+      fake.findings = [company(`Leaving ${u8()}`)];
+      await S.runJobById(db, handlers, waiting[0].id);
+      expect((await db.select().from(S.jobs).where(S.eq(S.jobs.id, waiting[0].id)))[0]).toMatchObject({ status: "done", result: { skipped: "workspace scheduled for deletion" } });
+      expect(fake.calls).toEqual([]);
+      expect(await usageOf(leaving.orgId, "searches")).toBe(1);
+      const notRun = await playRow(waiting[0].payload.playId);
+      expect(notRun.lastResult).toMatchObject({ status: "skipped", note: "Not run on schedule: this workspace is scheduled for deletion. Cancel the deletion in Settings to run plays again." });
+      expect((await db.select().from(S.playRuns).where(S.eq(S.playRuns.id, waiting[0].payload.runId))).length).toBe(0);
+      // A run a person starts themselves still goes ahead: it is their workspace until it is gone.
+      const byHand = await req("POST", `/v1/plays/${waiting[0].payload.playId}/run`, leaving.token, {});
+      expect(byHand.status).toBe(202);
+      await S.runJobById(db, handlers, byHand.body.jobId);
+      expect(fake.calls).toHaveLength(1);
+    });
+
+    it("plays skipped for lack of searches do not use the tick's fifty starts", async () => {
+      expect(svc.PLAYS_PER_TICK).toBe(50);
+      // Eleven workspaces with no searches left, five due plays each (55 - more than a tick starts) ...
+      const broke: Org[] = [];
+      for (let i = 0; i < 11; i++) {
+        const b = await signup(`fair-broke-${i}`);
+        await setLimits(b.orgId, { searchesPerMonth: 1 });
+        await setUsage(b.orgId, "searches", 1);
+        await duePlays(b, 5, new Date("1999-01-01T00:00:00Z"));
+        broke.push(b);
+      }
+      // ... and, due after all of them, one play of a workspace that can run.
+      const o = await signup("fair-after");
+      const [mine] = await duePlays(o, 1, new Date("1999-06-01T00:00:00Z"));
+      const r = await tick();
+      expect(r.skippedQuota).toBeGreaterThanOrEqual(55);
+      expect((await jobsOf(o.orgId, "play.run")).map((j: any) => j.payload.playId)).toEqual([mine.id]);
+      for (const b of broke) {
+        expect(await usageOf(b.orgId, "searches")).toBe(1);
+        expect((await jobsOf(b.orgId, "play.run")).length).toBe(0);
+        const rows = await db.select().from(S.plays).where(S.eq(S.plays.orgId, b.orgId));
+        // Each says why it did not run and waits for its next slot.
+        for (const p of rows) {
+          expect(p.lastResult).toMatchObject({ status: "skipped" });
+          expect(p.lastResult.note).toMatch(/^Not run on schedule: /);
+          expect(p.nextRunAt.getTime()).toBeGreaterThan(Date.now() + 23 * 3600_000);
+        }
+      }
+    });
+  });
+
+  describe("what a candidate holds is cleaned on the way out as well", () => {
+    it("a stored row with control characters, a script link or a link with a password in it is shown - and approved - clean", async () => {
+      const o = await signup("clean-out");
+      const tag = u8();
+      const { play, candidates } = await queued(o, [person(`clean-${tag}`), post(`clean-${tag}`), post(`long-${tag}`), company(`Clean Co ${tag}`)]);
+      const p = candidates.find((c: any) => c.kind === "person");
+      const [t1, t2] = candidates.filter((c: any) => c.kind === "post");
+      const co = candidates.find((c: any) => c.kind === "company");
+      const longLink = `https://www.reddit.com/r/sales/comments/${"x".repeat(1500)}`;
+      // As a row might be after an import, a hand edit, or a release older than the rules.
+      await db
+        .update(S.playCandidates)
+        .set({ fullName: "Pat‮evil\u0007 Name", firstName: "Pat​", title: "T".repeat(500), companyName: "Glo⁦bex\u0008 Inc", location: "Ber‮lin", linkedinUrl: "https://user:hunter2@www.linkedin.com/in/pat", evidenceUrl: "https://reviewer:hunter2@evil.example/login", evidenceTitle: "Ti\u0000tle".replace("\u0000", "\u0001"), evidenceQuote: "Q".repeat(900), relevantBecause: `Hiring‮ a rep ${"r".repeat(400)}`, skipReason: null, scoreReasons: ["ok\u0007", "x".repeat(400)], signalType: "Not A Type!" })
+        .where(S.eq(S.playCandidates.id, p.id));
+      await db.update(S.playCandidates).set({ evidenceUrl: "javascript:alert(document.cookie)" }).where(S.eq(S.playCandidates.id, t1.id));
+      await db.update(S.playCandidates).set({ evidenceUrl: longLink, relevantBecause: "R".repeat(300) }).where(S.eq(S.playCandidates.id, t2.id));
+      await db.update(S.playCandidates).set({ companyName: "Clean‮ Co\u0007", evidenceUrl: "ftp://files.example/list" }).where(S.eq(S.playCandidates.id, co.id));
+      await db.update(S.plays).set({ name: "Acme‮ customers\u0007" }).where(S.eq(S.plays.id, play.id));
+
+      const list = (await req("GET", `/v1/plays/candidates?playId=${play.id}&limit=50`, o.token)).body.candidates;
+      const out = Object.fromEntries(list.map((c: any) => [c.id, c]));
+      expect(out[p.id]).toMatchObject({ fullName: "Pat evil Name", firstName: "Pat", companyName: "Glo bex Inc", location: "Ber lin", linkedinUrl: null, evidenceUrl: null, evidenceTitle: "Ti tle", signalType: "other", playName: "Acme customers" });
+      expect(out[p.id].title).toBe("T".repeat(300));
+      expect(out[p.id].evidenceQuote).toBe("Q".repeat(500));
+      expect(out[p.id].relevantBecause.length).toBeLessThanOrEqual(300);
+      expect(out[p.id].relevantBecause.startsWith("Hiring a rep")).toBe(true);
+      expect(out[p.id].scoreReasons).toEqual(["ok", "x".repeat(200)]);
+      expect(out[t1.id].evidenceUrl).toBeNull();
+      expect(out[co.id]).toMatchObject({ companyName: "Clean Co", evidenceUrl: null });
+      // Nothing with a control or text-direction character, a password or a script link is in the answer at all.
+      // eslint-disable-next-line no-control-regex
+      expect(JSON.stringify(list)).not.toMatch(/[\u0000-\u001f‪-‮⁦-⁩​]|hunter2|javascript:/);
+
+      // Approval puts the cleaned values on the lead - what the reviewer was shown.
+      const done = await approve(o, [p.id, t1.id, t2.id]);
+      expect(done.body).toMatchObject({ approved: 3, leadsCreated: 1, tasksCreated: 2 });
+      const [lead] = await leadsOf(o.orgId);
+      expect(lead).toMatchObject({ fullName: "Pat evil Name", linkedinUrl: null, location: "Ber lin" });
+      expect(lead.title).toBe("T".repeat(300));
+      expect(lead.custom.evidence_url).toBeUndefined();
+      expect(lead.custom.play_name).toBe("Acme customers");
+      expect(lead.custom.company_name).toBe("Glo bex Inc");
+      // eslint-disable-next-line no-control-regex
+      expect(JSON.stringify(lead)).not.toMatch(/[\u0000-\u001f‪-‮⁦-⁩​]|hunter2/);
+      // A task's body is the reason and the link, bounded; a link that would not fit whole is left out, never cut.
+      const made = await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId));
+      for (const t of made) expect(t.body.length).toBeLessThanOrEqual(1000);
+      const bodies = made.map((t: any) => t.body).sort();
+      expect(bodies.some((b: string) => b === "Reddit thread asking which tool to use for outbound.")).toBe(true);
+      const long = bodies.find((b: string) => b.startsWith("R".repeat(300)));
+      expect(long).toBe(`${"R".repeat(300)}\nThe link is too long to show here - open it from the play's approved conversations.`);
+      expect(JSON.stringify(made)).not.toMatch(/javascript:|x{200}/);
+    });
+
+    it("a finding, an upload link and a play name are cleaned on the way in", async () => {
+      const o = await signup("clean-in");
+      const tag = u8();
+      // An engine's evidence link with credentials in it is not kept; a conversation with only such a link is not a candidate.
+      const { candidates } = await queued(o, [company(`Cred Co ${tag}`, { evidenceUrl: "https://user:pw@acme.example/customers" }), post(`cred-${tag}`, { evidenceUrl: "https://user:pw@www.reddit.com/r/sales/1" }), person(`cred-${tag}`, { linkedinUrl: `https://u:p@www.linkedin.com/in/cred-${tag}`, email: `cred-${tag}@globex.example` })]);
+      expect(candidates.map((c: any) => [c.kind, c.evidenceUrl, c.linkedinUrl]).sort()).toEqual([["company", null, null], ["person", "https://boards.greenhouse.io/globex/jobs/1", null]]);
+      // An upload whose post link carries a user name or password is refused outright.
+      const up = await mkPlay(o, { type: "engagers_upload", config: {}, name: "Up" });
+      const bad = await req("POST", `/v1/plays/${up.id}/upload`, o.token, { engagement: "reacted", postUrl: "https://user:pw@www.linkedin.com/posts/acme_launch-1", people: [{ email: `a-${tag}@globex.example` }] });
+      expect([bad.status, bad.body.error.code]).toEqual([400, "validation_error"]);
+      expect(bad.body.error.message).toMatch(/must not contain a user name or password/);
+      expect(bad.text).not.toContain("user:pw");
+      expect(await candidatesOf(up.id)).toEqual([]);
+      // A play's name is one clean line.
+      const named = await req("POST", "/v1/plays", o.token, { name: "  Acme‮ customers\u0007​  ", type: "competitor_customers", config: COMPETITORS });
+      expect(named.status).toBe(201);
+      expect(named.body.play.name).toBe("Acme customers");
+      expect((await playRow(named.body.play.id)).name).toBe("Acme customers");
+      const renamed = await req("PATCH", `/v1/plays/${named.body.play.id}`, o.token, { name: "New⁧ name\u0001" });
+      expect(renamed.body.play.name).toBe("New name");
+      const empty = await req("PATCH", `/v1/plays/${named.body.play.id}`, o.token, { name: "‮​⁦" });
+      expect([empty.status, empty.body.error.code]).toEqual([400, "validation_error"]);
+      expect((await playRow(named.body.play.id)).name).toBe("New name");
+    });
+
+    it("a lead made from a candidate with a company name and no website carries the name for templates", async () => {
+      const o = await signup("company-name");
+      const tag = u8();
+      const { candidates } = await queued(o, [person(`named-${tag}`, { companyName: "Globex\u0007 GmbH" }), person(`sited-${tag}`, { companyName: "Initech", companyDomain: "initech.example" }), person(`bare-${tag}`, { companyName: undefined, email: `bare-${tag}@x.example` })]);
+      await approve(o, candidates.map((c: any) => c.id));
+      const leads = await leadsOf(o.orgId);
+      const of = (slug: string) => leads.find((l: any) => (l.linkedinUrl ?? "").endsWith(`${slug}-${tag}`));
+      expect(of("named").custom.company_name).toBe("Globex GmbH");
+      expect(of("named").companyId).toBeNull();
+      // With a website there is a company row, which is where the name lives.
+      expect("company_name" in of("sited").custom).toBe(false);
+      expect(of("sited").companyId).toBeTruthy();
+      expect("company_name" in of("bare").custom).toBe(false);
+    });
+  });
+
+  describe("how much one play may hold", () => {
+    const UP = (o: Org, id: string, body: unknown) => req("POST", `/v1/plays/${id}/upload`, o.token, body);
+    const fill = (o: Org, playId: string, status: string, n: number) =>
+      db.execute(S.sql`INSERT INTO play_candidates (org_id, play_id, kind, status, relevant_because, signal_type, dedupe_key) SELECT ${o.orgId}, ${playId}, 'person', ${status}, 'Reacted to a post.', 'post_engagement', 'fill:' || ${status} || ':' || g FROM generate_series(1, ${n}) g`);
+
+    it("skipping does not make room without end: 20,000 not-approved candidates is the most, and an upload that does not fit says how many were added and why", async () => {
+      expect([svc.PENDING_CAP_PER_PLAY, svc.UNAPPROVED_CAP_PER_PLAY]).toEqual([5_000, 20_000]);
+      const o = await signup("ceiling");
+      const tag = u8();
+      const play = await mkPlay(o, { type: "engagers_upload", config: {} });
+      await fill(o, play.id, "skipped", 19_998);
+      await fill(o, play.id, "approved", 50);
+      const people = Array.from({ length: 5 }, (_, i) => ({ email: `c${i}-${tag}@globex.example` }));
+      const r = await UP(o, play.id, { engagement: "reacted", people: [...people, { fullName: "Only Name" }] });
+      expect(r.status).toBe(200);
+      const why = "this play already holds 20,000 people who were not approved (waiting or skipped), the most one play keeps. Start a new play for more.";
+      expect(r.body).toMatchObject({ added: 2, duplicates: 0, rejectedCount: 4, notAdded: { count: 3, reason: `Not added: ${why}` } });
+      expect(r.body.rejected).toEqual([
+        { row: 3, reason: `Not added: ${why}` },
+        { row: 4, reason: `Not added: ${why}` },
+        { row: 5, reason: `Not added: ${why}` },
+        { row: 6, reason: "Needs a LinkedIn profile link, an email address, or a name with a company." },
+      ]);
+      expect(r.body.run.note).toBe(`6 rows read: 2 added, 1 not usable. 3 rows were not added because ${why}`);
+      expect((await req("GET", `/v1/plays/${play.id}`, o.token)).body.play.counts).toEqual({ pending: 2, approved: 50, skipped: 19_998 });
+      // Skipping the two that are waiting makes no room.
+      const waiting = (await candidatesOf(play.id)).filter((c: any) => c.status === "pending");
+      await decide(o, waiting.map((c: any) => ({ id: c.id, decision: "skip" })));
+      const again = await UP(o, play.id, { engagement: "reacted", people: [{ email: `later-${tag}@globex.example` }] });
+      expect(again.body).toMatchObject({ added: 0, notAdded: { count: 1 } });
+      expect(again.body.run.note).toBe(`1 row read: 0 added. 1 row was not added because ${why}`);
+      // A run says the same.
+      const runPlay = await mkPlay(o, { name: "Full run" });
+      await fill(o, runPlay.id, "skipped", 20_000);
+      fake.findings = [company(`Late ${tag}`)];
+      const { run: full } = await run(o, runPlay.id);
+      expect(full).toMatchObject({ status: "done", found: 1, added: 0 });
+      expect(full.note).toBe(`Found 1: 0 new. 1 result was not added because ${why}`);
+    });
+
+    it("the review queue's own limit says what to do about it", async () => {
+      const o = await signup("ceiling-queue");
+      const tag = u8();
+      const play = await mkPlay(o, { type: "engagers_upload", config: {} });
+      await fill(o, play.id, "pending", 4_999);
+      const r = await UP(o, play.id, { engagement: "reacted", people: [{ email: `q1-${tag}@globex.example` }, { email: `q2-${tag}@globex.example` }] });
+      const why = "this play already has 5,000 waiting for review. Review or skip some first.";
+      expect(r.body).toMatchObject({ added: 1, rejectedCount: 1, notAdded: { count: 1, reason: `Not added: ${why}` } });
+      expect(r.body.run.note).toBe(`2 rows read: 1 added. 1 row was not added because ${why}`);
+    });
+
+    it("an upload into a play that approves by itself approves a hundred inside the request and leaves the rest in Review, saying so", async () => {
+      expect(svc.AUTO_APPROVE_INLINE_MAX).toBe(100);
+      const o = await signup("auto-upload");
+      const tag = u8();
+      const play = await mkPlay(o, { type: "engagers_upload", config: {}, autoApprove: true });
+      const people = Array.from({ length: 130 }, (_, i) => ({ email: `auto${i}-${tag}@globex.example`, fullName: `Person ${i}` }));
+      const r = await UP(o, play.id, { engagement: "signed_up", people });
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({ added: 130, rejectedCount: 0, autoApproved: 100, leftForReview: 30 });
+      expect(r.body.run.note).toBe("130 rows read: 130 added. 100 people were approved automatically. 30 more people are waiting in Review: at most 100 are approved automatically at a time here, so approve the rest there.");
+      expect((await leadsOf(o.orgId)).length).toBe(100);
+      expect(await usageOf(o.orgId, "leads")).toBe(100);
+      expect((await req("GET", `/v1/plays/${play.id}`, o.token)).body.play.counts).toEqual({ pending: 30, approved: 100, skipped: 0 });
+      // The thirty are ordinary candidates: a person approves them.
+      const rest = (await candidatesOf(play.id)).filter((c: any) => c.status === "pending");
+      expect((await approve(o, rest.map((c: any) => c.id))).body).toMatchObject({ approved: 30, leadsCreated: 30 });
+      // A small upload is approved whole, with nothing said about a limit.
+      const small = await UP(o, play.id, { engagement: "signed_up", people: [{ email: `small-${tag}@globex.example` }] });
+      expect(small.body).toMatchObject({ added: 1, autoApproved: 1 });
+      expect("leftForReview" in small.body).toBe(false);
+      expect(small.body.run.note).toBe("1 row read: 1 added. 1 person was approved automatically.");
+    }, 120_000);
+  });
+
+  describe("an approval whose candidate is decided or removed while it is under way", () => {
+    /** Runs `during` in the middle of the next approval: after the claim, before the lead is made. */
+    async function interrupt(during: () => Promise<unknown>) {
+      const leadsSvc = await import("./services/leads.js");
+      // A second interruption in one test replaces the first: the real function is taken afresh.
+      vi.restoreAllMocks();
+      const real = leadsSvc.findExistingLead;
+      let fired = false;
+      vi.spyOn(leadsSvc, "findExistingLead").mockImplementation(async (...args: Parameters<typeof real>) => {
+        const found = await real(...args);
+        if (!fired) {
+          fired = true;
+          await during();
+        }
+        return found;
+      });
+      return () => fired;
+    }
+    async function setup(name: string) {
+      const o = await signup(name);
+      const tag = u8();
+      const [campaign] = await db.insert(S.campaigns).values({ orgId: o.orgId, name: "Outbound" }).returning();
+      const { play, candidates } = await queued(o, [person(`mid-${tag}`, { email: `mid-${tag}@globex.example` })], { campaignId: campaign.id });
+      return { o, tag, play, campaign, c: candidates[0] };
+    }
+
+    it("the play is deleted: nobody is added, nothing is charged, nobody is enrolled", async () => {
+      const { o, play, campaign, c } = await setup("mid-deleted");
+      const fired = await interrupt(() => db.delete(S.plays).where(S.eq(S.plays.id, play.id)));
+      const r = await approve(o, [c.id], { enroll: true });
+      expect(fired()).toBe(true);
+      expect(r.status).toBe(200);
+      expect(r.body).toMatchObject({ approved: 0, leadsCreated: 0, leadsExisting: 0, enrolled: 0, queuedForEmail: 0, applied: [] });
+      expect(r.body.notApplied).toEqual([{ id: c.id, reason: "This was removed while it was being approved, so nobody was added." }]);
+      expect(await leadsOf(o.orgId)).toEqual([]);
+      expect(await usageOf(o.orgId, "leads")).toBe(0);
+      expect((await jobsOf(o.orgId, "play.enroll")).length).toBe(0);
+      expect((await db.select().from(S.campaignContacts).where(S.eq(S.campaignContacts.campaignId, campaign.id))).length).toBe(0);
+    });
+
+    it("the person is erased: the lead does not come back, and a lead the workspace already had is left alone", async () => {
+      const { o, c } = await setup("mid-erased");
+      const fired = await interrupt(() => db.delete(S.playCandidates).where(S.eq(S.playCandidates.id, c.id)));
+      const r = await approve(o, [c.id], { enroll: true });
+      expect(fired()).toBe(true);
+      expect(r.body).toMatchObject({ approved: 0, leadsCreated: 0, enrolled: 0, queuedForEmail: 0 });
+      expect(await leadsOf(o.orgId)).toEqual([]);
+      expect(await usageOf(o.orgId, "leads")).toBe(0);
+
+      // Someone who was already a lead: the approval adds nothing and removes nothing.
+      const b = await setup("mid-existing");
+      const [had] = await db.insert(S.leads).values({ orgId: b.o.orgId, email: b.c.email, fullName: "Already Here" }).returning();
+      const firedB = await interrupt(() => db.delete(S.playCandidates).where(S.eq(S.playCandidates.id, b.c.id)));
+      const rb = await approve(b.o, [b.c.id], { enroll: true });
+      expect(firedB()).toBe(true);
+      expect(rb.body).toMatchObject({ approved: 0, leadsCreated: 0, leadsExisting: 0, enrolled: 0, queuedForEmail: 0 });
+      expect((await leadsOf(b.o.orgId)).map((l: any) => l.id)).toEqual([had.id]);
+      expect(await usageOf(b.o.orgId, "leads")).toBe(0);
+      expect((await db.select().from(S.campaignContacts).where(S.eq(S.campaignContacts.leadId, had.id))).length).toBe(0);
+    });
+
+    it("a conversation removed while it is being approved leaves no task behind", async () => {
+      const o = await signup("mid-post");
+      const tag = u8();
+      const { candidates } = await queued(o, [post(`mid-a-${tag}`), post(`mid-b-${tag}`)]);
+      // After the claim, before the decision is written: the first one goes (its play deleted, say).
+      const real = db.query.plays.findFirst.bind(db.query.plays);
+      let fired = false;
+      vi.spyOn(db.query.plays, "findFirst").mockImplementation(async (...args: any[]) => {
+        const row = await real(...args);
+        if (!fired) {
+          fired = true;
+          await db.delete(S.playCandidates).where(S.eq(S.playCandidates.id, candidates[0].id));
+        }
+        return row;
+      });
+      const r = await approve(o, candidates.map((c: any) => c.id));
+      expect(fired).toBe(true);
+      expect(r.body).toMatchObject({ approved: 1, tasksCreated: 1, applied: [candidates[1].id] });
+      expect(r.body.notApplied).toEqual([{ id: candidates[0].id, reason: "This was removed while it was being approved, so nothing was added." }]);
+      const made = await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId));
+      expect(made).toHaveLength(1);
+      expect(made[0].body).toContain(candidates[1].evidenceUrl);
+    });
+
+    it("someone else skipped it: the skip stands and no lead is left behind; someone else approved it: that lead stands", async () => {
+      const a = await setup("mid-skipped");
+      const fired = await interrupt(() => db.update(S.playCandidates).set({ status: "skipped", decidedAt: new Date() }).where(S.eq(S.playCandidates.id, a.c.id)));
+      const r = await approve(a.o, [a.c.id], { enroll: true });
+      expect(fired()).toBe(true);
+      expect(r.body).toMatchObject({ approved: 0, leadsCreated: 0, enrolled: 0, queuedForEmail: 0 });
+      expect(r.body.notApplied).toEqual([{ id: a.c.id, reason: "Decided elsewhere a moment ago." }]);
+      expect((await candidate(a.c.id)).status).toBe("skipped");
+      expect(await leadsOf(a.o.orgId)).toEqual([]);
+      expect(await usageOf(a.o.orgId, "leads")).toBe(0);
+
+      const b = await setup("mid-approved");
+      const firedB = await interrupt(() => db.update(S.playCandidates).set({ status: "approved", decidedAt: new Date() }).where(S.eq(S.playCandidates.id, b.c.id)));
+      const rb = await approve(b.o, [b.c.id], { enroll: true });
+      expect(firedB()).toBe(true);
+      expect(rb.body).toMatchObject({ approved: 0, enrolled: 0, queuedForEmail: 0 });
+      expect(rb.body.notApplied).toEqual([{ id: b.c.id, reason: "Decided elsewhere a moment ago." }]);
+      // The lead exists once and was paid for once; it is not enrolled by the request that lost.
+      expect((await leadsOf(b.o.orgId)).length).toBe(1);
+      expect(await usageOf(b.o.orgId, "leads")).toBe(1);
+      expect((await db.select().from(S.campaignContacts).where(S.eq(S.campaignContacts.campaignId, b.campaign.id))).length).toBe(0);
     });
   });
 });

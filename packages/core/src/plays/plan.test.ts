@@ -421,3 +421,50 @@ describe("how the site is asked", () => {
     }
   }, 15_000);
 });
+
+describe("the competitors a plan names", () => {
+  const site = (links: string[], headings: string[] = []): string =>
+    page(
+      "Trackly - product analytics for small teams",
+      `<main><h1>Know what your users do</h1>${headings.map((h) => `<h2>${h}</h2>`).join("")}<section>${links.map((l) => `<a href="/compare/${l.toLowerCase().replace(/[^a-z0-9]+/g, "-")}">${l}</a>`).join("")}</section></main>`,
+      `<meta name="description" content="Trackly is a product analytics tool for small teams."><meta property="og:site_name" content="Trackly">`,
+    );
+  const plan = async (links: string[], headings: string[] = [], known?: { name: string; domain?: string }[]) => {
+    use({ "https://trackly.com/": site(links, headings) });
+    return planPlays({ website: "trackly.com", ...(known ? { knownCompetitors: known } : {}) });
+  };
+
+  it("a name that is only the start of another goes: Google beside Google Analytics is not who the site competes with", async () => {
+    const p = await plan(["Trackly vs Google", "Trackly vs Google Analytics", "Trackly vs Matomo", "Trackly vs Plausible"]);
+    expect(p.competitors.map((c) => c.name)).toEqual(["Google Analytics", "Matomo", "Plausible"]);
+    expect(p.plays.find((x) => x.type === "competitor_customers")!.name).toBe("Customers of Google Analytics and Matomo and others");
+    expect(p.plays.find((x) => x.type === "competitor_customers")!.config).toEqual({ competitors: [{ name: "Google Analytics" }, { name: "Matomo" }, { name: "Plausible" }] });
+    expect(JSON.stringify(p.plays)).not.toMatch(/Customers of Google and/);
+    expect((p.plays.find((x) => x.type === "public_asks")!.config as { competitors: string[] }).competitors).toEqual(["Google Analytics", "Matomo", "Plausible"]);
+  });
+
+  it("a version number at the end of a name is not part of the name", async () => {
+    const p = await plan(["Trackly vs Google Analytics 4", "Trackly vs Google Analytics", "Trackly vs Adobe Analytics 2.0", "Trackly vs Matomo 5", "Trackly vs Matomo"], ["The best alternative to Universal Analytics v3"]);
+    expect(p.competitors.map((c) => c.name)).toEqual(["Google Analytics", "Adobe Analytics", "Matomo", "Universal Analytics"]);
+  });
+
+  it("a number that is the name stays: one word and a number, a year, a three-digit number", async () => {
+    const p = await plan(["Trackly vs Level 3", "Trackly vs Office 365", "Trackly vs Segment 2024", "Trackly vs 15Five", "Trackly vs Auth0"]);
+    expect(p.competitors.map((c) => c.name)).toEqual(["Level 3", "Office 365", "Segment 2024", "15Five", "Auth0"]);
+  });
+
+  it("the customer's own saved competitors are kept as written, and a found name that only starts one of theirs goes", async () => {
+    const p = await plan(["Trackly vs Google", "Trackly vs Heap", "Trackly vs Heap Analytics 2"], [], [{ name: "Google" }, { name: "Mixpanel 2" }, { name: "Heap Analytics Cloud" }]);
+    expect(p.competitors).toEqual([
+      { name: "Google", source: "saved" },
+      { name: "Mixpanel 2", source: "saved" },
+      { name: "Heap Analytics Cloud", source: "saved" },
+    ]);
+  });
+
+  it("a model's suggestions are tidied the same way", async () => {
+    use({ "https://trackly.com/": site(["Trackly vs Matomo"]) });
+    const p = await planPlays({ website: "trackly.com" }, { ai: model({ competitors: ["Google", "Google Analytics 4", "Matomo Cloud", "Amplitude"] }) });
+    expect(p.competitors.map((c) => `${c.name} (${c.source})`)).toEqual(["Google Analytics (ai)", "Matomo Cloud (ai)", "Amplitude (ai)"]);
+  });
+});

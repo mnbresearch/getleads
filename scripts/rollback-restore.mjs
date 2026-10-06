@@ -24,6 +24,11 @@
 // (plus ENCRYPTION_KEYS_OLD if it is set in production). --dry-run only counts;
 // --org <workspace id> limits it to one workspace.
 // It prints counts, never a token, a credential or a connection string. Safe to run twice.
+//
+// Exit status: 0 when every row was read (and, without --dry-run, restored); 2 when any row
+// could not be read - in a dry run as well. On 2, do NOT redeploy the previous build: the old
+// release could not read those rows either. Fix the key, run again, continue on 0.
+// 1 means it could not start (missing values, API not built) or stopped part-way.
 import { createCipheriv, createHash, randomBytes } from "node:crypto";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -97,6 +102,28 @@ export async function restore({ dbPkg, db, openShareToken, openOrgSecret, legacy
   return out;
 }
 
+/**
+ * What the operator is told at the end, and the exit status. Counts and fixed text only.
+ *
+ * Rows that could not be read are a failure - in a dry run too, because the dry run exists
+ * to find this out before anything is redeployed. The previous release could not read those
+ * rows either, so the last line then says NOT to redeploy, and the status is 2 (0 otherwise).
+ */
+export function summary(r, { dryRun = false, orgId = null } = {}) {
+  const lines = [
+    `[rollback-restore]${dryRun ? " DRY RUN - nothing was changed." : ""}${orgId ? " One workspace only." : ""}`,
+    `  report links ${dryRun ? "that would be " : ""}given their plaintext token back: ${r.links} (already readable by the old release: ${r.linksAlready})`,
+    `  sender and integration credentials ${dryRun ? "that would be " : ""}rewritten in the old format: ${r.creds} (already in it: ${r.credsAlready})`,
+  ];
+  if (r.failed) {
+    lines.push(`  could not be read (left untouched): ${r.failed}. These need the encryption key they were saved under - check ENCRYPTION_KEY / ENCRYPTION_KEYS_OLD.`);
+    lines.push("  DO NOT redeploy the previous build yet: fix the key, run this again, and continue only when nothing is left unread.");
+  } else {
+    lines.push(dryRun ? "  Run again without --dry-run, then redeploy the previous build." : "  Now redeploy the previous build. To roll forward later, just deploy the new build again.");
+  }
+  return { lines, exitCode: r.failed ? 2 : 0 };
+}
+
 async function main() {
   const here = dirname(fileURLToPath(import.meta.url));
   const apiLib = join(here, "..", "apps", "api", "dist", "lib");
@@ -145,15 +172,10 @@ async function main() {
     stop(`stopped part-way (it is safe to run again): ${e?.name ?? "Error"}${e?.code ? ` [${e.code}]` : ""}`);
   }
 
-  console.log(`[rollback-restore]${dryRun ? " DRY RUN - nothing was changed." : ""}${orgId ? " One workspace only." : ""}`);
-  console.log(`  report links ${dryRun ? "that would be " : ""}given their plaintext token back: ${r.links} (already readable by the old release: ${r.linksAlready})`);
-  console.log(`  sender and integration credentials ${dryRun ? "that would be " : ""}rewritten in the old format: ${r.creds} (already in it: ${r.credsAlready})`);
-  if (r.failed) console.log(`  could not be read (left untouched): ${r.failed}. These need the encryption key they were saved under - check ENCRYPTION_KEY / ENCRYPTION_KEYS_OLD.`);
-  if (r.failed) console.log("  DO NOT redeploy the previous build yet: fix the key, run this again, and continue only when nothing is left unread.");
-  else console.log(dryRun ? "  Run again without --dry-run, then redeploy the previous build." : "  Now redeploy the previous build. To roll forward later, just deploy the new build again.");
+  const done = summary(r, { dryRun, orgId });
+  for (const line of done.lines) console.log(line);
   await dbPkg.closeDb().catch(() => {});
-  // Unread rows are a failure in a dry run too: the dry run exists to find this out first.
-  process.exit(r.failed ? 2 : 0);
+  process.exit(done.exitCode);
 }
 
 // Run only when started as a script, so a test can import `restore` without side effects.

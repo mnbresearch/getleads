@@ -22,8 +22,11 @@ const MONEY = new RegExp(
 /** Roughly what one unit of a currency is in US dollars: only used to compare an amount with a minimum, never shown. */
 const RATE: Record<string, number> = { USD: 1, CAD: 0.73, AUD: 0.66, SGD: 0.75, NZD: 0.6, HKD: 0.13, EUR: 1.08, GBP: 1.27, INR: 0.012, CHF: 1.1, SEK: 0.095, NOK: 0.093, DKK: 0.145, JPY: 0.0067, AED: 0.27 };
 
-/** Dashes that look like a hyphen but are other characters ("pre\u2011seed"): read as a hyphen. */
-const plainHyphens = (s: string): string => s.replace(/[\u2010\u2011\u2012\u2013]/g, "-");
+/** A headline is a line. Whatever a feed sends as one, only this much of it is read. */
+const MAX_HEADLINE = 600;
+
+/** Dashes that look like a hyphen but are other characters ("pre\u2011seed"): read as a hyphen. Only the first part of an overlong text is kept. */
+const plainHyphens = (s: string): string => String(s ?? "").slice(0, MAX_HEADLINE).replace(/[\u2010\u2011\u2012\u2013]/g, "-");
 
 const SAID_BEFORE = /(?:valued at|valuation of|valuing\s+\S+(?:\s+\S+)?\s+at|worth)\s*(?:about|around|nearly|over|more than|up to|roughly|approximately|~)?\s*$/i;
 const SAID_AFTER = /^\s*\+?\s*(?:post-?money\s+|pre-?money\s+)?valuation\b/i;
@@ -94,7 +97,7 @@ export function headlineRound(headline: string): string | null {
 
 /** A fund raising a fund is not a company raising a round. ("Raises $10M to fund expansion" is.) */
 const FUND_RAISE =
-  /\b(?:fund|funds)\s+(?:[ivx]+|\d+)\b|\b(?:new|debut|maiden|first|second|third|fourth|fifth|latest|flagship|venture|climate|opportunity|early-stage|(?:million|billion|mn|bn|crore|[\d.]+[mb]))\s+fund\b|\bfund\s+(?:targeting|aimed|focused|dedicated)\b|\b(?:vc|venture capital|private equity)\s+(?:firm|fund|investor)\b/i;
+  /\b(?:fund|funds)\s+(?:[ivx]+|\d+)\b|\b(?:new|debut|maiden|first|second|third|fourth|fifth|latest|flagship|venture|climate|opportunity|early-stage|(?:million|billion|mn|bn|crore|[\d.]{1,12}[mb]))\s+fund\b|\bfund\s+(?:targeting|aimed|focused|dedicated)\b|\b(?:vc|venture capital|private equity)\s+(?:firm|fund|investor)\b/i;
 
 /** An investor changing what it invests ("raises seed cap to $5M", "backs 18 new startups") is not a company raising money. */
 const INVESTOR_NEWS = /\b(?:raises?|raised|raising|lifts?|lifted|increases?|increased|doubles?|doubled|hikes?|hiked)\b[^.]{0,40}\b(?:cap|ceiling|limit|che(?:que|ck)\s+size|ticket\s+size)\b\s+to\b|\bbacks?\s+\d+\s+(?:new\s+|more\s+)?(?:startups|companies|founders|ventures)\b/i;

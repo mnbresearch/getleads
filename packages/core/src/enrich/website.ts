@@ -1,4 +1,4 @@
-import * as cheerio from "cheerio";
+import { loadHtml, shortText } from "../util/html.js";
 import type { CompanyProfile, PersonCandidate } from "../types.js";
 import { fetchText, pMap } from "../util/http.js";
 import { rootDomain } from "../util/domain.js";
@@ -127,7 +127,9 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
 
   for (const { path, html } of pages) {
     if (!html) continue;
-    const $ = cheerio.load(html);
+    // Through the shared guard (util/html.ts): a page built to stall the parser is refused, not parsed.
+    const $ = loadHtml(html);
+    if (!$) continue;
     if (path === "") {
       profile.name = clean($('meta[property="og:site_name"]').attr("content")) ?? clean($("title").text().split(/[|–-]/)[0]);
       profile.description =
@@ -155,12 +157,21 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
     $("a[href]").each((_, el) => socialFromUrl($(el).attr("href") ?? "", profile.socials));
     // Team pages: look for name + title pairs inside small blocks
     if (/team|about|leadership|people/.test(path)) {
+      // The text around a name is read once per parent and only up to a page's worth: a page of thousands
+      // of name-like elements under one parent would otherwise read that parent again for each of them.
+      const around = new Map<unknown, string>();
+      let named = 0;
       $("h2, h3, h4, .name, [class*=name], [class*=member], [class*=team]").each((_, el) => {
-        const nameText = clean($(el).clone().children().remove().end().text());
+        // The element's own words, not those of the elements inside it.
+        const own = (el.children ?? []).map((c) => (c.type === "text" ? (c as { data?: string }).data ?? "" : "")).join("");
+        const nameText = clean(own);
         if (!nameText || nameText.length > 40 || nameText.split(" ").length < 2 || nameText.split(" ").length > 4) return;
         if (!/^[A-Z][a-z]+(\s[A-Z][a-z.'-]+){1,3}$/.test(nameText)) return;
-        const next = clean($(el).next().text()) ?? "";
-        const parentText = clean($(el).parent().text()) ?? "";
+        if (++named > 2000) return false;
+        const next = clean(shortText($(el).next().get(0), 20_000, { maxNodes: 20_000 }) ?? "") ?? "";
+        const parent = el.parent;
+        if (!around.has(parent)) around.set(parent, clean(shortText(parent, 20_000, { maxNodes: 20_000 }) ?? "") ?? "");
+        const parentText = around.get(parent) ?? "";
         const titleCand = TITLE_WORDS.test(next) ? next : parentText.replace(nameText, "").trim();
         const title = TITLE_WORDS.test(titleCand) ? titleCand.slice(0, 80) : undefined;
         if (!title) return;

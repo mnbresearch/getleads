@@ -9,6 +9,7 @@ import { resetSearchCache, type SearchProvider } from "../search/index.js";
 import { honorSiteOperator } from "../search/providers.js";
 import type { SearchResult } from "../types.js";
 import { searchWith, web, type FakeWeb, type Route } from "./kit.test.js";
+import { CRAWLER_TOKEN } from "../util/http.js";
 import { PlayRun, hostPauseMs, parseRobots, robotsAllows } from "./shared.js";
 
 let net: FakeWeb;
@@ -283,5 +284,50 @@ describe("a search that never looked where it was asked to", () => {
     expect(trace).toMatchObject({ searches: 3, failedSearches: 1, blocked: false });
     // The web results still came from a fallback search, and that is still said.
     expect(trace.notes).toContain("No dependable search source is connected on our side, so these results come from a fallback search and may be thin.");
+  });
+});
+
+describe("the name a robots.txt addresses this reader by", () => {
+  it("is the product token of the user-agent every request carries", async () => {
+    expect(CRAWLER_TOKEN).toBe("ScoutBot");
+    const sent: string[] = [];
+    vi.stubGlobal("fetch", async (_url: unknown, init?: { headers?: unknown }) => {
+      sent.push(new Headers(init?.headers as Record<string, string>).get("user-agent") ?? "");
+      return new Response("<p>ok</p>", { status: 200, headers: { "content-type": "text/html" } });
+    });
+    const run = new PlayRun({});
+    expect((await run.fetchPage("https://acme.com/customers")).ok).toBe(true);
+    // robots.txt and the page: both say who is asking, in the form "<token>/<version> (+address)".
+    expect(sent).toHaveLength(2);
+    for (const ua of sent) expect(ua).toMatch(/ ScoutBot\/\d+\.\d+ \(\+https:\/\/[^)]+\)$/);
+  });
+
+  it.each(["ScoutBot", "scoutbot", "SCOUTBOT", "ScoutBot/1.0", "scoutbot/2", "ScoutBot (+https://scout.example)"])("a group for %s is ours, and replaces the group for everyone", (name) => {
+    const rules = parseRobots(`User-agent: *\nDisallow: /everyone\n\nUser-agent: ${name}\nDisallow: /ours\n`);
+    expect(rules).toEqual({ allow: [], disallow: ["/ours"] });
+    expect(robotsAllows(rules, "/ours/page")).toBe(false);
+    expect(robotsAllows(rules, "/everyone")).toBe(true);
+  });
+
+  // The name is matched whole. "bot" used to match (it is part of "scoutbot"), so rules written for some other crawler were taken as ours.
+  it.each(["bot", "Scout", "ScoutBotPro", "MyScoutBot", "Googlebot", "scout bot", "Mozilla/5.0"])("a group for %s is somebody else's: the group for everyone applies", (name) => {
+    const rules = parseRobots(`User-agent: *\nDisallow: /everyone\n\nUser-agent: ${name}\nDisallow: /\n`);
+    expect(rules).toEqual({ allow: [], disallow: ["/everyone"] });
+    expect(robotsAllows(rules, "/customers")).toBe(true);
+  });
+
+  it("several groups that name us add up; a file with no group for us or for everyone closes nothing", () => {
+    expect(parseRobots("User-agent: ScoutBot\nDisallow: /a\n\nUser-agent: Googlebot\nUser-agent: scoutbot/1.0\nDisallow: /b\nAllow: /b/open\n")).toEqual({ allow: ["/b/open"], disallow: ["/a", "/b"] });
+    expect(parseRobots("User-agent: Googlebot\nDisallow: /\n")).toEqual({ allow: [], disallow: [] });
+    // A comment after a rule, or a line that is only a comment, is not part of it.
+    expect(parseRobots("# for all\nUser-agent: * # everyone\nDisallow: /x # not this\n")).toEqual({ allow: [], disallow: ["/x"] });
+  });
+
+  it("the site's rules for us are obeyed by a run", async () => {
+    use({ "https://acme.com/robots.txt": { body: "User-agent: *\nAllow: /\n\nUser-agent: ScoutBot\nDisallow: /customers\n", type: "text/plain" }, "https://acme.com/customers": "<p>x</p>", "https://acme.com/about": "<p>about</p>" });
+    const run = new PlayRun({});
+    expect(await run.fetchPage("https://acme.com/customers")).toEqual({ ok: false, kind: "refused", why: "robots.txt" });
+    expect((await run.fetchPage("https://acme.com/about")).ok).toBe(true);
+    expect(net.pages()).toEqual(["https://acme.com/about"]);
   });
 });

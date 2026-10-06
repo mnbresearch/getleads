@@ -2,11 +2,14 @@
  * Hiring signals from a company's own careers page + public job boards via search.
  * Keyless. Returns open role count by function - a strong buying-intent proxy.
  */
-import * as cheerio from "cheerio";
 import { fetchText } from "../util/http.js";
+import { loadHtml, shortText } from "../util/html.js";
 import { isPublicHost } from "../util/publicHost.js";
 import { assertPublicHost, isSsrfBlocked } from "../util/egress.js";
 import { webSearchDetailed } from "../search/index.js";
+
+/** Children of a job-title element that hold its location, team or badge rather than the title. */
+const TITLE_NOISE = new Set(["span", "small", "div"]);
 
 const CAREER_PATHS = ["/careers", "/jobs", "/careers/", "/join-us", "/work-with-us", "/company/careers", "/about/careers", "/openings"];
 const FUNCTION_RULES: [RegExp, string][] = [
@@ -75,10 +78,14 @@ export async function detectHiring(domain: string, companyName?: string, opts: {
     const html = await fetchText(`https://${domain}${p}`, { timeoutMs: 8000, publicOnly: true, allowPrivateHosts });
     if (!html) continue;
     fetchedAnyPage = true;
-    const $ = cheerio.load(html);
+    // Through the shared guard (util/html.ts): a page built to stall the parser is refused, not parsed.
+    const $ = loadHtml(html);
+    if (!$) continue;
     const candidates: string[] = [];
     $("a, h2, h3, h4, li, [class*=job], [class*=position], [class*=opening], [class*=role]").each((_, el) => {
-      const t = $(el).clone().children("span,small,div").remove().end().text().replace(/\s+/g, " ").trim();
+      // A job title is a short line. The element's text is read only far enough to see whether it is one
+      // (its direct span, small and div children hold the location and the like, and are left out).
+      const t = (shortText(el, 400, { skipChildren: TITLE_NOISE }) ?? "").replace(/\s+/g, " ").trim();
       if (t.length >= 6 && t.length <= 70 && TITLE_RE.test(t) && FUNCTION_RULES.some(([re]) => re.test(t))) candidates.push(t);
     });
     if (candidates.length >= 2) {
@@ -91,9 +98,9 @@ export async function detectHiring(domain: string, companyName?: string, opts: {
     if (ats) {
       const atsHtml = await fetchText(ats, { timeoutMs: 8000, publicOnly: true, allowPrivateHosts });
       if (atsHtml) {
-        const $a = cheerio.load(atsHtml);
-        $a("a, h3, h4, [class*=posting], [class*=opening]").each((_, el) => {
-          const t = $a(el).text().replace(/\s+/g, " ").trim();
+        const $a = loadHtml(atsHtml);
+        $a?.("a, h3, h4, [class*=posting], [class*=opening]").each((_, el) => {
+          const t = (shortText(el, 400) ?? "").replace(/\s+/g, " ").trim();
           if (t.length >= 6 && t.length <= 70 && TITLE_RE.test(t) && FUNCTION_RULES.some(([re]) => re.test(t))) titles.add(t);
         });
         if (titles.size) {

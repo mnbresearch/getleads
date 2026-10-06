@@ -636,7 +636,7 @@ export function CampaignDetail() {
           {messages.map((m) => (
             <details key={m.id} className="p-3">
               <summary className="flex cursor-pointer flex-wrap items-center gap-2 text-sm">
-                <StatusBadge s={m.status} /><span className="font-medium">{m.subject}</span>
+                <StatusBadge s={m.status} /><span className="min-w-0 font-medium [overflow-wrap:anywhere]" data-testid="message-subject">{m.subject}</span>
                 {/* A message whose contact was deleted is kept as a record, without the person:
                     the server sends no address (an older one sent a "sha256:..." fingerprint,
                     which is never shown). */}
@@ -644,7 +644,7 @@ export function CampaignDetail() {
                 {m.intent && <span className="badge bg-brand-50 text-brand-700">{m.intent.replace(/_/g, " ")}</span>}
                 <span className="ml-auto text-xs text-ink-500">{fmtDate(m.sentAt)}{m.openedAt && " · opened"}{m.repliedAt && " · replied"}</span>
               </summary>
-              <pre className="mt-2 whitespace-pre-wrap font-sans text-sm text-ink-200">{m.bodyText}</pre>
+              <pre className="mt-2 max-w-full whitespace-pre-wrap font-sans text-sm text-ink-200 [overflow-wrap:anywhere]">{m.bodyText}</pre>
               {/* Every inbound message can be answered from here. The box used to render only
                   when an AI draft existed, so a workspace with no AI had no way to reply at all. */}
               {recipientRemoved(m) && <p className="mt-2 text-xs text-ink-400">This contact was deleted, so the message is kept as a record only: who it was {m.direction === "inbound" ? "from" : "to"} and what it said have been removed.</p>}

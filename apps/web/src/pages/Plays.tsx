@@ -71,7 +71,13 @@ export function PlaysPage() {
   const [toggling, setToggling] = useState<Set<string>>(new Set());
   const [forbidden, setForbidden] = useState<string | null>(null);
 
+  // Plays created and run together from the suggestions. Their results are reported once,
+  // as a group - and when none of them could search, what is missing is said once too.
+  const [batch, setBatch] = useState<{ ids: string[]; outcomes: Record<string, { status: string; added: number; note: string }>; reported: boolean } | null>(null);
+  const batchRef = useRef(batch);
+  batchRef.current = batch;
   const [formOpen, setFormOpen] = useState(false);
+  const [formType, setFormType] = useState<string | undefined>(undefined);
   const [justCreated, setJustCreated] = useState<PlayOut | null>(null);
   const [editing, setEditing] = useState<PlayOut | null>(null);
   const [uploadFor, setUploadFor] = useState<PlayOut | null>(null);
@@ -182,7 +188,13 @@ export function PlaysPage() {
       if (reported.current.has(run.id)) return;
       reported.current.add(run.id);
     }
-    toast(`${clean(play.name, 80)}: ${runSentence(run)}`, runFailed(run.status) ? "err" : "ok");
+    const group = batchRef.current;
+    if (group && !group.reported && group.ids.includes(play.id)) {
+      // Part of a group started together: noted here, announced once when the last one ends.
+      setBatch((b) => (b && b.ids.includes(play.id) ? { ...b, outcomes: { ...b.outcomes, [play.id]: { status: String(run.status ?? ""), added: Number(run.added) || 0, note: clean(run.note, 400) } } } : b));
+    } else {
+      toast(`${clean(play.name, 80)}: ${runSentence(run)}`, runFailed(run.status) ? "err" : "ok");
+    }
     void loadPlays();
     setEpoch((e) => e + 1);
   }, [loadPlays, stopWatching, toast]);
@@ -238,7 +250,7 @@ export function PlaysPage() {
     for (const p of plays) if (p.running === true && !timers.current[p.id]) watchNow.current(p, null, false);
   }, [plays]);
 
-  const runNow = useCallback(async (play: PlayOut): Promise<boolean> => {
+  const runNow = useCallback(async (play: PlayOut, quiet = false): Promise<boolean> => {
     setProblems((m) => { const n = { ...m }; delete n[play.id]; return n; });
     setRunning((s) => new Set(s).add(play.id));
     try {
@@ -246,15 +258,15 @@ export function PlaysPage() {
       if (r?.run && typeof r.run.status === "string" && r.run.status !== "running") {
         finished(play, r.run);
       } else {
-        toast(`Run started for "${clean(play.name, 80)}". This usually takes a minute or two - the people it finds will appear in Review.`);
+        if (!quiet) toast(`Run started for "${clean(play.name, 80)}". This usually takes a minute or two - the people it finds will appear in Review.`);
         watch(play, r?.runId ?? r?.run?.id ?? null);
       }
       return true;
     } catch (e) {
       const said = messageOf(e);
       if (e instanceof ProspexError && e.status === 409) {
-        // Already running (a schedule, or a teammate): not a failure, so wait for that run.
-        toast(said);
+        // Already running (a schedule, a teammate, a second press): not a failure, so wait for that run.
+        if (!quiet) toast(said);
         watch(play, runIdOf(e));
         return true;
       }
@@ -265,6 +277,31 @@ export function PlaysPage() {
       return false;
     }
   }, [finished, stopWatching, toast, watch]);
+
+  /** Run a group of just-created plays, once each, and land on the Plays tab with them in progress. */
+  const launch = useCallback(async (list: PlayOut[], stay: boolean) => {
+    setBatch({ ids: list.map((p) => p.id), outcomes: {}, reported: false });
+    let started = 0;
+    for (const p of list) {
+      if (await runNow(p, true)) started++;
+      // One that could not start has its reason on its card; it is not waited for.
+      else setBatch((b) => (b ? { ...b, ids: b.ids.filter((id) => id !== p.id) } : b));
+    }
+    if (started > 0) toast(`Created and started ${plural(started, "play")}. Each takes a minute or two - what they find will be waiting in Review.`);
+    if (!stay) { setShowPlan(false); go("plays"); }
+  }, [go, runNow, toast]);
+
+  // The group's result, once, when its last run has ended.
+  useEffect(() => {
+    if (!batch || batch.reported || batch.ids.length === 0) return;
+    const done = batch.ids.map((id) => batch.outcomes[id]).filter(Boolean);
+    if (done.length < batch.ids.length) return;
+    setBatch({ ...batch, reported: true });
+    const found = done.reduce((n, o) => n + o.added, 0);
+    const blocked = done.filter((o) => runFailed(o.status)).length;
+    if (blocked === done.length) toast(`None of the ${plural(done.length, "run")} could search. What is missing, and what works today, is at the top of the Plays tab.`, "err");
+    else toast(`${plural(done.length, "run")} finished. ${found > 0 ? `${plural(found, "person", "people")} ${found === 1 ? "is" : "are"} waiting in Review.` : "Nobody new was found this time."}${blocked > 0 ? ` ${blocked} could not search - the reason is on the play.` : ""}`);
+  }, [batch, toast]);
 
   const toggle = async (play: PlayOut) => {
     setToggling((s) => new Set(s).add(play.id));
@@ -301,7 +338,16 @@ export function PlaysPage() {
     void loadPlays();
   }, [loadPlays]);
 
-  const closeForm = () => { setFormOpen(false); setJustCreated(null); };
+  const formOpenNow = useRef(false);
+  formOpenNow.current = formOpen;
+  const closeForm = () => { setFormOpen(false); setJustCreated(null); setFormType(undefined); };
+  const openForm = (type?: string) => { setFormType(type); setJustCreated(null); setFormOpen(true); };
+  // Every run of the group came back unable to search: said once, with what is missing in
+  // the server's own words and the two kinds of play that do not depend on it.
+  const batchDone = batch && batch.ids.length > 0 ? batch.ids.map((id) => batch.outcomes[id]).filter(Boolean) : [];
+  const allBlocked = !!batch && batch.ids.length > 0 && batchDone.length === batch.ids.length && batchDone.every((o) => o.status === "blocked");
+  const batchTypes = batch ? plays.filter((p) => batch.ids.includes(p.id)).map((p) => p.type) : [];
+  const whatIsMissing = (types ?? []).find((t) => batchTypes.includes(t.type) && t.setupHint)?.setupHint ?? (types ?? []).find((t) => t.setupHint)?.setupHint ?? batchDone.find((o) => o.note)?.note ?? "";
   const campaignNames = useMemo(() => new Map(campaigns.map((c) => [c.id, c.name])), [campaigns]);
   const pickers = { icps, lists, campaigns, clients: clients.filter((c) => c.status !== "archived"), error: pickErr, retry: loadPickers };
   const clientNames = useMemo(() => new Map(clients.map((c) => [c.id, c.name])), [clients]);
@@ -323,7 +369,7 @@ export function PlaysPage() {
   const actions = loaded ? (
     <>
       {!showPlan && <button type="button" className="btn-secondary" onClick={() => { setShowPlan(true); go("plays"); }}>Suggest plays from my website</button>}
-      <button type="button" className={showPlan && plays.length === 0 ? "btn-secondary" : "btn-primary"} onClick={() => setFormOpen(true)}>New play</button>
+      <button type="button" className={showPlan && plays.length === 0 ? "btn-secondary" : "btn-primary"} onClick={() => openForm()}>New play</button>
     </>
   ) : undefined;
 
@@ -354,24 +400,39 @@ export function PlaysPage() {
           {tab === "review" && (plays.length === 0 ? (
             <Empty title="Nothing to review yet" hint="A play finds people who need you and puts them here, each with one sentence saying why and a link to the proof. You approve or skip. Start by telling Scout your website." action={<button type="button" className="btn-primary" onClick={() => { setShowPlan(true); go("plays"); }}>Start from your website</button>} />
           ) : (
-            <ReviewQueue plays={plays} types={types} playId={playFilter} kind={kindFilter} onFilter={(next) => go("review", { playId: next.playId ?? playFilter, kind: next.kind ?? kindFilter })} epoch={epoch} shortcuts={!anyDialog} toast={toast} onPendingChange={onPendingChange} onForbidden={onForbidden} onGoToPlays={() => go("plays")} />
+            <ReviewQueue plays={plays} types={types} campaignNames={campaignNames} playId={playFilter} kind={kindFilter} onFilter={(next) => go("review", { playId: next.playId ?? playFilter, kind: next.kind ?? kindFilter })} epoch={epoch} shortcuts={!anyDialog} toast={toast} onPendingChange={onPendingChange} onForbidden={onForbidden} onGoToPlays={() => go("plays")} />
           ))}
 
           {tab === "plays" && (
             <>
+              {allBlocked && batch && (
+                <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900 [overflow-wrap:anywhere]" role="alert" data-testid="batch-blocked">
+                  <div className="flex items-start justify-between gap-3">
+                    <div className="font-semibold">{batch.ids.length === 1 ? "The run could not search" : `None of the ${batch.ids.length} runs could search`}</div>
+                    <button type="button" className="shrink-0 text-amber-800 underline" onClick={() => setBatch(null)}>Dismiss</button>
+                  </div>
+                  {whatIsMissing && <p className="mt-1">{whatIsMissing}</p>}
+                  <p className="mt-1">This is about how Scout searches, not about your market - nothing was looked at, so nothing was ruled out. Two kinds of play work today without it:</p>
+                  <ul className="mt-2 space-y-2">
+                    <li className="flex flex-wrap items-center gap-x-3 gap-y-1"><span className="min-w-0 flex-1 basis-64"><span className="font-medium">People who engaged.</span> Upload the people who reacted to a post, signed up or attended, and review them here.</span><button type="button" className="btn-secondary shrink-0 bg-surface py-1" onClick={() => openForm("engagers_upload")}>Start an upload play</button></li>
+                    <li className="flex flex-wrap items-center gap-x-3 gap-y-1"><span className="min-w-0 flex-1 basis-64"><span className="font-medium">Competitor customers, with the competitor&apos;s website.</span> Given the website, Scout reads that site&apos;s own customer pages directly.</span><button type="button" className="btn-secondary shrink-0 bg-surface py-1" onClick={() => openForm("competitor_customers")}>Add a competitor&apos;s website</button></li>
+                  </ul>
+                </div>
+              )}
               {showPlan && (
                 <PlanFlow
                   types={types}
                   defaultWebsite={website}
                   runningIds={running}
-                  pendingOf={(id) => plays.find((p) => p.id === id)?.counts?.pending ?? 0}
+                  playOf={(id: string) => plays.find((p) => p.id === id)}
+                  onLaunch={launch}
                   onReview={(p) => go("review", { playId: p.id })}
                   onCreated={onCreated}
                   onRun={runNow}
                   onForbidden={onForbidden}
                   onDone={() => setShowPlan(false)}
                   onClose={plays.length > 0 ? () => setShowPlan(false) : undefined}
-                  onManual={() => setFormOpen(true)}
+                  onManual={() => openForm()}
                 />
               )}
               {plays.length > 0 && (
@@ -424,7 +485,14 @@ export function PlaysPage() {
             </div>
           </div>
         ) : (
-          formOpen && <PlayForm types={types} typesError={typesErr} onRetryTypes={loadTypes} pickers={pickers} toast={toast} onForbidden={onForbidden} onSaved={(play) => { onCreated(play); setShowPlan(false); setJustCreated(play); }} />
+          formOpen && <PlayForm key={formType ?? "pick"} startType={formType} types={types} typesError={typesErr} onRetryTypes={loadTypes} pickers={pickers} toast={toast} onForbidden={onForbidden} onSaved={(play) => {
+            onCreated(play);
+            setShowPlan(false);
+            // Closed while the save was in flight: the play exists, but "Your play is ready"
+            // must not be waiting inside the dialog the next time it is opened.
+            if (formOpenNow.current) setJustCreated(play);
+            else toast(`"${clean(play.name, 80)}" was created. It is on the Plays tab.`);
+          }} />
         )}
       </Modal>
       <Modal open={!!editing} onClose={() => setEditing(null)} title="Edit play" wide>

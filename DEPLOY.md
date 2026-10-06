@@ -369,6 +369,7 @@ These have sensible defaults and are not in `render.yaml`. Add one in Render's E
 | `ROW_CAP_<KIND>` | see below | The most of one kind of thing a workspace may hold. Past it, creating another is refused with a sentence naming the limit; existing ones are never removed. `<KIND>` is one of `LISTS` (2,000), `ICPS` (500), `SAVEDSEARCHES` (1,000), `AUTOPILOTS` (500), `MONITORS` (500), `SIGNALSUBSCRIPTIONS` (500), `TASKS` (100,000), `WEBHOOKS` (100), `APIKEYS` (100, active keys only), `CLIENTS` (5,000), `PIXELS` (200), `VISIBILITYPROMPTS` (1,000), `CAMPAIGNS` (5,000). A whole number, 1 or more. |
 | `JOB_OPEN_TYPE_CAP` | 10000 | The most background jobs of one type a workspace may have waiting or running. Past it a request that would queue another is answered 429 with `Retry-After: 30` and saves nothing. |
 | `JOB_OPEN_TOTAL_CAP` | 20000 | The same, across all job types of one workspace. |
+| `PLAYS_HOST_PAUSE_MS` | 300 | The pause, in milliseconds, between two requests a play makes to the same website (pages and robots.txt; requests to one site always go out one at a time). Read when a run starts, so a change applies to the next run without a deploy. Accepted range 0 to 5000; anything that is not a number means 300. Raise it (1000 or more) if sites answer 429 or complain about being crawled - runs then read fewer pages inside their four minutes. 0 removes the pause and is meant for tests, not production. Plays identify themselves to websites with the user-agent token `ScoutBot` and follow a `User-agent: ScoutBot` (or `*`) group in robots.txt. |
 | `DEBUG_SEARCH` | off | `true` (or `1`): the server log includes the text of web and people searches and the search providers' own error messages. Off, the log says only how long the search text was and which providers answered. Search text is what customers type (names, companies), so turn it on only while debugging and turn it off afterwards. |
 
 The row and job limits are checked per server process: requests that arrive at the same moment are counted together within one process. With more than one API instance, a burst can exceed a limit by at most the number of instances times the requests each is handling at that instant; the next request sees the real count.
@@ -414,9 +415,11 @@ node scripts/rollback-restore.mjs --dry-run     # counts what it would change
 node scripts/rollback-restore.mjs               # does it
 ```
 
-If the dry run reports nothing to change, there is nothing to restore: redeploy the previous build straight away. A line `could not be read` means those rows were saved under a key that is not in `ENCRYPTION_KEY` / `ENCRYPTION_KEYS_OLD`; they are left untouched.
+If the dry run reports nothing to change, there is nothing to restore: redeploy the previous build straight away.
 
-**Rollback order:** (1) the script, (2) the hand steps above that apply to you, (3) redeploy the previous API build, (4) redeploy the previous web build. **Rolling forward again:** deploy the new API, then the new web. Nothing else.
+A line `could not be read` means those rows were saved under a key that is not in `ENCRYPTION_KEY` / `ENCRYPTION_KEYS_OLD`. They are left untouched, the script prints `DO NOT redeploy the previous build yet`, and it exits with status 2 - in a dry run as well, because finding this out first is what the dry run is for. **Do not redeploy the previous build while any row is unread:** the old release could not read those senders, integrations or report links either. Set the missing key (usually `ENCRYPTION_KEYS_OLD`), run the script again, and continue only when it reports nothing unread and exits with status 0.
+
+**Rollback order:** (1) the script, until it exits with status 0, (2) the hand steps above that apply to you, (3) redeploy the previous API build, (4) redeploy the previous web build. **Rolling forward again:** deploy the new API, then the new web. Nothing else.
 
 ---
 

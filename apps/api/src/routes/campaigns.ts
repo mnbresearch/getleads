@@ -531,8 +531,11 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
   // A workspace with AI assistance turned off gets the rendered template, is not charged
   // for an AI message, and is told why the preview is not personalised.
   const previewAiOff = step.aiPersonalize && aiDisabled(c.get("auth").org);
-  if (step.aiPersonalize && !previewAiOff) await consume(db, oid, "aiMessages", 1);
-  const out = await generateOutreach(step.aiPersonalize ? aiFor(c.get("auth")) : NO_AI, {
+  const previewAi = step.aiPersonalize ? aiFor(c.get("auth")) : NO_AI;
+  // Charged only when a model will actually run, as /generate does: with no AI engine the
+  // preview is the rendered template, and that used to cost an AI message all the same.
+  if (step.aiPersonalize && !previewAiOff && hasAi(previewAi)) await consume(db, oid, "aiMessages", 1);
+  const out = await generateOutreach(previewAi, {
     lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null },
     sender: { name: account?.fromName ?? "Me", company: String(s.senderCompany ?? ""), title: s.senderTitle ? String(s.senderTitle) : undefined, valueProp: String(s.valueProp ?? step.aiInstructions ?? ""), signature: account?.signature ?? undefined, tone: s.tone as "friendly" | undefined },
     subjectTemplate: step.subjectTemplate,
@@ -714,6 +717,9 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().m
   return c.json({ matched, intent: cls.intent, confidence: cls.confidence, ...(aiSkipped ? { skipped: aiSkipped, note: aiSkipped === "quota" ? "AI quota reached: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_unavailable" ? "The AI engine did not answer: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_off" ? "AI assistance is turned off for this workspace: the reply was classified with rules only and no draft was written." : "Could not record AI usage, so the AI steps were skipped." } : {}) });
 });
 
+/** How long after a person wrote in an answer to them still counts as an answer (not held back by sender warm-up). */
+const REPLY_WINDOW_DAYS = 14;
+
 /** Send (or edit-and-send) the AI-drafted follow-up for an inbound message. */
 campaignRoutes.post(
   "/messages/:id/send-reply",
@@ -773,7 +779,15 @@ campaignRoutes.post(
     if (!sendOrg) throw notFound("Workspace");
     // Kill switch, the sender's daily cap, the workspace ceiling and the shared sender's cap:
     // the limits a sequence send is held to. This route used to pass none of them.
-    const slot = await reserveManualSend(sendOrg, account);
+    // Answering someone who wrote in during the last 14 days is not held back by a new
+    // sender's warm-up ladder (every other limit still applies). A reply sent long after the
+    // conversation went quiet is a cold send again, and is treated as one.
+    const [wroteIn] = await db
+      .select({ id: messages.id })
+      .from(messages)
+      .where(and(eq(messages.orgId, oid), eq(messages.leadId, lead.id), eq(messages.direction, "inbound"), sql`${messages.createdAt} > now() - interval '${sql.raw(String(REPLY_WINDOW_DAYS))} days'`))
+      .limit(1);
+    const slot = await reserveManualSend(sendOrg, account, { answeringInbound: !!wroteIn });
     if (!slot.ok) throw new ApiError(slot.status, slot.message, slot.code);
     try {
       await consume(db, oid, "emails", 1);

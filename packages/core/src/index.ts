@@ -25,7 +25,7 @@ export * from "./outreach/generate.js";
 export * from "./pipeline.js";
 export * from "./util/domain.js";
 export * from "./util/names.js";
-export { pMap, sleep, fetchJson, fetchText, fetchPublic, readCapped, type FetchOpts } from "./util/http.js";
+export { CRAWLER_TOKEN, pMap, sleep, fetchJson, fetchText, fetchPublic, readCapped, type FetchOpts } from "./util/http.js";
 export * from "./signals/news.js";
 export * from "./signals/hiring.js";
 export * from "./signals/jobChange.js";

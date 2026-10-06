@@ -2,7 +2,7 @@
  * Resolve LinkedIn profile URLs to people (name/title/company) and back, using public search snippets
  * and the public profile page (when LinkedIn serves it). No LinkedIn login or scraping of logged-in pages.
  */
-import * as cheerio from "cheerio";
+import { loadHtml } from "../util/html.js";
 import type { PersonCandidate } from "../types.js";
 import { webSearch, type WebSearchOutcome } from "../search/index.js";
 import { fetchText } from "../util/http.js";
@@ -19,10 +19,11 @@ export async function resolveLinkedinUrl(url: string): Promise<PersonCandidate |
   // hop is fixed; publicOnly + hostAllow keep every redirect on LinkedIn as well.
   const html = await fetchText(li, { timeoutMs: 10_000, publicOnly: true, hostAllow: isLinkedinHost });
   if (html && !/authwall|login/i.test(html.slice(0, 2000)) && html.includes("og:title")) {
-    const $ = cheerio.load(html);
-    const og = $('meta[property="og:title"]').attr("content") ?? $("title").text();
-    const desc = $('meta[name="description"]').attr("content") ?? "";
-    const parsed = parseLinkedinTitle(og, desc);
+    // Through the shared guard (util/html.ts); an unreadable page is treated like no page, and the search below is tried.
+    const $ = loadHtml(html);
+    const og = $ ? ($('meta[property="og:title"]').attr("content") ?? $("title").text()) : "";
+    const desc = $ ? ($('meta[name="description"]').attr("content") ?? "") : "";
+    const parsed = $ ? parseLinkedinTitle(og, desc) : null;
     if (parsed) return { ...parsed, linkedinUrl: li, snippet: desc.slice(0, 300), source: "linkedin:public", confidence: 0.85 };
   }
   // 2) Search engines index the profile title
@@ -138,7 +139,8 @@ export async function linkedinPostEngagers(postUrl: string): Promise<{ people: P
   // leaves LinkedIn ends the fetch rather than being followed.
   const html = await fetchText(url, { timeoutMs: 12_000, publicOnly: true, hostAllow: isLinkedinHost });
   if (!html || /authwall/i.test(html.slice(0, 3000))) return { people: [], publicPage: false };
-  const $ = cheerio.load(html);
+  const $ = loadHtml(html);
+  if (!$) return { people: [], publicPage: false };
   const postText = $('meta[property="og:description"]').attr("content")?.slice(0, 500);
   const people = new Map<string, PersonCandidate>();
   $("a[href*='linkedin.com/in/']").each((_, el) => {
