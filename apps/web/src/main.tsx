@@ -8,6 +8,7 @@ import { Shell } from "./components/Shell";
 import { AuthPage } from "./pages/Auth";
 import { Dashboard } from "./pages/Dashboard";
 import { LeadsPage } from "./pages/Leads";
+import { PlaysPage } from "./pages/Plays";
 import { SearchPage } from "./pages/Search";
 import { IcpPage } from "./pages/Icps";
 import { CampaignsPage, CampaignDetail } from "./pages/Campaigns";
@@ -72,6 +73,7 @@ function Root() {
           <Protected>
             <Shell>
               <Routes>
+                <Route path="/plays" element={<PlaysPage />} />
                 <Route path="/clients" element={<ClientsPage />} />
                 <Route path="/clients/:id" element={<ClientDetailPage />} />
                 <Route path="/leads" element={<LeadsPage />} />

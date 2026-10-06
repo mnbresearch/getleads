@@ -14,7 +14,7 @@ import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, experimentForStep, leadsWithUsableEmail, mailingAddressOf, markReplied, reserveManualSend, unsubscribeFooter, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, leadsWithUsableEmail, mailingAddressOf, markReplied, outreachReasonOf, reserveManualSend, unsubscribeFooter, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
@@ -539,6 +539,8 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
     bodyTemplate: step.bodyTemplate,
     instructions: step.aiInstructions ?? undefined,
     stepNo: step.stepNo,
+    // The same "relevant because" a real send carries, so the preview is what goes out.
+    ...(outreachReasonOf(lead) ? { reason: outreachReasonOf(lead) } : {}),
   });
   return c.json(previewAiOff ? { ...out, aiOff: true, note: AI_OFF_NOTE } : out);
 });
@@ -556,9 +558,11 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   const b = c.req.valid("json");
   const { db } = getDb();
   let lead = b.lead;
+  let reason: string | undefined;
   if (b.leadId) {
     const l = await db.query.leads.findFirst({ where: and(eq(leads.id, b.leadId), eq(leads.orgId, oid)) });
     if (!l) throw notFound("Lead");
+    reason = outreachReasonOf(l);
     const co = l.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, l.companyId), eq(companies.orgId, oid)) }) : null;
     lead = { firstName: l.firstName ?? undefined, lastName: l.lastName ?? undefined, fullName: l.fullName ?? undefined, title: l.title ?? undefined, company: co ? { name: co.name ?? undefined, domain: co.domain, industry: co.industry ?? undefined, description: co.description ?? undefined } : undefined };
   }
@@ -568,7 +572,7 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   // No engine: nothing to meter, and the answer must say it is a template. It used to come
   // back looking like a personalised draft (and was charged as an AI message).
   if (aiConfigured) await consume(db, oid, "aiMessages", 1);
-  const out = await generateOutreach(ai, { lead, sender: b.sender, instructions: b.instructions, stepNo: b.stepNo, language: b.language });
+  const out = await generateOutreach(ai, { lead, sender: b.sender, instructions: b.instructions, stepNo: b.stepNo, language: b.language, ...(reason ? { reason } : {}) });
   const personalised = !!(out as { personalized?: boolean }).personalized;
   return c.json({
     ...out,

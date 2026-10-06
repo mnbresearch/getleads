@@ -31,6 +31,18 @@ export const FAQS: Faq[] = [
     a: "Two ways. Those tools sell you access to a contact database; Scout searches live sources, can verify each address before you send, and never sends to one it knows is invalid. And none of them measure what AI engines say about you, which is increasingly where buyers form an opinion before they ever reply.",
   },
   {
+    q: "What is a play in Scout?",
+    a: "A play is a saved recipe that finds the people who need your product this week from one source of buying intent, such as a competitor's published customers, an open job posting, a funding round or a public request for a tool like yours. Each person arrives with a one-sentence reason and the proof, and waits for you to approve or skip.",
+  },
+  {
+    q: "Where do the people in a play come from?",
+    a: "From public pages and your own data. Scout reads published customer pages and case studies, public job postings, funding news and public posts, and can use your own website visitors, your existing contacts and lists you upload. It does not buy contact lists, and each candidate says where its reason came from, with a link when that is a public page.",
+  },
+  {
+    q: "Does Scout log in to my LinkedIn or X account?",
+    a: "No. Scout never asks for your LinkedIn or X password, does not act as you on either site and does not automate anyone's account. Plays read pages that are public, the same ones anyone can open without signing in, and when a site refuses a page Scout reports that instead of working around it.",
+  },
+  {
     q: "What are AEO and GEO?",
     a: "Answer Engine Optimisation and Generative Engine Optimisation are the practice of being named by AI assistants when someone asks about your category. Scout measures it: it writes the questions a real buyer would type, asks each engine repeatedly on a schedule, and reports how often you appear, per engine, with the sample size.",
   },

@@ -416,6 +416,14 @@ If the dry run reports nothing to change, there is nothing to restore: redeploy 
 
 ---
 
+### B12. Plays in this release
+
+Plays ([docs/PLAYS.md](docs/PLAYS.md)) need **no new required environment variables**.
+
+Three types of play look on the public web through search (customers of a competitor, companies hiring for a role, people asking in public), and so does the step that finds people at a company any play has found. They work with no key, but the keyless search fallback is often refused from cloud addresses, so results can be thin and a run may report that it could not search. They are more dependable with a search source connected - any one of the existing optional search keys, which you may already have set: `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX`, `SERPER_API_KEY`, `SERPAPI_KEY` or `BRAVE_SEARCH_API_KEY`.
+
+---
+
 ## Part C - What each key unlocks (feature map)
 
 | Feature | Works with zero keys? | Better with |
@@ -438,5 +446,5 @@ If the dry run reports nothing to change, there is nothing to restore: redeploy 
 | Team seats + invites | Yes (invite link shown; email needs mail provider) | Resend |
 | Domain deliverability check (SPF/DKIM/DMARC/MX) | Yes | - |
 | Webhooks (HMAC), CRM sync (HubSpot, Pipedrive, Zoho, Cortex, generic, Sheets) | Yes | customer's CRM tokens |
-| REST API + OpenAPI + SDK + MCP (46 tools) | Yes | - |
+| REST API + OpenAPI + SDK + MCP (57 tools) | Yes | - |
 | Stripe billing | Off in pilot | Stripe keys |

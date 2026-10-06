@@ -240,6 +240,15 @@ async function makeTenant(label: string): Promise<Tenant> {
   ids.agentRun = run.id;
   await ins(S.scrapedLeads, { orgId, leadId: lead1.id, agentRunId: run.id, name: lead1.fullName, company: `${tag} Corp`, email: lead1.email, enrichedData: { query: `${tag} discovery query` }, source: "agent:discovery" });
   await db.insert(S.usage).values({ orgId, period: S.currentPeriod(), metric: "leads", count: 7 }).onConflictDoNothing();
+  // plays: a recipe, an upload-fed one, a run and a candidate waiting for review
+  const play = await ins(S.plays, { orgId, name: `${tag} Play`, type: "competitor_customers", config: { competitors: [{ name: `${tag} Rival` }] }, targetTitles: [`${tag} title`] });
+  ids.play = play.id;
+  const playUpload = await ins(S.plays, { orgId, name: `${tag} Upload Play`, type: "engagers_upload", config: {} });
+  ids.playUpload = playUpload.id;
+  const playRun = await ins(S.playRuns, { orgId, playId: play.id, status: "done", found: 1, added: 1, note: `${tag} run note` });
+  ids.playRun = playRun.id;
+  const playCandidate = await ins(S.playCandidates, { orgId, playId: play.id, runId: playRun.id, kind: "company", companyName: `${tag} Customer Co`, relevantBecause: `Named as a customer of ${tag} Rival.`, evidenceTitle: `${tag} case study`, signalType: "competitor_customer", dedupeKey: `cn:${tag.toLowerCase()} customer co` });
+  ids.playCandidate = playCandidate.id;
   ids.owner = ownerId;
   ids.member = memberId;
   ids.apiKey = keyRow.id;
@@ -446,6 +455,40 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "POST /v1/account/delete/cancel": E("none; body tries to name another org", X("nothing pending; body names org A", "/v1/account/delete/cancel", { orgId: a.org }, true)),
     "GET /v1/account/privacy": list("/v1/account/privacy"),
     "PATCH /v1/account/privacy": E("none; body tries to name another org", X("body names org A", "/v1/account/privacy", { aiAssist: true, orgId: a.org, id: a.org }, true)),
+
+    // ── plays (recipes, review queue, results) ──
+    "GET /v1/plays/types": list("/v1/plays/types"),
+    "POST /v1/plays/plan": noref("reads a public website the caller names; no workspace ids"),
+    "GET /v1/plays/candidates": E("query playId", X("A's play as a filter", `/v1/plays/candidates?playId=${a.play}`), X("own queue", "/v1/plays/candidates", undefined, true)),
+    // Answers 200 with the foreign ids under `notApplied`; the snapshot proves nothing of A's changed.
+    "POST /v1/plays/candidates/decide": E(
+      "body decisions[].id",
+      X("approve A's candidate (and enrol)", "/v1/plays/candidates/decide", { decisions: [{ id: a.playCandidate, decision: "approve" }], enroll: true }, true),
+      X("skip A's candidate", "/v1/plays/candidates/decide", { decisions: [{ id: a.playCandidate, decision: "skip", skipReason: "not a fit" }] }, true),
+    ),
+    "POST /v1/plays/candidates/:id/find-people": E("path :id", X("people for A's candidate", `/v1/plays/candidates/${a.playCandidate}/find-people`, { titles: ["CEO"] })),
+    "GET /v1/plays/performance": list("/v1/plays/performance"),
+    "GET /v1/plays": list("/v1/plays"),
+    "POST /v1/plays": E(
+      "body icpId, listId, campaignId, clientId",
+      X("A's ICP", "/v1/plays", { name: "x", type: "funding", config: {}, icpId: a.icp }),
+      X("A's list", "/v1/plays", { name: "x", type: "funding", config: {}, listId: a.list }),
+      X("A's campaign", "/v1/plays", { name: "x", type: "funding", config: {}, campaignId: a.campaign }),
+      X("A's client", "/v1/plays", { name: "x", type: "funding", config: {}, clientId: a.client }),
+    ),
+    "GET /v1/plays/:id": E("path :id", X("A's play", `/v1/plays/${a.play}`)),
+    "PATCH /v1/plays/:id": E(
+      "path :id, body icpId, listId, campaignId, clientId",
+      X("edit A's play", `/v1/plays/${a.play}`, { name: "pwned", autoApprove: true }),
+      X("own play -> A's ICP", `/v1/plays/${b.play}`, { icpId: a.icp }),
+      X("own play -> A's list", `/v1/plays/${b.play}`, { listId: a.list }),
+      X("own play -> A's campaign", `/v1/plays/${b.play}`, { campaignId: a.campaign }),
+      X("own play -> A's client", `/v1/plays/${b.play}`, { clientId: a.client }),
+    ),
+    "DELETE /v1/plays/:id": E("path :id", X("delete A's play", `/v1/plays/${a.play}`)),
+    "POST /v1/plays/:id/run": E("path :id", X("run A's play", `/v1/plays/${a.play}/run`, {})),
+    "GET /v1/plays/:id/runs": E("path :id", X("runs of A's play", `/v1/plays/${a.play}/runs`)),
+    "POST /v1/plays/:id/upload": E("path :id", X("upload into A's play", `/v1/plays/${a.playUpload}/upload`, { engagement: "commented", people: [{ email: "x@example.com" }] })),
 
     // ── leads ──
     "GET /v1/leads": E("query listId, clientId, icpId, tag, companyDomain, q, attention", ...leadFilters.map((f) => X(`filter ${f || "(none)"}`, `/v1/leads${f}`, undefined, true))),

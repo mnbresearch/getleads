@@ -34,6 +34,11 @@ export const RETENTION = {
   auditLogDays: 730,
   /** Upgrade requests that were closed (converted or dismissed). */
   closedUpgradeRequestDays: 730,
+  /**
+   * What a play found and nobody approved: candidates still waiting or skipped, and the
+   * record of each run. (An approved candidate stays for as long as its lead does.)
+   */
+  playCandidateDays: 180,
 } as const;
 
 const STATEMENT_MS = 120_000;
@@ -136,6 +141,27 @@ export async function runRetention(db: Db): Promise<RetentionReport> {
   // ── Logs ──
   await step("deleted", "audit log", async (tx) => counted(await tx.execute(sql`DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log WHERE created_at < now() - ${days(RETENTION.auditLogDays)} LIMIT ${BATCH})`)), { repeat: true });
   await step("deleted", "upgrade requests", async (tx) => counted(await tx.execute(sql`DELETE FROM upgrade_requests WHERE status IN ('converted', 'dismissed') AND created_at < now() - ${days(RETENTION.closedUpgradeRequestDays)}`)));
+
+  // ── Plays ──
+  // People a play found who were never approved are not kept indefinitely: a candidate is
+  // personal data held on the strength of "someone may want to review this".
+  await step("deleted", "play candidates", async (tx) =>
+    counted(await tx.execute(sql`DELETE FROM play_candidates WHERE id IN (SELECT id FROM play_candidates WHERE status IN ('pending', 'skipped') AND created_at < now() - ${days(RETENTION.playCandidateDays)} LIMIT ${BATCH})`)),
+    { repeat: true },
+  );
+  // An approved person stays while their lead exists. A lead removed by a plain delete (a
+  // cascade, a row removed by hand) leaves the candidate without one; it goes too.
+  await step("deleted", "play candidates of deleted leads", async (tx) =>
+    counted(
+      await tx.execute(sql`
+        DELETE FROM play_candidates WHERE id IN (
+          SELECT id FROM play_candidates
+          WHERE status = 'approved' AND kind = 'person' AND lead_id IS NULL AND coalesce(decided_at, created_at) < now() - interval '1 hour'
+          LIMIT ${BATCH})`),
+    ),
+    { repeat: true },
+  );
+  await step("deleted", "play runs", async (tx) => counted(await tx.execute(sql`DELETE FROM play_runs WHERE id IN (SELECT id FROM play_runs WHERE started_at < now() - ${days(RETENTION.playCandidateDays)} LIMIT ${BATCH})`)), { repeat: true });
 
   // ── Copies of deleted leads ──
   // The one step that rewrites rows a customer could once read (a deleted lead's old

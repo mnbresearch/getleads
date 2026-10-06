@@ -1,4 +1,4 @@
-import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, inArray, integrations, jobs, leads, lists, monitors, ne, organizations, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, visits, webhooks } from "@prospex/db";
+import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, inArray, integrations, jobs, leads, lists, monitors, ne, organizations, plays, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, visits, webhooks } from "@prospex/db";
 import { buildIcpWithAi, clampLeadQuery, crawlCompanyWebsite, createAiProviderForPlan, fetchPublic, findEmail, parseHttpUrl, redact, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { orgMemberEmail } from "./lib/members.js";
@@ -8,7 +8,7 @@ import { clampSearchQuery } from "./lib/searchQuery.js";
 import { webhookSecret } from "./lib/webhookSecret.js";
 import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead, verifierOf } from "./services/leads.js";
 import { AiNotConfiguredError, knownBrands, sampleAcrossEngines } from "./services/visibility.js";
-import { sendStep, tickCampaign } from "./services/campaigns.js";
+import { enrollEligibleLeads, sendStep, tickCampaign } from "./services/campaigns.js";
 import { appsScriptOutputUrl, fetchAppsScriptOutput, syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
 import { aiForOrg } from "./lib/ai.js";
@@ -23,6 +23,7 @@ import { identifyVisit, openVisitorJob } from "./services/visitors.js";
 import { refreshCompanySignals, runSubscription } from "./services/signals.js";
 import { runMonitor } from "./services/monitors.js";
 import { runAutopilot } from "./services/autopilot.js";
+import { runPlay, tickPlays } from "./services/plays.js";
 import { blockedByProvidersNote, plural } from "./services/notes.js";
 import { sendMail } from "./lib/mailer.js";
 import { purgeDueWorkspaces } from "./services/accountDeletion.js";
@@ -125,6 +126,8 @@ export const RECURRING_JOBS: Record<string, number> = {
   "monitors.tick": 30 * 60_000,
   "visibility.tick": 3600_000,
   "autopilots.tick": 3600_000,
+  // Hourly: starts the plays whose own interval (6 hours to 30 days) has come round.
+  "plays.tick": 3600_000,
   // Daily. A job change is a slow event and each check costs a provider call, so scanning
   // more often would spend credits to learn the same thing.
   "jobchanges.tick": 24 * 3600_000,
@@ -1108,6 +1111,82 @@ export const handlers: Record<string, JobHandler> = {
     if (ss.alert && fresh > 0 && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `${plural(fresh, "new lead")} for "${ssName}"`, text: `Scout found ${plural(fresh, "new lead")} matching "${ssName}":\n\n${names.join("\n")}${stoppedBecause ? `\n\n${stoppedBecause}` : ""}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
     else if (ss.alert && blocked && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `Could not check "${ssName}" today`, text: `${note}\n\nThe search will run again tomorrow.` });
     return { results: results.length, fresh, providerFailures, note, clientClaim };
+  },
+
+  /**
+   * Run one play and put what it finds in the review queue. payload: { playId, runId, charged? }
+   *
+   * Creates no lead unless the play itself is set to approve automatically. The search unit
+   * was charged by whoever queued the run (`charged`), and is given back when the run could
+   * not look at anything. Enqueued with one attempt: see POST /v1/plays/:id/run.
+   */
+  "play.run": async (job, ctx) => {
+    const playId = job.payload.playId;
+    const runId = job.payload.runId;
+    if (!isUuid(playId) || !isUuid(runId)) return { skipped: "bad payload" };
+    const play = await ctx.db.query.plays.findFirst({ where: eq(plays.id, playId) });
+    if (!play) return { skipped: "missing" };
+    if (foreign(job, play.orgId)) return ORG_MISMATCH;
+    return runPlay(play, runId, { log: ctx.log, charged: job.payload.charged === true });
+  },
+
+  /** Scheduler: hourly, start the plays that are due (active plays of active workspaces, at most 50 a tick). */
+  "plays.tick": async (job, ctx) => {
+    return withReschedule(ctx.db, job, "plays.tick", () => tickPlays());
+  },
+
+  /**
+   * Put approved people who had no usable address into the play's campaign, once an address
+   * has been looked for. payload: { playId, campaignId, leadIds (<= 200), lookedUp?, waits? }
+   *
+   * The lookup is the ordinary `lead.enrich` job, one per lead, so each is metered, retried
+   * and timed like any other enrichment. This job queues those, comes back a little later,
+   * and enrols whoever has an address by then through the same filters as the enroll route.
+   * A lead whose address was not found is simply not enrolled, and is counted in the result.
+   * Enrolling never starts a campaign.
+   */
+  "play.enroll": async (job, ctx) => {
+    const { db } = ctx;
+    const playId = job.payload.playId;
+    const campaignId = job.payload.campaignId;
+    if (!isUuid(playId) || !isUuid(campaignId)) return { skipped: "bad payload" };
+    const play = await db.query.plays.findFirst({ where: eq(plays.id, playId), columns: { id: true, orgId: true } });
+    if (!play) return { skipped: "missing" };
+    if (foreign(job, play.orgId)) return ORG_MISMATCH;
+    const org = await db.query.organizations.findFirst({ where: eq(organizations.id, play.orgId), columns: { status: true } });
+    if (!org || org.status !== "active") return { skipped: "organization not active" };
+    // The campaign and the leads are the play org's own, not merely rows with those ids.
+    const campaign = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, campaignId), eq(campaigns.orgId, play.orgId)) });
+    if (!campaign) return { skipped: "campaign missing" };
+    const asked = [...new Set((Array.isArray(job.payload.leadIds) ? (job.payload.leadIds as unknown[]) : []).filter(isUuid))].slice(0, 200);
+    const own = asked.length
+      ? await db.select({ id: leads.id, email: leads.email, firstName: leads.firstName, lastName: leads.lastName, companyId: leads.companyId }).from(leads).where(and(eq(leads.orgId, play.orgId), inArray(leads.id, asked)))
+      : [];
+    const ids = own.map((l) => l.id);
+    if (!ids.length) return { enrolled: 0, asked: asked.length };
+    const later = (payload: Record<string, unknown>) => enqueue(db, "play.enroll", { playId, campaignId, leadIds: ids, ...payload }, { orgId: play.orgId, priority: 1, runAt: new Date(Date.now() + 2 * 60_000) });
+    if (job.payload.lookedUp !== true) {
+      // Only leads an enrichment can find an address for: a name and a company to look at.
+      const lookups = own.filter((l) => !l.email && l.companyId && l.firstName && l.lastName);
+      if (lookups.length) {
+        for (const l of lookups) await enqueue(db, "lead.enrich", { leadId: l.id }, { orgId: play.orgId });
+        await later({ lookedUp: true, waits: 0 });
+        return { lookupsQueued: lookups.length, toEnroll: ids.length };
+      }
+    } else {
+      const waits = Number(job.payload.waits) || 0;
+      const [{ n: open }] = await db
+        .select({ n: dsql<number>`count(*)::int` })
+        .from(jobs)
+        .where(and(eq(jobs.orgId, play.orgId), eq(jobs.type, "lead.enrich"), inArray(jobs.status, ["queued", "running"]), inArray(dsql`${jobs.payload}->>'leadId'`, ids)));
+      // Still looking: come back, at most ten times (twenty minutes), then enrol whoever is ready.
+      if (Number(open) > 0 && waits < 10) {
+        await later({ lookedUp: true, waits: waits + 1 });
+        return { waitingForLookups: Number(open) };
+      }
+    }
+    const r = await enrollEligibleLeads(campaign, ids);
+    return { enrolled: r.enrolled, withoutAddress: r.skippedNoEmail, invalidAddress: r.skippedInvalidEmail, ownedByAnotherClient: r.skippedOtherClient };
   },
 
   /**

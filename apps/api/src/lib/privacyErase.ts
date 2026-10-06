@@ -1,4 +1,4 @@
-import { and, eq, events, getDb, globalSuppressions, inArray, jobs, leads, messages, monitorResults, organizations, scrapedLeads, sql, withStatementTimeout, type Db } from "@prospex/db";
+import { and, eq, events, getDb, globalSuppressions, inArray, jobs, leads, messages, monitorResults, organizations, playCandidates, scrapedLeads, sql, withStatementTimeout, type Db } from "@prospex/db";
 import { ADDRESS_FINGERPRINT_PREFIX, addressFingerprint, onPlatformList, platformBase } from "./privacySuppression.js";
 
 /**
@@ -12,6 +12,7 @@ import { ADDRESS_FINGERPRINT_PREFIX, addressFingerprint, onPlatformList, platfor
  *   events           "lead.created" with their name and address, "message.sent" with the
  *                    address and subject - for 90 days, and still delivered to webhooks
  *   monitor_results  the LinkedIn post or mention that surfaced them
+ *   play_candidates  what a play found about them, before and after they were approved
  *   jobs             finished enrichment / verification jobs naming them
  *   organizations.settings.aiReplyStyleExamples   replies written to them, kept as examples
  *
@@ -103,6 +104,16 @@ export async function eraseLeads(orgId: string, leadIds: string[], dbIn?: Db): P
       out.eventsDeleted += gone.length;
 
       await tx.delete(monitorResults).where(and(eq(monitorResults.orgId, orgId), profiles.length ? sql`(${inArray(monitorResults.leadId, ids)} OR ${inArray(monitorResults.url, profiles)})` : inArray(monitorResults.leadId, ids)));
+      // What a play found about these people: the candidates that became (or were matched to)
+      // these leads, and any other candidate carrying the same address or profile.
+      await tx
+        .delete(playCandidates)
+        .where(
+          and(
+            eq(playCandidates.orgId, orgId),
+            sql`(${inArray(playCandidates.leadId, ids)}${emails.length ? sql` OR ${inArray(sql`lower(${playCandidates.email})`, emails)}` : sql``}${profiles.length ? sql` OR ${inArray(playCandidates.linkedinUrl, profiles)}` : sql``})`,
+          ),
+        );
       // Provenance rows cascade with the lead; rows from before they were linked are matched by address.
       if (emails.length) await tx.delete(scrapedLeads).where(and(eq(scrapedLeads.orgId, orgId), sql`${scrapedLeads.leadId} IS NULL`, inArray(sql`lower(${scrapedLeads.email})`, emails)));
       // Finished jobs that name the lead (their results can hold its address). Queued ones
@@ -240,6 +251,10 @@ export async function eraseDataSubject(email: string, note = "Erased at the pers
   eventsDeleted += ev.length;
   for (const o of ev) touched.add(o.orgId);
   await db.delete(scrapedLeads).where(sameMailbox(sql`${scrapedLeads.email}`, base));
+  // Candidates a play is holding for review, in every workspace: the person asked to be
+  // forgotten, and the address is on the platform list so no play will store it again.
+  const candidates = await db.delete(playCandidates).where(sameMailbox(sql`${playCandidates.email}`, base)).returning({ orgId: playCandidates.orgId });
+  for (const o of candidates) touched.add(o.orgId);
   // The workspaces' own do-not-contact entries for this address stay: they are what keeps
   // it from being emailed, and they hold nothing but the address.
   return { workspaces: touched.size, leadsDeleted, messagesAnonymised, eventsDeleted };

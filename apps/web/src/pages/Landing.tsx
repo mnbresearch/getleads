@@ -139,6 +139,35 @@ const aiWork = [
   },
 ];
 
+/**
+ * Plays, the headline: three cards and one honest line about what it does not do.
+ *
+ * Every claim here is something the product does by construction - the reason sentence is
+ * assembled from what the evidence page says, a candidate with no evidence is not created,
+ * a person approves before anyone becomes a lead, and results are counted per play. If any
+ * of that changes, this copy changes with it.
+ */
+const playCards = [
+  {
+    label: "How it finds them",
+    title: "One play per source of buying intent",
+    body: "Companies a competitor names as customers. Teams hiring for the role you sell to. Fresh funding. People asking in public for a tool like yours. Visitors to your own site, contacts who changed jobs, or a list of post engagers you upload. Give Scout your website and it suggests which to run.",
+    guard: "It works from public pages and your own data. Some sources need set-up first, and the app says which are ready.",
+  },
+  {
+    label: "The proof on every person",
+    title: "A reason you can check in one click",
+    body: "Every candidate carries one plain sentence - named as a customer in this case study, hiring for this role, asked for an alternative in this thread - with a link to that page and the line it quoted. When the source is your own data, such as your website visitors, it says so instead.",
+    guard: "No proof, no candidate. The sentence is assembled from what the page says, not written freely by an AI.",
+  },
+  {
+    label: "The scoreboard per play",
+    title: "See which source actually earns replies",
+    body: "Each play is judged by what happened next: found, approved, contacted, replied, replied positively. Put your effort into the play that starts conversations and pause the ones that do not.",
+    guard: "A rate is marked \"not enough sends yet\" until there are enough behind it to mean something.",
+  },
+];
+
 const steps = [
   { n: "01", title: "Describe who you're after", desc: "Titles, industries, company size, tech stack, or plain language. Scout turns it into a live search." },
   { n: "02", title: "Scout finds, verifies and ranks", desc: "Every result is enriched, checked and scored against your ICP before it ever reaches your list." },
@@ -283,6 +312,7 @@ export function LandingPage() {
           <Logo size={28} textClassName="text-lg" />
           <nav className="hidden items-center gap-6 text-sm text-ink-300 sm:flex">
             {HAS_DEMO_VIDEO && <a href="#demo" className="hover:text-ink-50">Watch</a>}
+            <a href="#plays" className="hover:text-ink-50">Plays</a>
             <a href="#problems" className="hover:text-ink-50">Why Scout</a>
             <a href="#ai" className="hover:text-ink-50">The AI layer</a>
             <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
@@ -318,6 +348,63 @@ export function LandingPage() {
         </section>
 
         <DemoVideo />
+
+        <section id="plays" className="scroll-mt-24 pb-8 pt-20">
+          <div className="mx-auto max-w-2xl text-center">
+            <span className="badge border border-brand-200 bg-brand-50 text-brand-700">New: Plays</span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Plays: buyers who need you this week, with the proof</h2>
+            <p className="mt-3 text-ink-300">
+              A play watches one source of buying intent and brings you the people behind it. Each arrives with one sentence
+              saying why they are relevant and a link to the page that shows it. You approve or skip, and Scout then tells you
+              which play started real conversations.
+            </p>
+          </div>
+
+          <figure className="mx-auto mt-10 max-w-2xl" data-testid="landing-play-example">
+            <div className="card p-5 text-left shadow-glow">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-base font-semibold text-ink-50">Dana Whitfield</span>
+                <span className="badge bg-black/[0.05] text-ink-300">Person</span>
+                <span className="badge bg-brand-50 text-brand-700">Competitor customers</span>
+              </div>
+              <div className="mt-0.5 text-sm text-ink-300">VP Operations at Northwind Freight</div>
+              <div className="mt-3 rounded-lg border border-black/[0.06] bg-cream/70 p-3">
+                <p className="text-[15px] leading-snug text-ink-50"><span className="font-semibold">Relevant because:</span> Named as a customer of Acme in their case study &quot;How Northwind cut onboarding time&quot;.</p>
+                <blockquote className="mt-2 border-l-2 border-brand-200 pl-3 text-sm italic text-ink-300">&ldquo;Northwind Freight cut onboarding time by 40% in one quarter.&rdquo;</blockquote>
+                <div className="mt-2 text-xs text-ink-400"><span className="font-semibold uppercase tracking-wide">Proof</span> <span className="font-medium text-brand-600">How Northwind cut onboarding time ↗</span> <span>acme.example · 2 days ago</span></div>
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-2" aria-hidden>
+                <span className="rounded-lg bg-brand-600 px-3.5 py-1.5 text-sm font-medium text-white">Approve</span>
+                <span className="rounded-lg border border-black/10 bg-black/[0.03] px-3.5 py-1.5 text-sm font-medium text-ink-100">Skip</span>
+                <span className="text-xs text-ink-400">or press A / S</span>
+              </div>
+            </div>
+            <figcaption className="mt-2 text-center text-xs text-ink-500">An example of what waits in your review queue. The names are made up.</figcaption>
+          </figure>
+
+          <div className="mt-10 grid grid-cols-1 gap-5 lg:grid-cols-3">
+            {playCards.map((c) => (
+              <div key={c.title} className="card flex flex-col p-6 transition hover:-translate-y-0.5 hover:shadow-lg" data-testid="landing-play-card">
+                <span className="badge w-fit bg-brand-50 text-brand-700">{c.label}</span>
+                <div className="mt-3 text-lg font-semibold leading-snug text-ink-50">{c.title}</div>
+                <p className="mt-2 flex-1 text-sm text-ink-400">{c.body}</p>
+                <div className="mt-4 flex items-start gap-2 border-t border-black/[0.06] pt-3 text-xs text-ink-300">
+                  <span className="mt-0.5 shrink-0 text-brand-600">&#9673;</span>
+                  <span>{c.guard}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          <div className="card mt-6 flex flex-col items-start gap-4 p-6 sm:flex-row sm:items-center sm:justify-between" data-testid="landing-play-honest">
+            <p className="max-w-3xl text-sm text-ink-200">
+              <strong className="font-semibold text-ink-50">What Plays does not do:</strong> log in to your LinkedIn or X account, automate anyone&apos;s
+              profile, or work from bought lists. It reads public pages and your own data, and nothing becomes a lead until you
+              approve it, unless you tell a play to approve on its own.
+            </p>
+            <Link to="/signup" className="btn-primary shrink-0 px-5 py-2.5">Start with your website</Link>
+          </div>
+        </section>
 
         <section id="problems" className="scroll-mt-24 py-24">
           <div className="mx-auto max-w-2xl text-center">
@@ -620,6 +707,7 @@ export function LandingPage() {
             <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Product</div>
             <ul className="mt-3 space-y-2 text-ink-300">
               {HAS_DEMO_VIDEO && <li><a href="#demo" className="hover:text-ink-50">Watch the demo</a></li>}
+              <li><a href="#plays" className="hover:text-ink-50">Plays</a></li>
               <li><a href="#problems" className="hover:text-ink-50">Why Scout</a></li>
               <li><a href="#ai" className="hover:text-ink-50">The AI layer</a></li>
               <li><a href="#visibility" className="hover:text-ink-50">AI visibility</a></li>

@@ -7,6 +7,7 @@ import { recipientLabel } from "../lib/recipient";
 import { DeleteButton, EmailStatusBadge, Empty, LoadError, Modal, Page, ScoreBar, Spinner, useToast } from "../components/ui";
 import { BUCKET_COPY, type ClientAttention } from "../lib/clients";
 import { ExtLink } from "../components/ExtLink";
+import { PlayReason } from "../components/plays/PlayReason";
 import { useMe } from "../lib/me";
 import { safeHref } from "../lib/safeHref";
 import { plural } from "../lib/plural";
@@ -496,6 +497,8 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
   };
   return (
     <Modal open={!!lead} onClose={onClose} title={lead.fullName ?? "Lead"} wide>
+      {/* A lead approved from a play carries why it was found, and the page that shows it. */}
+      <PlayReason custom={lead.custom} />
       <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 [overflow-wrap:anywhere]">
         <div className="min-w-0 space-y-2 text-sm">
           <div className="text-ink-400">{lead.title}</div>

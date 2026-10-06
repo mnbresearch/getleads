@@ -401,7 +401,7 @@ suite("database integration", () => {
       // error, so the two are derived from the same constant and this pins that. The list
       // is written out deliberately: adding a scheduler should require saying so here.
       expect(Object.keys(RECURRING_JOBS).sort()).toEqual(
-        ["autopilots.tick", "campaign.tick", "jobchanges.tick", "monitors.tick", "org.purge", "signals.scan", "system.cleanup", "visibility.tick"].sort(),
+        ["autopilots.tick", "campaign.tick", "jobchanges.tick", "monitors.tick", "org.purge", "plays.tick", "signals.scan", "system.cleanup", "visibility.tick"].sort(),
       );
     });
 

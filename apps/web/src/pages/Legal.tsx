@@ -10,7 +10,7 @@ import { Logo } from "../components/Logo";
  * provider or a data flow changes, this page has to change with it.
  */
 
-const LAST_UPDATED = "4 October 2026";
+const LAST_UPDATED = "6 October 2026";
 const CONTACT = "contact@mnbresearch.com";
 
 /**
@@ -29,6 +29,7 @@ const RETENTION = {
   eventDays: 90,
   auditLogDays: 730,
   closedUpgradeRequestDays: 730,
+  playCandidateDays: 180,
 } as const;
 /** Days between an owner asking for a workspace to be deleted and the deletion (DELETION_GRACE_MS in the API). */
 const DELETION_GRACE_DAYS = 7;
@@ -124,6 +125,9 @@ export function PrivacyPage() {
           It comes from public sources (company websites, search results, public profiles), from files and CRMs a customer connects, and from the third-party data and verification providers listed in section 8. A customer that works for its own clients can share a read-only report link with a client; that report shows prospects' names, job titles, companies and pipeline stage, and never email addresses, phone numbers or profile links.
         </p>
         <p>
+          A customer can also set up plays: saved searches for people showing one specific sign of interest, such as a company being named as a customer on a competitor's public website, or a person asking in public for a tool like the customer's. The people a play finds are held as candidates for the customer to review, each with the reason it was found and, where there is one, a link to the public page the reason came from; a candidate becomes a lead only when the customer approves it or has told that play to approve on its own, and a deletion request covers candidates in the same way as leads.
+        </p>
+        <p>
           <strong>If you are a prospect</strong> and want to know why a customer contacted you, or want your data removed, you can contact that customer directly, or email us at <Mail />. On your request we will find which customers' workspaces hold your email address, delete your records from all of them, and put your address on a platform-wide do-not-contact list. From then on no Scout customer can email you through Scout, and your address is not stored again when a customer later imports a list or runs a search that would bring it back. What remains is your address on do-not-contact lists (ours, and a customer's if you had unsubscribed from them), which is what keeps you from being contacted, and content-free records that a message was once sent (kept so sending limits and bounce protection cannot be reset by deleting records). Copies a customer already exported to their own CRM or files are outside Scout; we will tell the customer about your request.
         </p>
       </Section>
@@ -202,6 +206,7 @@ export function PrivacyPage() {
           <>Leads, companies, lists, campaigns and messages are kept until the customer deletes them or the workspace is deleted. Deleting a lead also removes the content and the address from every message to and from that person, and the activity entries about them, within a day at the latest.</>,
           <>Do-not-contact (unsubscribe) records are kept for as long as the customer's workspace exists, because deleting them would allow the person to be emailed again. The platform-wide do-not-contact list is kept until the person asks us to remove them from it.</>,
           <>Individual website-visit records: {RETENTION.visitDays} days. The per-company summary built from them is kept until the workspace is deleted.</>,
+          <>People a play has found who are still waiting for review, or were skipped: {RETENTION.playCandidateDays} days. The record of each play run is removed after the same time. A person the customer approves becomes a lead and is kept as a lead is.</>,
           <>The activity feed (which webhooks are delivered from): {RETENTION.eventDays} days.</>,
           <>Sign-in attempts (email address and IP address): failed attempts up to {RETENTION.loginFailureDays} days, successful sign-ins {RETENTION.loginSuccessDays} days.</>,
           <>Password-reset, email-confirmation and sign-in tokens: {RETENTION.expiredTokenDays} days after they expire. Team invitations: {RETENTION.closedInviteDays} days after they are accepted, revoked or expire.</>,

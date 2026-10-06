@@ -135,6 +135,7 @@ const KNOWN_ACTIONS = [
   "team.invited", "team.invite_resent", "team.invite_revoked", "team.joined", "team.member_removed",
   "leads.exported", "leads.imported", "leads.bulk_deleted", "list.deleted", "client.created", "client.deleted", "client.share_enabled", "client.share_disabled", "client.share_rotated",
   "campaign.started", "campaign.paused", "campaign.deleted",
+  "play.created", "play.deleted", "play.auto_approve_changed", "play.candidates_approved", "play.uploaded",
   "org.settings_changed", "account.privacy_updated", "account.export_started", "account.exported", "account.deletion_requested", "account.deletion_cancelled", "account.deletion_reminder", "account.purged",
   "admin.login", "admin.logout", "admin.2fa_reset", "admin.plan_changed", "admin.status_changed", "admin.credits_changed",
   "admin.upgrade_request_status_changed", "admin.tool_limit_changed",

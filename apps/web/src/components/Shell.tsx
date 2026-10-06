@@ -7,6 +7,7 @@ import { emailVerificationAvailable } from "../lib/me";
 
 const nav = [
   { to: "/", label: "Overview", icon: "▦" },
+  { to: "/plays", label: "Plays", icon: "▷" },
   { to: "/clients", label: "Clients", icon: "◧" },
   { to: "/search", label: "Find leads", icon: "⌕" },
   { to: "/leads", label: "Leads", icon: "☰" },

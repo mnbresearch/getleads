@@ -12,8 +12,8 @@ packages/
   core/       The engine: search providers, discovery, crawler, email find/verify, ICP scoring, AI outreach. No DB deps.
   db/         Drizzle schema, SQL migrations, Postgres-backed job queue (no Redis), usage metering, plans.
   sdk/        Zero-dependency TypeScript client.
-  mcp/        MCP server: 46 tools for Claude Desktop / Claude Code / Cursor / Cortex agents.
-docs/         Deployment, pilot playbook, architecture.
+  mcp/        MCP server: 57 tools for Claude Desktop / Claude Code / Cursor / Cortex agents.
+docs/         Deployment, pilot playbook, architecture, Plays.
 scripts/      smoke.sh + smoke-v2.sh - end-to-end API tests.
 ```
 
@@ -31,10 +31,27 @@ npm run dev:web                  # http://localhost:5173
 Login: `demo@prospex.local` / `demo1234`. The seed is for local development only: it refuses to
 run with `NODE_ENV=production` (the password above is public), unless forced with `--force`.
 
+## Plays
+
+Find the people who need you this week - with the proof. A play is a saved recipe that watches
+one source of buying intent and fills a review queue. Every candidate comes with a one-sentence
+"relevant because" reason and the page that proves it. A person approves or skips; only an
+approved candidate becomes a lead, and nothing is sent by approving. Each play is then scored
+on what happened next: found, approved, contacted, replied, replied positively.
+
+Seven types: customers a competitor names in public, companies hiring for a role, recently
+funded companies, people asking in public for a tool like yours, visitors to your own website,
+contacts who changed jobs, and a list you upload of people who engaged with a post.
+
+Scout never logs in to anyone's LinkedIn or X account, runs no account automation and buys no
+lists. See [docs/PLAYS.md](docs/PLAYS.md) for each type, the review rule, how results are
+measured, limits and privacy.
+
 ## What is built
 
 | Layer | What it does | Free provider(s) |
 |---|---|---|
+| Plays | Saved recipes that find who needs you this week from one intent source, each candidate with a reason and its evidence; a review queue before anything becomes a lead; results per play. See [docs/PLAYS.md](docs/PLAYS.md) | built-in; a search key makes the search-based plays dependable |
 | Discovery | `site:linkedin.com/in` + company queries across search engines with automatic fallback | Google CSE (100/day free), SerpAPI (100/mo free), Brave ($5/1k, no free tier since Feb 2026), DuckDuckGo + Bing HTML (keyless) |
 | Enrichment | Crawls company sites: description, JSON-LD, team pages, public emails, tech stack, socials | built-in |
 | Email finding | Pattern inference from known emails, 12 candidate patterns, web search for published addresses | built-in, Hunter (25/mo) optional |
@@ -49,7 +66,7 @@ run with `NODE_ENV=production` (the password above is public), unless forced wit
 | Multichannel | Sequence steps for email (A/B variants), LinkedIn connect/message (tasks), calls, WhatsApp Cloud API; engagement scoring; pipeline statuses | Meta WhatsApp (1k conv/mo) |
 | Autopilot | Autonomous daily prospecting: query → enrich → verify → score → list → campaign | - |
 | Tools | LinkedIn↔email, colleagues, decision makers by persona, company intel, bulk verify, domain health (SPF/DKIM/DMARC), saved searches + alerts, team invites | - |
-| Agents | `POST /v1/agent/prospect` one-call workflow, OpenAPI 3.1 at `/openapi.json`, Swagger at `/docs`, SDK, MCP server (46 tools) | - |
+| Agents | `POST /v1/agent/prospect` one-call workflow, OpenAPI 3.1 at `/openapi.json`, Swagger at `/docs`, SDK, MCP server (57 tools) | - |
 
 ## Deploy for free
 

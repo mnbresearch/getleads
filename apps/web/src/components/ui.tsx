@@ -219,11 +219,19 @@ export function useToast() {
   return { toast, Toast };
 }
 
-export function TagInput({ value, onChange, placeholder }: { value: string[]; onChange: (v: string[]) => void; placeholder?: string }) {
+/**
+ * `inputId` / `ariaLabel` name the text box for a `<label htmlFor>` or a screen reader, and
+ * `max` stops the list growing past what the server accepts. All optional: without them this
+ * behaves exactly as it always has.
+ */
+export function TagInput({ value, onChange, placeholder, inputId, ariaLabel, max }: { value: string[]; onChange: (v: string[]) => void; placeholder?: string; inputId?: string; ariaLabel?: string; max?: number }) {
   const [draft, setDraft] = useState("");
   const add = () => {
     const parts = draft.split(",").map((s) => s.trim()).filter(Boolean);
-    if (parts.length) onChange([...new Set([...value, ...parts])]);
+    if (parts.length) {
+      const next = [...new Set([...value, ...parts])];
+      onChange(max && max > 0 ? next.slice(0, max) : next);
+    }
     setDraft("");
   };
   return (
@@ -231,10 +239,12 @@ export function TagInput({ value, onChange, placeholder }: { value: string[]; on
       {value.map((v) => (
         <span key={v} className="badge bg-brand-50 text-brand-700">
           {v}
-          <button className="ml-1 text-brand-600 hover:text-brand-600" onClick={() => onChange(value.filter((x) => x !== v))}>×</button>
+          <button type="button" className="ml-1 text-brand-600 hover:text-brand-600" aria-label={`Remove ${v}`} onClick={() => onChange(value.filter((x) => x !== v))}>×</button>
         </span>
       ))}
       <input
+        id={inputId}
+        aria-label={ariaLabel}
         className="min-w-[8rem] flex-1 border-0 bg-transparent p-1 text-sm focus:outline-none"
         value={draft}
         placeholder={placeholder}

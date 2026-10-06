@@ -7,6 +7,7 @@ import { randomToken } from "../lib/crypto.js";
 import { openOrgJson, rebindOnReadSoon } from "../lib/credentials.js";
 import { NO_PLATFORM_MAILER, sendMail, type MailerConfig } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
+import { mailSafe } from "./playEngines.js";
 import { tryConsume } from "../lib/quota.js";
 import { canonicalEmail } from "./leads.js";
 import { aiForOrg } from "../lib/ai.js";
@@ -1316,6 +1317,8 @@ export async function sendStep(campaignId: string, contactId: string, stepId: st
         instructions: step.aiInstructions ?? undefined,
         stepNo: step.stepNo,
         previousSubject: prevMsg?.subject,
+        // Why a play found this person, when one did (nothing is passed for any other lead).
+        ...reasonFor(lead),
         // This text is sent with nobody reading it first, so the draft must pass the output
         // guard or the template goes out instead. The allowlist is the tenant's own: the
         // sender's domains, the workspace website, and (inside generateOutreach) every host
@@ -1516,6 +1519,22 @@ export async function markReplied(orgId: string, leadEmail: string, intent: stri
 }
 
 
+/**
+ * The reason a play found this lead (`custom.relevant_because`, written when the candidate
+ * was approved), for the opening line of an AI draft. Made mail-safe again here, because a
+ * custom field can also be written by an import or an edit. Undefined for every lead no
+ * play found - and then nothing at all is added to the prompt.
+ */
+export function outreachReasonOf(lead: { custom?: unknown } | null | undefined): string | undefined {
+  const v = (lead?.custom as Record<string, unknown> | null | undefined)?.relevant_because;
+  if (typeof v !== "string" || !v.trim()) return undefined;
+  return mailSafe(v) || undefined;
+}
+const reasonFor = (lead: { custom?: unknown } | null | undefined): { reason?: string } => {
+  const reason = outreachReasonOf(lead);
+  return reason ? { reason } : {};
+};
+
 /** Manual channels (LinkedIn connect/message, call, custom task) become tasks for a human; the sequence advances when the task is completed. */
 export async function createStepTask(campaign: Campaign, contactId: string, leadId: string, step: { id: string; stepNo: number; channel: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions: string | null }, totalSteps: number) {
   const { db } = getDb();
@@ -1531,6 +1550,7 @@ export async function createStepTask(campaign: Campaign, contactId: string, lead
   let body = renderTemplate(step.bodyTemplate, vars);
   if (step.aiPersonalize && lead) {
     const out = await generateOutreach(aiForOrg(org ?? { plan: "free" }), { lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null }, sender: { name: senderName, company: senderCompany, valueProp: String(os.valueProp ?? d.valueProp ?? ""), tone: (os.tone ?? d.tone) as "friendly" | undefined }, bodyTemplate: step.bodyTemplate, instructions: `${step.channel === "linkedin_connect" ? "This is a LinkedIn connection note: max 280 characters, no subject." : step.channel === "linkedin_message" ? "This is a LinkedIn DM: short, casual, no subject line." : step.channel === "call" ? "Write a 60-second call opener script." : ""} ${step.aiInstructions ?? ""}`, stepNo: step.stepNo,
+      ...reasonFor(lead),
       // A task body is pasted by a person into LinkedIn or read out on a call, so the same
       // output guard applies; these channels have no subject line. A rejected draft leaves
       // the rendered template in place.

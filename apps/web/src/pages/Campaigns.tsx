@@ -283,6 +283,9 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
         </div>
         <div>
           <div className="mb-2 flex items-center justify-between"><div className="label mb-0">Sequence steps</div><button className="btn-secondary" onClick={() => setSteps([...steps, { delayDays: 3, subjectTemplate: "Re: ", bodyTemplate: "", aiPersonalize: true }])}>+ Step</button></div>
+          <p className="mb-2 text-xs text-ink-400" data-testid="step-variables-help">
+            Variables: <code>{"{{first_name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{title}}"}</code>, <code>{"{{sender_name}}"}</code>. People approved from a play also have <code>{"{{relevant_because}}"}</code> - the one-sentence reason Scout found them. Leads from anywhere else do not, so give it a fallback: <code>{'{{relevant_because | fallback:"Your team came up in my research."}}'}</code>. With AI personalize on, the opening line can refer to the reason without you adding it.
+          </p>
           <div className="space-y-3">
             {steps.map((s, i) => (
               <div key={i} className="rounded-lg border border-black/10 p-3">

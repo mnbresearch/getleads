@@ -18,7 +18,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { Prospex, ProspexError } from "@prospex/sdk";
+import { Prospex, ProspexError, type PlayCreateInput, type PlayType, type PlayUpdateInput } from "@prospex/sdk";
 
 const gl = new Prospex();
 const server = new McpServer({ name: "prospex", version: "0.1.0" });
@@ -139,6 +139,222 @@ server.tool("complete_task", "Mark a task done/skipped; the contact's sequence a
 server.tool("create_autopilot", `Create an autonomous daily prospecting agent: finds N fresh leads for a query every day, verifies, scores, saves to a list and optionally enrolls in a campaign. With autoEnroll and a campaignId, the people it finds are emailed without further review.${CONFIRM}`, { name: short(), query: z.string().max(2000), icpId: id.optional(), listId: id.optional(), campaignId: id.optional(), dailyLeads: z.number().int().min(1).max(100).default(10), minScore: z.number().int().min(0).max(100).default(60), requireValidEmail: z.boolean().default(true), autoEnroll: z.boolean().default(false), runHourUtc: z.number().int().min(0).max(23).default(3) }, OUTREACH, (a) => wrap(() => gl.tools.createAutopilot({ ...a, query: { query: a.query } })));
 server.tool("run_autopilot", `Run an autopilot now (background job). An autopilot set to enroll automatically will email the people it finds.${CONFIRM}`, { id }, OUTREACH, (a) => wrap(() => gl.tools.runAutopilot(a.id)));
 server.tool("set_lead_status", "Move a lead through the pipeline: new | contacted | engaged | replied | qualified | customer | lost.", { id, status: short(40) }, WRITE, (a) => wrap(() => gl.tools.setLeadStatus(a.id, a.status)));
+
+// ── Plays: find the people who need the user's product this week, with the proof ──
+// The loop the descriptions teach: plan_plays -> create_play -> run_play -> review_queue (WITH
+// the user) -> decide_candidates -> play_results. A play only ever fills a review queue; a
+// candidate becomes a lead when a person approves it, and nothing here sends a message.
+// decide_candidates is the one tool that can lead to contact (enroll: true adds approved people
+// to a campaign), so it carries OUTREACH and the CONFIRM sentence.
+const PLAY_TYPES = ["competitor_customers", "hiring_role", "funding", "public_asks", "website_visitors", "job_changes", "engagers_upload"] as const;
+const ASK_SOURCES = ["linkedin", "reddit", "hackernews", "x", "forums"] as const;
+const ENGAGEMENTS = ["reacted", "commented", "reposted", "followed", "signed_up", "attended", "other"] as const;
+
+/** A refusal made here, before any request: it reads like the API's own validation error. */
+const refuse = (message: string): never => {
+  throw new ProspexError(400, "validation_error", message);
+};
+const isHttpUrl = (v: string) => {
+  try {
+    const u = new URL(v);
+    return (u.protocol === "http:" || u.protocol === "https:") && !!u.hostname;
+  } catch {
+    return false;
+  }
+};
+/** http(s) only. `javascript:` and `data:` are valid URLs, and these are shown to people as links. */
+const httpUrl = (max = 2000) => z.string().max(max).refine(isHttpUrl, "a link starting with http:// or https://");
+/** A profile link the way people paste it: with http(s)://, or bare ("linkedin.com/in/jane"). No other scheme. */
+const profileLink = z
+  .string()
+  .max(500)
+  .refine((v) => (/^[a-z][a-z0-9+-]*:/i.test(v.trim()) ? isHttpUrl(v.trim()) : v.trim().length > 0), "a profile link like https://www.linkedin.com/in/jane");
+/** A company website: a domain, or an http(s) address on one. */
+const website = z
+  .string()
+  .min(4)
+  .max(300)
+  .regex(/^(?:https?:\/\/)?(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})(?:[/?#][^\s]*)?$/i, "a website like acme.com or https://acme.com");
+// A fresh schema per use: one shared instance is listed as a "$ref" into another argument, which
+// not every assistant resolves. Each plays argument is spelled out in full instead.
+const uid = () => z.string().uuid();
+const dom = () =>
+  z
+    .string()
+    .max(253)
+    .regex(/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+(?:[a-z]{2,63}|xn--[a-z0-9-]{1,59})$/i, "a company domain like acme.com");
+const tags = (max: number, each = 100) => z.array(z.string().min(1).max(each)).max(max);
+const days = (max: number) => z.number().int().min(1).max(max);
+const competitorRef = () => z.object({ name: z.string().min(1).max(120), domain: dom().optional() }).strict();
+
+/** What each type of play accepts, exactly. A key that belongs to another type is refused, not dropped. */
+const PLAY_CONFIG: Record<PlayType, z.ZodTypeAny> = {
+  competitor_customers: z.object({ competitors: z.array(competitorRef()).min(1).max(10), maxPerCompetitor: z.number().int().min(1).max(50).optional() }).strict(),
+  hiring_role: z.object({ roles: tags(10).min(1), keywords: tags(10).optional(), locations: tags(10).optional(), companyDomains: z.array(dom()).max(50).optional() }).strict(),
+  funding: z.object({ keywords: tags(10).optional(), industries: tags(10).optional(), locations: tags(10).optional(), days: days(60).optional(), minAmountUsd: z.number().int().min(0).max(1_000_000_000_000).optional(), country: z.string().length(2).optional() }).strict(),
+  public_asks: z
+    .object({ competitors: tags(10, 120).optional(), problems: tags(10, 160).optional(), category: z.string().min(1).max(120).optional(), sources: z.array(z.enum(ASK_SOURCES)).max(ASK_SOURCES.length).optional(), days: days(90).optional() })
+    .strict()
+    .refine((c) => !!c.competitors?.length || !!c.problems?.length || !!c.category, "give at least one of competitors, problems or category"),
+  website_visitors: z.object({ minIntentScore: z.number().int().min(0).max(100).optional(), days: days(90).optional() }).strict(),
+  job_changes: z.object({ days: days(90).optional() }).strict(),
+  engagers_upload: z.object({}).strict(),
+};
+/**
+ * The argument shape an assistant sees: every key any type takes, each bounded. Which keys a
+ * given type takes is checked by PLAY_CONFIG before a request is made.
+ */
+const playConfig = z
+  .object({
+    competitors: z.array(z.union([z.string().min(1).max(120), competitorRef()])).max(10).optional(),
+    maxPerCompetitor: z.number().int().min(1).max(50).optional(),
+    roles: tags(10).optional(),
+    keywords: tags(10).optional(),
+    industries: tags(10).optional(),
+    locations: tags(10).optional(),
+    companyDomains: z.array(dom()).max(50).optional(),
+    problems: tags(10, 160).optional(),
+    category: z.string().min(1).max(120).optional(),
+    sources: z.array(z.enum(ASK_SOURCES)).max(ASK_SOURCES.length).optional(),
+    days: days(90).optional(),
+    minAmountUsd: z.number().int().min(0).max(1_000_000_000_000).optional(),
+    country: z.string().length(2).optional(),
+    minIntentScore: z.number().int().min(0).max(100).optional(),
+  })
+  .strict();
+const configFor = (type: PlayType, config: unknown): Record<string, unknown> => {
+  const r = PLAY_CONFIG[type].safeParse(config ?? {});
+  if (r.success) return r.data as Record<string, unknown>;
+  const issue = r.error.issues[0];
+  const where = issue?.path.length ? `config.${issue.path.join(".")}: ` : "config: ";
+  return refuse(`These settings do not fit a ${type} play - ${where}${issue?.message ?? "not valid"}. See create_play for what each type takes.`);
+};
+const engagerRow = z
+  .object({ fullName: short().optional(), firstName: short(100).optional(), lastName: short(100).optional(), title: short(300).optional(), companyName: short().optional(), companyDomain: dom().optional(), linkedinUrl: profileLink.optional(), email: z.string().max(254).optional(), location: short().optional(), note: short(500).optional() })
+  .strict();
+const PLAY_CONFIG_HELP =
+  "config by type - competitor_customers: {competitors:[{name, domain?}] (1-10), maxPerCompetitor? (1-50)}; hiring_role: {roles (1-10), keywords?, locations?, companyDomains?}; funding: {keywords?, industries?, locations?, days? (1-60), minAmountUsd?, country? (2 letters)}; public_asks: {competitors? (names), problems?, category?, sources? (linkedin, reddit, hackernews, x, forums), days?} with at least one of competitors, problems or category; website_visitors: {minIntentScore? (0-100), days? (1-90)}; job_changes: {days? (1-90)}; engagers_upload: {} (it is fed with upload_engagers and is never run).";
+const AUTO_APPROVE_HELP = "Leave autoApprove off unless the user explicitly asks for it: when it is on, the people a run finds become leads without anyone reviewing them, and each new person uses one lead unit.";
+
+server.tool(
+  "plan_plays",
+  "Step 1 of Plays. A play is a saved recipe that finds the people who need the user's product right now from one source of buying intent: companies a competitor names as customers, companies hiring for a role, companies that just raised funding, people asking in public for a solution or complaining about a competitor, companies visiting the user's own website, known contacts who changed jobs, or an uploaded list of people who engaged with a post. Give the user's website: Scout reads it and answers with what it understood (the product, who buys it, competitors) and the plays it suggests, each with ready settings, the job titles to target and why. Saves nothing and contacts nobody; uses one search unit. Show the suggestions to the user, then save the ones they want with create_play. The whole loop: plan_plays -> create_play -> run_play -> review_queue (review WITH the user) -> decide_candidates -> play_results.",
+  { website },
+  LOOKUP,
+  (a) => wrap(() => gl.plays.plan(a.website)),
+);
+server.tool(
+  "list_play_types",
+  "The seven kinds of play: what each one finds, the settings it needs (fields), suggested job titles, and whether it can work in this workspace yet (available, with a plain reason when it cannot, for example no website tracking installed). Use it before create_play when you are not starting from plan_plays.",
+  {},
+  READ,
+  () => wrap(() => gl.plays.types()),
+);
+server.tool(
+  "list_plays",
+  "The workspace's saved plays, each with how many candidates are waiting, approved and skipped, and what its last run found. Pass playId to get one play with its last 10 runs: do that after run_play to see whether the run has finished and what it says. A run with status blocked could not look anywhere (its note says why): that is a failure to search, not the same as finding nobody.",
+  { playId: uid().optional() },
+  READ,
+  (a) => wrap<unknown>(() => (a.playId ? gl.plays.get(a.playId) : gl.plays.list())),
+);
+server.tool(
+  "create_play",
+  `Step 2 of Plays: save a play. Take type, config and targetTitles from plan_plays, or from list_play_types. ${PLAY_CONFIG_HELP} targetTitles are the job titles to look for at the companies the play finds. listId: approved people are added to that list. campaignId: the campaign approved people can be added to later, and only when decide_candidates is called with enroll: true. Creating a play finds nobody and contacts nobody: call run_play next. ${AUTO_APPROVE_HELP} runEveryHours (6-720) makes the play run on a schedule, and every run uses one search unit; leave it out to run only when asked.`,
+  {
+    name: z.string().min(1).max(120),
+    type: z.enum(PLAY_TYPES),
+    config: playConfig.default({}),
+    targetTitles: tags(20).optional(),
+    icpId: uid().optional(),
+    clientId: uid().optional(),
+    listId: uid().optional(),
+    campaignId: uid().optional(),
+    autoApprove: z.boolean().default(false),
+    minScore: z.number().int().min(0).max(100).optional(),
+    runEveryHours: z.number().int().min(6).max(720).nullable().optional(),
+    status: z.enum(["active", "paused"]).optional(),
+  },
+  WRITE,
+  (a) => wrap(() => gl.plays.create({ ...a, config: configFor(a.type, a.config) } as PlayCreateInput)),
+);
+server.tool(
+  "update_play",
+  `Change a saved play: rename it, pause or resume it (status), or change its settings, target titles, ICP, list, campaign, schedule or auto-approve. Pass only what changes. To change settings, send the complete config for the play's type. ${PLAY_CONFIG_HELP} runEveryHours: null stops the schedule. Pass null for icpId, listId, campaignId or clientId to detach it. Contacts nobody. ${AUTO_APPROVE_HELP}`,
+  {
+    id: uid(),
+    name: z.string().min(1).max(120).optional(),
+    config: playConfig.optional(),
+    targetTitles: tags(20).optional(),
+    icpId: uid().nullable().optional(),
+    clientId: uid().nullable().optional(),
+    listId: uid().nullable().optional(),
+    campaignId: uid().nullable().optional(),
+    autoApprove: z.boolean().optional(),
+    minScore: z.number().int().min(0).max(100).optional(),
+    runEveryHours: z.number().int().min(6).max(720).nullable().optional(),
+    status: z.enum(["active", "paused"]).optional(),
+  },
+  WRITE,
+  ({ id: playId, ...patch }) =>
+    wrap(() => {
+      if (Object.values(patch).every((v) => v === undefined)) refuse("Nothing to change: pass at least one of name, status, config, targetTitles, icpId, clientId, listId, campaignId, autoApprove, minScore or runEveryHours.");
+      return gl.plays.update(playId, patch as PlayUpdateInput);
+    }),
+);
+server.tool(
+  "run_play",
+  "Step 3 of Plays: run a play now. It looks at its source (public pages and search results, or the workspace's own data) and puts what it finds in the review queue as candidates, each with a one-sentence reason and the page that proves it. Uses one search unit. Creates no leads and contacts nobody. It usually runs in the background for one to four minutes: call list_plays with playId to see the run's status and note, then review_queue. A play of type engagers_upload is not run; give it people with upload_engagers.",
+  { id: uid() },
+  LOOKUP,
+  (a) => wrap(() => gl.plays.run(a.id)),
+);
+server.tool(
+  "review_queue",
+  "Step 4 of Plays: the candidates plays have found. By default those waiting for a decision, best fit first. Each has relevantBecause (one sentence saying why this person or company is relevant now), the evidence behind it (evidenceUrl, evidenceTitle, evidenceQuote), a confidence, and a fit score when the play has an ICP. kind is person (can become a lead), company (nobody found there yet: use find_people_for_candidate) or post (a public conversation with no contact details: approving it creates a task to answer it, never a lead). alreadyLead means the person is already in the workspace. Review these WITH the user: show each reason with its evidence link and let the user say who to approve and who to skip. Do not decide for them, then record their choices with decide_candidates.",
+  { status: z.enum(["pending", "approved", "skipped"]).default("pending"), playId: uid().optional(), kind: z.enum(["person", "company", "post"]).optional(), limit: z.number().int().min(1).max(200).default(25), offset: z.number().int().min(0).max(1_000_000).default(0) },
+  READ,
+  (a) => wrap(() => gl.plays.candidates(a)),
+);
+server.tool(
+  "decide_candidates",
+  `Step 5 of Plays: record the user's decisions on candidates from review_queue. Approve only candidates the user has seen and said yes to. Approving a person creates a lead that keeps the reason and the evidence link (one lead unit for each new person, none for someone who was already a lead); approving a company saves the company; approving a post creates a task to answer that conversation. Skipping only marks the candidate skipped. Approving creates leads and never sends anything by itself. The answer says exactly what happened: leadsCreated, leadsExisting, tasksCreated, notApplied (decisions that changed nothing, with the reason) and stopped (the plan's lead allowance ran out or something failed: the candidates not reached are still waiting). Leave enroll false unless the user asked for it. With enroll: true, approved people are also added to the play's campaign (those with no address yet are looked up first and counted in queuedForEmail), and a campaign that is running will email them.${CONFIRM}`,
+  { decisions: z.array(z.object({ id: uid(), decision: z.enum(["approve", "skip"]), skipReason: z.string().max(200).optional() }).strict()).min(1).max(200), enroll: z.boolean().default(false) },
+  OUTREACH,
+  (a) => wrap(() => gl.plays.decide(a.decisions, { enroll: a.enroll })),
+);
+server.tool(
+  "find_people_for_candidate",
+  "For a company candidate in the review queue: find up to 5 decision makers there. Each person found joins the queue as a new person candidate carrying the company's reason and evidence. Uses one search unit. Creates no leads and contacts nobody: the people still go through review_queue and decide_candidates.",
+  { candidateId: uid(), titles: tags(10).optional(), limit: z.number().int().min(1).max(5).default(3) },
+  LOOKUP,
+  (a) => wrap(() => gl.plays.findPeople(a.candidateId, { titles: a.titles, limit: a.limit })),
+);
+server.tool(
+  "upload_engagers",
+  "Give a play of type engagers_upload a list of people the user already has: people who reacted to, commented on or reposted a post, followed, signed up or attended. Pass exactly one of people (rows, up to 2,000) or csv (text with a header row). Each row needs a LinkedIn profile link, or an email, or a name together with a company. postUrl, postTitle and postAuthor describe the post and become the evidence. The rows become candidates in the review queue with a reason such as: Commented on the post \"<title>\". Rows that cannot be used come back in rejected with the reason. Creates no leads and contacts nobody. Scout does not log in to LinkedIn or any other site to collect these people: the user supplies the list.",
+  {
+    playId: uid(),
+    engagement: z.enum(ENGAGEMENTS),
+    postUrl: httpUrl(2000).optional(),
+    postTitle: short(200).optional(),
+    postAuthor: short(120).optional(),
+    people: z.array(engagerRow).min(1).max(2000).optional(),
+    csv: z.string().min(1).max(1_900_000).optional(),
+  },
+  WRITE,
+  ({ playId, ...input }) =>
+    wrap(() => {
+      if ((input.people === undefined) === (input.csv === undefined)) refuse("Pass exactly one of people or csv.");
+      return gl.plays.upload(playId, input);
+    }),
+);
+server.tool(
+  "play_results",
+  "Step 6 of Plays: what each play led to in the last N days - found, approved, contacted, replied and replied positively, with the reply rate and positive rate over the people contacted. sufficient is false until at least 20 people from a play have been contacted: its rates are then too small a sample to compare, so tell the user there are not enough sends yet instead of ranking it. best names the strongest play among those with enough sends and is null when none has enough. A note is included when replies are not being recorded. Use it with the user to decide which source of intent deserves more effort.",
+  { days: z.number().int().min(7).max(365).default(90) },
+  READ,
+  (a) => wrap(() => gl.plays.performance(a.days)),
+);
 
 const transport = new StdioServerTransport();
 await server.connect(transport);

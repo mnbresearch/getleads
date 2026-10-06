@@ -21,6 +21,7 @@ import { agentRoutes } from "./routes/agent.js";
 import { automationRoutes } from "./routes/automation.js";
 import { pixelPublic, visitorRoutes } from "./routes/visitors.js";
 import { signalRoutes } from "./routes/signals.js";
+import { playRoutes } from "./routes/plays.js";
 import { joinRoutes, toolRoutes } from "./routes/tools.js";
 import { adminRoutes } from "./routes/admin.js";
 import { leadCaptureRoutes } from "./routes/leadCapture.js";
@@ -127,7 +128,7 @@ function accessLog(print: (line: string) => void): MiddlewareHandler {
 
 const KB = 1024;
 const MB = 1024 * KB;
-export const BODY_LIMITS = { default: 1 * MB, leadImport: 10 * MB, publicPost: 256 * KB } as const;
+export const BODY_LIMITS = { default: 1 * MB, leadImport: 10 * MB, playUpload: 2 * MB, publicPost: 256 * KB } as const;
 
 /** Unauthenticated endpoints: anyone on the internet can POST to these, so they get the smallest allowance. */
 const PUBLIC_POST_PREFIXES = ["/px/", "/v1/auth/", "/t/", "/v1/email-events/", "/v1/public/", "/internal/"];
@@ -139,6 +140,7 @@ const PUBLIC_POST_PATHS = new Set(["/v1/upgrade-requests", "/v1/admin/login"]);
  * There was no limit anywhere: a 50 MB body was read into memory in full on any endpoint,
  * signed in or not, and a 20 MB CSV import took a 512 MB instance down. Now:
  *   - 10 MB for the lead import (5,000 leads of CSV or JSON fit several times over);
+ *   - 2 MB for a play's upload of people who engaged (2,000 rows fit several times over);
  *   - 256 KB for POSTs that need no authentication (sign-in forms, the visitor pixel,
  *     unsubscribe, provider event hooks) - none of them has a legitimate body near that;
  *   - 1 MB for everything else, including the Stripe webhook: its events are normally a few
@@ -146,6 +148,8 @@ const PUBLIC_POST_PATHS = new Set(["/v1/upgrade-requests", "/v1/admin/login"]);
  */
 export function bodyLimitFor(method: string, path: string): number {
   if (method === "POST" && path === "/v1/leads/import") return BODY_LIMITS.leadImport;
+  // A list of up to 2,000 people who engaged with a post, as rows or as a CSV.
+  if (method === "POST" && /^\/v1\/plays\/[^/]+\/upload$/.test(path)) return BODY_LIMITS.playUpload;
   if (method === "POST" && (PUBLIC_POST_PATHS.has(path) || PUBLIC_POST_PREFIXES.some((p) => path.startsWith(p)))) return BODY_LIMITS.publicPost;
   return BODY_LIMITS.default;
 }
@@ -339,6 +343,7 @@ export function createApp(opts: AppOptions = {}) {
   app.route("/v1/automation", automationRoutes);
   app.route("/v1/visitors", visitorRoutes);
   app.route("/v1/signals", signalRoutes);
+  app.route("/v1/plays", playRoutes);
   app.route("/v1/tools", toolRoutes);
   app.route("/v1/auth", joinRoutes);
   app.route("/px", pixelPublic);
