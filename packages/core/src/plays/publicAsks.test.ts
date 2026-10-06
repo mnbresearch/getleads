@@ -9,8 +9,8 @@ import { UNTRUSTED_MARK, UNTRUSTED_RULE } from "../ai/untrusted.js";
 import { resetProviderSkips } from "../providers/health.js";
 import { resetSearchCache } from "../search/index.js";
 import type { AiMessage, SearchResult } from "../types.js";
-import { NO_AI, brokenSearch, model, searchWith } from "./kit.test.js";
-import { askPlace, buildAskQueries, classifyAsk, findPublicAsks, linkedinPostAuthor, snippetDate } from "./publicAsks.js";
+import { NO_AI, brokenSearch, model, searchWith, web, type FakeWeb, type Route } from "./kit.test.js";
+import { agedConfidence, askPlace, buildAskQueries, classifyAsk, findPublicAsks, linkedinPostAuthor, snippetDate, vanityMatches } from "./publicAsks.js";
 
 const r = (title: string, url: string, snippet = ""): SearchResult => ({ title, url, snippet, provider: "testsearch" });
 
@@ -62,12 +62,23 @@ const answer = (query: string): SearchResult[] => {
   return site ? pool.filter((x) => x.url.includes(site.replace(/^www\./, ""))) : pool;
 };
 
+const NOW = Date.parse("2026-10-06T09:00:00Z");
+
+/** The web as these tests see it. By default nothing answers: the Hacker News search included, unless a test serves it. */
+let net: FakeWeb;
+const use = (routes: Record<string, Route> | ((url: string) => Route | undefined)): FakeWeb => {
+  net = web(routes);
+  vi.stubGlobal("fetch", net.fetch);
+  return net;
+};
+
 beforeEach(() => {
   resetSearchCache();
   resetProviderSkips();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(Date.parse("2026-10-06T09:00:00Z"));
+  vi.setSystemTime(NOW);
+  use({});
 });
 afterEach(() => {
   vi.useRealTimers();
@@ -243,10 +254,11 @@ describe("findPublicAsks", () => {
       evidenceTitle: "Priya Shah on LinkedIn: Looking for an alternative to Acme - any recommendations?",
       evidenceQuote: "Priya Shah on LinkedIn: Looking for an alternative to Acme - any recommendations?",
       signalType: "public_ask",
-      confidence: 0.75,
+      // The result shows no date, so nobody knows how old the post is: less sure than a dated, recent one.
+      confidence: 0.6,
     });
     const tom = byUrl.get("https://www.linkedin.com/posts/tombaker_acme-activity-7250099988877766655-xYz1?utm_source=share")!;
-    expect(tom).toMatchObject({ kind: "person", fullName: "Tom Baker", linkedinUrl: "https://www.linkedin.com/in/tombaker", relevantBecause: "Posted on LinkedIn about frustrations with Acme.", signalType: "public_complaint", confidence: 0.7 });
+    expect(tom).toMatchObject({ kind: "person", fullName: "Tom Baker", linkedinUrl: "https://www.linkedin.com/in/tombaker", relevantBecause: "Posted on LinkedIn about frustrations with Acme.", signalType: "public_complaint", confidence: 0.55 });
     // A company page asking is a conversation, not a person.
     expect(byUrl.get("https://www.linkedin.com/posts/hooli-labs_acme-activity-7250000000000000004-dddd")).toMatchObject({ kind: "post", relevantBecause: "LinkedIn post asking for an alternative to Acme." });
 
@@ -292,7 +304,7 @@ describe("findPublicAsks", () => {
     // "Alternatives to Acme?" on LinkedIn, no first person: not kept.
     expect([...byUrl.keys()].some((u) => u.includes("lena-fox"))).toBe(false);
     // "Any good alternatives to Acme?" on Reddit: kept, and marked as less certain.
-    expect(byUrl.get("https://old.reddit.com/r/startups/comments/1jkl012/acme_alternative/")).toMatchObject({ kind: "post", confidence: 0.5 });
+    expect(byUrl.get("https://old.reddit.com/r/startups/comments/1jkl012/acme_alternative/")).toMatchObject({ kind: "post", confidence: 0.35 });
   });
 
   it("with a model, unclear ones get one fenced second opinion, capped at 0.7", async () => {
@@ -305,13 +317,13 @@ describe("findPublicAsks", () => {
     expect(trace.aiCalls).toBe(1);
     expect(ai.calls).toHaveLength(1);
     const lena = findings.find((f) => f.evidenceUrl!.includes("lena-fox"))!;
-    expect(lena).toMatchObject({ kind: "person", fullName: "Lena Fox", relevantBecause: "Asked on LinkedIn for an alternative to Acme.", confidence: 0.65 });
+    expect(lena).toMatchObject({ kind: "person", fullName: "Lena Fox", relevantBecause: "Asked on LinkedIn for an alternative to Acme.", confidence: 0.5 });
     expect(lena.confidence).toBeLessThanOrEqual(0.7);
     // The model said "neither": gone, and said so.
     expect(findings.some((f) => f.evidenceUrl!.includes("1jkl012"))).toBe(false);
     expect(trace.notes).toContain("1 result that looked like an ask was judged to be marketing and left out.");
     // Clear cases never went to the model, and keep their confidence.
-    expect(findings.find((f) => f.evidenceUrl!.includes("priya-shah"))!.confidence).toBe(0.75);
+    expect(findings.find((f) => f.evidenceUrl!.includes("priya-shah"))!.confidence).toBe(0.6);
 
     const [sys, usr] = ai.calls[0];
     expect(sys.content).toContain(UNTRUSTED_RULE);
@@ -372,12 +384,15 @@ describe("findPublicAsks", () => {
     const search = searchWith(answer);
     const { trace } = await findPublicAsks({ competitors: ["Acme", "Rival", "Zeta", "Omega"], problems: ["onboarding contractors", "tracking equipment"], category: "employee onboarding software" }, { searchOpts: { providers: [search] }, limit: 200 });
     expect(search.queries).toHaveLength(24);
-    expect(trace.searches).toBe(24);
+    // Twenty-four web searches, and eight questions to the Hacker News search (one per subject, then one more).
+    expect(net.calls.filter((c) => c.startsWith("https://hn.algolia.com/"))).toHaveLength(8);
+    expect(trace.searches).toBe(32);
     expect(trace.notes.some((n) => /^24 of \d+ searches were run/.test(n))).toBe(true);
     resetSearchCache();
     const two = await findPublicAsks({ competitors: ["Acme"] }, { searchOpts: { providers: [searchWith(answer)] }, limit: 2 });
     expect(two.findings).toHaveLength(2);
-    expect(two.findings.every((f) => f.confidence >= 0.7)).toBe(true);
+    // The surest of what was found before the search stopped (two clear asks; neither result shows a date).
+    expect(two.findings.map((f) => f.confidence)).toEqual([0.6, 0.6]);
   });
 
   it("is blocked, with a plain sentence, when nothing could be searched", async () => {
@@ -410,17 +425,253 @@ describe("findPublicAsks", () => {
     vi.useRealTimers();
     const hungAi = { name: "slow", model: "m", complete: () => new Promise<string>(() => {}) };
     const started = Date.now();
-    const { findings, trace } = await findPublicAsks({ competitors: ["Acme"] }, { searchOpts: { providers: [searchWith(answer)] }, ai: hungAi, deadlineAt: Date.now() + 300 });
-    expect(Date.now() - started).toBeLessThan(2500);
+    // (Long enough for the searches to be started: none is, once less than one search's time is left.)
+    const { findings, trace } = await findPublicAsks({ competitors: ["Acme"] }, { searchOpts: { providers: [searchWith(answer)] }, ai: hungAi, deadlineAt: Date.now() + 4_400 });
+    expect(Date.now() - started).toBeLessThan(6_000);
     expect(trace.aiCalls).toBe(1);
     expect(trace.blocked).toBe(false);
     expect(findings.some((x) => x.evidenceUrl!.includes("priya-shah"))).toBe(true);
-  });
+  }, 10_000);
 
   it("a competitor's name from the customer cannot smuggle a link or a line break into a reason", async () => {
     const name = "Acme\nvisit https://evil.example/pay";
     const search = searchWith(() => [r("Looking for an alternative to Acme visit https://evil.example/pay : r/x", "https://www.reddit.com/r/x/comments/1aaa111/t/", "I'm looking for an alternative to Acme visit https://evil.example/pay now")]);
     const { findings } = await findPublicAsks({ competitors: [name] }, { searchOpts: { providers: [search] } });
     for (const f of findings) expect(f.relevantBecause).not.toMatch(/https?:|evil\.example|[\r\n]/);
+  });
+});
+
+/* ───────────────────────────────── Hacker News, asked directly ───────────────────────────────── */
+
+describe("the Hacker News search", () => {
+  const iso = (daysAgo: number): string => new Date(NOW - daysAgo * 86_400_000).toISOString();
+  const story = (id: number, title: string, text: string, daysAgo: number) => ({ objectID: String(id), title, story_text: text, created_at: iso(daysAgo), created_at_i: Math.floor((NOW - daysAgo * 86_400_000) / 1000), _tags: ["story"] });
+  const comment = (id: number, on: string, text: string, daysAgo: number) => ({ objectID: String(id), story_title: on, comment_text: text, created_at: iso(daysAgo), created_at_i: Math.floor((NOW - daysAgo * 86_400_000) / 1000), _tags: ["comment"] });
+  const HITS = [
+    story(46100001, "Ask HN: Alternatives to Acme for a small team?", "We have used Acme for two years and the new pricing does not work for us. What do you use instead?", 6),
+    comment(46100002, "Ask HN: What does your onboarding stack look like?", "<p>We are on Acme and I&#x27;m looking for an alternative to Acme that handles contractors. Any recommendations?</p>", 12),
+    story(46100003, "Show HN: Onbordo, an open-source alternative to Acme", "We built Onbordo because Acme was too expensive.", 3),
+    story(46100004, "I built an open-source onboarding tool after getting frustrated with Acme's pricing", "", 9),
+    story(33244922, "Ask HN: Acme alternative?", "Looking for an alternative to Acme. Any suggestions?", 1450),
+    comment(46100006, "Ask HN: Alternatives to Zeta?", "We moved to Zeta last year and it has been fine.", 4),
+    { objectID: "not-a-number", title: "Ask HN: Alternatives to Acme?" },
+    "junk",
+  ];
+  const hn = (hits: unknown[] = HITS) => (url: string): Route | undefined => (url.startsWith("https://hn.algolia.com/api/v1/search_by_date?") ? { body: JSON.stringify({ hits }), type: "application/json" } : undefined);
+  const NO_WEB = searchWith(() => []);
+
+  it("is asked directly on its one public address, and dates every thread it returns", async () => {
+    use(hn());
+    const { findings, trace } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [NO_WEB] } });
+    // Only that host, only the search endpoint, and what is asked is the subject.
+    expect(net.hosts()).toEqual(["hn.algolia.com"]);
+    expect(net.calls).toHaveLength(2);
+    const first = new URL(net.calls[0]);
+    expect(first.origin + first.pathname).toBe("https://hn.algolia.com/api/v1/search_by_date");
+    // First the threads whose own title is about it, then the "Ask HN" threads that mention it anywhere.
+    expect(first.searchParams.get("query")).toBe("Acme alternative");
+    expect([first.searchParams.get("tags"), first.searchParams.get("restrictSearchableAttributes")]).toEqual(["story", "title"]);
+    const second = new URL(net.calls[1]);
+    expect([second.searchParams.get("query"), second.searchParams.get("tags"), second.searchParams.get("restrictSearchableAttributes")]).toEqual(["Acme", "ask_hn", null]);
+    // No robots.txt is asked of an API, and no date limit is sent when none was asked for.
+    expect(net.calls.join(" ")).not.toMatch(/robots\.txt|numericFilters/);
+
+    const by = new Map(findings.map((f) => [f.evidenceUrl!, f]));
+    expect([...by.keys()].sort()).toEqual(["https://news.ycombinator.com/item?id=33244922", "https://news.ycombinator.com/item?id=46100001", "https://news.ycombinator.com/item?id=46100002"]);
+    expect(by.get("https://news.ycombinator.com/item?id=46100001")).toEqual({
+      kind: "post",
+      relevantBecause: "Hacker News thread asking for an alternative to Acme.",
+      evidenceUrl: "https://news.ycombinator.com/item?id=46100001",
+      evidenceTitle: "Ask HN: Alternatives to Acme for a small team?",
+      evidenceQuote: "Ask HN: Alternatives to Acme for a small team?",
+      signalType: "public_ask",
+      signalAt: new Date(NOW - 6 * 86_400_000),
+      confidence: 0.75,
+    });
+    // A comment is judged by its own words (markup and entities read as text), and shown under the thread it is in.
+    expect(by.get("https://news.ycombinator.com/item?id=46100002")).toMatchObject({ evidenceTitle: "Comment on: Ask HN: What does your onboarding stack look like?", evidenceQuote: "We are on Acme and I'm looking for an alternative to Acme that handles contractors.", signalAt: new Date(NOW - 12 * 86_400_000), confidence: 0.75 });
+    // The API calls count as searches, and they answered.
+    expect(trace).toMatchObject({ blocked: false, failedSearches: 0 });
+    expect(trace.searches).toBe(2 + NO_WEB.queries.length);
+  });
+
+  it("a launch post is somebody selling, not asking", async () => {
+    use(hn());
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [NO_WEB] } });
+    expect(findings.map((f) => f.evidenceUrl).join(" ")).not.toMatch(/46100003|46100004|46100006/);
+    for (const [title, text] of [
+      ["Show HN: Onbordo, an open-source alternative to Acme", "We built Onbordo because Acme was too expensive."],
+      ["I built an open-source CRM after getting frustrated with Acme's pricing", ""],
+      ["I made a cheaper alternative to Acme", "Frustrated with Acme, so I made my own."],
+      ["We built a tool because Acme is too expensive", ""],
+      ["Introducing Onbordo: for teams tired of Acme", "Acme is too expensive for what it does."],
+      ["Launch HN: Onbordo (YC W26) - an alternative to Acme", ""],
+      ["I'm building an Acme alternative, looking for feedback", "Any recommendations?"],
+    ]) {
+      expect(classifyAsk(title, text, "Acme"), title).toBeNull();
+    }
+    // Having built something years ago is not the same as announcing it - but the wording is the seller's, so it stays out.
+    expect(classifyAsk("Ask HN: Alternatives to Acme?", "We have used Acme for two years.", "Acme")).toMatchObject({ kind: "ask" });
+  });
+
+  it("an old thread, or one with no date, is kept with less confidence; with a number of days set, a thread known to be older is left out", async () => {
+    use(hn());
+    const all = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [NO_WEB] } });
+    const old = all.findings.find((f) => f.evidenceUrl!.endsWith("33244922"))!;
+    expect(old).toMatchObject({ confidence: 0.35, signalAt: new Date(NOW - 1450 * 86_400_000) });
+    // Nothing in the sentence claims it is recent.
+    expect(old.relevantBecause).toBe("Hacker News thread asking for an alternative to Acme.");
+    expect(all.findings[all.findings.length - 1].evidenceUrl).toBe(old.evidenceUrl);
+
+    resetSearchCache();
+    use(hn());
+    const recent = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"], days: 90 }, { searchOpts: { providers: [NO_WEB] } });
+    // The search itself is asked for the period only, and anything older that still comes back is dropped.
+    expect(new URL(net.calls[0]).searchParams.get("numericFilters")).toBe(`created_at_i>${Math.floor((NOW - 90 * 86_400_000) / 1000)}`);
+    expect(recent.findings.map((f) => f.evidenceUrl).sort()).toEqual(["https://news.ycombinator.com/item?id=46100001", "https://news.ycombinator.com/item?id=46100002"]);
+    expect(recent.trace.notes).toContain("1 conversation older than 90 days was left out.");
+  });
+
+  it.each([
+    [0.75, 10, 0.75],
+    [0.75, 90, 0.75],
+    [0.75, 200, 0.5],
+    [0.75, 800, 0.35],
+    [0.5, 200, 0.3],
+    [0.75, null, 0.6],
+    [0.5, null, 0.35],
+  ])("confidence %s at %s days old is %s", (confidence, days, expected) => {
+    expect(agedConfidence(confidence, days === null ? null : new Date(NOW - days * 86_400_000), NOW)).toBeCloseTo(expected, 5);
+  });
+
+  it("answers when web search does not, and is not asked at all when Hacker News was not chosen", async () => {
+    use(hn());
+    const down = await findPublicAsks({ competitors: ["Acme"] }, { searchOpts: { providers: [brokenSearch("duckduckgo"), brokenSearch("bing_html")] } });
+    expect(down.trace.blocked).toBe(false);
+    expect(down.findings.length).toBe(3);
+    expect(down.trace.notes.some((n) => / searches did not get an answer, so some results may be missing\.$/.test(n))).toBe(true);
+
+    resetSearchCache();
+    resetProviderSkips();
+    use(hn());
+    await findPublicAsks({ competitors: ["Acme"], sources: ["linkedin", "reddit"] }, { searchOpts: { providers: [searchWith(answer)] } });
+    expect(net.calls).toEqual([]);
+  });
+
+  it("a search API that is down, slow or answers with something else is a search that did not answer", async () => {
+    for (const route of [undefined, { status: 503, body: "down" }, { body: "<html>Just a moment...</html>", type: "text/html" }, { body: "{not json", type: "application/json" }, { body: JSON.stringify({ hits: "many" }), type: "application/json" }] as (Route | undefined)[]) {
+      resetSearchCache();
+      use(() => route);
+      const { findings, trace } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [brokenSearch()] } });
+      expect(findings).toEqual([]);
+      expect(trace.blocked).toBe(true);
+      expect(trace.failedSearches).toBe(trace.searches);
+    }
+  });
+
+  it("web results for separate threads are separate threads", async () => {
+    // Two threads whose addresses differ only in the query string.
+    const search = searchWith((q) =>
+      q.includes("Acme")
+        ? [r("Ask HN: Alternatives to Acme for a 40-person team? | Hacker News", "https://news.ycombinator.com/item?id=41234567", "We have used Acme for two years."), r("Ask HN: Anyone moved away from Acme? | Hacker News", "https://news.ycombinator.com/item?id=41239990", "Has anyone switched from Acme to something cheaper?")]
+        : [],
+    );
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [search] } });
+    expect(findings.map((f) => f.evidenceUrl).sort()).toEqual(["https://news.ycombinator.com/item?id=41234567", "https://news.ycombinator.com/item?id=41239990"]);
+  });
+});
+
+describe("a LinkedIn author is a person only when we are sure of it", () => {
+  it("a brand made of everyday words is a page, whatever its capitals say", () => {
+    for (const no of ["New Breed on LinkedIn: 20 Performance Benchmarks", "Best Lifetime Deals on LinkedIn: Looking for an alternative to Acme?", "Growth Leads on LinkedIn: x", "Smart Revenue on LinkedIn: x", "Elto AI on LinkedIn: x", "J Smith on LinkedIn: x", "A B on LinkedIn: x"]) {
+      expect(linkedinPostAuthor(no), no).toBeNull();
+    }
+    // One everyday word among real names means nothing.
+    for (const [title, name] of [["George Best on LinkedIn: x", "George Best"], ["Rose Nguyen on LinkedIn: x", "Rose Nguyen"], ["Will Power on LinkedIn: x", "Will Power"], ["Adam D'Angelo on LinkedIn: Does anyone have experience", "Adam D'Angelo"]]) {
+      expect(linkedinPostAuthor(title), title).toMatchObject({ name });
+    }
+  });
+
+  it.each([
+    ["priya-shah-4b6a2311", "Priya Shah", true],
+    ["maxlmaeder", "Max Maeder", true],
+    ["marcopapa82", "Marco Papa", true],
+    ["mattwatsonkc", "Matt Watson", true],
+    ["adamdangelo1", "Adam D'Angelo", true],
+    ["wiltermood", "Calvin Wiltermood", true],
+    ["jane-doe-phd", "Jane Doe", true],
+    ["mary-jane-watson", "Mary Watson", true],
+    ["new-breed-revenue", "New Breed", false],
+    ["leadiq-inc", "Lead Iq", false],
+    ["john-smith-marketing", "John Smith", false],
+    ["smithconsulting", "John Smith", false],
+    ["thedigitalmarketingconsultant", "Ryan Stewart", false],
+    ["x", "Jane Doe", false],
+  ])("the profile address %s for %s: %s", (vanity, name, expected) => {
+    expect(vanityMatches(vanity, name)).toBe(expected);
+  });
+
+  it("a company page that asks is a conversation to answer, never a person with a profile address", async () => {
+    const posts = [
+      r("New Breed on LinkedIn: We're looking for an alternative to Acme. Any recommendations?", "https://www.linkedin.com/posts/new-breed-revenue_acme-activity-7250000000000000011-aaaa", "We're looking for an alternative to Acme. Any recommendations?"),
+      r("John Smith on LinkedIn: I'm looking for an alternative to Acme. Any recommendations?", "https://www.linkedin.com/posts/john-smith-marketing_acme-activity-7250000000000000012-bbbb", "I'm looking for an alternative to Acme. Any recommendations?"),
+      r("Dana Scully on LinkedIn: I'm looking for an alternative to Acme. Any recommendations?", "https://www.linkedin.com/posts/danascully7_acme-activity-7250000000000000013-cccc", "I'm looking for an alternative to Acme. Any recommendations?"),
+    ];
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["linkedin"] }, { searchOpts: { providers: [searchWith((q) => (q.includes("Acme") ? posts : []))] } });
+    expect(findings).toHaveLength(3);
+    const people = findings.filter((f) => f.kind === "person");
+    expect(people.map((f) => f.linkedinUrl)).toEqual(["https://www.linkedin.com/in/danascully7"]);
+    for (const f of findings.filter((x) => x.kind === "post")) {
+      expect(f.linkedinUrl).toBeUndefined();
+      expect(f.fullName).toBeUndefined();
+      expect(f.relevantBecause).toBe("LinkedIn post asking for an alternative to Acme.");
+    }
+  });
+});
+
+describe("a Hacker News post that only mentions the subject is not about it", () => {
+  const at = (daysAgo: number) => ({ created_at: new Date(NOW - daysAgo * 86_400_000).toISOString() });
+  const HITS = [
+    // An "Ask HN" about something else, which names the product once in passing.
+    { objectID: "49000001", title: "Ask HN: Is traditional software dying?", story_text: "My data points: two internal projects to replace Acme and Float. Acme will be kept, Float will be replaced. What do you all think?", ...at(20) },
+    // The product in a list of integrations, in a thread that asks something unrelated.
+    { objectID: "49000002", title: "Ask HN: How can I improve my products? Which one to keep working on?", story_text: "A single report from all tools like Gmail, Slack, GitHub, Acme etc. Which should I pick?", ...at(25) },
+    // A comment that names it without asking anything.
+    { objectID: "49000003", story_title: "Somebody files for an IPO", comment_text: "I've moved folks to Monday, Nutshell, Acme (who I don't like either but they're better than the rest), a dozen others.", ...at(30) },
+    // A real one: the thread is about choosing between it and something else.
+    { objectID: "49000004", title: "Ask HN: CRM vs. Acme", story_text: "We've been using Acme and, in my opinion, it's the best among a bad bunch. Has anyone here used Clarify?", ...at(40) },
+    // A real one inside a thread about something else: the sentences that name the product ask.
+    { objectID: "49000005", story_title: "Ask HN: What does your stack look like?", comment_text: "Postgres, Rails, the usual. We are on Acme for onboarding and I'm looking for an alternative to Acme. Any recommendations? Otherwise boring tech.", ...at(10) },
+  ];
+  const PROBLEM_HITS = [
+    { objectID: "49100001", title: "Ask HN: Email leaked while traveling abroad?", story_text: "I received an email in German to an email address that I have never used. How do I verify where it leaked?", ...at(5) },
+    { objectID: "49100002", title: "Tell HN: A shop will not let me change country", story_text: "If anybody reads this, please let me know an email address so I can contact a real human to verify that my account is real.", ...at(50) },
+    { objectID: "49100003", title: "Ask HN: What do you use to verify email addresses before sending?", story_text: "We send about 40k cold emails a month and our bounce rate is climbing. Looking for a tool that can verify email addresses in bulk.", ...at(8) },
+  ];
+  const serve = (hits: unknown[]) => (url: string): Route | undefined => (url.startsWith("https://hn.algolia.com/") ? { body: JSON.stringify({ hits }), type: "application/json" } : undefined);
+
+  it("for a competitor: only where the product is named is somebody asking about it", async () => {
+    use(serve(HITS));
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [searchWith(() => [])] } });
+    const by = new Map(findings.map((f) => [f.evidenceUrl!.split("=")[1], f]));
+    expect([...by.keys()].sort()).toEqual(["49000004", "49000005"]);
+    expect(by.get("49000004")).toMatchObject({ relevantBecause: "Hacker News thread asking about Acme.", evidenceTitle: "Ask HN: CRM vs. Acme", evidenceQuote: "Has anyone here used Clarify?" });
+    expect(by.get("49000005")).toMatchObject({ relevantBecause: "Hacker News thread asking for an alternative to Acme.", evidenceTitle: "Comment on: Ask HN: What does your stack look like?", evidenceQuote: "We are on Acme for onboarding and I'm looking for an alternative to Acme." });
+  });
+
+  it("for a problem: only somebody asking for something to solve it with", async () => {
+    use(serve(PROBLEM_HITS));
+    const { findings } = await findPublicAsks({ problems: ["verify email addresses"], sources: ["hackernews"] }, { searchOpts: { providers: [searchWith(() => [])] } });
+    expect(findings.map((f) => f.evidenceUrl)).toEqual(["https://news.ycombinator.com/item?id=49100003"]);
+    expect(findings[0]).toMatchObject({ relevantBecause: "Hacker News thread asking which tool to use for verify email addresses.", evidenceTitle: "Ask HN: What do you use to verify email addresses before sending?" });
+  });
+
+  it("a question on Hacker News is not, by itself, somebody looking for a product", () => {
+    expect(classifyAsk("Ask HN: Is traditional software dying?", "Two internal projects to replace Acme.", "Acme")).toBeNull();
+    expect(classifyAsk("Ask HN: How do you get a registrar to take abuse reports seriously?", "", undefined)).toBeNull();
+    expect(classifyAsk("Ask HN: Alternatives to Acme for a 40-person team?", "", "Acme")).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("Ask HN: What do you use for onboarding contractors?", "", undefined)).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("Ask HN: Which CRM would you pick for a ten-person team?", "", undefined)).toMatchObject({ kind: "ask" });
+    expect(classifyAsk("Ask HN: Best tool to verify email addresses?", "", undefined)).toMatchObject({ kind: "ask" });
   });
 });

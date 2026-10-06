@@ -1,14 +1,15 @@
 /**
  * The hiring play: search results from the public job boards become companies with a
  * posting for the role - and only those. Listings, salary pages, other roles and closed
- * postings are not findings, "open" is only said of a posting that was opened, and no date
- * is ever claimed.
+ * postings are not findings, "hiring" is only said of a posting that was opened and found
+ * live, the company is named by the posting itself and never by a made-up reading of its
+ * address, and no date is ever claimed.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetProviderSkips } from "../providers/health.js";
 import { resetSearchCache } from "../search/index.js";
 import type { SearchResult } from "../types.js";
-import { buildHiringQueries, findHiringCompanies, parseJobResult, roleMatches } from "./hiring.js";
+import { buildHiringQueries, findHiringCompanies, parseJobResult, readPostingPage, roleMatches } from "./hiring.js";
 import { brokenSearch, page, searchWith, web, type FakeWeb, type Route } from "./kit.test.js";
 
 const ROLE = "Sales Development Representative";
@@ -64,7 +65,15 @@ const BOARDS: Record<string, Route> = {
   "https://job-boards.greenhouse.io/initech/jobs/5550001004": { status: 404 },
   "https://boards.greenhouse.io/vandelay/jobs/8800123": { status: 403 },
   "https://jobs.lever.co/umbrellacorp/1b2c3d4e-5f60-7a8b-9c0d-112233445566": posting("Umbrella Corp - Sales Development Representative (Remote)"),
-  "https://jobs.lever.co/soylent/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/apply": { body: posting("Soylent jobs"), finalUrl: "https://jobs.lever.co/soylent" },
+  // A closed posting sends the visitor back to the company's list of jobs.
+  "https://jobs.lever.co/soylent/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee/apply": { status: 302, location: "https://jobs.lever.co/soylent" },
+  "https://jobs.lever.co/soylent": posting("Soylent jobs"),
+  // Ashby: the role and the employer in the title, and the employer again in the posting's structured data.
+  "https://jobs.ashbyhq.com/hooli/0f1e2d3c-4b5a-6978-8695-a4b3c2d1e0f9": page(
+    "Sales Development Representative @ Hooli",
+    `<div id="root"></div>`,
+    `<script type="application/ld+json">{"@context":"https://schema.org/","@type":"JobPosting","title":"Sales Development Representative","hiringOrganization":{"@type":"Organization","name":"Hooli"}}</script>`,
+  ),
 };
 
 let net: FakeWeb;
@@ -90,7 +99,7 @@ describe("reading one search result as a posting", () => {
     [SERP.greenhouse[1], { companyName: "Initech", title: ROLE, board: "Greenhouse", checkable: true }],
     [SERP.lever[0], { companyName: "Umbrella Corp", title: "Sales Development Representative (Remote)", board: "Lever", checkable: true }],
     [SERP.lever[1], { companyName: "Soylent", title: "Senior SDR", board: "Lever" }],
-    [SERP.ashby[0], { companyName: "Hooli", title: ROLE, board: "Ashby", checkable: false }],
+    [SERP.ashby[0], { companyName: "Hooli", title: ROLE, board: "Ashby", checkable: true }],
     [SERP.workable[0], { companyName: "Tyrell Corp", title: ROLE, board: "Workable", checkable: false }],
     [SERP.wellfound[0], { companyName: "Wayne Enterprises", title: ROLE, board: "Wellfound", checkable: false }],
     [SERP.linkedin[0], { companyName: "Stark Industries", title: ROLE, board: "LinkedIn", url: "https://www.linkedin.com/jobs/view/sales-development-representative-at-stark-industries-3891002211", checkable: false }],
@@ -176,14 +185,16 @@ describe("findHiringCompanies", () => {
       confidence: 0.85,
     });
     expect(byName.get("Umbrella Corp")).toMatchObject({ relevantBecause: "Hiring a Sales Development Representative (Remote) - open posting on Lever.", confidence: 0.85 });
-    // Boards that cannot be opened by a visitor: a posting, never an "open" one.
-    expect(byName.get("Stark Industries")).toMatchObject({ relevantBecause: "Hiring a Sales Development Representative - posting on LinkedIn.", confidence: 0.65 });
-    expect(byName.get("Hooli")!.relevantBecause).toBe("Hiring a Sales Development Representative - posting on Ashby.");
-    expect(byName.get("Tyrell Corp")!.relevantBecause).toBe("Hiring a Sales Development Representative - posting on Workable.");
-    expect(byName.get("Wayne Enterprises")!.relevantBecause).toBe("Hiring a Sales Development Representative - posting on Wellfound.");
-    // A board that refused the check: still a posting, still not called open.
-    expect(byName.get("Vandelay Industries")).toMatchObject({ relevantBecause: "Hiring a Sales Development Representative - posting on Greenhouse.", confidence: 0.65 });
-    expect(byName.get("Oscorp")).toMatchObject({ relevantBecause: "Hiring a Sales Development Representative - posting on their careers page.", companyDomain: "oscorp.com", evidenceUrl: "https://www.oscorp.com/careers/sales-development-representative" });
+    expect(byName.get("Hooli")).toMatchObject({ relevantBecause: "Hiring a Sales Development Representative - open posting on Ashby.", confidence: 0.85 });
+    // Boards that cannot be opened by a visitor: it has a posting - nobody looked whether it is still hiring.
+    expect(byName.get("Stark Industries")).toMatchObject({ relevantBecause: "Has a posting for Sales Development Representative on LinkedIn.", confidence: 0.65 });
+    expect(byName.get("Tyrell Corp")!.relevantBecause).toBe("Has a posting for Sales Development Representative on Workable.");
+    expect(byName.get("Wayne Enterprises")!.relevantBecause).toBe("Has a posting for Sales Development Representative on Wellfound.");
+    // A board that refused the check: still a posting, still not called hiring.
+    expect(byName.get("Vandelay Industries")).toMatchObject({ relevantBecause: "Has a posting for Sales Development Representative on Greenhouse.", confidence: 0.65 });
+    expect(byName.get("Oscorp")).toMatchObject({ relevantBecause: "Has a posting for Sales Development Representative on their careers page.", companyDomain: "oscorp.com", evidenceUrl: "https://www.oscorp.com/careers/sales-development-representative" });
+    // "Hiring" is said only of a posting that was opened and found live.
+    for (const f of findings) expect(/^Hiring /.test(f.relevantBecause)).toBe(f.confidence === 0.85);
 
     for (const f of findings) {
       expect(f.kind).toBe("company");
@@ -196,16 +207,18 @@ describe("findHiringCompanies", () => {
     expect(trace.blocked).toBe(false);
     expect(trace.notes).toContain("2 postings found by search were no longer there when opened, so they were left out.");
     expect(trace.notes).toContain("boards.greenhouse.io refused to show a page (it answered 403). It was not retried.");
-    // Five postings were opened: three answered (one of them with the company's list instead), one was gone, one refused.
-    expect(trace).toMatchObject({ searches: 8, failedSearches: 0, pagesFetched: 3, pagesRefused: 1 });
+    // Six postings were opened: four answered (one of them with the company's list instead), one was gone, one refused.
+    expect(trace).toMatchObject({ searches: 8, failedSearches: 0, pagesFetched: 4, pagesRefused: 1 });
   });
 
   it("opens only postings on boards that serve them to anyone, each once - never LinkedIn or the others", async () => {
     use(BOARDS);
     await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [searchWith(answer)] } });
-    expect(net.hosts().sort()).toEqual(["boards.greenhouse.io", "job-boards.greenhouse.io", "jobs.lever.co"]);
+    expect(net.hosts().sort()).toEqual(["boards.greenhouse.io", "job-boards.greenhouse.io", "jobs.ashbyhq.com", "jobs.lever.co"]);
     expect(new Set(net.calls).size).toBe(net.calls.length);
-    expect(net.calls.join(" ")).not.toMatch(/linkedin|ashbyhq|workable|wellfound|oscorp|indeed/);
+    expect(net.calls.join(" ")).not.toMatch(/linkedin|workable|wellfound|oscorp|indeed/);
+    // Each board's robots.txt was read once, before anything else was asked of it.
+    for (const host of net.hosts()) expect(net.calls.filter((c) => new URL(c).hostname === host)[0]).toBe(`https://${host}/robots.txt`);
   });
 
   it("drops a closed posting, a posting that now advertises another role, and every non-posting", async () => {
@@ -338,4 +351,125 @@ describe("named companies: their own careers pages", () => {
     expect(trace.pagesRefused).toBe(1);
     expect(trace.notes.join(" ")).toMatch(/is not a public web address, so it was not fetched\./);
   });
+});
+
+/* ───────────────────────────────── who is hiring, and is it still ───────────────────────────────── */
+
+describe("the company's name comes from the posting, not from a reading of its address", () => {
+  const SLUG = "globexakatroveinformationtechnologies";
+  const GH = `https://job-boards.greenhouse.io/${SLUG}/jobs/4719664005`;
+  const one = (results: SearchResult[]) => searchWith((q) => (q.startsWith('"') ? results : []));
+
+  it("reads the employer from the posting's title when the result and the address do not give it", async () => {
+    // The result is the role alone; the posting's own title says "at Globex" (its social title is the role alone, too).
+    use({ [GH]: page("Job Application for Sales Development Representative at Globex", `<main><h1>Sales Development Representative</h1></main>`, `<meta property="og:title" content="Sales Development Representative">`) });
+    const { findings } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [one([r(ROLE, GH)])] } });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ companyName: "Globex", relevantBecause: "Hiring a Sales Development Representative - open posting on Greenhouse.", evidenceUrl: GH });
+  });
+
+  it("an address that is one run of letters is never shown as a name: with nothing better, the posting is left out", async () => {
+    use({ [GH]: { status: 403 } });
+    const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [one([r(ROLE, GH)])] } });
+    expect(findings).toEqual([]);
+    expect(trace.notes).toContain("1 posting was left out because the company behind it could not be named from the posting.");
+    // On a board that cannot be opened there is nothing to ask, so it is not a posting we can name at all.
+    expect(parseJobResult(r(ROLE, "https://apply.workable.com/tyrellcorporationjobsboardinternational/j/ABC123DEF4/"))).toBeNull();
+    expect(JSON.stringify(findings)).not.toMatch(/Globexakatrove/i);
+  });
+
+  it("the result's own words for the company come before the address", async () => {
+    const url = "https://job-boards.greenhouse.io/hooliusa/jobs/7797762";
+    use({ [url]: { status: 403 } });
+    const { findings } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [one([r("Sales Development Representative - Hooli", url)])] } });
+    expect(findings.map((f) => f.companyName)).toEqual(["Hooli"]);
+  });
+
+  it("an address that reads as words is still a last resort", () => {
+    expect(parseJobResult(r(ROLE, "https://boards.greenhouse.io/black-duck/jobs/5373816008"))).toMatchObject({ companyName: "Black Duck" });
+    expect(parseJobResult(r(ROLE, "https://jobs.ashbyhq.com/chalk/1f394b94-e22d-4594-acb9-7d44474d0105"))).toMatchObject({ companyName: "Chalk" });
+    expect(parseJobResult(r(ROLE, "https://job-boards.greenhouse.io/superpaymentsltd/jobs/4880693101"))).toMatchObject({ unnamed: true });
+  });
+
+  it("reads the employer from structured data, a title in any of the boards' forms, or the board's own record", () => {
+    const filler = `<p>${"About the role. ".repeat(30_000)}</p>`;
+    // Far down a long page, as one board writes it.
+    expect(readPostingPage(page("Customer Success Manager", `<main>${filler}</main><script type="application/ld+json">{"@context" : "http://schema.org","@type" : "JobPosting","title" : "Customer Success Manager","hiringOrganization" : {"@type" : "Organization","name": "Initech"}}</script>`), "initech", true)).toEqual({ role: "Customer Success Manager", company: "Initech" });
+    expect(readPostingPage(page("Sales Development Representative - Outbound (US) @ Hooli", "<div></div>"), "hooli", false)).toEqual({ role: "Sales Development Representative - Outbound (US)", company: "Hooli" });
+    expect(readPostingPage(page("Umbrella Corp - Customer Success Manager", "<div></div>"), "umbrellacorp", true)).toEqual({ role: "Customer Success Manager", company: "Umbrella Corp" });
+    expect(readPostingPage(page("Job Application for Data Engineer at Soylent", "<div></div>"), "soylentjobs", false)).toEqual({ role: "Data Engineer", company: "Soylent" });
+    expect(readPostingPage(page("Careers", `<div></div><script>window.__data = {"public_url":"https://x.example/1","company_name":"Wonka Industries","title":"x"}</script>`), "wonkaind", false)).toMatchObject({ company: "Wonka Industries" });
+    // A page that names no employer names none.
+    expect(readPostingPage(page("Sales Development Representative", "<div></div>"), "x", false)).toEqual({ role: ROLE });
+    expect(readPostingPage(page("Jobs", `<script type="application/ld+json">{not json</script>`), "x", false)).toEqual({});
+  });
+});
+
+describe("only a posting that was opened and found live is called hiring", () => {
+  const ASHBY = "https://jobs.ashbyhq.com/hooli/0f1e2d3c-4b5a-6978-8695-a4b3c2d1e0f9";
+  const only = (result: SearchResult) => searchWith((q) => (q.startsWith('"') ? [result] : []));
+
+  it("a page that says it no longer takes applications is dropped", async () => {
+    for (const body of [
+      page("Sales Development Representative @ Hooli", `<main><h2>This job is no longer accepting applications</h2></main>`),
+      page("Job not found", `<main><h1>Job not found</h1></main>`),
+      page("Sales Development Representative @ Hooli", `<main><div role="alert">Applications are now closed.</div></main>`),
+    ]) {
+      resetSearchCache();
+      use({ [ASHBY]: body });
+      const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [only(r("Sales Development Representative @ Hooli", ASHBY))] } });
+      expect(findings).toEqual([]);
+      expect(trace.notes).toContain("1 posting found by search was no longer there when opened, so it was left out.");
+    }
+  });
+
+  it("a dash inside the role does not make a sentence with two dashes", async () => {
+    use({ [ASHBY]: page("Sales Development Representative - Outbound (US) @ Hooli", `<div id="root"></div>`) });
+    const open = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [only(r("Sales Development Representative - Outbound (US) @ Hooli", ASHBY))] } });
+    expect(open.findings[0].relevantBecause).toBe("Hiring a Sales Development Representative, Outbound (US) - open posting on Ashby.");
+    expect(open.findings[0].evidenceQuote).toBe("Sales Development Representative - Outbound (US)");
+    use({});
+    resetSearchCache();
+    const unchecked = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [only(r("Sales Development Representative - Outbound (US) at Tyrell Corp", "https://apply.workable.com/tyrell-corp/j/ABC123DEF4/"))] } });
+    expect(unchecked.findings[0].relevantBecause).toBe("Has a posting for Sales Development Representative, Outbound (US) on Workable.");
+  });
+
+  it("a posting the board's robots.txt closes is not opened, and so not called hiring", async () => {
+    use({ "https://jobs.ashbyhq.com/robots.txt": { body: "User-agent: *\nDisallow: /hooli/\n", type: "text/plain" }, [ASHBY]: page("Sales Development Representative @ Hooli", "<div></div>") });
+    const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [only(r("Sales Development Representative @ Hooli", ASHBY))] } });
+    expect(net.calls).toEqual(["https://jobs.ashbyhq.com/robots.txt"]);
+    expect(findings[0]).toMatchObject({ companyName: "Hooli", relevantBecause: "Has a posting for Sales Development Representative on Ashby.", confidence: 0.65 });
+    expect(trace.notes).toContain("jobs.ashbyhq.com asks automated readers not to open some of its pages (robots.txt), so those were skipped.");
+  });
+
+  it("postings on one board are opened one at a time, with a pause between them", async () => {
+    const before = process.env.PLAYS_HOST_PAUSE_MS;
+    process.env.PLAYS_HOST_PAUSE_MS = "300";
+    try {
+      const urls = ["globex", "initech", "hooli"].map((c, i) => `https://boards.greenhouse.io/${c}/jobs/40123${i}`);
+      use(Object.fromEntries(urls.map((u, i) => [u, posting(`Job Application for Sales Development Representative at ${["Globex", "Initech", "Hooli"][i]}`)])));
+      const results = urls.map((u, i) => r(`Job Application for Sales Development Representative at ${["Globex", "Initech", "Hooli"][i]}`, u));
+      const { findings } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [searchWith((q) => (q.startsWith('"') ? results : []))] } });
+      expect(findings).toHaveLength(3);
+      expect(net.calls).toHaveLength(4);
+      for (let i = 1; i < net.at.length; i++) expect(net.at[i] - net.at[i - 1]).toBeGreaterThanOrEqual(290);
+    } finally {
+      if (before === undefined) delete process.env.PLAYS_HOST_PAUSE_MS;
+      else process.env.PLAYS_HOST_PAUSE_MS = before;
+    }
+  }, 15_000);
+});
+
+describe("a search that never answers", () => {
+  it("cannot hold the run past its deadline: no further search is started once less than one search's time is left", async () => {
+    use({});
+    const hanging = { ...searchWith(() => []), search: (q: string) => (hanging.queries.push(q), new Promise<never>(() => {})) };
+    const started = Date.now();
+    const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [hanging] }, deadlineAt: Date.now() + 4_500 });
+    expect(Date.now() - started).toBeLessThan(5_500);
+    // One search fitted; the other seven were never started.
+    expect(hanging.queries).toHaveLength(1);
+    expect(findings).toEqual([]);
+    expect(trace.notes).toContain("The run reached its time limit and stopped early. What was found before that is kept.");
+  }, 10_000);
 });

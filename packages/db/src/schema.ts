@@ -1275,6 +1275,7 @@ export const playCandidates = pgTable(
     queueIdx: index("play_candidates_queue_idx").on(t.orgId, t.status, t.createdAt),
     playIdx: index("play_candidates_play_idx").on(t.playId, t.status),
     leadIdx: index("play_candidates_lead_idx").on(t.leadId).where(sql`lead_id IS NOT NULL`),
+    runIdx: index("play_candidates_run_idx").on(t.runId).where(sql`run_id IS NOT NULL`),
   }),
 );
 export type PlayCandidate = typeof playCandidates.$inferSelect;

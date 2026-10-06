@@ -29,9 +29,13 @@ const MAX_COMPARE_PAGES = 3;
 const MAX_COMPETITORS = 12;
 const COMPANY_SIZES = ["1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5000", "5000+"];
 
-/** Who buys, and which roles their team hires, by what the site says it does. First match wins; the last row is the default. */
+/**
+ * Who buys, and which roles their team hires, by what the site says it does. Every row is
+ * scored against the site's own description and headings and the best one wins (the earlier
+ * of two equals); the last row is the default when nothing matches.
+ */
 const PERSONAS: { match: RegExp; titles: string[]; roles: string[] }[] = [
-  { match: /\b(?:sales|outbound|prospect\w*|lead gen\w*|pipeline|crm|revenue|cold email|sdr|quota)\b/i, titles: ["VP Sales", "Head of Sales", "Sales Director", "Head of Growth", "Chief Revenue Officer", "Founder"], roles: ["Sales Development Representative", "Account Executive"] },
+  { match: /\b(?:sales|outbound|prospect\w*|lead[- ]gen\w*|leads|buyers|deals|pipeline|crm|revenue|cold email|sdr|quota)\b/i, titles: ["VP Sales", "Head of Sales", "Sales Director", "Head of Growth", "Chief Revenue Officer", "Founder"], roles: ["Sales Development Representative", "Account Executive"] },
   { match: /\b(?:marketing|seo|content|campaigns?|brand|advertis\w*|ads|social media|newsletter|demand gen\w*)\b/i, titles: ["Chief Marketing Officer", "VP Marketing", "Head of Marketing", "Head of Growth", "Marketing Director"], roles: ["Marketing Manager", "Growth Marketer", "Content Marketer"] },
   { match: /\b(?:recruit\w*|hiring|talent|applicants?|payroll|people ops|human resources|hr|onboarding employees|employee)\b/i, titles: ["Chief People Officer", "VP People", "Head of HR", "Head of Talent", "HR Director"], roles: ["Recruiter", "HR Manager", "People Operations Manager"] },
   { match: /\b(?:customer support|helpdesk|help desk|tickets?|customer success|live chat|customer service|contact cent(?:er|re))\b/i, titles: ["Head of Customer Support", "VP Customer Success", "Director of Customer Experience", "Head of Customer Success"], roles: ["Customer Support Specialist", "Customer Success Manager"] },
@@ -48,15 +52,78 @@ const PERSONAS: { match: RegExp; titles: string[]; roles: string[] }[] = [
 
 const CATEGORY_NOUN = "platform|software|tool|app|crm|solution|suite|system|service|api|marketplace|agency|consultancy|studio|engine|assistant|network";
 
-/** "Acme is a sales engagement platform for ..." gives "sales engagement platform". */
+/** What a site sells, by the words it uses for it, when it never says "X is a ... platform". First match wins. */
+const CATEGORY_WORDS: [RegExp, string][] = [
+  [/\b(?:e-?mail)\s+(?:verif\w+|validation|checker)\b|\bverif(?:y|ies|ying)\s+(?:e-?mail)(?:\s+address(?:es)?|s)?\b/i, "email verification tool"],
+  [/\bcold\s+(?:e-?mail|outreach)\b|\bsales engagement\b|\boutbound\s+(?:sales|e-?mail|campaigns?|sequences?)\b|\be-?mail outreach\b|\bmultichannel outreach\b|\bsales sequences?\b/i, "sales engagement tool"],
+  [/\blead[- ]gen\w*|\b(?:find|finds|finding|source|sources)\b[^.]{0,40}\b(?:leads|prospects)\b|\bb2b\s+(?:leads|contacts|contact data|data)\b|\bprospecting\b|\bverified contacts\b|\bcontact data\b|\blead (?:finder|database)\b/i, "lead generation tool"],
+  [/\bcrm\b/i, "CRM"],
+  [/\be-?mail marketing\b|\bnewsletters?\b/i, "email marketing tool"],
+  [/\b(?:error|crash|performance|application)\s+(?:monitoring|tracking)\b|\bapplication performance\b|\bobservability\b/i, "application monitoring tool"],
+  [/\bproduct analytics\b/i, "product analytics tool"],
+  [/\bshared inbox\b|\bcustomer support\b|\bhelp ?desk\b|\bticketing\b|\bcustomer service\b/i, "customer support software"],
+  [/\bperformance (?:management|reviews?)\b|\bpeople management\b|\bhr (?:and \w+ )?(?:software|platform|tools?)\b|\bhris\b|\bemployee engagement\b/i, "HR software"],
+  [/\bapplicant tracking\b|\brecruiting software\b/i, "applicant tracking system"],
+  [/\bproject management\b/i, "project management tool"],
+  [/\baccounting\b|\binvoicing\b|\bbookkeeping\b/i, "accounting software"],
+  [/\bseo\b|\bsearch engine optimi[sz]ation\b|\banswer engine optimi[sz]ation\b/i, "SEO tool"],
+  [/\bappointment (?:booking|scheduling)\b|\bscheduling (?:software|tool|app|links?)\b/i, "scheduling tool"],
+  [/\be-?signatures?\b|\bdocument signing\b/i, "e-signature tool"],
+  [/\bdata warehouse\b|\betl\b|\bdata pipelines?\b/i, "data integration tool"],
+  [/\blive chat\b|\bchatbots?\b/i, "live chat software"],
+  [/\be-?mail\b[^.]{0,30}\b(?:tool|platform|software|app|client)\b/i, "email tool"],
+];
+
+/**
+ * "Acme is a sales engagement platform for ..." gives "sales engagement platform". A site
+ * that only says what it does ("finds and verifies B2B leads", "the CRM that ...") gets
+ * the category those words belong to.
+ */
 export function categoryFrom(text: string): string | undefined {
   const m = new RegExp(`\\b(?:is|are)\\s+(?:an?|the|your)\\s+((?:[\\p{L}\\p{N}&/+-]+\\s+){0,4}?(?:${CATEGORY_NOUN}))\\b`, "iu").exec(text) ?? new RegExp(`\\b(?:the|an?)\\s+((?:[\\p{L}\\p{N}&/+-]+\\s+){1,4}?(?:${CATEGORY_NOUN}))\\s+(?:for|that|to|built)\\b`, "iu").exec(text);
-  if (!m) return undefined;
-  const c = cleanLine(m[1], 80).replace(/^(?:all-in-one|best|leading|first|only|modern|simple|ultimate|complete|powerful|#1|number one|world's|new|next-generation|ai-powered|ai-first)\s+/i, "").toLowerCase();
-  return c.split(" ").length >= 2 ? c : undefined;
+  if (m) {
+    const c = cleanLine(m[1], 80).replace(/^(?:all-in-one|best|leading|first|only|modern|simple|ultimate|complete|powerful|#1|number one|world's|new|next-generation|ai-powered|ai-first)\s+/i, "").toLowerCase();
+    if (c.split(" ").length >= 2) return c;
+    if (c === "crm") return "CRM";
+  }
+  for (const [re, category] of CATEGORY_WORDS) if (re.test(text)) return category;
+  return undefined;
+}
+
+/** Words every site has that say nothing about what it sells: skip links, cookie banners, sign-in buttons. */
+const BOILERPLATE = /\bskip to (?:the )?(?:main )?(?:content|navigation|footer)\b|\b(?:toggle|open|close|main) (?:navigation|menu)\b|\bmain content\b|\b(?:accept|reject|manage) (?:all )?cookies\b|\bcookie (?:policy|settings|preferences|notice)\b|\bwe use cookies\b[^.]{0,200}\.?|\bprivacy policy\b|\bterms (?:of (?:service|use)|and conditions)\b|\ball rights reserved\b|\b(?:sign|log) ?(?:in|up)\b|\bbook a demo\b|\bget started\b|\bstart (?:a |your )?free trial\b|\bcontact sales\b|\bsubscribe to our newsletter\b/gi;
+
+const withoutBoilerplate = (text: string): string => text.replace(BOILERPLATE, " ").replace(/\s+/g, " ").trim();
+
+/**
+ * The buyer persona a site's own words point to. What the site says about itself in its
+ * description counts three times, its main headline twice, its other headings and opening
+ * text once - so one stray word ("content" in "Skip to main content") cannot decide it.
+ */
+export function pickPersona(site: { description?: string; headline?: string; headings?: string[]; text?: string }): { titles: string[]; roles: string[] } {
+  const parts: [string, number][] = [
+    [withoutBoilerplate(site.description ?? ""), 3],
+    [withoutBoilerplate(site.headline ?? ""), 2],
+    [withoutBoilerplate((site.headings ?? []).slice(0, 30).join(". ")), 1],
+    [withoutBoilerplate((site.text ?? "").slice(0, 600)), 1],
+  ];
+  let best = PERSONAS[PERSONAS.length - 1];
+  let bestScore = 0;
+  for (const p of PERSONAS.slice(0, -1)) {
+    const re = new RegExp(p.match.source, "gi");
+    let score = 0;
+    for (const [text, weight] of parts) score += Math.min(4, (text.match(re) ?? []).length) * weight;
+    if (score > bestScore) {
+      best = p;
+      bestScore = score;
+    }
+  }
+  return best;
 }
 
 const COMPARE_PATH = /(?:^|[/-])(?:vs|versus|alternatives?|compare|comparison|comparisons|competitors?)(?:[/-]|$)/i;
+
+const GLUED = /\p{Ll}(?:See|We|Read|Learn|Try|Get|Compare|Why|How|Our|View|More|Start|Switch|Book|Watch|Explore|Vs|Find|Discover|Check|Sign|Join|Use|Make|Build|Stop|Go)$/u;
 
 /** Competitor names in one line of the site's own text: "Acme vs Rival", "Rival alternative", "alternative to Rival", "switch from Rival". */
 export function competitorsInText(text: string, own: { name?: string; domain?: string }): string[] {
@@ -67,6 +134,8 @@ export function competitorsInText(text: string, own: { name?: string; domain?: s
   const take = (raw: string | undefined): void => {
     const name = raw ? cleanCompanyName(raw.replace(/[.:,]+$/, ""), 3) : null;
     if (!name || !/^[\p{Lu}\p{N}]/u.test(name)) return;
+    // "HubSpotSee", "PipedriveWe": a name with a button's first word stuck to it is not a name.
+    if (name.split(" ").some((w) => GLUED.test(w))) return;
     if (isSameCompany(name, own)) return;
     if (/^(?:Competitors?|Others?|Alternatives?|Everyone|Them|Us|The Rest|Spreadsheets?|Excel|Email|Legacy|Traditional|Manual|In-house|DIY|Agencies|Freelancers|Consultants)$/i.test(name)) return;
     if (!out.some((o) => normCompanyName(o) === normCompanyName(name))) out.push(name);
@@ -100,10 +169,59 @@ function competitorFromLink(pathname: string, text: string, own: { name?: string
   return name && !isSameCompany(name, own) ? name : null;
 }
 
+/**
+ * The text of an element with a space between its pieces. A link built as
+ * `<a><span>HubSpot</span><span>See how we compare</span></a>` reads "HubSpot See how we
+ * compare", not "HubSpotSee how we compare".
+ */
+function spacedText($: cheerio.CheerioAPI, el: Parameters<cheerio.CheerioAPI>[0], max = 400): string {
+  const out: string[] = [];
+  let size = 0;
+  const stack: { type?: string; data?: string; children?: unknown[] }[] = $(el).toArray() as never[];
+  stack.reverse();
+  while (stack.length && size < max * 4) {
+    const n = stack.pop()!;
+    if (n.type === "text") {
+      const d = n.data ?? "";
+      size += d.length;
+      out.push(d);
+      continue;
+    }
+    const kids = (n.children ?? []) as (typeof stack)[number][];
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+  }
+  return cleanLine(out.join(" "), max);
+}
+
+/**
+ * The pieces of text in an element, each read on its own: a link's label ("Acme vs Rival")
+ * and the button text under it ("See how we compare") are two pieces, so the second can
+ * never be taken for part of a name in the first. Bold and italic words stay in their piece.
+ */
+function textPieces($: cheerio.CheerioAPI, el: Parameters<cheerio.CheerioAPI>[0], max = 200): string[] {
+  type N = { type?: string; data?: string; children?: unknown[] };
+  const out: string[] = [];
+  const stack: N[] = ($(el).toArray() as never[]).reverse();
+  while (stack.length && out.length < 20) {
+    const n = stack.pop()!;
+    if (n.type !== "tag" && n.type !== "root") continue;
+    const kids = (n.children ?? []) as N[];
+    if (kids.some((c) => c.type === "text" && /\S/.test(c.data ?? ""))) {
+      const t = spacedText($, n as never, max);
+      if (t) out.push(t);
+      continue;
+    }
+    for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+  }
+  return out;
+}
+
 interface SiteRead {
   name?: string;
   description?: string;
   headline?: string;
+  /** The page's section headings, in order. */
+  headings: string[];
   text: string;
   competitors: string[];
   compareLinks: string[];
@@ -159,21 +277,25 @@ function readPage(html: string, pageUrl: string, site: string, own: { name?: str
     if (!COMPARE_PATH.test(u.pathname) || /\.(?:pdf|png|jpe?g|svg|zip)$/i.test(u.pathname)) return;
     u.hash = "";
     u.search = "";
-    const text = cleanLine($(el).text(), 200);
-    addAll(competitorsInText(text, self));
+    const text = spacedText($, el, 200);
+    for (const piece of textPieces($, el)) addAll(competitorsInText(piece, self));
     const fromLink = competitorFromLink(u.pathname, text, self);
     if (fromLink) addAll([fromLink]);
     const href = u.toString();
     if (compareLinks.length < 40 && !compareLinks.includes(href)) compareLinks.push(href);
   });
   $("script, style, noscript, template, iframe").remove();
-  const headline = cleanLine($("h1").first().text(), 200) || undefined;
+  const headline = spacedText($, $("h1").first(), 200) || undefined;
+  const headings: string[] = [];
   $("h1, h2, h3").each((i, el) => {
-    if (i < 80) addAll(competitorsInText($(el).text(), self));
+    if (i >= 80) return;
+    const t = spacedText($, el, 200);
+    for (const piece of textPieces($, el)) addAll(competitorsInText(piece, self));
+    if (t && headings.length < 40) headings.push(t);
   });
   $("nav, footer, header, aside").remove();
-  const text = cleanLine($("body").text(), 3000);
-  return { name, description, headline, text, competitors: competitors.slice(0, 10), compareLinks };
+  const text = spacedText($, $("body"), 3000);
+  return { name, description, headline, headings, text, competitors: competitors.slice(0, 10), compareLinks };
 }
 
 function aiMessages(site: { domain: string; name?: string; description?: string; headline?: string; text: string }): AiMessage[] {
@@ -244,7 +366,14 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
       site = readPage(home.body, home.url, siteDomain, { domain: siteDomain }, true);
       const own = { name: site.name, domain: siteDomain };
       // The site's own comparison pages name its competitors better than anything else can.
-      const guesses = ["/compare", "/alternatives", "/vs", "/comparison"].map((p) => `https://${siteDomain}${p}`);
+      // Asked for where the site really answers (with "www" if that is where it lives), so each is one request.
+      let origin = `https://${siteDomain}`;
+      try {
+        origin = new URL(home.url).origin;
+      } catch {
+        // keep the plain form
+      }
+      const guesses = ["/compare", "/alternatives", "/vs", "/comparison"].map((p) => `${origin}${p}`);
       const seen = new Set<string>();
       const next = [...site.compareLinks.sort((a, b) => a.length - b.length), ...(site.compareLinks.length ? [] : guesses)].filter((u) => (seen.has(u) ? false : (seen.add(u), true))).slice(0, MAX_COMPARE_PAGES);
       for (const url of next) {
@@ -261,13 +390,13 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
   }
 
   const product: PlayPlan["product"] = { domain: siteDomain || cleanLine(literal, 120), ...(site?.name ? { name: site.name } : {}), ...(site?.description ? { description: site.description } : {}) };
-  const about = [site?.description, site?.headline, site?.text.slice(0, 600)].filter(Boolean).join(" ");
 
   /* Rules first: they always give an answer. A model, when there is one, refines it. */
-  const persona = PERSONAS.find((p) => p.match.test(about)) ?? PERSONAS[PERSONAS.length - 1];
+  const persona = pickPersona({ description: site?.description, headline: site?.headline, headings: site?.headings, text: site?.text });
   let titles = persona.titles.slice();
   let roles = persona.roles.slice();
-  let category = site ? categoryFrom(`${site.description ?? ""}. ${site.headline ?? ""}`) : undefined;
+  // What it is, by its own words: the description and main headline first, then its section headings.
+  let category = site ? (categoryFrom(withoutBoilerplate(`${site.description ?? ""}. ${site.headline ?? ""}`)) ?? categoryFrom(withoutBoilerplate(site.headings.slice(0, 20).join(". ")))) : undefined;
   let problems: string[] = [];
   const icp: IcpCriteria = {};
 

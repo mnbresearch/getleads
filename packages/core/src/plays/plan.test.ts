@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UNTRUSTED_MARK, UNTRUSTED_RULE } from "../ai/untrusted.js";
 import { NO_AI, model, page, web, type FakeWeb, type Route } from "./kit.test.js";
-import { categoryFrom, competitorsInText, planPlays } from "./plan.js";
+import { categoryFrom, competitorsInText, pickPersona, planPlays } from "./plan.js";
 
 const HOME = page(
   "Onbordo - Employee onboarding that runs itself",
@@ -124,10 +124,13 @@ describe("planPlays", () => {
 
   it("reads the home page once and at most three of the site's own comparison pages - nothing else", async () => {
     use(SITE);
-    await planPlays({ website: "onbordo.com" });
-    expect(net.calls[0]).toBe("https://onbordo.com/");
-    expect(net.calls.length).toBeLessThanOrEqual(4);
+    const plan = await planPlays({ website: "onbordo.com" });
+    // robots.txt first (this site has none, and nothing is said about that), then the pages.
+    expect(net.calls[0]).toBe("https://onbordo.com/robots.txt");
+    expect(net.pages()[0]).toBe("https://onbordo.com/");
+    expect(net.pages().length).toBeLessThanOrEqual(4);
     expect(new Set(net.calls).size).toBe(net.calls.length);
+    expect(plan.trace.notes).toEqual([]);
     expect(net.hosts()).toEqual(["onbordo.com"]);
     expect(net.calls.join(" ")).not.toMatch(/rival\.example|127\.0\.0\.1/);
   });
@@ -235,14 +238,14 @@ describe("planPlays", () => {
   it("a site that cannot be reached, or refuses, gives a general plan and says why", async () => {
     use(() => ({ throws: true }));
     const down = await planPlays({ website: "onbordo.com" });
-    expect(net.calls).toEqual(["https://onbordo.com/", "http://onbordo.com/"]);
+    expect(net.pages()).toEqual(["https://onbordo.com/", "http://onbordo.com/"]);
     expect(down.trace.blocked).toBe(true);
     expect(down.trace.blockedReason).toBe("onbordo.com could not be read (unreachable), so these suggestions are general. Check the address and try again.");
     expect(down.plays.map((p) => p.type)).toEqual(["funding"]);
 
     use({ "https://onbordo.com/": { status: 403 } });
     const refused = await planPlays({ website: "onbordo.com" });
-    expect(net.calls).toEqual(["https://onbordo.com/"]);
+    expect(net.pages()).toEqual(["https://onbordo.com/"]);
     expect(refused.trace).toMatchObject({ blocked: true, pagesRefused: 1 });
     expect(refused.trace.notes).toContain("onbordo.com refused to show a page (it answered 403). It was not retried.");
   });
@@ -276,4 +279,145 @@ describe("planPlays", () => {
     expect(plan.trace.blocked).toBe(true);
     expect(plan.plays.map((p) => p.type)).toEqual(["funding"]);
   });
+});
+
+/* ───────────────────────────────── sites as they are really built ───────────────────────────────── */
+
+describe("words that sit next to each other on the page are not one word", () => {
+  const BUILT = page(
+    "Sellwise - the CRM that sells with you",
+    `<a class="skip" href="#main">Skip to main content</a>
+     <header><nav><a href="/">Sellwise</a><a href="/pricing">Pricing</a></nav></header>
+     <main id="main">
+       <h1>Close more deals</h1>
+       <section class="compare">
+         <a href="/compare/sellwise-vs-hooli"><span>Sellwise vs Hooli</span><span>See how we compare</span></a>
+         <a href="/compare/sellwise-vs-pipewise"><div>Sellwise vs Pipewise</div><div>We built a better way</div></a>
+         <a href="/compare/sellwise-vs-initech"><h3>Sellwise vs Initech</h3><p>See the difference</p></a>
+       </section>
+     </main>`,
+    `<meta name="description" content="Sellwise is the CRM with a built-in AI teammate that works with your team to call leads, qualify prospects and book meetings."><meta property="og:site_name" content="Sellwise">`,
+  );
+
+  it("a link's label and the button text under it are read apart: competitors are clean names", async () => {
+    use({ "https://sellwise.com/": BUILT });
+    const plan = await planPlays({ website: "sellwise.com" });
+    expect(plan.competitors.map((c) => c.name)).toEqual(["Hooli", "Pipewise", "Initech"]);
+    expect(JSON.stringify(plan)).not.toMatch(/HooliSee|PipewiseWe|InitechSee/);
+    expect(plan.plays.find((p) => p.type === "competitor_customers")!.name).toBe("Customers of Hooli and Pipewise and others");
+  });
+
+  it("a name with a button's first word stuck to it is refused, should one ever reach the reader", () => {
+    const own = { name: "Sellwise", domain: "sellwise.com" };
+    expect(competitorsInText("Sellwise vs HooliSee how we compare", own)).toEqual([]);
+    expect(competitorsInText("Sellwise vs PipewiseWe built a better way", own)).toEqual([]);
+    // Capitals inside a real name are not that.
+    expect(competitorsInText("Sellwise vs HubSpot", own)).toEqual(["HubSpot"]);
+    expect(competitorsInText("Sellwise vs PipeDrive", own)).toEqual(["PipeDrive"]);
+  });
+
+  it("a site that says what it is in one word still gets its category, and so a public-conversations play", async () => {
+    use({ "https://sellwise.com/": BUILT });
+    const plan = await planPlays({ website: "sellwise.com" });
+    expect(plan.titles[0]).toBe("VP Sales");
+    const asks = plan.plays.find((p) => p.type === "public_asks")!;
+    expect(asks).toMatchObject({ name: "People asking for CRM recommendations", config: { category: "CRM" } });
+    expect(plan.trace.notes).toEqual([]);
+  });
+});
+
+describe("what kind of product, and who buys it", () => {
+  it.each([
+    ["Scoutly finds and verifies B2B leads, then measures what AI engines say about you.", "lead generation tool"],
+    ["Know who to target and why now, find verified contacts, and engage across every channel.", "lead generation tool"],
+    ["Mailproof verifies email addresses in bulk before you hit send.", "email verification tool"],
+    ["Send cold email that lands in the inbox.", "sales engagement tool"],
+    ["Sellwise is the CRM with a built-in AI teammate.", "CRM"],
+    ["Error monitoring and tracing for every developer.", "application monitoring tool"],
+    ["The shared inbox for teams that answer customers together.", "customer support software"],
+    ["Join 5,000+ teams using our HR and AI tools to manage people and performance.", "HR software"],
+    ["Onbordo is an employee onboarding platform for fast-growing teams.", "employee onboarding platform"],
+  ])("%s -> %s", (text, expected) => {
+    expect(categoryFrom(text)).toBe(expected);
+  });
+
+  it("makes nothing up for a site that does not say", () => {
+    for (const no of ["We help teams work better together.", "Welcome to our website. Sign in to continue.", "Skip to main content", ""]) expect(categoryFrom(no), no).toBeUndefined();
+  });
+
+  it("scores every persona against what the site says about itself, so one stray word does not decide", () => {
+    // "content" in a skip link and "campaigns" in a menu are not what the product is about.
+    const dev = pickPersona({ description: "Error monitoring and tracing for developers. Deploy with confidence.", headline: "Code breaks, fix it faster", headings: ["Skip to main content", "Trusted by engineering teams", "An SDK for every stack"], text: "Skip to main content Sign in Get started" });
+    expect(dev.titles[0]).toBe("Chief Technology Officer");
+    const hr = pickPersona({ description: "HR and AI tools to manage people and performance - all on one trusted platform.", headline: "People management, simplified", headings: ["Skip to main content", "Marketing teams love it too"] });
+    expect(hr.titles[0]).toBe("Chief People Officer");
+    const sales = pickPersona({ description: "Finds and verifies B2B leads for your sales team.", headline: "Outbound that learns from real replies", headings: ["Content that converts"] });
+    expect(sales.titles[0]).toBe("VP Sales");
+    // Nothing to go on: the general buyer.
+    expect(pickPersona({ description: "We make things better.", headings: ["Skip to main content", "Sign in"] }).titles[0]).toBe("Founder");
+    expect(pickPersona({}).titles[0]).toBe("Founder");
+  });
+
+  it("a lead-generation site gets a sales buyer, a category and a public-conversations play", async () => {
+    use({
+      "https://scoutly.com/": page(
+        "Scoutly",
+        `<a href="#main">Skip to main content</a><main id="main"><h1>Find your next customers</h1><h2>Verified contacts, not guesses</h2><p>Scoutly reads the public web for buying signals.</p></main>`,
+        `<meta name="description" content="Scoutly finds and verifies B2B leads, then measures what AI engines say about you when those buyers check you out."><meta property="og:site_name" content="Scoutly">`,
+      ),
+    });
+    const plan = await planPlays({ website: "scoutly.com" });
+    expect(plan.titles[0]).toBe("VP Sales");
+    expect(plan.plays.map((p) => p.type)).toEqual(["hiring_role", "public_asks", "funding"]);
+    expect(plan.plays.find((p) => p.type === "public_asks")).toMatchObject({ name: "People asking for lead generation tool recommendations", config: { category: "lead generation tool", sources: ["linkedin", "reddit", "hackernews", "forums"] } });
+    expect(plan.trace.notes).toEqual([]);
+  });
+});
+
+describe("how the site is asked", () => {
+  it("obeys the site's robots.txt, and says so", async () => {
+    use({ ...SITE, "https://onbordo.com/robots.txt": { body: "User-agent: *\nDisallow: /compare\nDisallow: /alternatives/\n", type: "text/plain" } });
+    const plan = await planPlays({ website: "onbordo.com" });
+    expect(net.calls).toEqual(["https://onbordo.com/robots.txt", "https://onbordo.com/"]);
+    // What the home page itself says is still used.
+    expect(plan.competitors.map((c) => c.name)).toEqual(["Acme", "Zeta HR", "Workbright"]);
+    expect(plan.trace.notes).toContain("onbordo.com asks automated readers not to open some of its pages (robots.txt), so those were skipped.");
+    expect(plan.trace.blocked).toBe(false);
+  });
+
+  it("a robots.txt that closes the site gives a general plan and says why", async () => {
+    use({ ...SITE, "https://onbordo.com/robots.txt": { body: "User-agent: *\nDisallow: /\n", type: "text/plain" } });
+    const plan = await planPlays({ website: "onbordo.com" });
+    expect(net.calls).toEqual(["https://onbordo.com/robots.txt"]);
+    expect(plan.trace.blocked).toBe(true);
+    expect(plan.plays.map((p) => p.type)).toEqual(["funding"]);
+  });
+
+  it("asks one thing at a time, with a pause, and asks where the site really lives", async () => {
+    const before = process.env.PLAYS_HOST_PAUSE_MS;
+    process.env.PLAYS_HOST_PAUSE_MS = "300";
+    try {
+      // No comparison links on the home page, so the usual paths are tried - on "www", where the site answered.
+      use((url) => {
+        const u = new URL(url);
+        if (u.host === "plainsite.com") return u.pathname === "/robots.txt" ? undefined : { status: 301, location: `https://www.plainsite.com${u.pathname}` };
+        return u.pathname === "/" ? page("Plainsite", `<main><h1>Plainsite</h1><p>We make tools.</p></main>`) : undefined;
+      });
+      await planPlays({ website: "plainsite.com" });
+      expect(net.calls).toEqual([
+        "https://plainsite.com/robots.txt",
+        "https://plainsite.com/",
+        "https://www.plainsite.com/robots.txt",
+        "https://www.plainsite.com/",
+        "https://www.plainsite.com/compare",
+        "https://www.plainsite.com/alternatives",
+        "https://www.plainsite.com/vs",
+      ]);
+      const www = net.calls.map((c, i) => [c, net.at[i]] as const).filter(([c]) => c.startsWith("https://www."));
+      for (let i = 1; i < www.length; i++) expect(www[i][1] - www[i - 1][1]).toBeGreaterThanOrEqual(290);
+    } finally {
+      if (before === undefined) delete process.env.PLAYS_HOST_PAUSE_MS;
+      else process.env.PLAYS_HOST_PAUSE_MS = before;
+    }
+  }, 15_000);
 });

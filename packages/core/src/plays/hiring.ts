@@ -5,8 +5,13 @@
  * Wellfound, LinkedIn Jobs) plus the open web, reads each result into company, posting
  * title and posting URL, keeps only postings whose title really is the role, and - for the
  * boards that serve their postings to anyone - opens the posting once to check it is still
- * there. A posting that could not be checked is reported as a posting, never as an open one,
- * and no date is ever claimed.
+ * there. Only a posting that was opened and found live is called hiring; one that could not
+ * be checked is reported as a posting, and no date is ever claimed.
+ *
+ * The company's name comes from the posting itself (its title, or the employer in its
+ * structured data), then from the search result's own words, and only last from the
+ * address - and an address that is one run of letters ("paveakatroveinformationtechnologies")
+ * is not a name, so that posting is left out rather than shown under a made-up one.
  */
 import * as cheerio from "cheerio";
 import type { SearchResult } from "../types.js";
@@ -37,7 +42,7 @@ interface Board {
 const BOARDS: Board[] = [
   { board: "Greenhouse", site: "boards.greenhouse.io", host: /^(?:job-)?boards(?:\.eu)?\.greenhouse\.io$/, posting: /^\/([a-z0-9_-]+)\/jobs\/\d+/i, checkable: true },
   { board: "Lever", site: "jobs.lever.co", host: /^jobs(?:\.eu)?\.lever\.co$/, posting: /^\/([a-z0-9_.-]+)\/[0-9a-f]{8}-[0-9a-f-]{20,}/i, checkable: true },
-  { board: "Ashby", site: "jobs.ashbyhq.com", host: /^jobs\.ashbyhq\.com$/, posting: /^\/([a-z0-9_.%-]+)\/[0-9a-f]{8}-[0-9a-f-]{20,}/i, checkable: false },
+  { board: "Ashby", site: "jobs.ashbyhq.com", host: /^jobs\.ashbyhq\.com$/, posting: /^\/([a-z0-9_.%-]+)\/[0-9a-f]{8}-[0-9a-f-]{20,}/i, checkable: true },
   { board: "Workable", site: "apply.workable.com", host: /^apply\.workable\.com$/, posting: /^\/([a-z0-9_-]+)\/j\/[0-9a-z]{6,}/i, checkable: false },
   { board: "Wellfound", site: "wellfound.com/company", host: /^wellfound\.com$/, posting: /^\/(?:company\/([a-z0-9_-]+)\/jobs\/\d+|jobs\/\d+)/i, checkable: false },
   { board: "LinkedIn", site: "linkedin.com/jobs/view", host: /^(?:[a-z]{2,3}\.)?linkedin\.com$/, posting: /^\/jobs\/view\/(?:[^/]*?-at-([a-z0-9%-]+?)-)?\d{6,}/i, checkable: false },
@@ -51,7 +56,7 @@ const AGGREGATORS = /(?:^|\.)(?:indeed|glassdoor|ziprecruiter|simplyhired|monste
 
 const NOT_A_POSTING = /\b\d[\d,]*\+?\s+(?:jobs|positions|openings|roles|vacancies)\b|\bjobs?\s+in\b|\bjobs$|\bjobs\s*\(|\bsalar(?:y|ies)\b|\binterview questions\b|\bjob description\b|\bwhat (?:is|does)\b|\bhow to become\b|\bresume\b|\bcv template\b|\bcourse\b|\bcertification\b|\btraining program\b|\bcareer path\b|\bday in the life\b/i;
 
-const CLOSED = /no longer (?:open|available|accepting|active|posted)|(?:position|job|role|posting|opening) (?:has been|is|was) (?:filled|closed|removed|expired)|(?:job|posting|page) (?:not found|has expired|is closed)|this job has (?:expired|closed)|we couldn(?:'|\u2019)t find (?:that|this) (?:job|page|posting)/i;
+const CLOSED = /no longer (?:open|available|accepting|active|posted|taking)|not accepting (?:new )?applications|applications (?:are|have) (?:now )?closed|(?:position|job|role|posting|opening) (?:has been|is|was) (?:filled|closed|removed|expired)|(?:job|posting|page) (?:not found|has expired|is closed)|this job has (?:expired|closed)|we couldn(?:'|\u2019)t find (?:that|this) (?:job|page|posting)/i;
 
 const ABBREVIATIONS: Record<string, string> = {
   sdr: "sales development representative",
@@ -106,6 +111,18 @@ export interface JobPosting {
   checkable: boolean;
   /** Only when the posting sits on the company's own site. */
   companyDomain?: string;
+  /**
+   * The name is only the address's slug, and the slug is one unbroken run of letters: not
+   * something to show as a company's name. The posting's own page has to name the company.
+   */
+  unnamed?: boolean;
+}
+
+/** A slug that reads as a name: words with separators ("black-duck"), or one short word ("chalk"). */
+function readableSlug(slug: string): boolean {
+  const words = slug.split(/[-_.\s]+/).filter(Boolean);
+  if (!words.length || words.some((w) => w.length > 15 || !/^[a-z0-9]+$/i.test(w))) return false;
+  return words.length > 1 || words[0].length <= 10;
 }
 
 const SITE_SUFFIX = /\s*[|\u2013\u2014\u00B7-]\s*(?:greenhouse|lever|ashby|ashbyhq|workable|wellfound(?:\s*\(formerly angellist talent\))?|angellist|linkedin|jobs?|careers?|job board|apply now|hiring)\s*$/i;
@@ -180,9 +197,12 @@ export function parseJobResult(r: SearchResult): JobPosting | null {
     const role = cleanRole(parsed.role);
     const companyName = parsed.company ?? (slug ? cleanCompanyName(slugToName(slug), 5) : null);
     if (!role || !companyName || NOT_A_POSTING.test(role)) return null;
+    // Named only by its address, and the address is not readable words: the posting's page must name the company.
+    const unnamed = !parsed.company && !!slug && !readableSlug(slug);
+    if (unnamed && !board.checkable) return null;
     u.search = "";
     u.hash = "";
-    return { companyName, title: role, url: u.toString(), board: board.board, checkable: board.checkable };
+    return { companyName, title: role, url: u.toString(), board: board.board, checkable: board.checkable, ...(unnamed ? { unnamed } : {}) };
   }
   // Anywhere else: only a page that names both the role and the employer, on a path that is a job.
   if (AGGREGATORS.test(host) || isSocialOrAggregator(host)) return null;
@@ -213,11 +233,89 @@ export function buildHiringQueries(roles: string[], keywords: string[] = [], loc
   return out;
 }
 
+/**
+ * The sentence a reviewer reads. "Hiring" is said only of a posting that was opened and
+ * found live (or read off the company's own careers page); anything else "has a posting".
+ * A dash inside the role ("SDR - Outbound") becomes a comma, so the sentence has one dash.
+ */
 function reasonFor(p: { title: string; board: string }, state: "open" | "unchecked" | "careers"): string {
-  const role = p.title;
+  const role = p.title.replace(/\s+[-\u2013\u2014]\s+/g, ", ");
   if (state === "careers") return `Hiring ${article(role)} ${role} - listed on their careers page.`;
-  if (p.board === "their careers page") return `Hiring ${article(role)} ${role} - posting on their careers page.`;
-  return `Hiring ${article(role)} ${role} - ${state === "open" ? "open posting" : "posting"} on ${p.board}.`;
+  if (state === "open") return `Hiring ${article(role)} ${role} - open posting on ${p.board}.`;
+  return `Has a posting for ${role} on ${p.board}.`;
+}
+
+const LD_JSON = /<script[^>]*type\s*=\s*["']application\/ld\+json["'][^>]*>([\s\S]{2,300000}?)<\/script>/gi;
+
+/**
+ * What a posting's own page says: the role and the employer.
+ *
+ * In order: the employer in the page's structured data (a JobPosting's hiringOrganization),
+ * the page title ("Job Application for X at Y", "X @ Y", "Y - X"), and the board's own
+ * record of the company's name. Nothing is guessed: a page that names no employer returns none.
+ */
+export function readPostingPage(body: string, slug: string | null, leverStyle: boolean): { role?: string; company?: string } {
+  let role: string | undefined;
+  let company: string | undefined;
+  for (const m of body.slice(0, 1_500_000).matchAll(LD_JSON)) {
+    let data: unknown;
+    try {
+      data = JSON.parse(m[1]);
+    } catch {
+      continue;
+    }
+    const queue: unknown[] = [data];
+    for (let seen = 0; queue.length && seen < 60 && !company; seen++) {
+      const node = queue.shift();
+      if (Array.isArray(node)) {
+        queue.push(...node.slice(0, 20));
+        continue;
+      }
+      if (!node || typeof node !== "object") continue;
+      const o = node as Record<string, unknown>;
+      if (o["@graph"]) queue.push(o["@graph"]);
+      const types = ([] as unknown[]).concat(o["@type"] ?? []).map((t) => String(t).toLowerCase());
+      if (!types.includes("jobposting")) continue;
+      const org = o.hiringOrganization;
+      const name = org && typeof org === "object" && !Array.isArray(org) ? (org as Record<string, unknown>).name : org;
+      const clean = typeof name === "string" ? cleanCompanyName(name, 6) : null;
+      if (clean) company = clean;
+      if (typeof o.title === "string" && cleanRole(o.title)) role = cleanRole(o.title);
+    }
+    if (company) break;
+  }
+  const $ = cheerio.load(body.slice(0, 300_000));
+  const titles = [cleanLine($("title").first().text(), 240), cleanLine($('meta[property="og:title"]').attr("content"), 240)].filter(Boolean);
+  for (const t of titles) {
+    const parsed = splitJobTitle(t, slug, leverStyle);
+    if (!parsed) continue;
+    if (parsed.company && !company) {
+      company = parsed.company;
+      role = role ?? (cleanRole(parsed.role) || undefined);
+    }
+  }
+  if (!company) {
+    const m = /"company_name"\s*:\s*"((?:[^"\\]|\\.){2,80})"/.exec(body.slice(0, 1_500_000));
+    if (m) {
+      try {
+        company = cleanCompanyName(JSON.parse(`"${m[1]}"`), 6) ?? undefined;
+      } catch {
+        // not a JSON string after all
+      }
+    }
+  }
+  // A title that is only the role ("Sales Development Representative") still says what the posting is for.
+  if (!role) {
+    for (const t of titles) {
+      const parsed = splitJobTitle(t, slug, leverStyle);
+      const r = parsed ? cleanRole(parsed.role) : "";
+      if (r && !NOT_A_POSTING.test(r)) {
+        role = r;
+        break;
+      }
+    }
+  }
+  return { ...(role ? { role } : {}), ...(company ? { company } : {}) };
 }
 
 export async function findHiringCompanies(cfg: { roles: string[]; keywords?: string[]; locations?: string[]; companyDomains?: string[] }, opts: PlayEngineOptions = {}): Promise<PlayEngineResult> {
@@ -280,7 +378,7 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
   const byCompany = new Map<string, JobPosting>();
   let asked = 0;
   for (const q of queries) {
-    if (asked >= MAX_SEARCHES || run.expired || byCompany.size >= limit * 2) break;
+    if (asked >= MAX_SEARCHES || run.expired || !run.canSearch || byCompany.size >= limit * 2) break;
     asked++;
     for (const r of await run.search(q, 20)) {
       const p = parseJobResult(r);
@@ -288,8 +386,9 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
       const key = normCompanyName(p.companyName);
       if (!key) continue;
       const have = byCompany.get(key);
-      // One posting per company: a checkable board beats one that cannot be checked.
-      if (!have || (p.checkable && !have.checkable)) byCompany.set(key, p);
+      // One posting per company: a checkable board beats one that cannot be checked, and a posting whose
+      // company the result itself names beats one known only by its address.
+      if (!have || (p.checkable && !have.checkable) || (have.unnamed && !p.unnamed && p.checkable === have.checkable)) byCompany.set(key, p);
     }
   }
   if (queries.length > asked && !run.expired && byCompany.size < limit * 2) {
@@ -298,11 +397,13 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
 
   /* Open each checkable posting once: gone means dropped, readable means its own title is the evidence. */
   let gone = 0;
+  let nameless = 0;
   const check = async (p: JobPosting): Promise<PlayFinding | null> => {
     let state: "open" | "unchecked" = "unchecked";
     let posting = p;
     if (p.checkable && !run.expired) {
-      const page = await run.fetchPage(p.url);
+      // One request per posting, paced per board, and only where the board's robots.txt allows it.
+      const page = await run.fetchPage(p.url, { maxRequests: 3 });
       if (!page.ok && page.kind === "missing") {
         gone++;
         return null;
@@ -311,28 +412,31 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
         const landed = new URL(page.url);
         const board = BOARDS.find((b) => b.host.test(landed.hostname.toLowerCase().replace(/^www\./, "")));
         // A closed posting sends the visitor back to the company's list of jobs.
-        if (!board || !board.posting.test(landed.pathname) || /[?&]error=/i.test(landed.search)) {
+        const at = board ? board.posting.exec(landed.pathname) : null;
+        if (!board || !at || /[?&]error=/i.test(landed.search)) {
           gone++;
           return null;
         }
         const $ = cheerio.load(page.body.slice(0, 400_000));
         // Some boards answer for a closed posting with a page that says so.
-        if (CLOSED.test($("title, h1, h2, [role='alert'], .error, .message").text().slice(0, 4000))) {
+        if (CLOSED.test($("title, h1, h2, [role='alert'], .error, .message, .closed, .job-closed").text().slice(0, 4000))) {
           gone++;
           return null;
         }
-        const pageTitle = cleanLine($('meta[property="og:title"]').attr("content") || $("title").first().text(), 240);
-        const reread = pageTitle ? parseJobResult({ title: pageTitle, url: p.url, snippet: "", provider: "page" }) : null;
-        if (reread) {
-          // The page now advertises a different role: the result was out of date.
-          if (!roles.some((role) => roleMatches(reread.title, role))) {
-            gone++;
-            return null;
-          }
-          posting = reread;
+        const said = readPostingPage(page.body, at[1] ?? null, board.board === "Lever");
+        // The page now advertises a different role: the result was out of date.
+        if (said.role && !roles.some((role) => roleMatches(said.role!, role))) {
+          gone++;
+          return null;
         }
+        posting = { ...p, title: said.role ?? p.title, ...(said.company ? { companyName: said.company, unnamed: false } : {}) };
         state = "open";
       }
+    }
+    // Still known only by an address that is not a name: not shown under a made-up one.
+    if (posting.unnamed) {
+      nameless++;
+      return null;
     }
     return finishFinding({
       kind: "company",
@@ -359,6 +463,7 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
       }
     }
   }
+  if (nameless > 0) run.note(`${nameless} posting${nameless === 1 ? "" : "s"} ${nameless === 1 ? "was" : "were"} left out because the company behind ${nameless === 1 ? "it" : "them"} could not be named from the posting.`);
   if (gone > 0) run.note(`${gone} posting${gone === 1 ? "" : "s"} found by search ${gone === 1 ? "was" : "were"} no longer there when opened, so ${gone === 1 ? "it was" : "they were"} left out.`);
 
   const trace = run.finish(run.searchAnswered || careersReached > 0, "Nothing could be searched or read, so no postings could be checked.");

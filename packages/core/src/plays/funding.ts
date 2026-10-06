@@ -6,51 +6,84 @@
  * best of them. The reason states an amount or a round only when the headline itself does.
  */
 import { fetchGoogleNews, scanSignals, type ParsedSignal } from "../signals/news.js";
-import { PlayRun, cleanCompanyName, cleanList, clampInt, findingLimit, finishFinding, isVendorName, rankFindings, safeHttpUrl } from "./shared.js";
+import { PlayRun, cleanCompanyName, cleanList, clampInt, findingLimit, finishFinding, isVendorName, rankFindings, safeHttpUrl, stripDescriptorPrefix } from "./shared.js";
 import type { PlayEngineOptions, PlayEngineResult, PlayFinding } from "./types.js";
 import { cleanLine, cleanQuote, normCompanyName } from "./util.js";
 
 const SAME_ROUND_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-const MONEY = /(US\$|A\$|C\$|S\$|\$|\u20B9|Rs\.?\s?|INR\s?|\u20AC|\u00A3)\s?(\d{1,4}(?:,\d{3})*(?:\.\d+)?)\s?(billion|bn|b|million|mn|m|crore|cr|lakh|k|thousand)?(?![\p{L}\p{N}])/iu;
+const CODE = "USD|CAD|AUD|SGD|NZD|HKD|EUR|GBP|INR|CHF|SEK|NOK|DKK|JPY|AED";
+const MONEY = new RegExp(
+  `(?:(${CODE})\\s?)?(US\\$|CA\\$|AU\\$|A\\$|C\\$|S\\$|\\$|\\u20B9|Rs\\.?\\s?|\\u20AC|\\u00A3)?\\s?(\\d{1,4}(?:,\\d{3})*(?:\\.\\d+)?)[\\s-]?(billion|bn|b|million|mn|mm|m|crore|cr|lakh|k|thousand)?(?![\\p{L}\\p{N}])(?:\\s?(${CODE})(?![\\p{L}\\p{N}]))?`,
+  "giu",
+);
+
+/** Roughly what one unit of a currency is in US dollars: only used to compare an amount with a minimum, never shown. */
+const RATE: Record<string, number> = { USD: 1, CAD: 0.73, AUD: 0.66, SGD: 0.75, NZD: 0.6, HKD: 0.13, EUR: 1.08, GBP: 1.27, INR: 0.012, CHF: 1.1, SEK: 0.095, NOK: 0.093, DKK: 0.145, JPY: 0.0067, AED: 0.27 };
+
+/** Dashes that look like a hyphen but are other characters ("pre\u2011seed"): read as a hyphen. */
+const plainHyphens = (s: string): string => s.replace(/[\u2010\u2011\u2012\u2013]/g, "-");
+
+const SAID_BEFORE = /(?:valued at|valuation of|valuing\s+\S+(?:\s+\S+)?\s+at|worth)\s*(?:about|around|nearly|over|more than|up to|roughly|approximately|~)?\s*$/i;
+const SAID_AFTER = /^\s*\+?\s*(?:post-?money\s+|pre-?money\s+)?valuation\b/i;
+
+function compact(v: number): string {
+  const fmt = (x: number, suffix: string): string => {
+    const r = Math.round(x * 10) / 10;
+    return `${Number.isInteger(r) ? r : r.toFixed(1)}${suffix}`;
+  };
+  if (v >= 1e9) return fmt(v / 1e9, "B");
+  if (v >= 1e6) return fmt(v / 1e6, "M");
+  if (v >= 1e3) return fmt(v / 1e3, "K");
+  return String(Math.round(v));
+}
 
 /**
- * The amount a headline states, in US dollars, and whether the headline wrote it in dollars.
- * Stricter than the scanner's own reading: the unit must end at a word boundary ("$5 more"
- * is five dollars, not five million) and only the headline is read, never the summary,
- * which lists other companies' rounds.
+ * The amount a headline says was raised: roughly in US dollars (for comparing with a
+ * minimum), whether the headline wrote it in US dollars, and how to show it.
+ *
+ * Stricter than the scanner's own reading. The unit must end at a word boundary ("$5 more"
+ * is five dollars, not five million). Only the headline is read, never the summary, which
+ * lists other companies' rounds. A figure the headline gives as a valuation ("at a $500M
+ * valuation", "valued at $2B") is not what was raised and is passed over. And an amount in
+ * another currency is shown in that currency ("CAD 17M", "EUR 2.5M", "INR 7 crore"), never
+ * as dollars.
  */
-export function headlineAmount(headline: string): { usd: number; inDollars: boolean } | null {
-  const m = MONEY.exec(headline);
-  if (!m) return null;
-  const n = parseFloat(m[2].replace(/,/g, ""));
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const symbol = m[1].trim().toLowerCase();
-  const unit = (m[3] ?? "").toLowerCase();
-  const rate = symbol === "\u20B9" || symbol.startsWith("rs") || symbol.startsWith("inr") ? 0.012 : symbol === "\u20AC" ? 1.08 : symbol === "\u00A3" ? 1.27 : symbol === "a$" ? 0.66 : symbol === "c$" ? 0.73 : symbol === "s$" ? 0.75 : 1;
-  const mult = unit === "billion" || unit === "bn" || unit === "b" ? 1e9 : unit === "million" || unit === "mn" || unit === "m" ? 1e6 : unit === "crore" || unit === "cr" ? 1e7 : unit === "lakh" ? 1e5 : unit === "k" || unit === "thousand" ? 1e3 : 1;
-  const usd = Math.round(n * mult * rate);
-  // A bare "$12" in a funding headline is a typo or a share price, not a round.
-  if (usd < 10_000) return null;
-  return { usd, inDollars: rate === 1 };
+export function headlineAmount(headline: string): { usd: number; inDollars: boolean; shown: string } | null {
+  const text = plainHyphens(headline);
+  for (const m of text.matchAll(MONEY)) {
+    const symbol = (m[2] ?? "").trim().toLowerCase();
+    const code = (m[1] ?? m[5] ?? "").toUpperCase();
+    // A number with neither a currency sign nor a currency code is not money.
+    if (!symbol && !code) continue;
+    const at = m.index ?? 0;
+    if (SAID_BEFORE.test(text.slice(Math.max(0, at - 40), at)) || SAID_AFTER.test(text.slice(at + m[0].length, at + m[0].length + 30))) continue;
+    const n = parseFloat(m[3].replace(/,/g, ""));
+    if (!Number.isFinite(n) || n <= 0) continue;
+    const currency =
+      code ||
+      (symbol === "\u20B9" || symbol.startsWith("rs") ? "INR" : symbol === "\u20AC" ? "EUR" : symbol === "\u00A3" ? "GBP" : symbol === "a$" || symbol === "au$" ? "AUD" : symbol === "c$" || symbol === "ca$" ? "CAD" : symbol === "s$" ? "SGD" : "USD");
+    const unit = (m[4] ?? "").toLowerCase();
+    const mult = unit === "billion" || unit === "bn" || unit === "b" ? 1e9 : unit === "million" || unit === "mn" || unit === "mm" || unit === "m" ? 1e6 : unit === "crore" || unit === "cr" ? 1e7 : unit === "lakh" ? 1e5 : unit === "k" || unit === "thousand" ? 1e3 : 1;
+    const usd = Math.round(n * mult * (RATE[currency] ?? 1));
+    // A bare "$12" in a funding headline is a typo or a share price, not a round.
+    if (usd < 10_000) continue;
+    const indian = unit === "crore" || unit === "cr" || unit === "lakh";
+    const amount = indian ? `${m[3]} ${unit === "lakh" ? "lakh" : "crore"}` : compact(n * mult);
+    return { usd, inDollars: currency === "USD", shown: currency === "USD" ? `$${amount}` : `${currency} ${amount}` };
+  }
+  return null;
 }
 
 /** "$12M", "$1.5B", "$500K". */
 export function formatUsd(usd: number): string {
-  const fmt = (v: number, suffix: string): string => {
-    const r = v >= 100 ? Math.round(v) : Math.round(v * 10) / 10;
-    return `$${Number.isInteger(r) ? r : r.toFixed(1)}${suffix}`;
-  };
-  if (usd >= 1e9) return fmt(usd / 1e9, "B");
-  if (usd >= 1e6) return fmt(usd / 1e6, "M");
-  if (usd >= 1e3) return fmt(usd / 1e3, "K");
-  return `$${Math.round(usd)}`;
+  return `$${compact(usd)}`;
 }
 
 /** A named round in the headline: "Series A", "seed", "pre-seed". Vague words ("round", "growth") are not a round. */
 export function headlineRound(headline: string): string | null {
-  const m = /\b(pre-?seed|seed|pre-?series\s+[a-k]|series\s+[a-k]\d?|angel)\b/i.exec(headline);
+  const m = /\b(pre-?seed|seed|pre-?series\s+[a-k]|series\s+[a-k]\d?|angel)\b/i.exec(plainHyphens(headline));
   if (!m) return null;
   const r = m[1].toLowerCase().replace(/\s+/g, " ");
   if (r.startsWith("series")) return `Series ${r.split(" ")[1].toUpperCase()}`;
@@ -63,27 +96,99 @@ export function headlineRound(headline: string): string | null {
 const FUND_RAISE =
   /\b(?:fund|funds)\s+(?:[ivx]+|\d+)\b|\b(?:new|debut|maiden|first|second|third|fourth|fifth|latest|flagship|venture|climate|opportunity|early-stage|(?:million|billion|mn|bn|crore|[\d.]+[mb]))\s+fund\b|\bfund\s+(?:targeting|aimed|focused|dedicated)\b|\b(?:vc|venture capital|private equity)\s+(?:firm|fund|investor)\b/i;
 
+/** An investor changing what it invests ("raises seed cap to $5M", "backs 18 new startups") is not a company raising money. */
+const INVESTOR_NEWS = /\b(?:raises?|raised|raising|lifts?|lifted|increases?|increased|doubles?|doubled|hikes?|hiked)\b[^.]{0,40}\b(?:cap|ceiling|limit|che(?:que|ck)\s+size|ticket\s+size)\b\s+to\b|\bbacks?\s+\d+\s+(?:new\s+|more\s+)?(?:startups|companies|founders|ventures)\b/i;
+
 /** "Raises concerns", "lands a $10M contract": the scanner's verbs, but not a funding round. */
 const NOT_FUNDING =
   /\b(?:raises?|raised|raising)\s+(?:concerns?|questions?|alarms?|doubts?|eyebrows|awareness|prices?|rates?|stakes?|the bar|forecasts?|outlook|guidance|targets?|fears?|hopes?|issues?|(?:red )?flags?|objections?|minimum|wages?|pay|salaries|dividends?|fees|tariffs?)\b|\b(?:contracts?|settlement|fines?|fined|penalt(?:y|ies)|lawsuit|verdict|tender|purchase order|orders? (?:worth|from|for)|buyback|dividend|share price|price target)\b/i;
+/** Business won, not money raised: "bags record order", "lands two projects", "wins licence". */
+const BUSINESS_WON = /\b(?:bags?|bagged|lands?|landed|wins?|won|secures?|secured|receives?|received|gets?|got|clinch(?:es|ed)?|awarded)\b(?:[^.;]|\.\d){0,70}\b(?:orders?|order book|contracts?|projects?|licen[cs]es?|mandates?|tenders?|letters? of (?:award|intent)|loa)\b/i;
+const FUNDING_WORD = /\b(?:funding|fundraise|investment|financing|round|pre-?seed|seed|series\s+[a-k]|raises?|raised)\b/i;
 /** With no amount and no round in the headline, it must at least say it is about funding. */
 const SAYS_FUNDING = /\b(?:raises?|raised|secures?|secured|bags|bagged|closes|closed|lands|landed|nets|netted|snags|gets|receives?|received)\b[^.]{0,60}\b(?:funding|investment|financing|capital|round)\b/i;
 
 /** Is this headline a company announcing money raised? */
 export function isFundingHeadline(title: string): boolean {
-  if (FUND_RAISE.test(title) || NOT_FUNDING.test(title)) return false;
-  return !!headlineAmount(title) || !!headlineRound(title) || SAYS_FUNDING.test(title);
+  const t = plainHyphens(title);
+  if (FUND_RAISE.test(t) || NOT_FUNDING.test(t) || INVESTOR_NEWS.test(t)) return false;
+  if (BUSINESS_WON.test(t) && !FUNDING_WORD.test(t)) return false;
+  return !!headlineAmount(t) || !!headlineRound(t) || SAYS_FUNDING.test(t);
+}
+
+/** Outlets that news feeds name by their web address. Any other address is left out rather than shown raw. */
+const PUBLISHERS: Record<string, string> = {
+  dealroom: "Dealroom",
+  siliconangle: "SiliconANGLE",
+  endpoints: "Endpoints News",
+  satnews: "SatNews",
+  bloomberg: "Bloomberg",
+  yourstory: "YourStory",
+  economictimes: "The Economic Times",
+  techcrunch: "TechCrunch",
+  reuters: "Reuters",
+  wsj: "WSJ",
+  ft: "Financial Times",
+  forbes: "Forbes",
+  fortune: "Fortune",
+  cnbc: "CNBC",
+  businesswire: "Business Wire",
+  prnewswire: "PR Newswire",
+  globenewswire: "GlobeNewswire",
+  venturebeat: "VentureBeat",
+  theinformation: "The Information",
+  axios: "Axios",
+  crunchbase: "Crunchbase News",
+  inc42: "Inc42",
+  entrackr: "Entrackr",
+  techinasia: "Tech in Asia",
+  geekwire: "GeekWire",
+  betakit: "BetaKit",
+  sifted: "Sifted",
+  finsmes: "FinSMEs",
+  pymnts: "PYMNTS",
+  fiercebiotech: "Fierce Biotech",
+  businessinsider: "Business Insider",
+  theverge: "The Verge",
+  wired: "Wired",
+  nytimes: "The New York Times",
+  theglobeandmail: "The Globe and Mail",
+  livemint: "Mint",
+  moneycontrol: "Moneycontrol",
+  vccircle: "VCCircle",
+  bwdisrupt: "BW Disrupt",
+  thenextweb: "The Next Web",
+  siliconrepublic: "Silicon Republic",
+  spacenews: "SpaceNews",
+  medcitynews: "MedCity News",
+  statnews: "STAT",
+  agfundernews: "AgFunderNews",
+  finextra: "Finextra",
+  marketwatch: "MarketWatch",
+  seekingalpha: "Seeking Alpha",
+  benzinga: "Benzinga",
+  citybiz: "citybiz",
+};
+
+/** The outlet's name as a reader knows it, or "" when all the feed gave is a web address we cannot put a name to. */
+export function publisherName(source: unknown): string {
+  const s = cleanLine(source, 80);
+  if (!s) return "";
+  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(s)) return cleanLine(s, 60);
+  const labels = s.toLowerCase().split(".");
+  for (const l of labels) if (PUBLISHERS[l]) return PUBLISHERS[l];
+  return "";
 }
 
 export function fundingReason(s: { title: string; source?: string; occurredAt?: Date }): string {
   const amount = headlineAmount(s.title);
   const round = headlineRound(s.title);
   let what: string;
-  if (amount && round) what = `Raised ${amount.inDollars ? "" : "about "}${formatUsd(amount.usd)} ${round}`;
-  else if (amount) what = `Raised ${amount.inDollars ? "" : "about "}${formatUsd(amount.usd)}`;
+  if (amount && round) what = `Raised ${amount.shown} ${round}`;
+  else if (amount) what = `Raised ${amount.shown}`;
   else if (round) what = `Raised ${/^[aeiou]/i.test(round) ? "an" : "a"} ${round} round`;
   else what = "Announced new funding";
-  const source = cleanLine(s.source, 60);
+  const source = publisherName(s.source);
   const d = s.occurredAt instanceof Date && Number.isFinite(s.occurredAt.getTime()) ? s.occurredAt : null;
   const on = d ? ` on ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}` : "";
   return source ? `${what}, reported by ${source}${on}.` : d ? `${what}, reported${on}.` : `${what}.`;
@@ -124,7 +229,10 @@ export async function findFundedCompanies(cfg: { keywords?: string[]; industries
   for (const s of signals) {
     if (s.type !== "funding" || typeof s.title !== "string") continue;
     const title = cleanLine(s.title, 300);
-    const name = cleanCompanyName(s.companyName, 5);
+    const given = cleanCompanyName(s.companyName, 6);
+    // "Nine-person Halluminate", "Space Insurer Charter Space": the headline's description is not part of the name.
+    const stripped = given ? stripDescriptorPrefix(given) : null;
+    const name = stripped ? cleanCompanyName(stripped, 5) : null;
     if (!title || !name || isVendorName(name)) continue;
     if (!isFundingHeadline(title)) continue;
     // The company must be named in the headline that is quoted as evidence.

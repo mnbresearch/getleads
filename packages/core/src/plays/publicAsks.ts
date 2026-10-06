@@ -6,6 +6,12 @@
  * a vendor's article, a listicle, a job ad or the competitor's own page. The author of a
  * LinkedIn post becomes a person; everything else is a conversation to answer. The quote is
  * the line from the result that the verdict rests on.
+ *
+ * Hacker News is also asked directly, through its public search API (one constant host, no
+ * key, built to be called): it answers when web search does not, and it dates every thread.
+ * A launch post ("Show HN", "I built ...") is somebody selling, not asking. A thread with no
+ * date, or an old one, is kept with less confidence and nothing is said about how recent it
+ * is; with a number of days set, a thread known to be older is left out.
  */
 import type { AiMessage, SearchResult } from "../types.js";
 import { UNTRUSTED_RULE, fence, plainString } from "../ai/untrusted.js";
@@ -23,6 +29,9 @@ const ON: Record<AskSource, string> = { linkedin: "LinkedIn", reddit: "Reddit", 
 const THREAD: Record<AskSource, string> = { linkedin: "LinkedIn post", reddit: "Reddit thread", hackernews: "Hacker News thread", x: "Post on X", forums: "Forum thread" };
 
 const MAX_SEARCHES = 24;
+/** Calls to the Hacker News search API in one run. */
+const MAX_HN_CALLS = 8;
+const HN_API = "https://hn.algolia.com/api/v1/search_by_date";
 const MAX_AI_BATCHES = 2;
 const AI_BATCH = 10;
 
@@ -120,6 +129,10 @@ const JOB_AD = /\b(?:we(?:'re|\u2019re| are) hiring|is hiring|now hiring|hiring 
 const MARKETING =
   /\b(?:top|best)\s+\d+\b|\b\d+\s+(?:best|top|great|free|powerful|proven|awesome|must-have)\b|\b\d+\s+(?:\w+\s+)?(?:alternatives|competitors|tools|platforms|apps|options)\b|\balternatives?\s+(?:&|and)\s+competitors\b|\bhere(?:'s|\u2019s| is| are)\s+(?:\d+|the top|my top|our|why|how|what|a list)\b|\bin this (?:post|article|guide|video|blog|review)\b|\b(?:we|i)\s+(?:compared|reviewed|tested|ranked|analy[sz]ed)\b|\b(?:ultimate|complete|definitive|comprehensive|in-depth)\s+(?:guide|comparison|review|list)\b|\bpros and cons\b|\b(?:full|detailed|honest|head-to-head)\s+(?:comparison|review)\b|\b(?:sign up|get started|book a demo|request a demo|start (?:your|a) free trial|free trial|link in (?:the )?(?:comments|bio)|dm me|comment\s+\S+\s+below|use code|limited time|% off)\b|\b(?:we|our team)\s+(?:built|created|made|launched|just launched|are building|offer|provide)\b|\bintroducing\b|\b(?:in|for)\s+20\d\d\b|\bsponsored\b|\bwebinar\b|\bcase study\b|\bpress release\b/i;
 
+/** Somebody announcing what they made ("Show HN: ...", "I built an open-source CRM after ...") is selling, not asking. */
+const LAUNCH =
+  /^(?:show|launch)\s+hn\b|\b(?:i|we)(?:['\u2019]ve| have)?\s+(?:just\s+|recently\s+|finally\s+)?(?:built|made|launched|created|released|open-?sourced|shipped|developed|wrote|am building|are building)\b|\b(?:i['\u2019]m|i am|we['\u2019]re|we are)\s+(?:building|launching|releasing|working on)\b|\bintroducing\b|\b(?:my|our)\s+(?:new\s+)?(?:startup|side project|open-?source\s+\w+|saas|launch)\b/i;
+
 /** "Tired of Acme? Try Globex" - a question put to the reader by someone selling the answer. */
 const VENDOR_HOOK =
   /\b(?:looking for|need|tired of|frustrated with|struggling with|sick of|still using|thinking of leaving|fed up with)\b[^?]{0,90}\?\s*(?:try|meet|check out|here(?:'s|\u2019s| is| are)|we (?:built|made|can help|have you covered|got you)|we(?:'ve|\u2019ve) (?:built|made|got you)|our (?:tool|platform|product|app|solution|team)|introducing|look no further|say hello|you(?:'re|\u2019re| are) not alone|switch to|read (?:this|on|our)|download|sign up|get started)/i;
@@ -134,7 +147,8 @@ const ASK_STRONG: RegExp[] = [
   /\b(?:which|what)\b[^.?!]{0,60}\b(?:should (?:i|we)|would you (?:recommend|suggest|choose|pick|use))\b/i,
   /\b(?:thinking (?:of|about)|considering|planning (?:on|to)|want(?:ing)? to|looking to|about to|need to|trying to|time to|ready to|decided to)\s+(?:switch(?:ing)?|mov(?:e|ing)|migrat(?:e|ing)|leav(?:e|ing)|replac(?:e|ing)|ditch(?:ing)?|cancel(?:l?ing)?|drop(?:ping)?)\b/i,
   /\b(?:i|we)\s+(?:really\s+|just\s+|urgently\s+)?(?:need|want)\s+(?:an?|some|to find an?)\s+[^.?!]{0,50}\b(?:alternatives?|replacements?|tool|software|platform|solution|recommendations?)\b/i,
-  /^ask hn:[^?]{0,140}(?:\?|\balternatives?\b|\brecommend|\bwhat do you use\b|\blooking for\b)/i,
+  // (Any "Ask HN: ...?" used to count. A question on Hacker News is not, by itself, somebody looking for a product.)
+  /^ask hn:[^?]{0,140}(?:\balternatives?\b|\brecommend|\bwhat (?:do|does|are) (?:you|your team|people|folks)(?: all)? us(?:e|ing)\b|\blooking for\b|\b(?:which|best|any good)\b[^?]{0,60}\b(?:tool|tools|software|service|platform|crm|app|library|provider|solution)\b)/i,
 ];
 
 const ASK_WEAK: RegExp[] = [
@@ -181,7 +195,7 @@ export function classifyAsk(title: string, snippet: string, competitor?: string)
   const t = cleanQuote(title, 300);
   const s = cleanQuote(snippet, 600);
   const all = `${t} ${s}`;
-  if (!all.trim() || JOB_AD.test(all) || MARKETING.test(all) || VENDOR_HOOK.test(all)) return null;
+  if (!all.trim() || JOB_AD.test(all) || MARKETING.test(all) || VENDOR_HOOK.test(all) || LAUNCH.test(all)) return null;
   const named = competitor ? new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(competitor)}(?![\\p{L}\\p{N}])`, "iu") : null;
   const firstPerson = FIRST_PERSON.test(all);
   const candidates = [...lines(t), ...lines(s)];
@@ -205,8 +219,25 @@ export function classifyAsk(title: string, snippet: string, competitor?: string)
 
 /* ───────────────────────────────── people ───────────────────────────────── */
 
-const BUSINESS_WORD = /^(?:labs?|tech|technologies|technology|software|solutions|systems|group|global|digital|media|studios?|agency|consulting|consultants|partners|ventures|capital|inc|llc|ltd|gmbh|co|corp|company|team|hq|ai|io|app|apps|cloud|data|analytics|marketing|sales|services|network|hub|works|academy|institute|university|club|community|official|news|daily|weekly|magazine|podcast|careers|jobs|recruiting|recruitment|staffing|insights|research|foundation|association|society|council|enterprises?|industries|holdings|bank|insurance|school|college)$/i;
+const BUSINESS_WORD = /^(?:labs?|tech|technologies|technology|software|solutions|systems|group|global|digital|media|studios?|agency|consulting|consultants|partners|ventures|capital|inc|llc|ltd|gmbh|co|corp|company|team|hq|ai|io|app|apps|cloud|data|analytics|marketing|sales|services|network|hub|works|academy|institute|university|club|community|official|news|daily|weekly|magazine|podcast|careers|jobs|recruiting|recruitment|staffing|insights|research|foundation|association|society|council|enterprises?|industries|holdings|bank|insurance|school|college|revenue|deals|growth|leads|crm|saas|b2b|seo|ads|agents?|automation|outreach|prospecting)$/i;
 const NAME_PARTICLE = /^(?:de|del|della|der|den|di|da|dos|du|van|von|bin|ibn|al|el|la|le|st\.?|mc|mac)$/i;
+/**
+ * Everyday words brands are made of. A "name" in which every word is one of these ("New
+ * Breed", "Best Lifetime Deals") is a page, not a person. One such word among real names
+ * ("George Best", "Rose Nguyen") means nothing.
+ */
+const BRAND_WORDS = new Set(
+  (
+    "new best top great good big little smart bright bold open future modern world city home life lifetime work people power prime first next one true real pure simple " +
+    "easy fast quick super ultra mega micro mini pro plus all any every free deal deals breed growth revenue lead leads sale money cash profit value brand brands content " +
+    "creative design social search click web net online site page post blog code dev build maker makers founder founders startup startups business venture success winning " +
+    "winner expert experts guru ninja hero heroes master masters boss chief talent hire hiring career remote local virtual cyber soft bot bots auto flow sync link base box " +
+    "kit stack sphere wave spark shift scale rise peak summit zen nova apex pixel quantum fusion vertex nexus pulse orbit beacon the of and for your my our with by to in on " +
+    "at daily weekly now today tomorrow better more most way ways idea ideas tips tricks hacks secrets stories story insider insiders review reviews guide guides report"
+  ).split(/\s+/),
+);
+/** What is left of a profile address once the person's name is taken out, when it is not a person's: "new-breed-revenue", "leadiq-inc". */
+const VANITY_BUSINESS = /^(?:inc|llc|ltd|gmbh|co|corp|company|hq|group|agency|media|digital|marketing|sales|software|solutions|consulting|consultants|tech|labs?|ai|io|app|apps|official|team|global|deals|growth|revenue|leads|crm|saas|b2b|seo|ads|studio|studios|ventures|capital|partners|services|systems|network|hub|news|daily|weekly|podcast|careers|jobs|recruiting|community|club|academy|institute|university|foundation|store|shop|online|web|page|brand|brands)$/i;
 
 /** A personal name from a LinkedIn result title ("Jane Doe on LinkedIn: ..."), or null for a company page or anything unclear. */
 export function linkedinPostAuthor(title: string): { name: string; text: string } | null {
@@ -228,17 +259,44 @@ export function linkedinPostAuthor(title: string): { name: string; text: string 
   const parts = name.split(" ").filter(Boolean);
   const given = parts.filter((p) => !NAME_PARTICLE.test(p));
   if (given.length < 2 || given.length > 4 || parts.length > 6 || name.length > 60) return null;
+  // Two words that could each be a name: an initial alone is not one.
+  if (given.filter((p) => p.replace(/[^\p{L}]/gu, "").length >= 2).length < 2) return null;
   if (parts.some((p) => BUSINESS_WORD.test(p.replace(/[.']/g, "")))) return null;
   if (!parts.every((p) => /^\p{Lu}/u.test(p) || NAME_PARTICLE.test(p))) return null;
+  // A brand made of everyday words is a company page whatever its capitals say.
+  if (given.every((p) => BRAND_WORDS.has(p.toLowerCase().replace(/[^a-z]/g, "")))) return null;
   return { name, text: cleanQuote(text, 300) };
 }
 
-/** Does the profile part of a post URL belong to this person? It carries the name on a personal profile. */
-function vanityMatches(vanity: string, name: string): boolean {
+/**
+ * Does the profile part of a post URL belong to this person? On a personal profile it
+ * carries the name and little else: digits, an initial, a short suffix. A company page's
+ * carries the company ("new-breed-revenue", "leadiq-inc"), and a profile address is only
+ * ever built from one we are confident is a person's.
+ */
+export function vanityMatches(vanity: string, name: string): boolean {
   if (!/^[a-z0-9][a-z0-9-]{2,99}$/i.test(vanity)) return false;
-  const v = vanity.toLowerCase().replace(/[^a-z]/g, "");
-  const tokens = name.split(" ").map((p) => slugifyNamePart(p)).filter((p) => p.length >= 3);
-  return tokens.length > 0 && tokens.some((p) => v.includes(p));
+  const tokens = name.split(" ").map((p) => slugifyNamePart(p)).filter((p) => p.length >= 2);
+  const long = tokens.filter((p) => p.length >= 3);
+  const squashed = vanity.toLowerCase().replace(/[^a-z]/g, "");
+  if (!long.length || !long.some((p) => squashed.includes(p))) return false;
+  // What the address holds besides the name.
+  const words = vanity.toLowerCase().split("-").filter(Boolean);
+  if (words.length > 1) {
+    let unexplained = 0;
+    for (const w of words) {
+      const letters = w.replace(/[^a-z]/g, "");
+      if (!letters || /\d/.test(w) || tokens.some((p) => letters === p || (p.length >= 3 && letters.includes(p)))) continue;
+      if (VANITY_BUSINESS.test(letters)) return false;
+      if (letters.length >= 4) unexplained++;
+    }
+    return unexplained <= 1;
+  }
+  let rest = squashed;
+  for (const p of tokens.slice().sort((a, b) => b.length - a.length)) rest = rest.replace(p, "");
+  if (VANITY_BUSINESS.test(rest)) return false;
+  for (const m of rest.matchAll(/[a-z]{3,}/g)) if (VANITY_BUSINESS.test(m[0])) return false;
+  return rest.length <= 8;
 }
 
 /* ───────────────────────────────── dates ───────────────────────────────── */
@@ -307,6 +365,119 @@ function aiMessages(items: { title: string; snippet: string }[]): AiMessage[] {
   ];
 }
 
+/**
+ * How sure a finding is once its age is counted. Somebody who asked last month is worth
+ * answering; an ask from two years ago was settled long since. A thread with no date could
+ * be either, so it sits in between - and nothing is ever said about how recent a thread is.
+ */
+export function agedConfidence(confidence: number, when: Date | null, now = Date.now()): number {
+  if (!when) return Math.max(0.3, confidence - 0.15);
+  const age = (now - when.getTime()) / 86_400_000;
+  if (age <= 90) return confidence;
+  if (age <= 365) return Math.max(0.3, confidence - 0.25);
+  return Math.min(0.35, confidence);
+}
+
+/**
+ * What is asked of the Hacker News search for one subject. First the threads whose own
+ * title is about it ("... HubSpot alternative"): the search otherwise matches a word
+ * anywhere in a long post, and the newest thirty such posts are rarely about the subject.
+ * Then the "Ask HN" threads that mention it anywhere.
+ */
+function hnQueries(subject: AskSubject): { query: string; tags: string; titleOnly?: boolean }[] {
+  const v = q(subject.value);
+  if (subject.kind === "competitor") return [{ query: `${v} alternative`, tags: "story", titleOnly: true }, { query: v, tags: "ask_hn" }];
+  return [{ query: v, tags: "ask_hn" }, { query: v, tags: "story", titleOnly: true }];
+}
+
+const ENTITIES: Record<string, string> = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
+
+/** Text out of the HTML the Hacker News API returns for a post's body. */
+function plainText(html: unknown): string {
+  if (typeof html !== "string") return "";
+  return html
+    .slice(0, 20_000)
+    .replace(/<[^>]{0,300}>/g, " ")
+    .replace(/&(#x[0-9a-f]{1,6}|#\d{1,7}|[a-z]{2,6});/gi, (whole, code: string) => {
+      const c = code.toLowerCase();
+      if (c[0] !== "#") return ENTITIES[c] ?? whole;
+      const n = c[1] === "x" ? parseInt(c.slice(2), 16) : parseInt(c.slice(1), 10);
+      return Number.isFinite(n) && n > 31 && n < 0x110000 ? String.fromCodePoint(n) : " ";
+    })
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+const SENTENCES = /(?<=[.?!\u2026])\s+/;
+
+/**
+ * The sentences of a post that are about the subject, each with the one that follows it.
+ * A long post that mentions a product once, in passing, is not about that product: what is
+ * judged is what is said where the product (or the problem) is named.
+ */
+function sentencesAbout(body: string, subject: AskSubject): string {
+  const parts = body.split(SENTENCES).filter(Boolean);
+  const named = subject.kind === "competitor" ? new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu") : null;
+  const about = (t: string): boolean => (named ? named.test(t) : topicOverlap(t, subject.value));
+  const keep = new Set<number>();
+  parts.forEach((p, i) => {
+    if (!about(p)) return;
+    keep.add(i);
+    if (i + 1 < parts.length) keep.add(i + 1);
+  });
+  return [...keep].sort((x, y) => x - y).map((i) => parts[i]).join(" ").slice(0, 560);
+}
+
+/** Words that make an ask an ask for a product, when the subject is a problem to solve rather than a product to leave. */
+const TOOL_SEEKING = /\b(?:tools?|software|services?|apps?|platforms?|products?|solutions?|librar(?:y|ies)|apis?|providers?|vendors?|saas|crm|alternatives?|recommend\w*|suggest\w*)\b|\bwhat (?:do|does|are) (?:you|your team|people|folks)(?: all)? us(?:e|ing)\b/i;
+
+/**
+ * One hit of the Hacker News search as a search result: its thread address, its title, and
+ * the part of its text that is about the subject.
+ *
+ * The search matches a word anywhere in a long post, so a hit is only as relevant as the
+ * place the word stands in. When the title is about the subject, the text around the first
+ * mention is read; otherwise only the sentences that name the subject are, and a hit with
+ * none is not a hit.
+ */
+function hnHit(raw: unknown, subject: AskSubject): { result: SearchResult; shown: string; when: Date | null } | null {
+  const h = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
+  const id = h ? String(h.objectID ?? "") : "";
+  if (!h || !/^\d{1,12}$/.test(id)) return null;
+  const comment = typeof h.comment_text === "string";
+  const body = plainText(comment ? h.comment_text : h.story_text);
+  // A comment is judged by its own words: the thread's title is somebody else's.
+  const ownTitle = comment ? "" : cleanLine(h.title, 300);
+  const thread = cleanLine(comment ? h.story_title : h.title, 200);
+  if (!ownTitle && !body) return null;
+  const named = subject.kind === "competitor" ? new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu") : null;
+  const titleOnSubject = !!ownTitle && (named ? named.test(ownTitle) : topicOverlap(ownTitle, subject.value));
+  let title = "";
+  let snippet: string;
+  if (titleOnSubject) {
+    title = ownTitle;
+    const needle = subject.value.toLowerCase().split(/\s+/).find((w) => w.length > 3) ?? subject.value.toLowerCase();
+    const at = Math.max(0, body.toLowerCase().indexOf(needle) - 200);
+    // Start at a word, not in the middle of one.
+    const from = at > 0 ? body.indexOf(" ", at) + 1 : 0;
+    snippet = body.slice(from, from + 560);
+  } else {
+    snippet = sentencesAbout(body, subject);
+    if (!snippet) return null;
+  }
+  // A problem to solve: the ask has to be for something to solve it with, not any question that uses the same words.
+  if (subject.kind !== "competitor" && !TOOL_SEEKING.test(`${title} ${snippet}`)) return null;
+  // A product named in passing, with a question about something else after it ("... Gmail, Slack, Acme etc. Which
+  // should I pick?"): the asking line has to name the product, or the passage has to be about leaving it.
+  if (named && !titleOnSubject) {
+    const verdict = classifyAsk("", snippet, subject.value);
+    if (!verdict || (!named.test(verdict.quote) && !verdict.leaving)) return null;
+  }
+  const created = typeof h.created_at === "string" ? new Date(h.created_at) : typeof h.created_at_i === "number" ? new Date(h.created_at_i * 1000) : null;
+  const when = created && Number.isFinite(created.getTime()) && created.getTime() <= Date.now() + 86_400_000 && created.getUTCFullYear() >= 2006 ? created : null;
+  return { result: { title, url: `https://news.ycombinator.com/item?id=${id}`, snippet, provider: "hackernews" }, shown: ownTitle || (thread ? `Comment on: ${thread}` : "Comment on Hacker News"), when };
+}
+
 interface Candidate {
   result: SearchResult;
   url: string;
@@ -315,6 +486,8 @@ interface Candidate {
   verdict: AskVerdict;
   when: Date | null;
   aiChecked: boolean;
+  /** The title to show when the result has none of its own (a comment in somebody else's thread). */
+  shown?: string;
 }
 
 export async function findPublicAsks(cfg: { competitors?: string[]; problems?: string[]; category?: string; sources?: AskSource[]; days?: number }, opts: PlayEngineOptions = {}): Promise<PlayEngineResult> {
@@ -338,38 +511,66 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
 
   const queries = buildAskQueries(subjects, sources);
   const byUrl = new Map<string, Candidate>();
-  let asked = 0;
   const tooOldSeen = new Set<string>();
-  for (const { query, subject } of queries) {
-    if (asked >= MAX_SEARCHES || run.expired || byUrl.size >= limit * 2) break;
-    asked++;
-    for (const r of await run.search(query, 20)) {
-      const url = safeHttpUrl(r?.url);
-      if (!url || typeof r.title !== "string") continue;
-      const place = askPlace(url);
-      if (!place || !sources.includes(place.source)) continue;
-      const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
-      const snippet = typeof r.snippet === "string" ? r.snippet : "";
-      const text = `${r.title} ${snippet}`;
-      // The competitor's own community or site is its page, not a public ask.
-      if (competitors.some((c) => normCompanyName(c).length >= 3 && rootDomain(host).split(".")[0].replace(/[^a-z0-9]/g, "") === normCompanyName(c))) continue;
-      // The result must be about what was searched for: a degraded search returns anything.
-      if (subject.kind === "competitor" ? !new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu").test(text) : !topicOverlap(text, subject.value)) continue;
-      const verdict = classifyAsk(r.title, snippet, subject.kind === "competitor" ? subject.value : undefined);
-      if (!verdict) continue;
-      const u = new URL(url);
-      u.hash = "";
-      const key = place.source === "hackernews" ? `hn:${u.searchParams.get("id")}` : `${u.hostname.replace(/^www\./, "")}${u.pathname.replace(/\/$/, "")}`.toLowerCase();
-      const when = snippetDate(snippet);
-      if (days !== null && when && when.getTime() < Date.now() - days * 86_400_000) {
-        tooOldSeen.add(key);
-        continue;
+  const cutoff = days !== null ? Date.now() - days * 86_400_000 : null;
+
+  /** One result from anywhere, kept when it is on the subject and reads as a person asking or complaining. */
+  const offer = (r: SearchResult, subject: AskSubject, known: Date | null, shown?: string): void => {
+    const url = safeHttpUrl(r?.url);
+    if (!url || typeof r.title !== "string") return;
+    const place = askPlace(url);
+    if (!place || !sources.includes(place.source)) return;
+    const host = new URL(url).hostname.toLowerCase().replace(/^www\./, "");
+    const snippet = typeof r.snippet === "string" ? r.snippet : "";
+    const text = `${r.title} ${snippet}`;
+    // The competitor's own community or site is its page, not a public ask.
+    if (competitors.some((c) => normCompanyName(c).length >= 3 && rootDomain(host).split(".")[0].replace(/[^a-z0-9]/g, "") === normCompanyName(c))) return;
+    // The result must be about what was searched for: a degraded search returns anything.
+    if (subject.kind === "competitor" ? !new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu").test(text) : !topicOverlap(text, subject.value)) return;
+    const verdict = classifyAsk(r.title, snippet, subject.kind === "competitor" ? subject.value : undefined);
+    if (!verdict) return;
+    const u = new URL(url);
+    u.hash = "";
+    const key = place.source === "hackernews" ? `hn:${u.searchParams.get("id")}` : `${u.hostname.replace(/^www\./, "")}${u.pathname.replace(/\/$/, "")}`.toLowerCase();
+    const when = known ?? snippetDate(snippet);
+    if (cutoff !== null && when && when.getTime() < cutoff) {
+      tooOldSeen.add(key);
+      return;
+    }
+    const have = byUrl.get(key);
+    if (!have || (verdict.strong && !have.verdict.strong) || (!have.when && when && verdict.strong === have.verdict.strong)) byUrl.set(key, { result: r, url: u.toString(), place, subject, verdict, when: when ?? have?.when ?? null, aiChecked: false, ...(shown ? { shown } : {}) });
+  };
+
+  /* Hacker News, asked directly: its own public search, newest first, every thread dated. */
+  if (sources.includes("hackernews")) {
+    let calls = 0;
+    outer: for (let round = 0; round < 2; round++) {
+      for (const subject of subjects) {
+        if (calls >= MAX_HN_CALLS || run.expired || !run.canSearch) break outer;
+        const ask = hnQueries(subject)[round];
+        if (!ask) continue;
+        calls++;
+        const params = new URLSearchParams({ query: ask.query, tags: ask.tags, hitsPerPage: "30" });
+        if (ask.titleOnly) params.set("restrictSearchableAttributes", "title");
+        if (cutoff !== null) params.set("numericFilters", `created_at_i>${Math.floor(cutoff / 1000)}`);
+        const res = await run.fetchApi<{ hits?: unknown }>(`${HN_API}?${params.toString()}`);
+        const hits = res && Array.isArray(res.hits) ? (res.hits as unknown[]) : null;
+        run.countSearch(hits !== null);
+        for (const h of (hits ?? []).slice(0, 40)) {
+          const hit = hnHit(h, subject);
+          if (hit) offer(hit.result, subject, hit.when, hit.shown);
+        }
       }
-      const have = byUrl.get(key);
-      if (!have || (verdict.strong && !have.verdict.strong)) byUrl.set(key, { result: r, url: u.toString(), place, subject, verdict, when, aiChecked: false });
     }
   }
-  if (queries.length > asked && !run.expired && byUrl.size < limit * 2) {
+
+  let asked = 0;
+  for (const { query, subject } of queries) {
+    if (asked >= MAX_SEARCHES || run.expired || !run.canSearch || byUrl.size >= limit * 2) break;
+    asked++;
+    for (const r of await run.search(query, 20)) offer(r, subject, null);
+  }
+  if (queries.length > asked && !run.expired && run.canSearch && byUrl.size < limit * 2) {
     run.note(`${asked} of ${queries.length} searches were run, to keep this run within its search allowance.`);
   }
   const tooOld = tooOldSeen.size;
@@ -407,11 +608,12 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
   for (const c of kept) {
     const author = c.place.source === "linkedin" && c.place.vanity ? linkedinPostAuthor(c.result.title) : null;
     const person = !!author && !!c.place.vanity && vanityMatches(c.place.vanity, author.name);
-    const confidence = c.aiChecked ? 0.65 : c.verdict.strong ? (c.verdict.kind === "ask" ? 0.75 : 0.7) : 0.5;
+    const sure = c.aiChecked ? 0.65 : c.verdict.strong ? (c.verdict.kind === "ask" ? 0.75 : 0.7) : 0.5;
+    const confidence = agedConfidence(sure, c.when);
     const base = {
       relevantBecause: reasonFor(c.verdict.kind, person, c.place.source, c.subject, c.verdict.leaving),
       evidenceUrl: c.url,
-      evidenceTitle: cleanThreadTitle(c.result.title) || THREAD[c.place.source],
+      evidenceTitle: cleanThreadTitle(c.shown ?? c.result.title) || THREAD[c.place.source],
       evidenceQuote: c.verdict.quote,
       signalType: c.verdict.kind === "ask" ? "public_ask" : "public_complaint",
       ...(c.when ? { signalAt: c.when } : {}),

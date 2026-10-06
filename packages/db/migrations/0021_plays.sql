@@ -15,6 +15,11 @@
 --
 -- Everything here is additive: three new tables, no change to any existing one.
 
+-- The foreign keys below briefly lock the tables they point at. If something else is holding
+-- one of those for long, give up quickly (the deploy is retried) rather than queue every
+-- writer of the live application behind this statement.
+SET LOCAL lock_timeout = '15s';
+
 CREATE TABLE IF NOT EXISTS plays (
   id               uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id           uuid NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,

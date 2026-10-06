@@ -318,6 +318,25 @@ function noteForSkipping(call: ProviderCall, now = Date.now()) {
 }
 
 /**
+ * Rest a provider for a stated time, for a reason its caller knows and an outcome alone
+ * does not say.
+ *
+ * A timeout normally deserves an immediate retry (see noteForSkipping), and for a keyed API
+ * that is right. A keyless scraper that answers with a bot challenge, or whose two endpoints
+ * both time out in one search, will do exactly the same for the next search and the one
+ * after: without this it was asked twice per search for a whole run, ten seconds each time.
+ * Never shortens a window already running. A later success clears it, as for any provider.
+ */
+export function coolOffProvider(provider: string, outcome: ProviderOutcome, ms: number, now = Date.now()) {
+  if (!(ms > 0)) return;
+  const until = now + ms;
+  if ((skipUntil.get(provider) ?? 0) < until) {
+    skipUntil.set(provider, until);
+    skipReason.set(provider, outcome);
+  }
+}
+
+/**
  * Providers that are closed for good, not merely failing.
  *
  * Distinct from the cooling-off map because the answer is different: a rejected key might be

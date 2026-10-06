@@ -13,12 +13,20 @@ import type { AiMessage, AiProvider, SearchResult } from "../types.js";
 import { ProviderUnavailableError } from "../providers/health.js";
 import type { SearchProvider } from "../search/index.js";
 
-export type Route = string | { status?: number; body?: string; type?: string; location?: string; finalUrl?: string; throws?: boolean };
+// Tests do not wait between requests to one host; the pacing tests set their own pause.
+process.env.PLAYS_HOST_PAUSE_MS ??= "0";
+
+/** A page. `location` with a 3xx status is a redirect, answered the way a server does: the engine decides whether to follow it. */
+export type Route = string | { status?: number; body?: string; type?: string; location?: string; throws?: boolean };
 
 export interface FakeWeb {
   fetch: typeof fetch;
-  /** Every URL asked for, in order. */
+  /** Every URL asked for, in order - robots.txt and redirect hops included. */
   calls: string[];
+  /** When each of `calls` was made (milliseconds), for the tests about pacing. */
+  at: number[];
+  /** `calls` without the robots.txt requests: the pages themselves. */
+  pages(): string[];
   hosts(): string[];
 }
 
@@ -27,10 +35,12 @@ const keyOf = (url: string): string => url.replace(/#.*$/, "").replace(/\/$/, ""
 /** A `fetch` that serves the given pages and answers 404 for everything else. */
 export function web(routes: Record<string, Route> | ((url: string) => Route | undefined)): FakeWeb {
   const calls: string[] = [];
+  const at: number[] = [];
   const table = typeof routes === "function" ? null : new Map(Object.entries(routes).map(([k, v]) => [keyOf(k), v]));
   const impl = async (input: unknown): Promise<Response> => {
     const url = String(input instanceof URL ? input.href : typeof input === "string" ? input : (input as { url: string }).url);
     calls.push(url);
+    at.push(Date.now());
     const route = table ? table.get(keyOf(url)) : (routes as (u: string) => Route | undefined)(url);
     const r: Exclude<Route, string> = route === undefined ? { status: 404, body: "Not found" } : typeof route === "string" ? { body: route } : route;
     if (r.throws) throw new TypeError("fetch failed");
@@ -44,10 +54,10 @@ export function web(routes: Record<string, Route> | ((url: string) => Route | un
     } else {
       res = new Response(status === 204 || status === 304 ? null : (r.body ?? ""), { status, headers });
     }
-    Object.defineProperty(res, "url", { value: r.finalUrl ?? url });
+    Object.defineProperty(res, "url", { value: url });
     return res;
   };
-  return { fetch: impl as unknown as typeof fetch, calls, hosts: () => [...new Set(calls.map((c) => new URL(c).hostname))] };
+  return { fetch: impl as unknown as typeof fetch, calls, at, pages: () => calls.filter((c) => !/\/robots\.txt$/.test(c)), hosts: () => [...new Set(calls.map((c) => new URL(c).hostname))] };
 }
 
 export interface FakeSearch extends SearchProvider {
@@ -260,7 +270,14 @@ const ownFile = typeof current !== "string" || /[\\/]kit\.test\.ts$/.test(curren
     expect((await w.fetch("https://acme.test/missing")).status).toBe(404);
     expect((await w.fetch("https://acme.test/gone")).status).toBe(410);
     expect(w.calls).toEqual(["https://acme.test/", "https://acme.test/missing", "https://acme.test/gone"]);
+    expect(w.at.length).toBe(3);
     expect(w.hosts()).toEqual(["acme.test"]);
+    await w.fetch("https://acme.test/robots.txt");
+    expect(w.pages()).toEqual(["https://acme.test/", "https://acme.test/missing", "https://acme.test/gone"]);
+    // A redirect is answered, not followed: whoever asked decides.
+    const moved = web({ "https://acme.test/old": { status: 302, location: "/new" } });
+    const res = await moved.fetch("https://acme.test/old");
+    expect([res.status, res.headers.get("location")]).toEqual([302, "/new"]);
   });
 
   it("the stand-in search provider records queries and can fail like a real one", async () => {

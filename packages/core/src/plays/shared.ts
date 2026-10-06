@@ -5,7 +5,7 @@
  */
 import type { AiMessage, SearchResult } from "../types.js";
 import { completeJson, hasAi } from "../ai/provider.js";
-import { webSearchDetailed, type WebSearchOutcome } from "../search/index.js";
+import { defaultProviders, webSearchDetailed, type WebSearchOutcome } from "../search/index.js";
 import { fetchPublic, readCapped } from "../util/http.js";
 import { extractDomain, normalizeLinkedinUrl, rootDomain } from "../util/domain.js";
 import { isPublicHost, parseHttpUrl } from "../util/publicHost.js";
@@ -96,7 +96,8 @@ const GENERIC = new Set(
     "calculator hub center centre directory gallery showcase list library archive latest popular recent rewards perks offers deals promo " +
     "discounts migration switch upgrade renewals invoices account accounts profile settings logout register welcome thanks error terms " +
     "privacy trust status docs documentation api resellers affiliates investors podcast ebooks guides reports whitepapers templates apps " +
-    "marketplace plans help search careers jobs store shop cart checkout demo tour quiz survey form contact-us about-us wins results impact"
+    "marketplace plans help search careers jobs store shop cart checkout demo tour quiz survey form contact-us about-us wins results impact " +
+    "main primary secondary header footer thumbnail thumb mockup desktop tablet"
   ).split(/\s+/),
 );
 
@@ -158,6 +159,86 @@ const word = (t: string) => t.toLowerCase().replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N
 export const isGenericWord = (t: string): boolean => GENERIC.has(word(t));
 export const isAudienceWord = (t: string): boolean => AUDIENCE.has(word(t));
 
+/** Where an unnamed company is said to be from: "an Austrian agency", "a UK retailer", "a global bank". */
+const PLACE_WORDS = new Set(
+  (
+    "american austrian australian belgian brazilian british canadian chinese czech danish dutch emirati english european finnish french german greek " +
+    "indian irish israeli italian japanese korean mexican nordic norwegian polish portuguese scandinavian scottish singaporean spanish swedish swiss " +
+    "turkish welsh african asian baltic latin uk us usa eu emea apac latam dach anz mena benelux nordics " +
+    "global international national regional local multinational worldwide north south east west northern southern eastern western central"
+  ).split(/\s+/),
+);
+
+/** What an unnamed company is said to do: "an environmental services company", "a trade org". */
+const INDUSTRY_WORDS = new Set(
+  (
+    "accounting adtech advertising aerospace agritech agtech apparel aviation biotech broadband chemicals cleantech climate communications consulting " +
+    "consumer creative crypto cyber cybersecurity defence defense dental digital edtech electronics engineering environmental events fashion fintech " +
+    "fitness foodtech freight furniture govtech hardware healthtech hrtech industrial infrastructure insurtech internet investment legaltech " +
+    "lending management maritime martech medical medtech mining mobility mortgage online outsourcing packaging pharmaceutical pharmaceuticals " +
+    "proptech publishing recruitment regtech research robotics semiconductor shipping staffing supply chain sustainability telecoms " +
+    "telecommunications trade trading training transport transportation utilities venture wealth web wellness wholesale workforce " +
+    "mobile app apps e-commerce it-services life sciences science oil gas"
+  ).split(/\s+/),
+);
+
+/** How big or how well known an unnamed company is said to be: "a Fortune 500 manufacturer", "a leading provider". */
+const SIZE_WORDS = new Set(
+  (
+    "large larger largest big bigger biggest major mid mid-size mid-sized midsize midsized medium-sized small-sized sized size tier listed private " +
+    "privately held fortune ftse nasdaq nyse series seed stage early late early-stage late-stage growth-stage fast-growing scaling scale-up scaleup " +
+    "established well-known famous renowned anonymous confidential undisclosed unnamed stealth billion million multi-billion multi-million dollar " +
+    "unicorn publicly traded independent family-owned award-winning premier prominent"
+  ).split(/\s+/),
+);
+
+/** The noun an anonymised customer is called by: "... company", "... agency", "... org". */
+const DESCRIPTOR_HEAD = new Set(
+  (
+    "company agency org organisation organization firm provider business startup start-up scaleup scale-up retailer bank manufacturer insurer lender " +
+    "consultancy distributor supplier vendor brand institution association nonprofit non-profit charity corporation enterprise client customer"
+  ).split(/\s+/),
+);
+
+/** Further nouns that end a description when the page itself opens it with "A" or "An": "a logistics leader". */
+const LOOSE_HEAD = new Set(
+  "leader platform marketplace giant unicorn team network group chain university hospital studio publisher broker carrier operator developer maker producer reseller builder player pioneer".split(" "),
+);
+
+/** A word that describes a kind of company rather than naming one. */
+export const isDescribingWord = (t: string): boolean => {
+  const w = word(t);
+  return !!w && (GENERIC.has(w) || PLACE_WORDS.has(w) || INDUSTRY_WORDS.has(w) || SIZE_WORDS.has(w) || DESCRIPTOR_HEAD.has(w) || /^\d+$/.test(w));
+};
+
+/** "company", "agency", "org" and the like: the noun an unnamed company is called by. */
+export const isDescriptorHead = (t: string): boolean => DESCRIPTOR_HEAD.has(word(t));
+
+/**
+ * Is this a description standing in for a name the page chose not to give?
+ *
+ * "Environmental Services Company", "Austrian Agency", "Polish Trade Org": a noun meaning
+ * "a company" with nothing around it but words for where it is, what it does or how big it
+ * is. And anything the page itself introduces with "A" or "An" ("A Pharmadata Company").
+ * "Allica Bank" and "Ford Motor Company" are names: a word in them describes nothing.
+ */
+export function isDescriptorName(name: string, source?: string): boolean {
+  const tokens = cleanLine(name, 160).split(/\s+/).filter(Boolean);
+  if (!tokens.length) return false;
+  const head = tokens[tokens.length - 1];
+  if (tokens.length >= 2 && isDescriptorHead(head) && tokens.slice(0, -1).every(isDescribingWord)) return true;
+  if (source) {
+    const m = /^(?:an?|one)\s+(.{2,80})$/i.exec(cleanLine(source, 200));
+    if (m) {
+      const rest = m[1].toLowerCase();
+      const shown = tokens.join(" ").toLowerCase();
+      const named = rest === shown || rest.startsWith(`${shown} `) || rest.startsWith(`${shown},`);
+      if (named && (isDescriptorHead(head) || LOOSE_HEAD.has(word(head)) || tokens.some(isDescribingWord))) return true;
+    }
+  }
+  return false;
+}
+
 /**
  * A string taken from a web page as a company name, or null when it does not read as one.
  * Deliberately strict: a name that is refused costs one missed candidate, a wrong one puts
@@ -191,6 +272,33 @@ export function cleanCompanyName(raw: unknown, maxWords = 5): string | null {
   // Percentages and counts belong to headlines ("40% faster"), not names.
   if (/\d\s?%|\b\d+x\b/i.test(s)) return null;
   return s;
+}
+
+/** Nouns that say what kind of company follows: "Space Insurer Charter Space", "... Developer NexThera". */
+const KIND_NOUN = new Set("insurer developer startup start-up maker provider firm company unicorn lender manufacturer retailer operator producer supplier vendor".split(" "));
+const SECTOR_TECH = /^(?:insur|fin|health|med|ed|prop|legal|reg|agri|ag|food|clean|climate|bio|deep|mar|ad|hr|gov|space|defen[cs]e)-?tech$/i;
+/** "Basketball League", "Trade Council": a body, not a company that raises a round. */
+const BODY_NOUN = new Set("league federation council committee ministry department authority commission government association".split(" "));
+
+/**
+ * A company's name without the description a headline puts in front of it: "Nine-person
+ * Halluminate" is Halluminate, "Insurtech Outmarket" is Outmarket, "Space Insurer Charter
+ * Space" is Charter Space, "Korea's Dental Robotics" is - nobody: once the description is
+ * gone nothing that names a company is left, and null says so.
+ */
+export function stripDescriptorPrefix(name: string): string | null {
+  let tokens = cleanLine(name, 160).split(/\s+/).filter(Boolean);
+  while (tokens.length > 1 && /['\u2019]s$/.test(tokens[0])) tokens = tokens.slice(1);
+  for (let i = tokens.length - 2; i >= 0; i--) {
+    if (KIND_NOUN.has(word(tokens[i]))) {
+      tokens = tokens.slice(i + 1);
+      break;
+    }
+  }
+  while (tokens.length > 1 && (/^(?:\d+|[a-z]+)-(?:person|people|employee|member|year-old|month-old)$/i.test(tokens[0]) || SECTOR_TECH.test(tokens[0]))) tokens = tokens.slice(1);
+  if (!tokens.length || tokens.every(isDescribingWord)) return null;
+  if (tokens.length <= 2 && BODY_NOUN.has(word(tokens[tokens.length - 1]))) return null;
+  return tokens.join(" ");
 }
 
 /** `globex-corp` as a readable name. Casing is a guess, so callers prefer a name the page spells out. */
@@ -271,14 +379,122 @@ export function rankFindings(findings: PlayFinding[], limit: number): PlayFindin
   return [...best.values()].sort((a, b) => b.confidence - a.confidence).slice(0, limit);
 }
 
+/* ───────────────────────────────── robots.txt ───────────────────────────────── */
+
+export interface RobotsRules {
+  allow: string[];
+  disallow: string[];
+}
+
+const NO_RULES: RobotsRules = { allow: [], disallow: [] };
+/** The name this crawler answers to in a robots.txt group (it is in the user-agent it sends). */
+const ROBOTS_AGENT = "scoutbot";
+
+/**
+ * The rules of a robots.txt that apply to us: the group that names this crawler when there
+ * is one, otherwise the group for `*`. Anything unreadable means no rules.
+ */
+export function parseRobots(text: string, agent = ROBOTS_AGENT): RobotsRules {
+  const groups: { agents: string[]; allow: string[]; disallow: string[] }[] = [];
+  let current: (typeof groups)[number] | null = null;
+  let lastWasAgent = false;
+  for (const raw of String(text ?? "").slice(0, 500_000).split(/\r?\n/)) {
+    const line = raw.replace(/#.*$/, "").trim();
+    const at = line.indexOf(":");
+    if (at <= 0) continue;
+    const field = line.slice(0, at).trim().toLowerCase();
+    const value = line.slice(at + 1).trim();
+    if (field === "user-agent") {
+      if (!current || !lastWasAgent) {
+        current = { agents: [], allow: [], disallow: [] };
+        groups.push(current);
+      }
+      current.agents.push(value.toLowerCase());
+      lastWasAgent = true;
+      continue;
+    }
+    lastWasAgent = false;
+    if (!current) continue;
+    if (field === "disallow" && value) current.disallow.push(value.slice(0, 500));
+    else if (field === "allow" && value) current.allow.push(value.slice(0, 500));
+  }
+  const named = groups.filter((g) => g.agents.some((a) => a !== "*" && a.length >= 3 && agent.includes(a)));
+  const chosen = named.length ? named : groups.filter((g) => g.agents.includes("*"));
+  return { allow: chosen.flatMap((g) => g.allow).slice(0, 2000), disallow: chosen.flatMap((g) => g.disallow).slice(0, 2000) };
+}
+
+function robotsPattern(pattern: string): RegExp {
+  const anchored = pattern.endsWith("$");
+  const body = (anchored ? pattern.slice(0, -1) : pattern).split("*").map(escapeRegExp).join(".*");
+  return new RegExp(`^${body}${anchored ? "$" : ""}`);
+}
+
+/** May this path be opened? The longest matching rule decides; a tie goes to "allow". */
+export function robotsAllows(rules: RobotsRules, pathAndQuery: string): boolean {
+  const path = pathAndQuery || "/";
+  let best = -1;
+  let allowed = true;
+  const consider = (patterns: string[], verdict: boolean): void => {
+    for (const p of patterns) {
+      if (p.length < best || (p.length === best && !verdict)) continue;
+      let hit = false;
+      try {
+        hit = robotsPattern(p).test(path);
+      } catch {
+        hit = false;
+      }
+      if (hit) {
+        best = p.length;
+        allowed = verdict;
+      }
+    }
+  };
+  consider(rules.disallow, false);
+  consider(rules.allow, true);
+  return allowed;
+}
+
 /* ───────────────────────────────── the run ───────────────────────────────── */
 
 export type PageResult =
   | { ok: true; url: string; body: string }
-  | { ok: false; kind: "refused" | "missing" | "failed" | "deadline"; why: string };
+  | { ok: false; kind: "refused" | "missing" | "failed" | "deadline" | "budget"; why: string };
+
+export interface FetchPageOptions {
+  /** Wire requests this call may make at most (redirect hops and a robots.txt count). */
+  maxRequests?: number;
+  /** False for a constant API endpoint that is built to be called. Default true. */
+  robots?: boolean;
+  /** Accept a JSON body (an API) instead of a page. */
+  json?: boolean;
+}
 
 const NO_SEARCH_SOURCE = "No search source is connected on our side, so this run could not search. This is not a result about your market.";
 const EVERY_SEARCH_FAILED = "Every search failed, so nothing could be checked this time. This is not a result about your market - try again later.";
+const KEYLESS_SEARCH = new Set(["duckduckgo", "bing_html"]);
+
+/** A run that was given no deadline still ends. */
+const DEFAULT_RUN_MS = 240_000;
+/** One search never holds a run longer than this, whatever the sources behind it do. */
+const SEARCH_WAIT_MS = 12_000;
+/** No search is started with less time left than one search can need. */
+const MIN_SEARCH_MS = 4_000;
+const MAX_HOPS = 5;
+
+/**
+ * The pause between two requests to the same host. 300 ms unless the operator sets
+ * PLAYS_HOST_PAUSE_MS (tests set it to 0, so a web that exists in memory is not waited for).
+ */
+export function hostPauseMs(): number {
+  const raw = process.env.PLAYS_HOST_PAUSE_MS;
+  const n = raw === undefined || raw.trim() === "" ? Number.NaN : Number(raw);
+  return Number.isFinite(n) ? Math.min(5_000, Math.max(0, Math.floor(n))) : 300;
+}
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
 
 /** A page that answered 200 with a login wall or a bot check instead of its content. */
 function wallOn(body: string, requested: URL, finalUrl: string): string | null {
@@ -299,26 +515,49 @@ function wallOn(body: string, requested: URL, finalUrl: string): string | null {
 }
 
 /**
- * One engine run: counts what was tried, remembers what each search said, and at the end
- * decides whether anything was looked at at all.
+ * One engine run: counts what was tried, remembers what each search said, paces and
+ * polices every page request, and at the end decides whether anything was looked at at all.
  */
 export class PlayRun {
   readonly trace: PlayRunTrace = emptyTrace();
+  /** Requests actually sent for pages: redirect hops and robots.txt included. */
+  requests = 0;
   private readonly outcomes: WebSearchOutcome[] = [];
+  private readonly direct = new WeakSet<WebSearchOutcome>();
+  private readonly deadline: number;
+  private readonly pause: number;
+  private readonly hostQueue = new Map<string, Promise<void>>();
+  private readonly hostLastDone = new Map<string, number>();
+  private readonly robots = new Map<string, Promise<RobotsRules>>();
   private pagesFailed = 0;
+  private sitesIgnored = 0;
   private aiStopped = false;
   private stoppedForTime = false;
 
-  constructor(readonly opts: PlayEngineOptions) {}
+  constructor(readonly opts: PlayEngineOptions) {
+    this.deadline = typeof opts.deadlineAt === "number" && Number.isFinite(opts.deadlineAt) ? opts.deadlineAt : Date.now() + DEFAULT_RUN_MS;
+    this.pause = hostPauseMs();
+  }
 
-  /** No new work is started once the deadline has passed. */
-  get expired(): boolean {
-    const over = this.opts.deadlineAt !== undefined && Date.now() >= this.opts.deadlineAt;
-    if (over && !this.stoppedForTime) {
+  private outOfTime(): void {
+    if (!this.stoppedForTime) {
       this.stoppedForTime = true;
       this.note("The run reached its time limit and stopped early. What was found before that is kept.");
     }
+  }
+
+  /** No new work is started once the deadline has passed. */
+  get expired(): boolean {
+    const over = Date.now() >= this.deadline;
+    if (over) this.outOfTime();
     return over;
+  }
+
+  /** Is there time left for one more search? A search is not started when the answer is no. */
+  get canSearch(): boolean {
+    const ok = this.deadline - Date.now() >= MIN_SEARCH_MS;
+    if (!ok) this.outOfTime();
+    return ok;
   }
 
   note(sentence: string): void {
@@ -326,11 +565,21 @@ export class PlayRun {
     if (s && !this.trace.notes.includes(s) && this.trace.notes.length < MAX_NOTES) this.trace.notes.push(s);
   }
 
-  /** Feed for `onOutcome` of helpers that run their own searches (domain resolution, people search). */
-  readonly recordOutcome = (o: WebSearchOutcome): void => {
-    this.outcomes.push(o);
+  /**
+   * Feed for `onOutcome` of helpers that run their own searches (domain resolution, people
+   * search), and for `search` below.
+   *
+   * A `site:` search that came back empty because the engine ignored the site and everything
+   * it sent was discarded did not search that site at all: it is counted as a search that
+   * failed, so a run made of such searches says "could not search", not "found nobody".
+   */
+  readonly recordOutcome = (o: WebSearchOutcome, query?: string): void => {
+    const ignoredSite = typeof query === "string" && /(?:^|\s)site:\S/i.test(query) && !o.everyProviderFailed && !(o.results?.length > 0) && (o.attempts ?? []).some((a) => (a.offSite ?? 0) > 0);
+    if (ignoredSite) this.sitesIgnored++;
+    const seen = ignoredSite ? { ...o, everyProviderFailed: true } : o;
+    this.outcomes.push(seen);
     this.trace.searches++;
-    if (o.everyProviderFailed) this.trace.failedSearches++;
+    if (seen.everyProviderFailed) this.trace.failedSearches++;
   };
 
   /** True once at least one search got an answer from some provider (even an empty one). */
@@ -342,25 +591,38 @@ export class PlayRun {
     return this.outcomes.length;
   }
 
+  /** Count something that is a search in all but name (a public search API), and whether it answered. */
+  countSearch(answered: boolean): void {
+    const o: WebSearchOutcome = { results: [], attempts: [], everyProviderFailed: !answered, nothingConfigured: false };
+    // Not a web search: it says nothing about which web search sources are connected.
+    this.direct.add(o);
+    this.recordOutcome(o);
+  }
+
+  /** The web searches among the outcomes (a public search API asked directly is not one). */
+  private get webOutcomes(): WebSearchOutcome[] {
+    return this.outcomes.filter((o) => !this.direct.has(o));
+  }
+
   /**
-   * Wait for a piece of work, but not past the deadline. Work that is still running when
-   * the deadline passes is abandoned (its own timeouts end it) and null is returned, so a
-   * slow search, page or model cannot hold a run beyond the time it was given.
+   * Wait for a piece of work, but not past the deadline (or `capMs`, when that is sooner).
+   * Work still running then is abandoned (its own timeouts end it) and null is returned, so
+   * a slow search, page or model cannot hold a run beyond the time it was given.
    */
-  async within<T>(work: Promise<T>): Promise<T | null> {
-    const at = this.opts.deadlineAt;
-    if (at === undefined) return work;
-    const left = at - Date.now();
-    if (left <= 0) {
+  async within<T>(work: Promise<T>, capMs?: number): Promise<T | null> {
+    const toDeadline = this.deadline - Date.now();
+    if (toDeadline <= 0) {
       work.catch(() => {});
-      void this.expired;
+      this.outOfTime();
       return null;
     }
+    const capped = capMs !== undefined && capMs < toDeadline;
+    const left = capped ? Math.max(1, capMs) : toDeadline;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const late = new Promise<null>((resolve) => {
       timer = setTimeout(() => {
         work.catch(() => {});
-        void this.expired;
+        if (!capped) this.outOfTime();
         resolve(null);
       }, left);
       (timer as unknown as { unref?: () => void }).unref?.();
@@ -372,30 +634,181 @@ export class PlayRun {
     }
   }
 
+  private get onlyKeylessSearch(): boolean {
+    const providers = this.opts.searchOpts?.providers ?? defaultProviders();
+    return !providers.some((p) => !KEYLESS_SEARCH.has(p.name) && p.available());
+  }
+
   /** One web search. Never throws; a failure is counted and returns nothing. */
   async search(query: string, count = 20): Promise<SearchResult[]> {
-    if (this.expired) return [];
+    if (this.expired || !this.canSearch) return [];
+    const outer = this.opts.searchOpts?.onOutcome;
+    let recorded = false;
     try {
-      const o = await this.within(webSearchDetailed(query, { count, ...(this.opts.country ? { country: this.opts.country } : {}), ...(this.opts.searchOpts ?? {}) }));
-      // Abandoned at the deadline: not an answer and not a failure of the search source.
-      if (!o) return [];
-      this.recordOutcome(o);
+      const work = webSearchDetailed(query, {
+        count,
+        ...(this.opts.country ? { country: this.opts.country } : {}),
+        ...(this.opts.searchOpts ?? {}),
+        onOutcome: (o, q) => {
+          recorded = true;
+          this.recordOutcome(o, q);
+          try {
+            outer?.(o, q);
+          } catch {
+            // an observer never breaks the search it is watching
+          }
+        },
+      });
+      const started = Date.now();
+      const o = await this.within(work, SEARCH_WAIT_MS);
+      if (!o) {
+        // Abandoned at the deadline: neither an answer nor a failure of the search source.
+        // Abandoned for taking too long: a search that did not answer.
+        if (!recorded && Date.now() - started >= SEARCH_WAIT_MS - 50 && Date.now() < this.deadline) {
+          recorded = true;
+          this.recordOutcome({ results: [], attempts: [], everyProviderFailed: true, nothingConfigured: this.onlyKeylessSearch });
+        }
+        return [];
+      }
       return Array.isArray(o.results) ? o.results : [];
     } catch {
-      this.recordOutcome({ results: [], attempts: [], everyProviderFailed: true, nothingConfigured: false });
+      if (!recorded) this.recordOutcome({ results: [], attempts: [], everyProviderFailed: true, nothingConfigured: false });
       return [];
     }
+  }
+
+  /**
+   * One request on the wire: after the requests before it to the same host have finished,
+   * and after a pause, so a site is never asked for two things at once or in a burst.
+   */
+  private async wire(target: URL, sent?: () => void): Promise<Response | null | "deadline"> {
+    const host = target.host.toLowerCase();
+    const before = this.hostQueue.get(host) ?? Promise.resolve();
+    let release: () => void = () => {};
+    const mine = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    this.hostQueue.set(
+      host,
+      before.then(() => mine),
+    );
+    await before;
+    try {
+      const last = this.hostLastDone.get(host);
+      if (last !== undefined && this.pause > 0) {
+        const wait = last + this.pause - Date.now();
+        if (wait > 0) {
+          if (Date.now() + wait >= this.deadline) {
+            this.outOfTime();
+            return "deadline";
+          }
+          await sleep(Math.min(wait, this.pause));
+        }
+      }
+      if (this.expired) return "deadline";
+      this.requests++;
+      sent?.();
+      const remaining = this.deadline - Date.now();
+      try {
+        return await fetchPublic(target.href, { publicOnly: true, allowPrivateHosts: this.opts.allowPrivateHosts === true, timeoutMs: Math.max(1_000, Math.min(PAGE_TIMEOUT_MS, remaining)), maxBytes: MAX_PAGE_BYTES, maxRedirects: 0 });
+      } finally {
+        this.hostLastDone.set(host, Date.now());
+      }
+    } finally {
+      release();
+    }
+  }
+
+  /**
+   * GET a URL, following redirects by hand: every hop is a request that is paced, counted
+   * and checked. A hop that would leave https for plain http is not followed - the https
+   * form of the same address is asked for instead.
+   */
+  private async get(start: URL, budget: () => number, sent: () => void, allowed?: (u: URL) => Promise<boolean>): Promise<{ res: Response; url: URL } | { stop: "refused" | "failed" | "deadline" | "budget" | "robots"; url?: URL }> {
+    let current = start;
+    for (let hop = 0; hop <= MAX_HOPS; hop++) {
+      if (budget() <= 0) return { stop: "budget" };
+      // Every address is checked against its own host's robots.txt before it is asked for - the first and each hop.
+      if (allowed && !(await allowed(current))) return { stop: "robots", url: current };
+      if (this.expired) return { stop: "deadline" };
+      if (budget() <= 0) return { stop: "budget" };
+      let res: Response | null | "deadline";
+      try {
+        res = await this.wire(current, sent);
+      } catch {
+        return { stop: "failed" };
+      }
+      if (res === "deadline") return { stop: "deadline" };
+      if (!res) return { stop: "refused" };
+      const location = res.status >= 300 && res.status < 400 ? res.headers.get("location") : null;
+      if (!location) return { res, url: current };
+      await res.body?.cancel().catch(() => {});
+      let next: URL | null;
+      try {
+        next = parseHttpUrl(new URL(location, current).toString());
+      } catch {
+        next = null;
+      }
+      if (!next) return { stop: "refused" };
+      if (current.protocol === "https:" && next.protocol === "http:") {
+        next.protocol = "https:";
+        if (next.port === "80") next.port = "";
+      }
+      if (next.toString() === current.toString()) return { stop: "failed" };
+      current = next;
+    }
+    return { stop: "failed" };
+  }
+
+  /** The robots.txt rules of a host, read once per run. Anything but a readable file means no rules. */
+  private rulesFor(target: URL, budget: () => number, sent: () => void): Promise<RobotsRules> {
+    const key = target.host.toLowerCase();
+    const known = this.robots.get(key);
+    if (known) return known;
+    // Declared first: the work below refers to its own promise (after its first await).
+    let loading!: Promise<RobotsRules>;
+    loading = (async (): Promise<RobotsRules> => {
+      let start: URL;
+      try {
+        start = new URL("/robots.txt", target.origin);
+      } catch {
+        return NO_RULES;
+      }
+      const got = await this.get(start, budget, sent);
+      if ("stop" in got) {
+        // Out of budget or time before it could be read: not remembered, so it is asked again later.
+        if (got.stop === "budget" || got.stop === "deadline") this.robots.delete(key);
+        return NO_RULES;
+      }
+      // Where the file really lives shares its rules, so that host is not asked again.
+      const landed = got.url.host.toLowerCase();
+      if (landed !== key && !this.robots.has(landed)) this.robots.set(landed, loading);
+      if (!got.res.ok || !/text|plain/i.test(got.res.headers.get("content-type") ?? "text/plain")) {
+        await got.res.body?.cancel().catch(() => {});
+        return NO_RULES;
+      }
+      try {
+        const text = new TextDecoder("utf-8", { fatal: false }).decode(await readCapped(got.res, 500_000));
+        // An HTML page served for /robots.txt is not a robots file.
+        return /^\s*</.test(text) ? NO_RULES : parseRobots(text);
+      } catch {
+        return NO_RULES;
+      }
+    })();
+    this.robots.set(key, loading);
+    return loading;
   }
 
   /**
    * Fetch one page that a customer named or another page linked to.
    *
    * Always through the public-only fetcher: a private, loopback or internal address is
-   * refused before any request, and again on every redirect hop. One request per call - a
-   * refusal (a 401/403/429/451/999, a login wall, a bot check, a file that is not a page)
-   * is counted, noted and never retried.
+   * refused before any request, and again on every redirect hop. The host's robots.txt is
+   * read once and obeyed. Requests to one host go out one at a time with a pause between
+   * them. A refusal (a 401/403/429/451/999, a login wall, a bot check, a file that is not a
+   * page, a path robots.txt closes) is counted, noted and never retried.
    */
-  async fetchPage(url: string): Promise<PageResult> {
+  async fetchPage(url: string, o: FetchPageOptions = {}): Promise<PageResult> {
     const target = parseHttpUrl(url);
     const shown = target ? target.hostname.replace(/^www\./, "") : cleanLine(url, 80);
     if (!target) {
@@ -403,26 +816,44 @@ export class PlayRun {
       this.note(`${shown || "An address"} is not a web address, so it was not fetched.`);
       return { ok: false, kind: "refused", why: "not a web address" };
     }
-    const allowPrivateHosts = this.opts.allowPrivateHosts === true;
-    if (!allowPrivateHosts && !isPublicHost(target.href)) {
+    if (this.opts.allowPrivateHosts !== true && !isPublicHost(target.href)) {
       this.trace.pagesRefused++;
       this.note(`${shown} is not a public web address, so it was not fetched.`);
       return { ok: false, kind: "refused", why: "not a public web address" };
     }
     if (this.expired) return { ok: false, kind: "deadline", why: "time limit" };
-    const remaining = this.opts.deadlineAt !== undefined ? this.opts.deadlineAt - Date.now() : PAGE_TIMEOUT_MS;
-    let res: Response | null;
-    try {
-      res = await fetchPublic(target.href, { publicOnly: true, allowPrivateHosts, timeoutMs: Math.max(1_000, Math.min(PAGE_TIMEOUT_MS, remaining)), maxBytes: MAX_PAGE_BYTES });
-    } catch {
+    // What this one call has sent: its own hops and a robots.txt it had to fetch. (Other pages being fetched at the same time have their own count.)
+    let used = 0;
+    const sent = (): void => {
+      used++;
+    };
+    const budget = (): number => (o.maxRequests === undefined ? MAX_HOPS + 2 : o.maxRequests) - used;
+    if (budget() <= 0) return { ok: false, kind: "budget", why: "request limit" };
+
+    const allowed =
+      o.robots === false
+        ? undefined
+        : async (u: URL): Promise<boolean> => robotsAllows(await this.rulesFor(u, budget, sent), `${u.pathname}${u.search}`);
+    const got = await this.get(target, budget, sent, allowed);
+    if ("stop" in got) {
+      if (got.stop === "deadline") return { ok: false, kind: "deadline", why: "time limit" };
+      if (got.stop === "budget") return { ok: false, kind: "budget", why: "request limit" };
+      if (got.stop === "robots") {
+        const closed = (got.url ?? target).hostname.replace(/^www\./, "");
+        this.trace.pagesRefused++;
+        this.note(`${closed} asks automated readers not to open some of its pages (robots.txt), so those were skipped.`);
+        return { ok: false, kind: "refused", why: "robots.txt" };
+      }
+      if (got.stop === "refused") {
+        this.trace.pagesRefused++;
+        this.note(`${shown} did not lead to a public web address, so it was not read.`);
+        return { ok: false, kind: "refused", why: "not a public web address" };
+      }
       this.pagesFailed++;
       return { ok: false, kind: "failed", why: "unreachable" };
     }
-    if (!res) {
-      this.trace.pagesRefused++;
-      this.note(`${shown} did not lead to a public web address, so it was not read.`);
-      return { ok: false, kind: "refused", why: "not a public web address" };
-    }
+    const { res } = got;
+    const finalUrl = got.url.toString();
     const status = res.status;
     if (!res.ok) {
       await res.body?.cancel().catch(() => {});
@@ -436,7 +867,7 @@ export class PlayRun {
       return { ok: false, kind: "failed", why: `status ${status}` };
     }
     const type = res.headers.get("content-type") ?? "";
-    if (type && !/html|xml|text\/plain/i.test(type)) {
+    if (type && !(o.json ? /json/i : /html|xml|text\/plain/i).test(type)) {
       await res.body?.cancel().catch(() => {});
       this.trace.pagesRefused++;
       this.note(`A link on ${shown} led to a file that is not a web page, so it was skipped.`);
@@ -449,15 +880,30 @@ export class PlayRun {
       this.pagesFailed++;
       return { ok: false, kind: "failed", why: "unreadable" };
     }
-    const finalUrl = safeHttpUrl(res.url) ?? target.toString();
-    const wall = wallOn(body, target, finalUrl);
-    if (wall) {
-      this.trace.pagesRefused++;
-      this.note(`${shown} ${wall} instead of the page, so it was not read. It was not retried.`);
-      return { ok: false, kind: "refused", why: wall };
+    if (!o.json) {
+      const wall = wallOn(body, target, finalUrl);
+      if (wall) {
+        this.trace.pagesRefused++;
+        this.note(`${shown} ${wall} instead of the page, so it was not read. It was not retried.`);
+        return { ok: false, kind: "refused", why: wall };
+      }
+      this.trace.pagesFetched++;
     }
-    this.trace.pagesFetched++;
     return { ok: true, url: finalUrl, body };
+  }
+
+  /**
+   * Ask a public, keyless JSON API on a constant host (built to be called, so robots.txt
+   * does not apply). Paced like any other host. Returns the parsed body, or null.
+   */
+  async fetchApi<T>(url: string): Promise<T | null> {
+    const page = await this.fetchPage(url, { robots: false, json: true, maxRequests: 2 });
+    if (!page.ok) return null;
+    try {
+      return JSON.parse(page.body) as T;
+    } catch {
+      return null;
+    }
   }
 
   /** A page that was fetched but turned out not to be usable (a redirect to another site). */
@@ -511,7 +957,8 @@ export class PlayRun {
   /** Why searching produced nothing to look at, or null when at least one search answered or none ran. */
   get searchFailure(): string | null {
     if (!this.outcomes.length || this.searchAnswered) return null;
-    return this.outcomes.every((o) => o.nothingConfigured) ? NO_SEARCH_SOURCE : EVERY_SEARCH_FAILED;
+    const web = this.webOutcomes;
+    return web.length && web.every((o) => o.nothingConfigured) ? NO_SEARCH_SOURCE : EVERY_SEARCH_FAILED;
   }
 
   /**
@@ -525,11 +972,15 @@ export class PlayRun {
       const pagesSentence = parts.length && this.trace.pagesFetched === 0 ? `None of the pages could be read (${parts.join(", ")}), so nothing could be checked.` : null;
       const timeSentence = this.stoppedForTime ? "The run reached its time limit before anything could be checked. This is not a result about your market." : null;
       this.block(this.searchFailure ?? pagesSentence ?? timeSentence ?? fallbackReason);
-    } else if (!this.trace.blocked && this.outcomes.length && this.outcomes.every((o) => o.nothingConfigured)) {
+    } else if (!this.trace.blocked && this.webOutcomes.length && this.webOutcomes.every((o) => o.nothingConfigured)) {
       this.note("No dependable search source is connected on our side, so these results come from a fallback search and may be thin.");
     }
-    if (!this.trace.blocked && this.trace.failedSearches > 0) {
-      this.note(`${this.trace.failedSearches} of ${this.trace.searches} searches did not get an answer, so some results may be missing.`);
+    if (!this.trace.blocked && this.sitesIgnored > 0) {
+      this.note(`${this.sitesIgnored} of ${this.trace.searches} searches were meant for one site each, but the search source in use ignored that and its results had to be discarded. Those sites were not searched.`);
+    }
+    const otherFailures = this.trace.failedSearches - this.sitesIgnored;
+    if (!this.trace.blocked && otherFailures > 0) {
+      this.note(`${otherFailures} of ${this.trace.searches} searches did not get an answer, so some results may be missing.`);
     }
     return this.trace;
   }

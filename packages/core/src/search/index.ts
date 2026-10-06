@@ -1,6 +1,6 @@
 import type { SearchResult } from "../types.js";
 import { ProviderUnavailableError, providerCoolOff, providerRecentlyRejected, providerRetired, reportProviderCall, retiredReason, type ProviderOutcome } from "../providers/health.js";
-import { defaultProviders, type SearchProvider } from "./providers.js";
+import { defaultProviders, offSiteDiscarded, type SearchProvider } from "./providers.js";
 
 export interface WebSearchOptions {
   count?: number;
@@ -28,6 +28,12 @@ export interface WebSearchAttempt {
   outcome?: ProviderOutcome | "skipped";
   count: number;
   ms?: number;
+  /**
+   * Results this provider returned for a `site:` query that were NOT on that site, and so
+   * were discarded. Scraped engines ignore the operator from some addresses: such a search
+   * "answered" with nothing, yet it never looked where it was asked to. Set only when > 0.
+   */
+  offSite?: number;
 }
 
 export interface WebSearchOutcome {
@@ -119,7 +125,8 @@ export async function webSearchDetailed(query: string, opts: WebSearchOptions = 
     const started = Date.now();
     try {
       const results = await p.search(query, { count: opts.count, offset: opts.offset, country: opts.country });
-      attempts.push({ provider: p.name, ok: true, outcome: "ok", count: results.length, ms: Date.now() - started });
+      const offSite = offSiteDiscarded(results);
+      attempts.push({ provider: p.name, ok: true, outcome: "ok", count: results.length, ms: Date.now() - started, ...(offSite > 0 ? { offSite } : {}) });
       if (results.length > best.length) best = results;
       if (results.length >= min) break;
     } catch (err) {
@@ -240,10 +247,36 @@ export function resetSearchCache() {
   cache.clear();
 }
 
+/**
+ * Query parameters that say where a click came from and never which page it is. Everything
+ * else in a query string can be the page's identity (`news.ycombinator.com/item?id=...`,
+ * `youtube.com/watch?v=...`) and is kept.
+ */
+const TRACKING_PARAM = /^(?:utm_[a-z0-9_]*|ref|ref_src|ref_url|fbclid|gclid|gclsrc|dclid|msclkid|yclid|igshid|mc_cid|mc_eid|trk|trkinfo|_hsenc|_hsmi|gh_src)$/i;
+
+/** What makes two result URLs the same page: host and path without case, the query without tracking parameters, no fragment. */
+export function resultKey(url: string): string {
+  try {
+    const u = new URL(url);
+    const kept: string[] = [];
+    for (const [k, v] of u.searchParams) if (!TRACKING_PARAM.test(k)) kept.push(`${k}=${v}`);
+    return `${u.protocol}//${u.host}${u.pathname}`.replace(/\/$/, "").toLowerCase() + (kept.length ? `?${kept.join("&")}` : "");
+  } catch {
+    return url.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+  }
+}
+
+/**
+ * One result per page.
+ *
+ * The key used to drop the whole query string, which made every
+ * `news.ycombinator.com/item?id=...` - and any other page identified by a parameter - the
+ * same result, so a search that found ten threads returned one.
+ */
 export function dedupe(results: SearchResult[]) {
   const seen = new Set<string>();
   return results.filter((r) => {
-    const k = r.url.replace(/[?#].*$/, "").replace(/\/$/, "").toLowerCase();
+    const k = resultKey(r.url);
     if (seen.has(k)) return false;
     seen.add(k);
     return true;

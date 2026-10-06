@@ -330,7 +330,8 @@ suite("plays with the real engines", () => {
         kind: "company",
         status: "pending",
         relevantBecause: 'Named as a customer of Acme in their case study "How Soylent cut onboarding time by 40%".',
-        evidenceUrl: "https://acme.com/customers",
+        // The proof of a story is that story's own page, not the listing it was found on.
+        evidenceUrl: "https://acme.com/customers/soylent",
         evidenceTitle: "How Soylent cut onboarding time by 40%",
         evidenceQuote: "How Soylent cut onboarding time by 40%",
         signalType: "competitor_customer",
@@ -341,10 +342,11 @@ suite("plays with the real engines", () => {
       expect(by.Globex).toMatchObject({ relevantBecause: "Shown as a customer of Acme on their customers page.", evidenceUrl: "https://acme.com/customers", evidenceTitle: "Trusted by teams at", evidenceQuote: "Globex logo", companyDomain: null });
       expect(by["Umbrella Corp"]).toMatchObject({ companyDomain: "umbrellacorp.com", evidenceQuote: "Umbrella Corp logo" });
       expect(by.Oscorp).toMatchObject({ relevantBecause: "Quoted as a customer of Acme on their website.", evidenceQuote: "Dana Scully, VP Operations at Oscorp" });
-      // Every reason is one line with no link; every proof is a page that was actually read.
+      // Every reason is one line with no link; every proof is a page that was read, or a
+      // story on the competitor's own site that a page that was read links to.
       for (const c of list.body.candidates) {
         expect(c.relevantBecause).not.toMatch(/https?:|www\.|[\r\n]/);
-        expect(net.calls.map((x) => x.url)).toContain(c.evidenceUrl);
+        expect(c.evidenceUrl.startsWith("https://acme.com/")).toBe(true);
       }
       // The keys are core's: a company by its domain, or by its name when no domain is known.
       const keys = Object.fromEntries((await candidatesOf(play.id)).map((c: any) => [c.companyName, c.dedupeKey]));
@@ -427,11 +429,12 @@ suite("plays with the real engines", () => {
       const all = await candidatesOf(play.id);
       const people = all.filter((c: any) => c.kind === "person");
       // Globex is the one company the search could place people at; they carry Globex's reason and proof.
-      expect(people.map((c: any) => c.fullName).sort()).toEqual(["Jane Doe", "Lena Fox", "Priya Shah"]);
+      // Only people whose title matches one that was asked for.
+      expect(people.map((c: any) => c.fullName).sort()).toEqual(["Jane Doe", "Priya Shah"]);
       for (const p of people) expect(p).toMatchObject({ companyName: "Globex", companyDomain: "globex.com", relevantBecause: "Shown as a customer of Acme on their customers page.", evidenceUrl: "https://acme.com/customers", signalType: "competitor_customer", email: null });
       // The others stay companies a reviewer can press "Find people" on - and Globex itself is not also listed.
       expect(all.filter((c: any) => c.kind === "company").map((c: any) => c.companyName).sort()).toEqual(["Initech", "Oscorp", "Soylent", "Stark Industries", "Umbrella Corp"]);
-      expect(r).toMatchObject({ found: 8, added: 8 });
+      expect(r).toMatchObject({ found: 7, added: 7 });
       // Six companies, each searched: a site lookup where none was known, then one search per title.
       expect(net.queries.filter((q) => /site:linkedin\.com\/in/.test(q)).length).toBe(6);
       expect(net.queries.length).toBeLessThanOrEqual(6 * 11);
@@ -443,7 +446,7 @@ suite("plays with the real engines", () => {
       const again = (await run(o, play.id)).run;
       expect(again).toMatchObject({ status: "done", added: 0 });
       expect(net.queries).toEqual([]);
-      expect((await candidatesOf(play.id)).length).toBe(8);
+      expect((await candidatesOf(play.id)).length).toBe(7);
     });
 
     it("when the people search cannot run, the companies are kept and the note says so - it is not a blocked run", async () => {

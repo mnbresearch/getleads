@@ -6,7 +6,7 @@
 import { describe, expect, it } from "vitest";
 import type { PlayFinding } from "./types.js";
 import { finishFinding, rankFindings } from "./shared.js";
-import { cleanLine, emptyTrace, mailSafeReason, mergeTrace, normCompanyName, playDedupeKey, safeSentence } from "./util.js";
+import { cleanLine, cutAtWord, emptyTrace, mailSafeReason, mergeTrace, normCompanyName, plainDashes, playDedupeKey, safeSentence } from "./util.js";
 
 const f = (over: Partial<PlayFinding>): PlayFinding => ({ kind: "person", relevantBecause: "Asked on LinkedIn for an alternative to Acme.", signalType: "public_ask", confidence: 0.7, ...over });
 
@@ -83,7 +83,9 @@ describe("mailSafeReason", () => {
     // A bare name with a dotted ending would be turned into a link by a mail client.
     expect(mailSafeReason("Named as a customer of Booking.com on their website.")).toBe("Named as a customer of Booking on their website.");
     expect(mailSafeReason("Go to evil.example now")).toBe("Go to evil now");
-    expect(mailSafeReason("docs.evil.co.uk is the place")).toBe("docs is the place");
+    // What is kept of a dotted name is the part that says whose it is, not whichever label came first.
+    expect(mailSafeReason("docs.evil.co.uk is the place")).toBe("evil is the place");
+    expect(mailSafeReason("reported by app.dealroom.co yesterday")).toBe("reported by dealroom yesterday");
   });
 
   it("removes email addresses and @handles", () => {
@@ -225,5 +227,35 @@ describe("names", () => {
     expect(cleanLine("  a\tb\n<b>c</b>  d\u200B ", 50)).toBe("a b c d");
     expect(cleanLine("x".repeat(500), 10)).toBe("xxxxxxxxxx");
     expect(cleanLine({ toString: () => "boom" }, 10)).toBe("");
+  });
+});
+
+describe("shortening and dashes", () => {
+  it("never stops inside a word: the cut falls on a space, and three dots say something was left out", () => {
+    const headline = "How Initech rebuilt its sales motion, grew conversion by seventy-five percent in sixty days and never looked back";
+    const cut = cutAtWord(headline, 110);
+    expect(cut).toBe("How Initech rebuilt its sales motion, grew conversion by seventy-five percent in sixty days and never...");
+    expect(cut.length).toBeLessThanOrEqual(110);
+    // The words before the dots are whole words of the original.
+    expect(headline.startsWith(cut.slice(0, -3))).toBe(true);
+    expect(/\s/.test(headline[cut.length - 3])).toBe(true);
+    // The cut can land exactly at the end of a word.
+    expect(cutAtWord("alpha beta gamma delta", 13)).toBe("alpha beta...");
+    expect(cutAtWord("alpha beta gamma", 16)).toBe("alpha beta gamma");
+    // No punctuation is left dangling before the dots.
+    expect(cutAtWord("one, two, three, four, five, six", 20)).toBe("one, two, three...");
+    for (const max of [20, 37, 64, 80]) {
+      const c = cutAtWord("The quick brown fox jumps over the lazy dog while nobody is watching the fence at all today", max);
+      expect(c.length).toBeLessThanOrEqual(max);
+      expect(c.endsWith("...")).toBe(true);
+      expect(/[a-z]\.\.\.$/.test(c) && " quick brown fox jumps over the lazy dog while nobody is watching the fence at all today ".includes(` ${c.slice(0, -3).split(" ").pop()} `)).toBe(true);
+    }
+  });
+
+  it("writes long dashes the plain way", () => {
+    expect(plainDashes("cut crashes by 60x \u2014 and made Acme the source of truth")).toBe("cut crashes by 60x - and made Acme the source of truth");
+    expect(plainDashes("fast\u2014and cheap")).toBe("fast - and cheap");
+    expect(plainDashes("2019\u20132024 pre\u2011seed")).toBe("2019 - 2024 pre-seed");
+    expect(plainDashes("already - plain")).toBe("already - plain");
   });
 });

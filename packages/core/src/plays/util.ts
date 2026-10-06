@@ -50,12 +50,34 @@ const HANDLE = /(^|[\s(\["'])@[\p{L}\p{N}_.-]{1,40}/gu;
 /** `Booking.com`, `evil.example`: a bare name with a dotted ending, which a mail client turns into a link. */
 const BARE_DOMAIN = /(?<![\p{L}\p{N}.@/-])([\p{L}\p{N}][\p{L}\p{N}-]*)(?:\.[\p{L}][\p{L}\p{N}-]*)*\.[\p{L}]{2,24}(?![\p{L}\p{N}])/gu;
 
-function cutAtWord(s: string, max: number): string {
-  if (s.length <= max) return s;
-  const head = s.slice(0, max - 3);
-  const at = head.lastIndexOf(" ");
-  return `${(at > max * 0.6 ? head.slice(0, at) : head).replace(/[\s,;:([-]+$/, "")}...`;
+/**
+ * The part of a dotted name that names its owner: "dealroom" in "app.dealroom.co", "evil"
+ * in "docs.evil.co.uk", "Booking" in "Booking.com". What is left when a mail-safe sentence
+ * drops a domain's ending, so the sentence still says who is meant.
+ */
+function registrableLabel(host: string): string {
+  const labels = host.split(".").filter(Boolean);
+  if (labels.length < 2) return host;
+  const tld = labels.pop()!;
+  if (labels.length >= 2 && tld.length === 2 && /^(?:co|com|org|net|gov|ac|edu)$/i.test(labels[labels.length - 1])) labels.pop();
+  return labels[labels.length - 1];
 }
+
+/**
+ * Shorten to at most `max` characters without ever stopping inside a word: the cut falls on
+ * the last space that fits, and three dots say that something was left out.
+ */
+export function cutAtWord(s: string, max: number): string {
+  if (s.length <= max) return s;
+  const head = s.slice(0, Math.max(1, max - 3));
+  // The character after the cut decides whether the last word is whole.
+  const whole = /\s/.test(s[head.length] ?? "");
+  const at = whole ? head.length : head.lastIndexOf(" ");
+  return `${(at > 0 ? head.slice(0, at) : head).replace(/[\s,;:([\u2012-\u2015-]+$/, "")}...`;
+}
+
+/** Long dashes from a page, written the plain way: "fast \u2014 and cheap" becomes "fast - and cheap". */
+export const plainDashes = (s: string): string => s.replace(/\s*[\u2012-\u2015]\s*/g, " - ").replace(/[\u2010\u2011]/g, "-");
 
 /**
  * The shared sanitiser behind every reason sentence.
@@ -76,7 +98,7 @@ function sanitiseSentence(value: unknown, max: number, strict: boolean): string 
     .replace(HOST_WITH_PATH, " ")
     .replace(IP_ADDRESS, " ");
   if (strict) {
-    s = s.replace(HANDLE, "$1").replace(BARE_DOMAIN, "$1").replace(/@/g, " at ");
+    s = s.replace(HANDLE, "$1").replace(BARE_DOMAIN, registrableLabel).replace(/@/g, " at ");
   }
   s = s
     // What a removed link leaves behind: "[text]()", "( )".

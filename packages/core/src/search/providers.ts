@@ -2,7 +2,7 @@ import * as cheerio from "cheerio";
 import type { SearchResult } from "../types.js";
 import { fetchJson, fetchText, fetchWithTimeout } from "../util/http.js";
 import { meter } from "../util/meter.js";
-import { classifyHttp, ProviderUnavailableError, providerRecentlyRejected, recordHttp, reportProviderCall, retireProvider } from "../providers/health.js";
+import { classifyHttp, coolOffProvider, ProviderUnavailableError, providerRecentlyRejected, recordHttp, reportProviderCall, retireProvider } from "../providers/health.js";
 // Keys arrive from dashboards and .env files, where a trailing newline or a wrapping pair of
 // quotes survives the paste. Cleaning at the edge means the value the provider sees is the
 // value the operator thinks they stored. See util/secret.ts.
@@ -230,11 +230,28 @@ export const duckDuckGoProvider = (): SearchProvider => ({
       timeoutMs: 5_000,
       headers: { referer: "https://html.duckduckgo.com/" },
     });
+    // A bot challenge ("Unfortunately, bots use DuckDuckGo too", HTTP 202) is an answer about
+    // US, not about the query: the lite endpoint will say the same, and so will the next
+    // search. Measured on 6 Oct 2026: 70 searches made 140 requests here, 135 timed out and
+    // 5 were challenged, for ten seconds of waiting each and not one result. So a challenge,
+    // or both endpoints failing in one search, rests the provider instead of asking again.
+    if (html && isDuckDuckGoChallenge(html)) {
+      reportProviderCall({ provider: "duckduckgo", outcome: "rate_limit", detail: "answered with a bot challenge" });
+      coolOffProvider("duckduckgo", "rate_limit", KEYLESS_COOL_MS);
+      throw new ProviderUnavailableError("duckduckgo", "rate_limit", "answered with a bot challenge");
+    }
     if (!html || !html.includes("result__a")) {
       // fallback: lite endpoint
       const lite = await fetchText(`https://lite.duckduckgo.com/lite/?${params}`, { timeoutMs: 5_000 });
+      if (lite && isDuckDuckGoChallenge(lite)) {
+        reportProviderCall({ provider: "duckduckgo", outcome: "rate_limit", detail: "answered with a bot challenge" });
+        coolOffProvider("duckduckgo", "rate_limit", KEYLESS_COOL_MS);
+        throw new ProviderUnavailableError("duckduckgo", "rate_limit", "answered with a bot challenge");
+      }
       if (!lite) {
         reportProviderCall({ provider: "duckduckgo", outcome: "network", detail: "neither the html nor the lite endpoint returned a page" });
+        // Two endpoints, two failures, one search: that is "repeatedly".
+        if (!html) coolOffProvider("duckduckgo", "network", KEYLESS_COOL_MS);
         throw new ProviderUnavailableError("duckduckgo", "network", "neither the html nor the lite endpoint returned a page");
       }
       const $l = cheerio.load(lite);
@@ -247,7 +264,8 @@ export const duckDuckGoProvider = (): SearchProvider => ({
         const snippet = $l(el).closest("tr").next("tr").find(".result-snippet").text().trim();
         outL.push({ title: $l(el).text().trim(), url: href, snippet, provider: "duckduckgo" });
       });
-      return rejectDecoys("duckduckgo", query, honorSiteOperator(query, outL)).slice(0, opts.count ?? 20);
+      const onSiteL = rejectDecoys("duckduckgo", query, honorSiteOperator(query, outL));
+      return keepOffSite(onSiteL, onSiteL.slice(0, opts.count ?? 20));
     }
     const $ = cheerio.load(html);
     const out: SearchResult[] = [];
@@ -259,9 +277,18 @@ export const duckDuckGoProvider = (): SearchProvider => ({
       if (!href.startsWith("http")) return;
       out.push({ title: a.text().trim(), url: href, snippet: $(el).find(".result__snippet").text().trim(), provider: "duckduckgo" });
     });
-    return rejectDecoys("duckduckgo", query, honorSiteOperator(query, out)).slice(0, opts.count ?? 20);
+    const onSite = rejectDecoys("duckduckgo", query, honorSiteOperator(query, out));
+    return keepOffSite(onSite, onSite.slice(0, opts.count ?? 20));
   },
 });
+
+/** How long a keyless scraper rests after a bot challenge or after both of its endpoints failed in one search. */
+export const KEYLESS_COOL_MS = 10 * 60 * 1000;
+
+/** DuckDuckGo's "prove you are human" page: served with HTTP 202, no results in it. */
+export function isDuckDuckGoChallenge(html: string): boolean {
+  return !html.includes("result__a") && !html.includes("result-link") && /anomaly-modal|bots use DuckDuckGo too|complete the following challenge/i.test(html.slice(0, 60_000));
+}
 
 
 /**
@@ -343,7 +370,8 @@ export const bingHtmlProvider = (): SearchProvider => ({
       if (!href.startsWith("http")) return;
       out.push({ title: a.text().trim(), url: href, snippet: $(el).find(".b_caption p, .b_lineclamp2, .b_algoSlug").first().text().trim(), provider: "bing_html" });
     });
-    return rejectDecoys("bing_html", query, honorSiteOperator(query, out)).slice(0, opts.count ?? 20);
+    const onSite = rejectDecoys("bing_html", query, honorSiteOperator(query, out));
+    return keepOffSite(onSite, onSite.slice(0, opts.count ?? 20));
   },
 });
 
@@ -352,7 +380,28 @@ export function honorSiteOperator(query: string, results: SearchResult[]) {
   const m = query.match(/site:([^\s]+)/i);
   if (!m) return results;
   const site = m[1].toLowerCase().replace(/^https?:\/\//, "");
-  return results.filter((r) => r.url.toLowerCase().replace(/^https?:\/\/(www\.)?/, "").startsWith(site.replace(/^www\./, "")) || r.url.toLowerCase().includes(`.${site}`) || r.url.toLowerCase().includes(`//${site}`));
+  const kept = results.filter((r) => r.url.toLowerCase().replace(/^https?:\/\/(www\.)?/, "").startsWith(site.replace(/^www\./, "")) || r.url.toLowerCase().includes(`.${site}`) || r.url.toLowerCase().includes(`//${site}`));
+  // How many were thrown away rides along on the array, unseen by anything that only reads
+  // the results: webSearchDetailed reports it per attempt, so a caller that cares can tell
+  // "nothing on that site" from "the engine ignored the site and we discarded what it sent".
+  const discarded = results.length - kept.length;
+  if (discarded > 0) Object.defineProperty(kept, OFF_SITE, { value: discarded, enumerable: false });
+  return kept;
+}
+
+const OFF_SITE = Symbol.for("prospex.search.offSiteDiscarded");
+
+/** Results a provider discarded for being off the site a `site:` query named. 0 when none, or when it cannot be known. */
+export function offSiteDiscarded(results: SearchResult[]): number {
+  const n = (results as unknown as Record<symbol, unknown>)[OFF_SITE];
+  return typeof n === "number" && n > 0 ? n : 0;
+}
+
+/** Carry the off-site count from one array to an array derived from it (a filter or a slice). */
+function keepOffSite(from: SearchResult[], to: SearchResult[]): SearchResult[] {
+  const n = offSiteDiscarded(from);
+  if (n > 0 && to !== from) Object.defineProperty(to, OFF_SITE, { value: n, enumerable: false });
+  return to;
 }
 
 export function defaultProviders(): SearchProvider[] {

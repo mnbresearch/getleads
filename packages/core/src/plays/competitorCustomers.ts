@@ -2,24 +2,50 @@
  * Play: companies a competitor names as its customers.
  *
  * Reads the competitor's own public pages - home page, customers and case-study sections,
- * the sitemap - at most twelve requests per competitor, one request per page, and reports
- * a company only with the page and the words on it that name the company as a customer.
+ * the sitemap - and reports a company only with the page and the words on it that name the
+ * company as a customer.
+ *
+ * At most twelve requests per competitor, everything counted: the site's robots.txt, every
+ * redirect hop, the sitemap. One request at a time with a pause in between. Listing pages
+ * come first; a story that a listing page already tells in full (who, and under which
+ * headline) is not opened again, and its proof is the story's own address. The exception
+ * is a connected model: it reads the prose of up to three pages, stories included.
  */
 import type { AiMessage } from "../types.js";
 import { UNTRUSTED_RULE, fence, fenceBlock } from "../ai/untrusted.js";
 import { resolveCompanyDomainDetailed } from "../discovery/companies.js";
 import { extractDomain } from "../util/domain.js";
 import { isPublicHost } from "../util/publicHost.js";
-import { customerLinksFromSitemap, extractCustomers, isCustomerPath, verifyAiCustomers, type CustomerHit } from "./extractCustomers.js";
+import { caseSlugOf, customerLinksFromSitemap, extractCustomers, isCustomerPath, pickEvidence, storyKeyOf, storyWorthOpening, verifyAiCustomers, type CustomerHit } from "./extractCustomers.js";
 import { PlayRun, clampInt, findingLimit, finishFinding, rankFindings, sameSite } from "./shared.js";
 import type { PlayEngineOptions, PlayEngineResult, PlayFinding } from "./types.js";
-import { cleanLine, normCompanyName } from "./util.js";
+import { cleanLine, cutAtWord, normCompanyName, plainDashes } from "./util.js";
 
 const FIXED_PATHS = ["/customers", "/case-studies", "/customer-stories", "/success-stories", "/stories", "/clients", "/testimonials", "/resources/case-studies"];
-/** Requests to one competitor's site, the sitemap included. */
+/** Requests to one competitor's site: robots.txt, redirect hops and the sitemap included. */
 const MAX_PAGES_PER_COMPETITOR = 12;
 const MAX_AI_PAGES_PER_COMPETITOR = 3;
 const MAX_COMPETITORS = 10;
+
+/** "/de/case-studies", "/pt-br/clientes": the same pages again in another language. */
+const inAnotherLanguage = (url: string): boolean => {
+  try {
+    return /^\/(?:de|fr|es|it|pt|nl|sv|da|no|nb|fi|pl|ja|jp|ko|kr|zh|cn|ru|tr|cs|hu|ro|el|he|ar|id|th|vi|br|mx)(?:-[a-z]{2,4})?\//i.test(new URL(url).pathname);
+  } catch {
+    return false;
+  }
+};
+
+/** The same address without its language prefix ("/de/case-studies" as "/case-studies"). */
+const withoutLanguage = (url: string): string => {
+  try {
+    const u = new URL(url);
+    u.pathname = u.pathname.replace(/^\/[a-z]{2}(?:-[a-z]{2,4})?(?=\/)/i, "");
+    return u.toString();
+  } catch {
+    return url;
+  }
+};
 
 interface Queued {
   url: string;
@@ -29,10 +55,20 @@ interface Queued {
 
 const keyOf = (url: string): string => url.replace(/[?#].*$/, "").replace(/\/$/, "").replace(/^https?:\/\/(www\.)?/i, "").toLowerCase();
 
+/**
+ * The sentence a reviewer reads. Built from fixed words around the competitor's name and,
+ * when the page has one, the case study's headline: in plain dashes, never cut inside a
+ * word, and only when it is a headline (not the line under a quote, not a page title, not a
+ * headline in another language).
+ */
 function reasonFor(hit: CustomerHit, competitor: string, customerPage: boolean): string {
-  const headline = hit.headline ? cleanLine(hit.headline, 110).replace(/["\u201C\u201D]/g, "'") : "";
   if (hit.via === "case_study") {
-    return headline ? `Named as a customer of ${competitor} in their case study "${headline}".` : `Has a customer story on ${competitor}'s website.`;
+    // (A headline that ends in a full stop would put two in the sentence.)
+    const headline = hit.headline ? cutAtWord(plainDashes(cleanLine(hit.headline, 200)).replace(/["\u201C\u201D]/g, "'").replace(/[.\s]+$/, ""), 110) : "";
+    if (headline) return `Named as a customer of ${competitor} in their case study "${headline}".`;
+    if (hit.mention === "attribution") return `Quoted as a customer of ${competitor} on their website.`;
+    if (hit.mention === "title") return `Named as a customer of ${competitor} on their customers page.`;
+    return `Has a customer story on ${competitor}'s website.`;
   }
   if (hit.via === "logo") return `Shown as a customer of ${competitor} on their ${customerPage ? "customers page" : "website"}.`;
   if (hit.via === "testimonial") return `Quoted as a customer of ${competitor} on their website.`;
@@ -111,48 +147,130 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
       const have = queue.get(k);
       if (!have || score > have.score) queue.set(k, { url, score, kind });
     };
-    const origin = `https://${site}`;
-    push(`${origin}/`, 100);
-    push(`${origin}/sitemap.xml`, 85, "sitemap");
-    for (const p of FIXED_PATHS) push(`${origin}${p}`, 70);
+    push(`https://${site}/`, 100);
+    push(`https://${site}/sitemap.xml`, 85, "sitemap");
+    for (const p of FIXED_PATHS) push(`https://${site}${p}`, 70);
 
-    const hits = new Map<string, { hit: CustomerHit; url: string; title: string; customerPage: boolean }>();
+    interface Seen {
+      hit: CustomerHit;
+      url: string;
+      title: string;
+      customerPage: boolean;
+    }
+    const hits = new Map<string, Seen>();
+    /** Which name each story is filed under: one story is about one customer, on whichever page it is met. */
+    const byStory = new Map<string, string>();
+    /** Stories a listing page already told in full: the company and words of the page that name it. */
+    const covered = new Set<string>();
+    const better = (a: Seen, b: Seen): Seen => {
+      if (a.hit.confidence !== b.hit.confidence) return b.hit.confidence > a.hit.confidence ? b : a;
+      // Equally sure on two pages: the customers page is the better proof to show a reviewer.
+      if (a.customerPage !== b.customerPage) return b.customerPage ? b : a;
+      return pickEvidence(a.hit, b.hit) === b.hit ? b : a;
+    };
     const keep = (hit: CustomerHit, url: string, title: string, customerPage: boolean): void => {
       const k = normCompanyName(hit.name);
+      if (!k) return;
+      let rec: Seen = { hit, url, title, customerPage };
+      const story = hit.storyUrl ? storyKeyOf(hit.storyUrl) : "";
+      const filed = story ? byStory.get(story) : undefined;
+      if (filed && filed !== k && hits.has(filed)) {
+        // The same story under a second name ("UNREAL" on its own page, "UNREAL Snacks" on the listing):
+        // one customer, under the fuller name, with the better of the two proofs.
+        const other = hits.get(filed)!;
+        const best = better(other, rec);
+        if (k.startsWith(filed)) {
+          hits.delete(filed);
+          rec = { ...best, hit: { ...best.hit, name: hit.name, domain: hit.domain ?? other.hit.domain } };
+        } else if (filed.startsWith(k)) {
+          hits.set(filed, { ...best, hit: { ...best.hit, name: other.hit.name, domain: other.hit.domain ?? hit.domain } });
+          return;
+        } else if (hit.confidence > other.hit.confidence) {
+          hits.delete(filed);
+        } else {
+          return;
+        }
+      }
+      if (story) byStory.set(story, k);
       const have = hits.get(k);
-      // Equally sure on two pages: the customers page is the better proof to show a reviewer.
-      const better = !have || hit.confidence > have.hit.confidence || (hit.confidence === have.hit.confidence && customerPage && !have.customerPage);
-      if (better) hits.set(k, { hit: { ...hit, domain: hit.domain ?? have?.hit.domain }, url, title, customerPage });
-      else if (!have.hit.domain && hit.domain) have.hit.domain = hit.domain;
+      if (!have) {
+        hits.set(k, rec);
+        return;
+      }
+      const best = better(have, rec);
+      hits.set(k, { ...best, hit: { ...best.hit, domain: best.hit.domain ?? have.hit.domain ?? hit.domain, storyUrl: best.hit.storyUrl ?? have.hit.storyUrl ?? hit.storyUrl } });
     };
 
-    let requests = 0;
+    const firstRequest = run.requests;
+    /** Requests still allowed for this competitor. Everything on the wire counts. */
+    const left = (): number => MAX_PAGES_PER_COMPETITOR - (run.requests - firstRequest);
     let aiPages = 0;
     let droppedByCheck = 0;
     let examinedHere = 0;
     let homepageDone = false;
+    let sitemapChildren = 0;
+    /** Asking for a path without its final slash was answered with a redirect to the one with it. */
+    let slashRedirects = false;
+    /** Where the site really answers ("https://www.acme.com"), learned from the home page, so later requests are not redirected there one by one. */
+    let canonical: URL | null = null;
+    /** The site writes its addresses with a slash at the end, so guessed paths are asked for that way too. */
+    let slashStyle = false;
+    const asServed = (q: Queued): string => {
+      try {
+        const u = new URL(q.url);
+        const bare = u.hostname.toLowerCase().replace(/^www\./, "");
+        if (canonical && bare === site && canonical.hostname.toLowerCase().replace(/^www\./, "") === site) {
+          u.protocol = canonical.protocol;
+          u.host = canonical.host;
+        }
+        const guess = q.score === 70 || q.score === 35;
+        if (q.kind === "page" && (slashRedirects || (slashStyle && guess)) && !u.pathname.endsWith("/") && !/\.[a-z0-9]{2,5}$/i.test(u.pathname)) u.pathname += "/";
+        return u.toString();
+      } catch {
+        return q.url;
+      }
+    };
+    /** Customers named well enough to report as they are (a headline, a logo, a name on the page - not a bare address). */
+    const named = (): number => [...hits.values()].filter((h) => h.hit.confidence >= 0.75).length;
+    const isStory = (url: string): boolean => {
+      try {
+        return caseSlugOf(new URL(url).pathname) !== null;
+      } catch {
+        return false;
+      }
+    };
     /** Once the site has shown where its customer pages are, paths it did not list are only tried last. */
     const demoteGuesses = (): void => {
       for (const q of queue.values()) if (q.score === 70) q.score = 35;
     };
-    while (requests < MAX_PAGES_PER_COMPETITOR && queue.size && !run.expired) {
+    while (left() > 0 && queue.size && !run.expired) {
       const next = [...queue.values()].sort((x, y) => y.score - x.score)[0];
       queue.delete(keyOf(next.url));
       done.add(keyOf(next.url));
       if (next.score < 30) break;
-      requests++;
+      // Paths the site never mentioned are only guessed at while it has shown few customers of its own accord.
+      if (next.score === 35 && hits.size >= 5) break;
+      // A page already read in one language is not read again in another.
+      if (next.kind === "page" && inAnotherLanguage(next.url) && done.has(keyOf(withoutLanguage(next.url)))) continue;
+      // A story a listing page already told in full is not opened again - unless a model is connected and
+      // still has pages to read: the story's prose is what a model is for, and the listing does not carry it.
+      if (next.kind === "page" && covered.has(storyKeyOf(next.url)) && !(run.aiUsable && aiPages < MAX_AI_PAGES_PER_COMPETITOR)) continue;
+      // Nor is an address under the customers section that is a category or a form rather than a story.
+      if (next.kind === "page" && next.score <= 61 && !storyWorthOpening(next.url, competitor.name)) continue;
+      // Nor is one more story opened for its name once the listing pages have named as many customers as will be reported.
+      if (next.kind === "page" && next.score <= 61 && isStory(next.url) && named() >= perCompetitor && !(run.aiUsable && aiPages < MAX_AI_PAGES_PER_COMPETITOR)) continue;
       const isHome = !homepageDone && next.score === 100;
       if (isHome) homepageDone = true;
-      let page = await run.fetchPage(next.url);
-      if (!page.ok && isHome && page.kind === "failed") {
+      const asked = asServed(next);
+      let page = await run.fetchPage(asked, { maxRequests: left() });
+      if (!page.ok && isHome && page.kind === "failed" && left() > 0) {
         // https reached nothing: some small sites still answer on http only. One try, same page.
-        requests++;
-        page = await run.fetchPage(`http://${site}/`);
+        page = await run.fetchPage(`http://${site}/`, { maxRequests: left() });
         if (!page.ok && page.kind !== "refused") run.note(`${site} could not be reached, so ${shownName} was not read.`);
         if (!page.ok) break;
       }
       if (!page.ok) {
-        if (page.kind === "deadline") break;
+        if (page.kind === "deadline" || page.kind === "budget") break;
         // The home page refusing settles it for the whole site: nothing else is asked for.
         if (isHome && page.kind === "refused") break;
         continue;
@@ -163,21 +281,36 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
         if (isHome) break;
         continue;
       }
+      done.add(keyOf(page.url));
+      try {
+        const landed = new URL(page.url);
+        if (isHome) canonical = landed;
+        if (landed.pathname !== "/" && landed.pathname.endsWith("/") && page.url.replace(/\/$/, "") === asked.replace(/\/$/, "") && !asked.endsWith("/")) slashRedirects = true;
+      } catch {
+        // an address that does not parse changes nothing
+      }
       if (next.kind === "sitemap") {
         const map = customerLinksFromSitemap(page.body, site);
-        for (const l of map.links.slice(0, 80)) push(l.url, l.score + 1);
+        for (const l of map.links.slice(0, 80)) push(l.url, l.score + 1 - (inAnotherLanguage(l.url) ? 40 : 0));
         if (map.links.length) demoteGuesses();
+        if (map.links.filter((l) => /\/$/.test(l.url)).length > map.links.length * 0.7) slashStyle = true;
         // An index of sitemaps: one child, the one most likely to list customer pages.
         const child = map.children.find((u) => /customer|case|stor|success|client/i.test(u)) ?? map.children.find((u) => /page|post|main|sitemap-?1|sitemap-0/i.test(u));
-        if (child) push(child, 80, "sitemap");
+        if (child && ++sitemapChildren <= 1) push(child, 80, "sitemap");
         continue;
       }
       pagesExamined++;
       examinedHere++;
       const out = extractCustomers(page.body, page.url, competitor);
       for (const h of out.hits) keep(h, page.url, out.title, out.customerPage);
-      for (const l of out.links) push(l.url, l.score);
-      if (out.links.some((l) => l.score >= 90)) demoteGuesses();
+      for (const t of out.told) covered.add(t);
+      for (const l of out.links) push(l.url, l.score - (inAnotherLanguage(l.url) ? 40 : 0));
+      if (out.links.some((l) => l.score >= 90)) {
+        demoteGuesses();
+        // The site has shown its customer pages itself; the sitemap would mostly add single stories.
+        for (const q of queue.values()) if (q.kind === "sitemap" && q.score > 50) q.score = 50;
+      }
+      if (out.links.length >= 3 && out.links.filter((l) => /\/$/.test(l.url)).length > out.links.length * 0.7) slashStyle = true;
 
       /* A model reads the prose of customer pages for names the rules cannot see. */
       const prose = out.text.length >= 200 && (out.customerPage || isHome || isCustomerPath(new URL(page.url).pathname));
@@ -203,7 +336,8 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
         companyName: hit.name,
         ...(hit.domain ? { companyDomain: hit.domain } : {}),
         relevantBecause: reasonFor(hit, cleanLine(competitor.name, 60), customerPage),
-        evidenceUrl: url,
+        // A story's proof is the story itself, not whichever page happened to link to it.
+        evidenceUrl: hit.via === "case_study" && hit.storyUrl ? hit.storyUrl : url,
         evidenceTitle: hit.headline || title || `${cleanLine(competitor.name, 60)} customers`,
         evidenceQuote: hit.quote,
         signalType: "competitor_customer",

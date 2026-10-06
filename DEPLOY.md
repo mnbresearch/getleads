@@ -339,7 +339,7 @@ The rule this release follows: **a one-click rollback stays cheap.** Whatever th
 
 #### Deploy order
 
-1. **API first.** It applies migrations 0015 to 0020 on start (all additive: the old release keeps running on the upgraded database). Wait for `curl https://<api>/health` to answer `{"ok":true,"db":"up"}`.
+1. **API first.** It applies migrations 0015 to 0022 on start (all additive: the old release keeps running on the upgraded database). Wait for `curl https://<api>/health` to answer `{"ok":true,"db":"up"}`.
 2. **Web second**, straight after. In between, the old web app works against the new API. The other way round does not: the new web app asks the old API for pages it does not have (it answers 404 for the workspace privacy settings, the deletion status and the audit log).
 3. Sign in to `/admin` once and open one client report link to see both work.
 
@@ -393,6 +393,10 @@ Report links and credentials that existed before the upgrade and were not change
 - **Two-factor sign-in is not asked for** (accounts and the admin console sign in with the password alone; the settings are kept for when you roll forward). Email confirmation is not enforced; security emails are not sent.
 - **The platform-wide do-not-contact list, "erase a person" and the workspace AI switch are unknown to the old release.** It would email an address that is only on the platform list. If you have used that list, copy it into every workspace's own list before rolling back: `INSERT INTO suppressions (org_id, email, reason) SELECT o.id, g.email, 'platform' FROM organizations o CROSS JOIN global_suppressions g ON CONFLICT DO NOTHING;`
 - **Webhooks created or rotated on the new release** are not signed correctly by the old one, and the daily job-change scan records nothing on it (B8).
+- **Sessions signed out on the new release work again on the old one.** "Sign out everywhere", a password change or reset on the new release retires older sessions; the old release does not know that and accepts them until they expire (up to 14 days). If you rolled back because of a suspected account compromise, change `JWT_SECRET` instead - that signs everyone out.
+- **Plays are absent on the old release.** `/v1/plays` answers "not found" and the web shows "Plays is being set up". People already approved from a play are ordinary leads and keep working. Queued play runs and enrolments wait untouched (the old worker never claims job types it does not know) and finish after you roll forward; a run that was in flight shows "running" until then.
+- **The shared platform sender goes back to the address stored on each sender row.** The new release always sends from the platform's own address; the old one sends from whatever From address the workspace had saved.
+- **Accounts created on the old release during the rollback** have no confirmed email when you roll forward. They can sign in and work; they see the "confirm your email" banner and cannot use the shared sender or send team invites until they confirm.
 
 **No rollback undoes these - only the restore point does:** leads, workspaces and people erased on the new release; the content removed by `PRIVACY_SWEEP`; and what the retention clean-up deleted on its daily run (old visitor page views, sign-in attempts, finished jobs, activity older than 90 days - the periods are in the Privacy Policy).
 

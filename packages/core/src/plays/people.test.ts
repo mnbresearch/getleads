@@ -1,7 +1,8 @@
 /**
  * From a company a play found to the people at it. The reason is about the company, so it
- * may only be attached to people the search shows working there - and nothing about a
- * person is ever made up, least of all an email address.
+ * may only be attached to people the search shows working there; when job titles are asked
+ * for, only people who hold one of them come back - and nothing about a person is ever made
+ * up, least of all an email address.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetProviderSkips } from "../providers/health.js";
@@ -58,10 +59,10 @@ afterEach(() => {
 describe("findPeopleForFinding", () => {
   it("returns people at the company, each carrying the company's reason and proof", async () => {
     const search = searchWith(answer);
-    const { people, trace } = await findPeopleForFinding(FINDING, { titles: ["VP Sales"], limit: 5 }, { searchOpts: { providers: [search] } });
-    expect(people.map((p) => p.fullName)).toEqual(["Jane Doe", "Priya Shah", "Lena Fox", "Tom Baker"]);
+    const { people, trace } = await findPeopleForFinding(FINDING, { titles: ["VP Sales", "Account Executive", "Head of Sales"], limit: 5 }, { searchOpts: { providers: [search] } });
+    expect(people.map((p) => p.fullName)).toEqual(["Lena Fox", "Jane Doe", "Priya Shah", "Tom Baker"]);
 
-    expect(people[0]).toEqual({
+    expect(people[1]).toEqual({
       kind: "person",
       fullName: "Jane Doe",
       firstName: "Jane",
@@ -94,7 +95,7 @@ describe("findPeopleForFinding", () => {
     }
     // Someone the result only loosely ties to the company is kept, but not trusted much.
     expect(people.find((p) => p.fullName === "Tom Baker")!.confidence).toBe(0.5);
-    expect(trace).toMatchObject({ searches: 2, failedSearches: 0, blocked: false });
+    expect(trace).toMatchObject({ searches: 4, failedSearches: 0, blocked: false });
   });
 
   it("leaves out people who work somewhere else, and says how many", async () => {
@@ -105,11 +106,38 @@ describe("findPeopleForFinding", () => {
     expect(trace.notes).toContain("2 people found by search did not clearly work at Globex, so they were left out.");
   });
 
-  it("puts the people with the wanted job title first, and stops at the limit (default 3)", async () => {
-    const { people } = await findPeopleForFinding(FINDING, { titles: ["VP Sales"] }, { searchOpts: { providers: [searchWith(answer)] } });
-    expect(people.map((p) => p.fullName)).toEqual(["Jane Doe", "Priya Shah", "Lena Fox"]);
+  it("with job titles asked for, only people who hold one of them come back - and it says how many did not", async () => {
+    const { people, trace } = await findPeopleForFinding(FINDING, { titles: ["VP Sales"] }, { searchOpts: { providers: [searchWith(answer)] } });
+    // An account executive and a head of sales work there too; neither is a VP of Sales.
+    expect(people.map((p) => p.fullName)).toEqual(["Jane Doe", "Priya Shah"]);
+    expect(people.every((p) => p.title === "VP Sales")).toBe(true);
+    expect(trace.notes).toContain("2 people found at Globex did not hold one of those job titles, so they were left out.");
+    resetSearchCache();
     const one = await findPeopleForFinding(FINDING, { titles: ["Account Executive"], limit: 1 }, { searchOpts: { providers: [searchWith(answer)] } });
     expect(one.people.map((p) => p.fullName)).toEqual(["Lena Fox"]);
+    // The same title written another way is the same title.
+    resetSearchCache();
+    const spelled = await findPeopleForFinding(FINDING, { titles: ["Vice President of Sales"] }, { searchOpts: { providers: [searchWith(answer)] } });
+    expect(spelled.people.map((p) => p.fullName)).toEqual(["Jane Doe", "Priya Shah"]);
+  });
+
+  it("the company's name where a title should be is not a title", async () => {
+    // What a search result looks like when the profile shows an employer and no role.
+    const profiles = [
+      r("Lydia Sellers - Globex | LinkedIn", "https://www.linkedin.com/in/lydiasellers", "Austin, Texas \u00B7 Globex"),
+      r("Jerry Bennett - Globex Inc. | LinkedIn", "https://www.linkedin.com/in/jerry-bennett", "Globex"),
+      r("Jane Doe - VP Sales - Globex | LinkedIn", "https://www.linkedin.com/in/jane-doe-1a2b3c", "VP Sales at Globex"),
+    ];
+    const search = () => searchWith((q) => (/site:linkedin\.com\/in/.test(q) ? profiles : answer(q)));
+    const asked = await findPeopleForFinding({ ...FINDING, companyDomain: "globex.com" }, { titles: ["VP Sales"], limit: 10 }, { searchOpts: { providers: [search()] } });
+    expect(asked.people.map((p) => p.fullName)).toEqual(["Jane Doe"]);
+    expect(asked.trace.notes).toContain("2 people found at Globex did not hold one of those job titles, so they were left out.");
+    // With no titles asked for they are people at the company - whose title nobody knows, and none is shown.
+    resetSearchCache();
+    const anyone = await findPeopleForFinding({ ...FINDING, companyDomain: "globex.com" }, { titles: [], limit: 10 }, { searchOpts: { providers: [search()] } });
+    expect(anyone.people.map((p) => p.fullName).sort()).toEqual(["Jane Doe", "Jerry Bennett", "Lydia Sellers"]);
+    for (const p of anyone.people.filter((x) => x.fullName !== "Jane Doe")) expect(p.title).toBeUndefined();
+    expect(anyone.people.find((p) => p.fullName === "Jane Doe")!.title).toBe("VP Sales");
   });
 
   it("does not search for a website the finding already has", async () => {

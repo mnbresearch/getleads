@@ -7,7 +7,9 @@
  * a fund, a contract win, and "raises concerns".
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { findFundedCompanies, formatUsd, fundingReason, headlineAmount, headlineRound, isFundingHeadline } from "./funding.js";
+import { findFundedCompanies, formatUsd, fundingReason, headlineAmount, headlineRound, isFundingHeadline, publisherName } from "./funding.js";
+import { stripDescriptorPrefix } from "./shared.js";
+import { mailSafeReason } from "./util.js";
 import { web, type FakeWeb, type Route } from "./kit.test.js";
 
 const NOW = Date.parse("2026-10-06T09:00:00Z");
@@ -51,12 +53,13 @@ afterEach(() => {
 
 describe("reading a headline", () => {
   it("takes an amount only when the headline states one, with a unit that really is a unit", () => {
-    expect(headlineAmount("Globex raises $12M Series A")).toEqual({ usd: 12_000_000, inDollars: true });
-    expect(headlineAmount("Globex secures $12 million in funding")).toEqual({ usd: 12_000_000, inDollars: true });
-    expect(headlineAmount("Hooli closes $1.5 billion round")).toEqual({ usd: 1_500_000_000, inDollars: true });
-    expect(headlineAmount("Tyrell bags US$750K pre-seed")).toEqual({ usd: 750_000, inDollars: true });
-    expect(headlineAmount("Hooli raises \u20B9100 crore")).toEqual({ usd: 12_000_000, inDollars: false });
-    expect(headlineAmount("Umbrella raises \u20AC2.5M")).toEqual({ usd: 2_700_000, inDollars: false });
+    expect(headlineAmount("Globex raises $12M Series A")).toEqual({ usd: 12_000_000, inDollars: true, shown: "$12M" });
+    expect(headlineAmount("Globex secures $12 million in funding")).toEqual({ usd: 12_000_000, inDollars: true, shown: "$12M" });
+    expect(headlineAmount("Hooli closes $1.5 billion round")).toEqual({ usd: 1_500_000_000, inDollars: true, shown: "$1.5B" });
+    expect(headlineAmount("Tyrell bags US$750K pre-seed")).toEqual({ usd: 750_000, inDollars: true, shown: "$750K" });
+    // Another currency is shown as that currency, never as dollars; the dollar figure is only for comparing with a minimum.
+    expect(headlineAmount("Hooli raises \u20B9100 crore")).toEqual({ usd: 12_000_000, inDollars: false, shown: "INR 100 crore" });
+    expect(headlineAmount("Umbrella raises \u20AC2.5M")).toEqual({ usd: 2_700_000, inDollars: false, shown: "EUR 2.5M" });
     // "$5 more" is five dollars, not five million; a bare small figure is not a round.
     expect(headlineAmount("Stock rises $5 more after Acme raises round")).toBeNull();
     expect(headlineAmount("Initech raises Series B")).toBeNull();
@@ -86,7 +89,7 @@ describe("reading a headline", () => {
     expect(fundingReason({ title: "Globex raises $12M Series A", source: "TechCrunch", occurredAt: at })).toBe("Raised $12M Series A, reported by TechCrunch on 2 Oct 2026.");
     expect(fundingReason({ title: "Globex raises $12M", source: "TechCrunch", occurredAt: at })).toBe("Raised $12M, reported by TechCrunch on 2 Oct 2026.");
     expect(fundingReason({ title: "Initech raises Series B", source: "Reuters", occurredAt: at })).toBe("Raised a Series B round, reported by Reuters on 2 Oct 2026.");
-    expect(fundingReason({ title: "Hooli raises \u20B9100 crore", source: "Mint" })).toBe("Raised about $12M, reported by Mint.");
+    expect(fundingReason({ title: "Hooli raises \u20B9100 crore", source: "Mint" })).toBe("Raised INR 100 crore, reported by Mint.");
     expect(fundingReason({ title: "Tyrell raises funding" })).toBe("Announced new funding.");
     expect(fundingReason({ title: "Tyrell raises funding", occurredAt: at })).toBe("Announced new funding, reported on 2 Oct 2026.");
     expect(fundingReason({ title: "Umbrella raises an angel round", source: "X", occurredAt: new Date("nope") })).toBe("Raised an angel round, reported by X.");
@@ -124,8 +127,8 @@ describe("findFundedCompanies", () => {
     // The related-coverage blurb mentions another company's $50M: it is not this company's amount.
     expect(byName.get("Initech")!.relevantBecause).toBe("Raised a Series B round, reported by Reuters on 30 Sep 2026.");
     expect(byName.get("Initech")!.confidence).toBe(0.7);
-    // An amount in another currency is approximate, and says so.
-    expect(byName.get("Hooli")!.relevantBecause).toBe("Raised about $12M pre-Series B, reported by The Economic Times on 4 Oct 2026.");
+    // An amount in another currency is stated in that currency, not turned into dollars.
+    expect(byName.get("Hooli")!.relevantBecause).toBe("Raised INR 100 crore pre-Series B, reported by The Economic Times on 4 Oct 2026.");
     expect(byName.get("Tyrell")!.relevantBecause).toBe("Announced new funding, reported by SiliconANGLE on 29 Sep 2026.");
     expect(byName.get("Umbrella")!.relevantBecause).toBe("Raised $3M seed, reported by EU-Startups on 5 Oct 2026.");
 
@@ -236,5 +239,138 @@ describe("findFundedCompanies", () => {
     expect(findings).toHaveLength(1);
     expect(findings[0].relevantBecause).toBe("Raised $9M Series A, reported by BadSource on 5 Oct 2026.");
     expect(JSON.stringify(findings[0].relevantBecause)).not.toMatch(/script|evil\.example|https?:/);
+  });
+});
+
+/* ───────────────────────────────── headlines as the news really writes them ───────────────────────────────── */
+
+describe("a headline's description is not part of the company's name", () => {
+  it.each([
+    ["Nine-person Globex", "Globex"],
+    ["Insurtech Initech", "Initech"],
+    ["Space Insurer Hooli Space", "Hooli Space"],
+    ["Ocular Disease Therapy Developer Tyrell", "Tyrell"],
+    ["Korea's Wonka Robotics", "Wonka Robotics"],
+    // Nothing that names a company is left.
+    ["Korea's Dental Robotics", null],
+    ["Basketball League", null],
+    // A place or an everyday word inside a real name stays.
+    ["Indian Walker", "Indian Walker"],
+    ["Space Epoch", "Space Epoch"],
+    ["Tiny Health", "Tiny Health"],
+    ["Globex", "Globex"],
+  ])("%s -> %s", (name, expected) => {
+    expect(stripDescriptorPrefix(name)).toBe(expected);
+  });
+});
+
+describe("what was raised, and what was not", () => {
+  it("a valuation is not the amount raised", () => {
+    expect(headlineAmount("Physical AI startup Globex raises seed round at $500M valuation")).toBeNull();
+    expect(headlineAmount("Initech secures pre-seed funding at Rs 16.7 cr valuation")).toBeNull();
+    expect(headlineAmount("Hooli, valued at $2B, raises new round")).toBeNull();
+    expect(headlineAmount("Tyrell raises $97M Series B, valuing startup at $650M")).toMatchObject({ usd: 97_000_000, shown: "$97M" });
+    expect(headlineAmount("Umbrella Secures $150M Series D at $2.3B Valuation")).toMatchObject({ shown: "$150M" });
+    expect(headlineAmount("Wonka raises $1B Series C at a $10B valuation")).toMatchObject({ shown: "$1B" });
+    expect(fundingReason({ title: "Physical AI startup Globex raises seed round at $500M valuation", source: "TechCrunch" })).toBe("Raised a seed round, reported by TechCrunch.");
+  });
+
+  it("a currency code after the number is that currency, not dollars", () => {
+    expect(headlineAmount("Globex Secures $17M CAD in Funding")).toMatchObject({ inDollars: false, shown: "CAD 17M" });
+    expect(headlineAmount("Initech raises A$5M seed")).toMatchObject({ inDollars: false, shown: "AUD 5M" });
+    expect(headlineAmount("Hooli raises 8 million EUR")).toMatchObject({ inDollars: false, shown: "EUR 8M" });
+    expect(headlineAmount("Tyrell secures \u00A38.30 million Series B")).toMatchObject({ shown: "GBP 8.3M" });
+    expect(headlineAmount("Umbrella Raises \u20AC500,000 Pre-Seed Round")).toMatchObject({ shown: "EUR 500K" });
+    expect(headlineAmount("Wonka bags Rs 1,750 Cr funding")).toMatchObject({ shown: "INR 1,750 crore" });
+    expect(headlineAmount("Soylent Raises USD 16.7M Series B")).toMatchObject({ inDollars: true, shown: "$16.7M" });
+    expect(headlineAmount("Oscorp raises $153-million in funding")).toMatchObject({ usd: 153_000_000, shown: "$153M" });
+    expect(headlineAmount("Stark Secures $133.65M Series A")).toMatchObject({ shown: "$133.7M" });
+    expect(fundingReason({ title: "Globex Secures $17M CAD in Funding", source: "AI Insider" })).toBe("Raised CAD 17M, reported by AI Insider.");
+    // A bare number is not money.
+    expect(headlineAmount("Globex backs 18 new startups")).toBeNull();
+    expect(headlineAmount("Globex closes Series C-1")).toBeNull();
+  });
+
+  it("a hyphen that is another character is still a hyphen: pre-seed is not seed", () => {
+    expect(headlineRound("Globex secures pre\u2011seed funding")).toBe("pre-seed");
+    expect(headlineRound("Globex secures pre\u2010seed funding")).toBe("pre-seed");
+    expect(headlineRound("Globex secures pre\u2013seed funding")).toBe("pre-seed");
+    expect(fundingReason({ title: "Globex secures pre\u2011seed funding at Rs 16.7 cr valuation" })).toBe("Raised a pre-seed round.");
+  });
+
+  it("an investor changing what it invests, and business won, are not rounds", () => {
+    for (const no of [
+      "Peak Capital Raises Surge Seed Cap to $5M, Backs 18 New Startups",
+      "Globex Ventures backs 12 startups in its latest cohort",
+      "Initech shares jump 5%: US arm bags record \u20B94,000 crore order; global order book hits \u20B945,000 crore",
+      "Hooli Bags \u20B928.78 Crore Work Orders; Shares Fall 0.65%",
+      "Tyrell hospitality arm bags Delhi Airport F&B licence, \u20B9109 crore fee in FY28",
+      "Umbrella Wagons bags \u20B9100 crore BESS project in Uttarakhand; targets \u20B91,000 crore order book",
+      "Wonka wins two projects across business worth \u20B91,840 crore",
+    ]) {
+      expect(isFundingHeadline(no), no).toBe(false);
+    }
+    // The same verbs with money raised are still rounds.
+    for (const yes of ["EV two-wheeler maker Globex bags Rs 1,750 Cr funding", "Initech Bags Rs 4 Cr to Scale Early Childhood Screening Platform", "Hooli lands $20M Series A to build out its team"]) {
+      expect(isFundingHeadline(yes), yes).toBe(true);
+    }
+  });
+});
+
+describe("who reported it", () => {
+  it("an outlet the feed names by its web address is given its name, or left out", () => {
+    expect(publisherName("app.dealroom.co")).toBe("Dealroom");
+    expect(publisherName("siliconangle.com")).toBe("SiliconANGLE");
+    expect(publisherName("Bloomberg.com")).toBe("Bloomberg");
+    expect(publisherName("entrepreneur.economictimes.indiatimes.com")).toBe("The Economic Times");
+    expect(publisherName("TechCrunch")).toBe("TechCrunch");
+    expect(publisherName("The Globe and Mail")).toBe("The Globe and Mail");
+    expect(publisherName("some-unknown-site.example")).toBe("");
+    expect(publisherName(undefined)).toBe("");
+    const at = new Date("2026-09-25T10:00:00Z");
+    expect(fundingReason({ title: "Globex secures $16M Series B", source: "app.dealroom.co", occurredAt: at })).toBe("Raised $16M Series B, reported by Dealroom on 25 Sep 2026.");
+    expect(fundingReason({ title: "Globex secures $16M Series B", source: "en.wowtale.example", occurredAt: at })).toBe("Raised $16M Series B, reported on 25 Sep 2026.");
+    expect(fundingReason({ title: "Globex secures $16M Series B", source: "en.wowtale.example" })).toBe("Raised $16M Series B.");
+  });
+
+  it("a sentence made safe for an email keeps the part of an address that says who it is", () => {
+    expect(mailSafeReason("Raised $16M Series B, reported by app.dealroom.co on 25 Sep 2026.")).toBe("Raised $16M Series B, reported by dealroom on 25 Sep 2026.");
+    expect(mailSafeReason("Seen on news.example.co.uk and on Booking.com")).toBe("Seen on example and on Booking");
+  });
+});
+
+describe("the feed, end to end", () => {
+  const REAL_SHAPES = `<?xml version="1.0" encoding="UTF-8"?><rss version="2.0"><channel><title>funding - Google News</title>
+${item("Exclusive: Nine-person Globex raises $30 million, counts four top labs as customers", "Fortune", "CBMiA1", 3)}
+${item("Insurtech Initech raises $34.5M just months after prior round", "TechCrunch", "CBMiA2", 4)}
+${item("Space Insurer Hooli Space Raises $5M Seed Round", "Payload Space", "CBMiA3", 2)}
+${item("Hooli Space raises $5M seed to insure the space economy", "app.dealroom.co", "CBMiA4", 3)}
+${item("Peak Capital Raises Surge Seed Cap to $5M, Backs 18 New Startups", "The Tech Buzz", "CBMiA5", 2)}
+${item("Tyrell Secures $17M CAD in Funding to Help Manufacturers Modernize Procurement", "AI Insider", "CBMiA6", 5)}
+${item("Physical AI startup Umbrella Kaiwu raises seed round at $500M valuation", "app.dealroom.co", "CBMiA7", 6)}
+${item("Wonka AI secures pre\u2011seed funding at Rs 16.7 cr valuation", "SaasRise", "CBMiA8", 1)}
+${item("Soylent Corp shares jump 5%: US arm bags record \u20B94,000 crore order; global order book hits \u20B945,000 crore", "Upstox", "CBMiA9", 2)}
+${item("Vandelay Bags \u20B928.78 Crore Work Orders; Shares Fall 0.65%", "hdfcsky.example", "CBMiA10", 2)}
+${item("Korea's Dental Robotics raises seed round for self-driving suction robot", "app.dealroom.co", "CBMiA11", 2)}
+${item("Oscorp secures $16M Series B led by Five Elms Capital", "some-unknown-site.example", "CBMiA12", 3)}
+</channel></rss>`;
+
+  it("names the company without its description, once, and says only what the headline says was raised", async () => {
+    use(news(REAL_SHAPES));
+    const { findings } = await findFundedCompanies({}, { limit: 100 });
+    const by = new Map(findings.map((f) => [f.companyName, f.relevantBecause]));
+    expect([...by.keys()].sort()).toEqual(["Globex", "Hooli Space", "Initech", "Oscorp", "Tyrell", "Umbrella Kaiwu", "Wonka AI"]);
+    expect(by.get("Globex")).toBe("Raised $30M, reported by Fortune on 3 Oct 2026.");
+    expect(by.get("Initech")).toBe("Raised $34.5M, reported by TechCrunch on 2 Oct 2026.");
+    expect(by.get("Hooli Space")).toMatch(/^Raised \$5M seed, reported by (?:Payload Space on 4|Dealroom on 3) Oct 2026\.$/);
+    expect(by.get("Tyrell")).toBe("Raised CAD 17M, reported by AI Insider on 1 Oct 2026.");
+    expect(by.get("Umbrella Kaiwu")).toBe("Raised a seed round, reported by Dealroom on 30 Sep 2026.");
+    expect(by.get("Wonka AI")).toBe("Raised a pre-seed round, reported by SaasRise on 5 Oct 2026.");
+    expect(by.get("Oscorp")).toBe("Raised $16M Series B, reported on 3 Oct 2026.");
+    for (const f of findings) {
+      // The headline quoted as proof still names the company as reported.
+      expect(f.evidenceQuote).toContain(f.companyName!);
+      expect(f.relevantBecause).not.toMatch(/\.(?:com|co|example)\b/);
+    }
   });
 });

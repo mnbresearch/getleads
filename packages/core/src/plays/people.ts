@@ -4,6 +4,10 @@
  * Each person carries the company finding's reason and evidence unchanged - the reason is
  * about the company, and it is only attached to people the search shows working there.
  * No email address is ever made up here.
+ *
+ * When job titles are asked for, only people whose own title is one of them come back: a
+ * person with another title, or with none the search could show, is not who was asked for.
+ * (A search result often puts the company's name where the title goes; that is not a title.)
  */
 import { titleMatch } from "../icp/score.js";
 import { resolveCompanyDomainDetailed } from "../discovery/companies.js";
@@ -75,28 +79,43 @@ export async function findPeopleForFinding(finding: PlayFinding, cfg: { titles: 
     found = res?.people ?? [];
   }
 
+  /** The person's job title, or "" when what the search put there is the company's name or nothing. */
+  const titleOf = (p: PersonCandidate): string => {
+    const t = cleanLine(p.title, 200);
+    const key = normCompanyName(t);
+    if (!t || !key) return "";
+    return key === normCompanyName(companyName) || key === normCompanyName(finding?.companyName) || (!!label && key === label) ? "" : t;
+  };
   let elsewhere = 0;
-  const ranked: { p: PersonCandidate; at: "yes" | "probably"; titled: boolean }[] = [];
+  let otherTitle = 0;
+  const ranked: { p: PersonCandidate; at: "yes" | "probably"; titled: boolean; title: string }[] = [];
   for (const p of found) {
     const at = worksAt(p, companyName, label);
     if (at === "no") {
       elsewhere++;
       continue;
     }
-    ranked.push({ p, at, titled: titles.length ? titleMatch(p.title, titles) === true : false });
+    const title = titleOf(p);
+    const titled = titles.length ? titleMatch(title, titles) === true : false;
+    // Titles were asked for: somebody with another title, or none we can see, is not who was asked for.
+    if (titles.length && !titled) {
+      otherTitle++;
+      continue;
+    }
+    ranked.push({ p, at, titled, title });
   }
   ranked.sort((a, b) => Number(b.titled) - Number(a.titled) || Number(b.at === "yes") - Number(a.at === "yes") || b.p.confidence - a.p.confidence);
 
   const people: PlayFinding[] = [];
   const seen = new Set<string>();
-  for (const { p, at } of ranked) {
+  for (const { p, at, title } of ranked) {
     if (people.length >= limit) break;
     const f = finishFinding({
       kind: "person",
       fullName: p.fullName,
       firstName: p.firstName,
       lastName: p.lastName,
-      title: p.title,
+      ...(title ? { title } : {}),
       linkedinUrl: p.linkedinUrl,
       location: p.location,
       companyName: cleanLine(finding.companyName, 160) || p.companyName || companyName,
@@ -116,6 +135,7 @@ export async function findPeopleForFinding(finding: PlayFinding, cfg: { titles: 
     people.push(f);
   }
   if (elsewhere > 0) run.note(`${elsewhere} ${elsewhere === 1 ? "person" : "people"} found by search did not clearly work at ${companyName}, so ${elsewhere === 1 ? "that person was" : "they were"} left out.`);
+  if (otherTitle > 0) run.note(`${otherTitle} ${otherTitle === 1 ? "person" : "people"} found at ${companyName} did not hold one of those job titles, so ${otherTitle === 1 ? "that person was" : "they were"} left out.`);
   if (run.searchAnswered && !people.length) run.note(`No one matching those job titles was found at ${companyName}.`);
 
   const trace = run.finish(run.searchAnswered, "The people search could not run, so nobody could be looked for.");

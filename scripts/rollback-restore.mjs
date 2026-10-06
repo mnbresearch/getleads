@@ -149,9 +149,11 @@ async function main() {
   console.log(`  report links ${dryRun ? "that would be " : ""}given their plaintext token back: ${r.links} (already readable by the old release: ${r.linksAlready})`);
   console.log(`  sender and integration credentials ${dryRun ? "that would be " : ""}rewritten in the old format: ${r.creds} (already in it: ${r.credsAlready})`);
   if (r.failed) console.log(`  could not be read (left untouched): ${r.failed}. These need the encryption key they were saved under - check ENCRYPTION_KEY / ENCRYPTION_KEYS_OLD.`);
-  console.log(dryRun ? "  Run again without --dry-run, then redeploy the previous build." : "  Now redeploy the previous build. To roll forward later, just deploy the new build again.");
+  if (r.failed) console.log("  DO NOT redeploy the previous build yet: fix the key, run this again, and continue only when nothing is left unread.");
+  else console.log(dryRun ? "  Run again without --dry-run, then redeploy the previous build." : "  Now redeploy the previous build. To roll forward later, just deploy the new build again.");
   await dbPkg.closeDb().catch(() => {});
-  process.exit(r.failed && !dryRun ? 2 : 0);
+  // Unread rows are a failure in a dry run too: the dry run exists to find this out first.
+  process.exit(r.failed ? 2 : 0);
 }
 
 // Run only when started as a script, so a test can import `restore` without side effects.
