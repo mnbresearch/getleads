@@ -1168,3 +1168,113 @@ export const globalSuppressions = pgTable("global_suppressions", {
   createdAt: ts("created_at").notNull().defaultNow(),
 });
 export type GlobalSuppression = typeof globalSuppressions.$inferSelect;
+
+// ── Plays ────────────────────────────────────────────────────────────────────────────────
+// A play is a saved recipe that finds people who need the customer's product now, from one
+// source of intent. What it finds waits in play_candidates for a person to approve or skip;
+// only an approved candidate becomes a lead. See migration 0021.
+
+export const PLAY_TYPES = ["competitor_customers", "hiring_role", "funding", "public_asks", "website_visitors", "job_changes", "engagers_upload"] as const;
+export type PlayType = (typeof PLAY_TYPES)[number];
+
+export const plays = pgTable(
+  "plays",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    type: text("type").$type<PlayType>().notNull(),
+    /** active | paused */
+    status: text("status").notNull().default("active"),
+    config: jsonb("config").$type<Record<string, unknown>>().notNull().default({}),
+    targetTitles: text("target_titles").array().notNull().default(sql`'{}'`),
+    icpId: uuid("icp_id").references(() => icps.id, { onDelete: "set null" }),
+    clientId: uuid("client_id").references(() => clients.id, { onDelete: "set null" }),
+    listId: uuid("list_id").references(() => lists.id, { onDelete: "set null" }),
+    campaignId: uuid("campaign_id").references(() => campaigns.id, { onDelete: "set null" }),
+    autoApprove: boolean("auto_approve").notNull().default(false),
+    minScore: integer("min_score").notNull().default(0),
+    /** Null = only when someone presses Run. */
+    runEveryHours: integer("run_every_hours"),
+    lastRunAt: ts("last_run_at"),
+    nextRunAt: ts("next_run_at"),
+    lastResult: jsonb("last_result").$type<Record<string, unknown>>(),
+    createdBy: uuid("created_by"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("plays_org_idx").on(t.orgId, t.createdAt),
+    dueIdx: index("plays_due_idx").on(t.nextRunAt).where(sql`status = 'active' AND run_every_hours IS NOT NULL`),
+  }),
+);
+export type Play = typeof plays.$inferSelect;
+
+export const playRuns = pgTable(
+  "play_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    playId: uuid("play_id").notNull().references(() => plays.id, { onDelete: "cascade" }),
+    /** running | done | failed | blocked */
+    status: text("status").notNull().default("running"),
+    /** manual | schedule | upload */
+    trigger: text("trigger").notNull().default("manual"),
+    found: integer("found").notNull().default(0),
+    added: integer("added").notNull().default(0),
+    duplicates: integer("duplicates").notNull().default(0),
+    note: text("note"),
+    error: text("error"),
+    startedAt: ts("started_at").notNull().defaultNow(),
+    finishedAt: ts("finished_at"),
+  },
+  (t) => ({ playIdx: index("play_runs_play_idx").on(t.playId, t.startedAt), orgIdx: index("play_runs_org_idx").on(t.orgId) }),
+);
+export type PlayRun = typeof playRuns.$inferSelect;
+
+export const playCandidates = pgTable(
+  "play_candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    playId: uuid("play_id").notNull().references(() => plays.id, { onDelete: "cascade" }),
+    runId: uuid("run_id").references(() => playRuns.id, { onDelete: "set null" }),
+    /** person | company | post */
+    kind: text("kind").notNull().default("person"),
+    /** pending | approved | skipped */
+    status: text("status").notNull().default("pending"),
+    skipReason: text("skip_reason"),
+    fullName: text("full_name"),
+    firstName: text("first_name"),
+    lastName: text("last_name"),
+    title: text("title"),
+    linkedinUrl: text("linkedin_url"),
+    email: text("email"),
+    emailStatus: text("email_status"),
+    location: text("location"),
+    companyName: text("company_name"),
+    companyDomain: text("company_domain"),
+    relevantBecause: text("relevant_because").notNull(),
+    evidenceUrl: text("evidence_url"),
+    evidenceTitle: text("evidence_title"),
+    evidenceQuote: text("evidence_quote"),
+    signalType: text("signal_type").notNull(),
+    signalAt: ts("signal_at"),
+    confidence: real("confidence").notNull().default(0.5),
+    score: real("score"),
+    scoreReasons: text("score_reasons").array().notNull().default(sql`'{}'`),
+    dedupeKey: text("dedupe_key").notNull(),
+    leadId: uuid("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    alreadyLead: boolean("already_lead").notNull().default(false),
+    decidedBy: uuid("decided_by"),
+    decidedAt: ts("decided_at"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    dedupeUniq: uniqueIndex("play_candidates_dedupe_uniq").on(t.playId, t.dedupeKey),
+    queueIdx: index("play_candidates_queue_idx").on(t.orgId, t.status, t.createdAt),
+    playIdx: index("play_candidates_play_idx").on(t.playId, t.status),
+    leadIdx: index("play_candidates_lead_idx").on(t.leadId).where(sql`lead_id IS NOT NULL`),
+  }),
+);
+export type PlayCandidate = typeof playCandidates.$inferSelect;

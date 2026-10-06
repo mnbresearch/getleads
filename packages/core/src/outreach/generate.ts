@@ -44,6 +44,11 @@ export interface OutreachInput {
   guard?: "enforce" | "warn";
   /** Extra allowlist entries the caller knows (sender address domain, the org's website). */
   guardContext?: GuardContext;
+  /**
+   * Why this person is worth writing to now (a play's "relevant because", already made
+   * mail-safe). Third-party-derived text: it reaches a model only as a fenced field.
+   */
+  reason?: string;
 }
 
 export interface OutreachResult {

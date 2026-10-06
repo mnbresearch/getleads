@@ -40,6 +40,7 @@ export const ROW_CAPS = {
   pixels: 200,
   visibilityPrompts: 1000,
   campaigns: 5000,
+  plays: 200,
 } as const;
 export type RowCapKind = keyof typeof ROW_CAPS;
 
@@ -68,6 +69,7 @@ const KIND_NOUN: Record<RowCapKind, string> = {
   pixels: "tracking pixels",
   visibilityPrompts: "tracked prompts",
   campaigns: "campaigns",
+  plays: "plays",
 };
 
 /**
