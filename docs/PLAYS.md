@@ -148,6 +148,35 @@ creates a task to go and answer it, never a lead.
   LinkedIn could not be reached (try again), the post is not shown without signing in, or
   there is no post at that link. A post link with a user name or password in it is refused.
 
+## What works without a connected search source
+
+Some plays read their source directly. Others find it through web search, which Scout's
+operator has to connect. When no search source is connected, the app says so on the types
+it affects and lists the ones that work first.
+
+Works without a search source:
+
+- **Customers of a competitor**, for every competitor whose website you give. Scout reads
+  that website's own customer pages.
+- **Recently funded companies.** Read from the news.
+- **People asking in public, on Hacker News.** Read through Hacker News's own public search.
+- **An uploaded list of people who engaged.** You supply it.
+- **Visitors to your website** (with the tracking snippet installed) and **contacts who
+  changed jobs** (on a plan that includes the check). Both use your own data.
+- **Companies hiring for a role, at companies you name.** Their own careers pages are read.
+
+Needs a search source:
+
+- **Companies hiring for a role across job boards.**
+- **People asking in public on LinkedIn, Reddit, X and forums.**
+- **A competitor you gave by name only.** Its website has to be found first.
+- **Finding people at a company** - the "Find people" button, and the step in a run that
+  looks for your target titles at the companies it found. Until a search source is
+  connected, those companies stay in Review as companies.
+
+A run that could not search says so: its status is "blocked" (or its note says which part
+could not look), and its search unit is given back. It is never reported as "nobody found".
+
 ## The review rule
 
 Nothing a play finds becomes a lead until a person approves it.
@@ -155,8 +184,10 @@ Nothing a play finds becomes a lead until a person approves it.
 - **Approve a person:** a lead is created (or, if you already had them, the existing lead is
   updated). The lead keeps the reason and the evidence link, is tagged with the play, and is
   added to the play's list if it has one.
-- **Approve a company:** the company is saved. No lead is created. Use "Find people" to look
-  for people there.
+- **Approve a company:** the company is kept in the play, under "Companies kept", with its
+  reason, its proof and how many people were found there so far. No lead is created. Use
+  "Find people" to look for people there, or dismiss it when you are done with it. A company
+  whose website is known is also added to your Companies.
 - **Approve a public conversation:** a task is created, "Answer this conversation", with the
   reason and the link. No lead is created.
 - **Skip:** the candidate is marked skipped, with your reason if you give one. Nothing else
@@ -169,7 +200,7 @@ found; a person whose address cannot be found is not added. Adding someone to a 
 not start the campaign: sending only ever happens from a campaign you have started.
 
 A decision on a candidate that somebody else already decided changes nothing and is reported
-back as not applied. Nothing is shown as approved unless it really was: the answer lists the
+back as not applied, with the reason as a sentence and as a short code a program can act on. Nothing is shown as approved unless it really was: the answer lists the
 ids whose decision went through (`applied`) and, separately, the ones that did not.
 
 **Auto-approve** is a switch on each play and is off by default. When you turn it on, the
@@ -319,6 +350,7 @@ plays, candidates and results, and cannot change anything.
 | Run now | `POST /v1/plays/{id}/run` | `run(id)` | `run_play` |
 | Run history | `GET /v1/plays/{id}/runs` | `runs(id)` | `list_plays` with `playId` |
 | Review queue | `GET /v1/plays/candidates` | `candidates(query)` | `review_queue` |
+| Companies kept | `GET /v1/plays/candidates?status=approved&kind=company` | `candidates({ status: "approved", kind: "company" })` | `review_queue` with status approved, kind company |
 | Approve or skip | `POST /v1/plays/candidates/decide` | `decide(decisions, { enroll })` | `decide_candidates` |
 | Find people at a company | `POST /v1/plays/candidates/{id}/find-people` | `findPeople(candidateId, opts)` | `find_people_for_candidate` |
 | Upload a list | `POST /v1/plays/{id}/upload` | `upload(id, input)` | `upload_engagers` |

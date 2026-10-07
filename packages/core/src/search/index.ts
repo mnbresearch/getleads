@@ -76,7 +76,8 @@ const EMPTY_CACHE_TTL = 5 * 60 * 1000;
  * closed to new customers as of Sep 2026, Serper is ~30x cheaper per query than SerpAPI, and
  * Brave has had no free tier since Feb 2026. Providers that recently rejected us are skipped.
  * A provider that errors or returns nothing is skipped. Results are cached 6h in-process;
- * an empty result only 5 minutes, and a run in which every provider threw is not cached at
+ * an empty result only 5 minutes, and a run in which every provider threw - or in which a
+ * `site:` search's results all had to be discarded as off that site - is not cached at
  * all, so an outage cannot be re-served as absence.
  *
  * Back-compatible shape: the results alone. Use webSearchDetailed to learn whether an empty
@@ -124,8 +125,9 @@ export async function webSearchDetailed(query: string, opts: WebSearchOptions = 
   for (const p of providers) {
     const started = Date.now();
     try {
-      const results = await p.search(query, { count: opts.count, offset: opts.offset, country: opts.country });
-      const offSite = offSiteDiscarded(results);
+      const answer = await p.search(query, { count: opts.count, offset: opts.offset, country: opts.country });
+      const offSite = offSiteDiscarded(answer);
+      const results = tidyResults(answer);
       attempts.push({ provider: p.name, ok: true, outcome: "ok", count: results.length, ms: Date.now() - started, ...(offSite > 0 ? { offSite } : {}) });
       if (results.length > best.length) best = results;
       if (results.length >= min) break;
@@ -170,14 +172,48 @@ export async function webSearchDetailed(query: string, opts: WebSearchOptions = 
   // What gets remembered, and for how long, depends on whether this was an answer or a
   // failure. Every provider failure path raises ProviderUnavailableError, so a failure is
   // countable; an empty list is only believed (briefly) when some provider actually answered.
+  //
+  // One empty answer is not believed at all: a `site:` search whose results were thrown away
+  // for being off that site. The engine ignored the operator, so the site was never
+  // searched - and a cached entry carries no attempts, so the second identical search in a
+  // run would have read as "searched and found nobody" where the first said, correctly, that
+  // the site could not be searched.
+  const siteIgnored = !deduped.length && attempts.some((a) => a.ok && (a.offSite ?? 0) > 0);
   if (deduped.length) {
     cache.set(key, { at: Date.now(), expiresAt: Date.now() + CACHE_TTL, results: deduped });
-  } else if (answered) {
+  } else if (answered && !siteIgnored) {
     cache.set(key, { at: Date.now(), expiresAt: Date.now() + EMPTY_CACHE_TTL, results: deduped });
   }
   // Otherwise: cache nothing. The next caller gets a real attempt rather than our bad day.
 
   return done({ results: deduped, attempts, everyProviderFailed, nothingConfigured });
+}
+
+/**
+ * A result is three lines: a title, an address and a snippet. Whatever a provider (or a page a
+ * scraper read) sends as one, only a line's worth of each is passed on, and a result whose
+ * address is longer than any real one is left out - cutting it would make another address.
+ *
+ * Everything downstream reads these fields with patterns written for a line of text. Handed a
+ * megabyte of spaces as a "title" - a results page can be made to carry one - several of them
+ * went back over it from every character: minutes during which the process answered nobody.
+ */
+export const MAX_RESULT_TITLE = 300;
+export const MAX_RESULT_SNIPPET = 1_000;
+export const MAX_RESULT_URL = 2_000;
+const MAX_RESULTS_PER_ANSWER = 200;
+
+export function tidyResults(results: SearchResult[]): SearchResult[] {
+  const out: SearchResult[] = [];
+  if (!Array.isArray(results)) return out;
+  for (const r of results) {
+    if (out.length >= MAX_RESULTS_PER_ANSWER) break;
+    if (!r || typeof r.url !== "string" || !r.url || r.url.length > MAX_RESULT_URL) continue;
+    const title = typeof r.title === "string" ? r.title : "";
+    const snippet = typeof r.snippet === "string" ? r.snippet : "";
+    out.push(title.length <= MAX_RESULT_TITLE && snippet.length <= MAX_RESULT_SNIPPET && title === r.title && snippet === r.snippet ? r : { ...r, title: title.slice(0, MAX_RESULT_TITLE), snippet: snippet.slice(0, MAX_RESULT_SNIPPET) });
+  }
+  return out;
 }
 
 /** DEBUG_SEARCH=true (or 1): log lines may carry the search text and providers' own words. */

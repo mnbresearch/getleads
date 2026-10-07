@@ -6,7 +6,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { UNTRUSTED_MARK, UNTRUSTED_RULE } from "../ai/untrusted.js";
 import { NO_AI, model, page, web, type FakeWeb, type Route } from "./kit.test.js";
-import { categoryFrom, competitorsInText, pickPersona, planPlays } from "./plan.js";
+import { categoryFrom, competitorsInText, isOwnProduct, pickPersona, planPlays } from "./plan.js";
 
 const HOME = page(
   "Onbordo - Employee onboarding that runs itself",
@@ -466,5 +466,65 @@ describe("the competitors a plan names", () => {
     use({ "https://trackly.com/": site(["Trackly vs Matomo"]) });
     const p = await planPlays({ website: "trackly.com" }, { ai: model({ competitors: ["Google", "Google Analytics 4", "Matomo Cloud", "Amplitude"] }) });
     expect(p.competitors.map((c) => `${c.name} (${c.source})`)).toEqual(["Google Analytics (ai)", "Matomo Cloud (ai)", "Amplitude (ai)"]);
+  });
+});
+
+/* ───────────────────────── what a second look at unseen sites found ───────────────────────── */
+
+describe("the site's own product is not one of its competitors", () => {
+  it("under a shorter or a longer form of its own name, by whole words", () => {
+    expect(isOwnProduct("Clearstat", { name: "Clearstat Analytics", domain: "getclearstat.com" })).toBe(true);
+    expect(isOwnProduct("Clearstat Analytics", { name: "Clearstat", domain: "clearstat.io" })).toBe(true);
+    expect(isOwnProduct("Clearstat Analytics Cloud", { name: "Clearstat Analytics", domain: "useclearstat.com" })).toBe(true);
+    // The address with what was put around the name taken off.
+    expect(isOwnProduct("Clearstat", { domain: "getclearstat.com" })).toBe(true);
+    expect(isOwnProduct("Clearstat", { domain: "clearstathq.com" })).toBe(true);
+    // Somebody else: a name that merely starts with the same letters, or shares a later word.
+    expect(isOwnProduct("Clearstatic", { name: "Clearstat Analytics", domain: "getclearstat.com" })).toBe(false);
+    expect(isOwnProduct("Rival Analytics", { name: "Clearstat Analytics", domain: "getclearstat.com" })).toBe(false);
+    expect(isOwnProduct("Getty", { domain: "getclearstat.com" })).toBe(false);
+    expect(isOwnProduct("Acme", { name: "Onbordo", domain: "onbordo.com" })).toBe(false);
+  });
+
+  it("is left out of a plan read from a site that compares itself under its short name", async () => {
+    const home = page(
+      "Clearstat Analytics - product analytics for small teams",
+      `<main><h1>Product analytics without the setup</h1><h2>Clearstat vs Rivalytics</h2><h2>Clearstat vs Chartwise</h2><a href="/compare/clearstat-vs-rivalytics">Clearstat vs Rivalytics</a></main>`,
+      `<meta name="description" content="Clearstat Analytics is a product analytics tool for small teams."><meta property="og:site_name" content="Clearstat Analytics">`,
+    );
+    use({ "https://getclearstat.com/": home, "https://getclearstat.com/compare/clearstat-vs-rivalytics": page("Clearstat vs Rivalytics", `<main><h1>Clearstat vs Rivalytics</h1><h2>Why teams move from Rivalytics to Clearstat</h2></main>`) });
+    const plan = await planPlays({ website: "getclearstat.com" }, { ai: NO_AI });
+    expect(plan.product.name).toBe("Clearstat Analytics");
+    expect(plan.competitors.map((c) => c.name)).toEqual(["Rivalytics", "Chartwise"]);
+    expect(JSON.stringify(plan.plays)).not.toMatch(/"name":"Clearstat"/);
+  });
+});
+
+describe("a product for support teams is bought by the people who run support", () => {
+  const SUPPORT = ["Head of Customer Support", "VP Customer Success", "Director of Customer Experience", "Head of Customer Success"];
+
+  it("'support stack', 'support platform', 'support team' and 'customer service' say what it is", () => {
+    for (const said of ["Deskly is the AI support stack built for B2B teams.", "The support platform your customers will thank you for.", "Everything your support team needs in one place.", "Customer service that scales with you."]) {
+      expect(categoryFrom(said), said).toBe("customer support software");
+      expect(pickPersona({ description: said, category: categoryFrom(said) }).titles, said).toEqual(SUPPORT);
+    }
+    // "Support" alone is not it: every product supports something.
+    expect(categoryFrom("We support Safari, Chrome and Firefox.")).toBeUndefined();
+  });
+
+  it("a support tool that describes how it is built does not get engineering titles", async () => {
+    const home = page(
+      "Deskly",
+      `<main><h1>Support infrastructure for the API era</h1><h2>Built for developers</h2><h2>An API for everything</h2><h2>Deploy in minutes</h2><p>Composable, with an SDK and open-source code.</p></main>`,
+      `<meta name="description" content="Deskly is the AI support stack built for B2B teams. Composable infrastructure that gives you complete flexibility to build a support motion that grows with your business - no-code or all-code."><meta property="og:site_name" content="Deskly">`,
+    );
+    use({ "https://deskly.com/": home });
+    const plan = await planPlays({ website: "deskly.com" }, { ai: NO_AI });
+    expect(plan.titles).toEqual(SUPPORT);
+    const hiring = plan.plays.find((p) => p.type === "hiring_role")!;
+    expect(hiring.config).toEqual({ roles: ["Customer Support Specialist", "Customer Success Manager"] });
+    expect(plan.plays.find((p) => p.type === "public_asks")).toMatchObject({ name: "People asking for customer support software recommendations", config: { category: "customer support software" } });
+    // Without the words that say it is for support, the same page is what it reads as: a developer tool.
+    expect(pickPersona({ description: "Composable infrastructure with an API, an SDK and open-source code.", headings: ["Built for developers", "Deploy in minutes"] }).titles[0]).toBe("Chief Technology Officer");
   });
 });

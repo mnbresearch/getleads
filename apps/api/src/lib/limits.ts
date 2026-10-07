@@ -87,18 +87,31 @@ const KIND_NOUN: Record<RowCapKind, string> = {
  *  - It is given back when the request that made it has been answered (by then the insert
  *    has committed) - but not before every check that was still counting at that moment has
  *    its answer: such a check may have counted before the row landed, and the reservation
- *    is the only thing that tells it the row exists. In any case it is gone after
- *    RESERVATION_MS, so a create that fails after its check cannot hold a workspace back
- *    for longer than those few seconds.
- *  - A reservation whose row has already landed must not be counted twice. Each one records
- *    the count it saw; the rows expected once everything in flight has committed are
- *    max(rows now, lowest count seen by a live earlier reservation + what they reserved).
+ *    is the only thing that tells it the row exists. A reservation made outside a request
+ *    (a job, a script) has nothing to give it back, and is gone after RESERVATION_MS, so a
+ *    create that fails after its check cannot hold a workspace back for longer than those
+ *    few seconds. One made inside a request never runs out while the request is still being
+ *    answered (a slow request must not lose its place before its row lands); the long
+ *    REQUEST_RESERVATION_MS is only there so that a request which never ends cannot hold a
+ *    place for ever.
+ *  - The count is conservative: the rows the database reports now PLUS everything reserved
+ *    by a live earlier check. A reservation whose row has already landed is therefore
+ *    counted twice until its request has been answered, so during a burst a create that
+ *    would just have fitted can be refused - but the ceiling is never passed.
+ *
+ *    It used to be cleverer: "the lowest count seen by a live earlier reservation, plus
+ *    what they reserved", so that a landed row was not counted twice. That forgot the rows
+ *    of reservations already given back: five creates in flight (each counted 0), the first
+ *    commits and its request ends, a sixth arrives and counts 1 row - the lowest count seen
+ *    by the four still in flight is 0, 0 + 4 + 1 fits under a ceiling of 5, and the sixth
+ *    row was created.
  *
  * This is per process. With several API instances the overshoot is bounded by the number of
  * instances times the creates each has in flight at that moment (each instance holds its own
  * line), not by the number of requests - and the next check on any instance sees the rows.
  */
 const RESERVATION_MS = 5_000;
+const REQUEST_RESERVATION_MS = 10 * 60_000;
 interface Reservation {
   seq: number;
   weight: number;
@@ -130,11 +143,13 @@ function reserve(key: string, weight: number): Reservation {
   // Keys of workspaces that stopped creating things are only pruned when looked at; clear
   // the expired ones now and then so the map cannot grow without bound.
   if (reservations.size > 2_000) for (const k of [...reservations.keys()]) liveReservations(k, now);
-  const r: Reservation = { seq: ++reservationSeq, weight: Math.max(1, Math.floor(weight) || 1), expires: now + RESERVATION_MS, seen: null };
+  // Inside a request the reservation is given back when the request ends, not by the clock.
+  const scope = requestReservations.getStore();
+  const r: Reservation = { seq: ++reservationSeq, weight: Math.max(1, Math.floor(weight) || 1), expires: now + (scope ? REQUEST_RESERVATION_MS : RESERVATION_MS), seen: null };
   const live = liveReservations(key, now);
   live.push(r);
   reservations.set(key, live);
-  requestReservations.getStore()?.push({ key, r });
+  scope?.push({ key, r });
   return r;
 }
 
@@ -171,18 +186,14 @@ function finish(key: string, r: Reservation): void {
 }
 
 /**
- * The rows `mine` must assume exist: the `n` the database reports now, or - if earlier
- * checks are still in flight - what there will be once their inserts commit.
+ * The rows `mine` must assume exist: the `n` the database reports now, plus everything
+ * reserved by a live earlier check - whether or not its row is already among the `n`
+ * (see "Reservations": counted twice at worst, never missed).
  */
 function expectedRows(key: string, mine: Reservation, n: number): number {
-  let base = n;
   let pending = 0;
-  for (const r of liveReservations(key)) {
-    if (r.seq >= mine.seq) continue;
-    pending += r.weight;
-    if (r.seen !== null && r.seen < base) base = r.seen;
-  }
-  return Math.max(n, base + pending);
+  for (const r of liveReservations(key)) if (r.seq < mine.seq) pending += r.weight;
+  return n + pending;
 }
 
 /**

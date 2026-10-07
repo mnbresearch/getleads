@@ -151,7 +151,9 @@ export async function linkedinPostEngagers(postUrl: string): Promise<{ people: P
     if (name.length < 3 || name.length > 60) return;
     people.set(li, { ...splitName(name), title: titleText || undefined, linkedinUrl: li, source: "linkedin:post", confidence: 0.6 });
   });
-  const reactions = Number(html.match(/"numLikes":(\d+)/)?.[1] ?? html.match(/(\d+)\s+reactions?/i)?.[1] ?? 0) || undefined;
-  const comments = Number(html.match(/"numComments":(\d+)/)?.[1] ?? html.match(/(\d+)\s+comments?/i)?.[1] ?? 0) || undefined;
+  // A count is a few digits and the word after a space or two. Unbounded (`\d+\s+`), a page of nothing
+  // but digits was read again from every one of them: minutes for a page of ordinary size.
+  const reactions = Number(html.match(/"numLikes":(\d{1,12})/)?.[1] ?? html.match(/(?<!\d)(\d{1,12})\s{1,8}reactions?/i)?.[1] ?? 0) || undefined;
+  const comments = Number(html.match(/"numComments":(\d{1,12})/)?.[1] ?? html.match(/(?<!\d)(\d{1,12})\s{1,8}comments?/i)?.[1] ?? 0) || undefined;
   return { people: [...people.values()], postText, reactions, comments, publicPage: true };
 }

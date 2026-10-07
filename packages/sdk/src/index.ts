@@ -294,6 +294,8 @@ export interface PlayCandidate {
   /** Set once approved (or at once, when the person was already a lead). */
   leadId: string | null;
   alreadyLead: boolean;
+  /** For a company: the person candidates its play already holds for it. Null for a person or a conversation. */
+  peopleFound: number | null;
   decidedAt: string | null;
   createdAt: string;
 }
@@ -305,6 +307,9 @@ export interface PlayTypeField {
   kind: "tags" | "text" | "number" | "competitors" | "select";
   options?: { value: string; label: string }[];
   required?: boolean;
+  /** A number field's lowest accepted value. */
+  min?: number;
+  /** A number field's highest value; for tags and competitors how many, for text how many characters. */
   max?: number;
   placeholder?: string;
   help?: string;
@@ -315,14 +320,24 @@ export interface PlayTypeInfo {
   name: string;
   summary: string;
   finds: "people" | "companies" | "conversations";
-  /** True when the type depends on public web search. */
+  /** True when the type's own source is web search (hiring across job boards): without a connected search source a run is likely to say it could not search. */
   needsSearch: boolean;
   /** False when the type cannot work in this workspace yet; `unavailableReason` says why. */
   available: boolean;
   unavailableReason?: string;
+  /** Only while no search source is connected on the server: what of this type works today and what does not. */
   setupHint?: string;
   fields: PlayTypeField[];
   defaultTitles?: string[];
+}
+
+/** The catalogue of play types, and what depends on a search source being connected on the server. */
+export interface PlayTypeCatalogue {
+  types: PlayTypeInfo[];
+  /** False when no search source is connected on the server. */
+  searchDependable: boolean;
+  /** Finding people at a company is always a web search; `setupHint` is present while none is connected. */
+  findPeople: { needsSearch: boolean; setupHint?: string };
 }
 
 export interface PlayPlanSuggestion {
@@ -334,6 +349,10 @@ export interface PlayPlanSuggestion {
   why: string;
   available: boolean;
   unavailableReason?: string;
+  /** This suggestion, with its settings, depends on web search. */
+  needsSearch: boolean;
+  /** Only while no search source is connected on the server. */
+  setupHint?: string;
 }
 
 /** What Scout understood from a website, and the plays it suggests. Nothing is saved. */
@@ -342,7 +361,9 @@ export interface PlayPlan {
   icp: IcpCriteria;
   titles: string[];
   competitors: { name: string; domain?: string; source: "saved" | "site" | "ai" }[];
+  /** When `searchDependable` is false, the suggestions that work today come first. */
   plays: PlayPlanSuggestion[];
+  searchDependable: boolean;
   notes: string[];
 }
 
@@ -372,6 +393,13 @@ export interface PlayDecision {
   skipReason?: string;
 }
 
+/**
+ * Why a decision was not applied. `already_decided`, `removed`, `not_found`, `play_gone` and
+ * `do_not_contact` mean the candidate is no longer waiting; `being_decided`, `quota` and
+ * `error` mean it still is.
+ */
+export type PlayNotAppliedCode = "already_decided" | "being_decided" | "removed" | "not_found" | "play_gone" | "quota" | "do_not_contact" | "error";
+
 export interface DecideResult {
   approved: number;
   skipped: number;
@@ -382,8 +410,10 @@ export interface DecideResult {
   enrolled: number;
   /** Approved people with no usable address yet: looked up in the background, then added to the campaign. */
   queuedForEmail: number;
-  /** Decisions that changed nothing (not pending any more, or not this workspace's). */
-  notApplied: { id: string; reason: string }[];
+  /** Company candidates approved by this request: each is kept in its play, where Find people works on it. */
+  companiesKept: number;
+  /** Decisions that changed nothing (not pending any more, or not this workspace's): the sentence, and a code to act on. */
+  notApplied: { id: string; reason: string; code: PlayNotAppliedCode }[];
   /** The ids whose decision was applied, in the order they were sent. An id is here or in `notApplied`, never both. */
   applied: string[];
   /** Present when the batch stopped early; the remaining candidates are still pending. */
@@ -639,7 +669,7 @@ export class Prospex {
    */
   plays = {
     /** The seven kinds of play, the settings each needs and whether each can work in this workspace yet. */
-    types: () => this.request<{ types: PlayTypeInfo[] }>("GET", "/v1/plays/types"),
+    types: () => this.request<PlayTypeCatalogue>("GET", "/v1/plays/types"),
     /** Read a website and suggest plays for it. Saves nothing. Uses one search unit. */
     plan: (website: string) => this.request<PlayPlan>("POST", "/v1/plays/plan", { website }),
     list: () => this.request<{ plays: Play[] }>("GET", "/v1/plays"),
@@ -662,14 +692,16 @@ export class Prospex {
       this.request<PlayCandidatePage>("GET", "/v1/plays/candidates", undefined, { ...q, playId: q.playId === undefined ? undefined : idSegment(q.playId, "playId") }),
     /**
      * Approve or skip up to 200 candidates. Approving a person creates a lead (one lead unit
-     * when the person is new), a company is saved as a company, a post becomes a task to answer
-     * it. Nothing is sent. With `enroll`, approved people are also added to the play's campaign.
+     * when the person is new), a company is kept in its play (list them with
+     * `candidates({ status: "approved", kind: "company" })`), a post becomes a task to answer
+     * it. `skip` on an approved company or post dismisses it. Nothing is sent. With `enroll`,
+     * approved people are also added to the play's campaign.
      */
     decide: (decisions: PlayDecision[], opts: { enroll?: boolean } = {}) =>
       this.request<DecideResult>("POST", "/v1/plays/candidates/decide", { decisions, ...(opts.enroll === undefined ? {} : { enroll: opts.enroll }) }),
     /** For a company candidate: find up to 5 people there. They join the queue with the company's reason and evidence. Uses one search unit. */
     findPeople: (candidateId: string, opts: { titles?: string[]; limit?: number } = {}) =>
-      this.request<{ added: number; candidates: PlayCandidate[]; note?: string }>("POST", `/v1/plays/candidates/${idSegment(candidateId, "candidateId")}/find-people`, opts),
+      this.request<{ added: number; candidates: PlayCandidate[]; /** How many people the play now holds for this company. */ peopleFound?: number; note?: string }>("POST", `/v1/plays/candidates/${idSegment(candidateId, "candidateId")}/find-people`, opts),
     /** Add people who engaged with a post (or signed up, followed, attended) to an engagers_upload play. Body up to 2 MB. */
     upload: (id: string, input: PlayUploadInput) => this.request<PlayUploadResult>("POST", `/v1/plays/${idSegment(id, "playId")}/upload`, input),
     /** Per play: found, approved, contacted, replied, replied positively. `days` 7 to 365, default 90. */

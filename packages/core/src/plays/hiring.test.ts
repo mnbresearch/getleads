@@ -8,8 +8,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { resetProviderSkips } from "../providers/health.js";
 import { resetSearchCache } from "../search/index.js";
+import { honorSiteOperator, type SearchProvider } from "../search/providers.js";
 import type { SearchResult } from "../types.js";
-import { buildHiringQueries, findHiringCompanies, parseJobResult, readPostingPage, roleMatches } from "./hiring.js";
+import { JOB_BOARDS_NOT_SEARCHED, buildHiringQueries, findHiringCompanies, parseJobResult, readPostingPage, roleMatches } from "./hiring.js";
 import { brokenSearch, page, searchWith, web, type FakeWeb, type Route } from "./kit.test.js";
 
 const ROLE = "Sales Development Representative";
@@ -472,4 +473,109 @@ describe("a search that never answers", () => {
     expect(findings).toEqual([]);
     expect(trace.notes).toContain("The run reached its time limit and stopped early. What was found before that is kept.");
   }, 10_000);
+});
+
+/* ───────────────────────── what a second look at live runs found ───────────────────────── */
+
+describe("a posting that can be checked is reported checked, or not at all", () => {
+  const GLOBEX = "https://boards.greenhouse.io/globex/jobs/6578883";
+  const NEW_HOME = "https://job-boards.greenhouse.io/globex/jobs/6578883";
+  const result: SearchResult = { title: "Sales Development Representative - Globex", url: GLOBEX, snippet: "Globex is hiring", provider: "stub" };
+  const found = searchWith((q) => (q.includes("site:boards.greenhouse.io") ? [result] : []));
+  const ROBOTS: Route = { body: "User-agent: *\nAllow: /\n", type: "text/plain" };
+
+  it("reading each board's robots.txt is not taken out of the three requests a posting gets", async () => {
+    // The board has moved the posting: one robots.txt and a redirect, then another robots.txt, then the page.
+    use({
+      "https://boards.greenhouse.io/robots.txt": ROBOTS,
+      [GLOBEX]: { status: 301, location: NEW_HOME },
+      "https://job-boards.greenhouse.io/robots.txt": ROBOTS,
+      [NEW_HOME]: posting("Job Application for Sales Development Representative at Globex"),
+    });
+    const { findings } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [found] } });
+    expect(net.calls).toEqual(["https://boards.greenhouse.io/robots.txt", GLOBEX, "https://job-boards.greenhouse.io/robots.txt", NEW_HOME]);
+    expect(findings.map((f) => [f.companyName, f.relevantBecause, f.confidence])).toEqual([["Globex", "Hiring a Sales Development Representative - open posting on Greenhouse.", 0.85]]);
+  });
+
+  it("the same for one that has been taken down: it is found gone, where it used to be reported unchecked", async () => {
+    // What a closed posting does on this board: on to its new address, and from there back to the company's list.
+    use({
+      "https://boards.greenhouse.io/robots.txt": ROBOTS,
+      [GLOBEX]: { status: 301, location: NEW_HOME },
+      "https://job-boards.greenhouse.io/robots.txt": ROBOTS,
+      [NEW_HOME]: { status: 302, location: "https://job-boards.greenhouse.io/globex?error=true" },
+      "https://job-boards.greenhouse.io/globex?error=true": posting("Jobs at Globex"),
+    });
+    resetSearchCache();
+    const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [found] } });
+    expect(findings).toEqual([]);
+    expect(trace.notes).toContain("1 posting found by search was no longer there when opened, so it was left out.");
+  });
+
+  it("a check that could not finish - too many hops, a board that does not answer - leaves the posting out, and says so", async () => {
+    // Four addresses deep: more than a posting's three requests.
+    const hop = (n: number): string => `https://boards.greenhouse.io/globex/jobs/6578883?step=${n}`;
+    use({ [GLOBEX]: { status: 302, location: hop(1) }, [hop(1)]: { status: 302, location: hop(2) }, [hop(2)]: { status: 302, location: hop(3) }, [hop(3)]: posting("Job Application for Sales Development Representative at Globex") });
+    const deep = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [found] } });
+    expect(deep.findings).toEqual([]);
+    expect(deep.trace.notes).toContain("1 posting found by search could not be opened to check that it is still there, so it was left out.");
+    expect(net.pages()).toHaveLength(3);
+
+    use({ [GLOBEX]: { throws: true } });
+    resetSearchCache();
+    const down = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [found] } });
+    expect(down.findings).toEqual([]);
+    expect(down.trace.notes).toContain("1 posting found by search could not be opened to check that it is still there, so it was left out.");
+
+    use({ [GLOBEX]: { status: 500 } });
+    resetSearchCache();
+    expect((await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [found] } })).findings).toEqual([]);
+  });
+
+  it("a board that refuses the check has answered: the posting is reported as one nobody could look at, as before", async () => {
+    use({ [GLOBEX]: { status: 403 } });
+    const { findings } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [found] } });
+    expect(findings.map((f) => [f.companyName, f.relevantBecause, f.confidence])).toEqual([["Globex", "Has a posting for Sales Development Representative on Greenhouse.", 0.65]]);
+  });
+});
+
+describe("when the job boards themselves could not be searched", () => {
+  /** An engine that ignores `site:`: what it sends for a board is from anywhere, and is discarded. For the open web it answers. */
+  const ignoresSite = (openWeb: SearchResult[]): SearchProvider => ({
+    name: "bing_html",
+    available: () => true,
+    search: async (q: string) => honorSiteOperator(q, q.startsWith("site:") ? [{ title: "Sales jobs near you", url: "https://jobs.example/sales", snippet: "", provider: "bing_html" }] : openWeb),
+  });
+  const UNRELATED: SearchResult[] = [{ title: "What does a sales development representative do?", url: "https://blog.example/what-is-an-sdr", snippet: "A guide to the role.", provider: "bing_html" }];
+
+  it("the run is blocked and says so, even though a search of the open web answered with something unrelated", async () => {
+    use({});
+    const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [ignoresSite(UNRELATED)] } });
+    expect(findings).toEqual([]);
+    expect(trace).toMatchObject({ searches: 8, failedSearches: 7, blocked: true, blockedReason: JOB_BOARDS_NOT_SEARCHED });
+    expect(JOB_BOARDS_NOT_SEARCHED).toBe("The job boards could not be searched this time, so no postings could be looked for. This is not a result about your market - try again later.");
+  });
+
+  it("it is not blocked when the open web gave a posting: something was found, and what could not be searched is said in a note", async () => {
+    use({});
+    // A company's own careers page, as the open web returns it.
+    const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [ignoresSite(SERP.plain)] } });
+    expect(findings.map((f) => f.companyName)).toEqual(["Oscorp"]);
+    expect(trace.blocked).toBe(false);
+    expect(trace.notes).toContain("7 of 8 searches were meant for one site each, but the search source in use ignored that and its results had to be discarded. Those sites were not searched.");
+  });
+
+  it("boards that were searched and had nothing are an answer: nothing found, not blocked", async () => {
+    use({});
+    const { findings, trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [searchWith(() => [])] } });
+    expect(findings).toEqual([]);
+    expect(trace).toMatchObject({ blocked: false, failedSearches: 0 });
+  });
+
+  it("when no search answered at all, the reason is the one every play gives for that", async () => {
+    use({});
+    const { trace } = await findHiringCompanies({ roles: [ROLE] }, { searchOpts: { providers: [brokenSearch()] } });
+    expect(trace.blocked).toBe(true);
+    expect(trace.blockedReason).not.toBe(JOB_BOARDS_NOT_SEARCHED);
+  });
 });

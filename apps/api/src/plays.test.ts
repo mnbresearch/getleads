@@ -310,11 +310,45 @@ suite("plays", () => {
       expect(byType.website_visitors.unavailableReason).toMatch(/tracking pixel/);
       expect(byType.job_changes.available).toBe(false);
       expect(byType.job_changes.unavailableReason).toMatch(/contact data provider/);
-      // A search-based type is still offered with no search source connected - with a hint.
-      expect(byType.competitor_customers).toMatchObject({ available: true, needsSearch: true });
-      expect(byType.competitor_customers.setupHint).toMatch(/public search/);
-      expect(byType.funding.setupHint).toBeUndefined();
+      // No search source is connected here. Every type is still offered, and each says exactly
+      // what that means for it - the same list as docs/PLAYS.md "What works without a connected search source".
+      expect(r.body.searchDependable).toBe(false);
+      expect(Object.fromEntries(r.body.types.map((t: any) => [t.type, [t.needsSearch, typeof t.setupHint === "string"]]))).toEqual({
+        competitor_customers: [false, true], // reads the competitor's own website; a competitor without one has to be searched for
+        hiring_role: [true, true], // job boards are searched
+        funding: [false, false], // read from the news
+        public_asks: [false, true], // Hacker News is read directly; the other places are searched
+        website_visitors: [false, false],
+        job_changes: [false, false],
+        engagers_upload: [false, false],
+      });
+      expect(byType.competitor_customers).toMatchObject({ available: true });
+      expect(byType.competitor_customers.setupHint).toBe("Works today for every competitor whose website you give: its customer pages are read directly. A competitor given by name only has to be searched for first, and a search source is not connected on our side yet.");
+      expect(byType.hiring_role.setupHint).toMatch(/^Searching job boards needs a search source, and a search source is not connected on our side yet: until it is, a run is likely to say it could not search \(it never reports that as nobody hiring\)\./);
+      expect(byType.hiring_role.setupHint).toMatch(/their own careers pages are read directly\.$/);
+      expect(byType.public_asks.setupHint).toBe("Works today on Hacker News, which is read directly. LinkedIn, Reddit, X and forums are searched, and a search source is not connected on our side yet - a run says so when it could not look there.");
+      // Finding people at a company is a search whatever the play.
+      expect(r.body.findPeople.needsSearch).toBe(true);
+      expect(r.body.findPeople.setupHint).toMatch(/^Finding people at a company uses web search, and a search source is not connected on our side yet\./);
       expect(byType.competitor_customers.fields.find((f: any) => f.key === "competitors")).toMatchObject({ kind: "competitors", required: true, max: 10 });
+      // Number fields say their lowest value as well as their highest - the same limits the settings are checked against.
+      const numbers = Object.fromEntries(r.body.types.flatMap((t: any) => t.fields.filter((f: any) => f.kind === "number").map((f: any) => [`${t.type}.${f.key}`, [f.min, f.max ?? null]])));
+      expect(numbers).toEqual({
+        "competitor_customers.maxPerCompetitor": [1, 50],
+        "funding.days": [1, 60],
+        "funding.minAmountUsd": [0, null],
+        "public_asks.days": [1, 90],
+        "website_visitors.minIntentScore": [0, 100],
+        "website_visitors.days": [1, 90],
+        "job_changes.days": [1, 90],
+      });
+      for (const t of r.body.types) for (const f of t.fields) if (f.kind !== "number") expect("min" in f, `${t.type}.${f.key}`).toBe(false);
+      // One below the lowest and one above the highest are both refused; the limits themselves are accepted.
+      for (const [type, key, base] of [["funding", "days", {}], ["public_asks", "days", { category: "crm" }], ["job_changes", "days", {}], ["website_visitors", "days", {}], ["competitor_customers", "maxPerCompetitor", COMPETITORS]] as const) {
+        const [min, max] = numbers[`${type}.${key}`];
+        const mk = (v: number) => req("POST", "/v1/plays", o.token, { name: `${type} ${key} ${v}`, type, config: { ...base, [key]: v } });
+        expect([type, key, (await mk(min - 1)).status, (await mk(max + 1)).status, (await mk(min)).status, (await mk(max)).status]).toEqual([type, key, 400, 400, 201, 201]);
+      }
       expect(byType.hiring_role.defaultTitles.length).toBeGreaterThan(0);
       // Nothing a customer reads names a server setting.
       expect(r.text).not.toMatch(/[A-Z]{3,}_[A-Z_]{3,}/);
@@ -326,6 +360,18 @@ suite("plays", () => {
       expect(now.website_visitors).toMatchObject({ available: true });
       expect(now.website_visitors.unavailableReason).toBeUndefined();
       expect(now.job_changes.available).toBe(true);
+
+      // With a search source connected nothing carries a hint; what each type's own source is does not change.
+      process.env.SERPER_API_KEY = "serper-test-key-not-real";
+      try {
+        const connected = await req("GET", "/v1/plays/types", o.token);
+        expect(connected.body.searchDependable).toBe(true);
+        expect(connected.body.findPeople).toEqual({ needsSearch: true });
+        for (const t of connected.body.types) expect([t.type, t.setupHint]).toEqual([t.type, undefined]);
+        expect(connected.body.types.filter((t: any) => t.needsSearch).map((t: any) => t.type)).toEqual(["hiring_role"]);
+      } finally {
+        delete process.env.SERPER_API_KEY;
+      }
     });
   });
 
@@ -514,8 +560,8 @@ suite("plays", () => {
       expect(d.status).toBe(200);
       expect(d.body).toMatchObject({ approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, applied: [] });
       expect(d.body.notApplied).toEqual([
-        { id: pe.id, reason: "Not found in this workspace." },
-        { id: co.id, reason: "Not found in this workspace." },
+        { id: pe.id, reason: "Not found in this workspace.", code: "not_found" },
+        { id: co.id, reason: "Not found in this workspace.", code: "not_found" },
       ]);
       expect((await leadsOf(B.orgId)).length).toBe(0);
       expect(await usageOf(B.orgId, "leads")).toBe(0);
@@ -929,7 +975,7 @@ suite("plays", () => {
 
       const r = await approve(o, [c.id]);
       expect(r.status).toBe(200);
-      expect(r.body).toEqual({ approved: 1, skipped: 0, leadsCreated: 1, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, notApplied: [], applied: [c.id] });
+      expect(r.body).toEqual({ approved: 1, skipped: 0, leadsCreated: 1, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, companiesKept: 0, notApplied: [], applied: [c.id] });
       const leads = await leadsOf(o.orgId);
       expect(leads).toHaveLength(1);
       const lead = leads[0];
@@ -958,8 +1004,10 @@ suite("plays", () => {
 
       // The same call again: nothing changes, nothing is charged, and it says why.
       const again = await approve(o, [c.id]);
-      expect(again.body).toEqual({ approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, notApplied: [{ id: c.id, reason: "Already approved." }], applied: [] });
-      expect((await decide(o, [{ id: c.id, decision: "skip" }])).body.notApplied).toEqual([{ id: c.id, reason: "Already approved." }]);
+      expect(again.body).toEqual({ approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, companiesKept: 0, notApplied: [{ id: c.id, reason: "Already approved.", code: "already_decided" }], applied: [] });
+      // An approved PERSON is a lead by now: skipping it afterwards is refused (only a kept company or conversation can be dismissed).
+      expect((await decide(o, [{ id: c.id, decision: "skip" }])).body.notApplied).toEqual([{ id: c.id, reason: "Already approved.", code: "already_decided" }]);
+      expect((await candidate(c.id)).status).toBe("approved");
       expect((await leadsOf(o.orgId)).length).toBe(1);
       expect(await usageOf(o.orgId, "leads")).toBe(1);
       expect((await candidate(c.id)).status).toBe("approved");
@@ -1007,6 +1055,8 @@ suite("plays", () => {
       // ...and `applied` is exactly the one that went through.
       expect(r.body.applied).toEqual([people[0].id]);
       expect(r.body.notApplied[0].reason).toMatch(/lead allowance is used up/);
+      // The one that hit the limit and the ones after it are all still waiting, and say why in a word.
+      expect(r.body.notApplied.map((n: any) => n.code)).toEqual(r.body.notApplied.map(() => "quota"));
       expect((await leadsOf(o.orgId)).length).toBe(1);
       expect(await usageOf(o.orgId, "leads")).toBe(2);
       for (const c of [people[1], people[2], co]) expect(await candidate(c.id)).toMatchObject({ status: "pending", leadId: null, decidedAt: null, decidedBy: null });
@@ -1023,15 +1073,15 @@ suite("plays", () => {
       const tag = u8();
       const { candidates } = await queued(o, [person(`sk-${tag}`), company(`Globex ${tag}`)]);
       const r = await decide(o, [{ id: candidates[0].id, decision: "skip", skipReason: "  Not a fit\u0000 " }, { id: candidates[1].id, decision: "skip" }]);
-      expect(r.body).toEqual({ approved: 0, skipped: 2, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, notApplied: [], applied: [candidates[0].id, candidates[1].id] });
+      expect(r.body).toEqual({ approved: 0, skipped: 2, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, companiesKept: 0, notApplied: [], applied: [candidates[0].id, candidates[1].id] });
       expect(await candidate(candidates[0].id)).toMatchObject({ status: "skipped", skipReason: "Not a fit", decidedBy: o.userId, leadId: null });
       expect((await candidate(candidates[1].id)).skipReason).toBeNull();
       expect(await leadsOf(o.orgId)).toEqual([]);
       expect(await usageOf(o.orgId, "leads")).toBe(0);
       const again = await decide(o, [{ id: candidates[0].id, decision: "skip", skipReason: "other" }, { id: candidates[0].id, decision: "approve" }]);
       expect(again.body.notApplied).toEqual([
-        { id: candidates[0].id, reason: "Already skipped." },
-        { id: candidates[0].id, reason: "Already skipped." },
+        { id: candidates[0].id, reason: "Already skipped.", code: "already_decided" },
+        { id: candidates[0].id, reason: "Already skipped.", code: "already_decided" },
       ]);
       expect((await candidate(candidates[0].id)).skipReason).toBe("Not a fit");
       expect((await req("GET", "/v1/plays/candidates?status=skipped", o.token)).body).toMatchObject({ total: 2, counts: { pending: 0, approved: 0, skipped: 2 } });
@@ -1046,7 +1096,7 @@ suite("plays", () => {
       const tag = u8();
       const { candidates } = await queued(o, [post(tag)], { type: "public_asks", config: { category: "outbound tool" } });
       const r = await approve(o, [candidates[0].id], { enroll: true });
-      expect(r.body).toEqual({ approved: 1, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 1, enrolled: 0, queuedForEmail: 0, notApplied: [], applied: [candidates[0].id] });
+      expect(r.body).toEqual({ approved: 1, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 1, enrolled: 0, queuedForEmail: 0, companiesKept: 0, notApplied: [], applied: [candidates[0].id] });
       const tasks = await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId));
       expect(tasks).toHaveLength(1);
       expect(tasks[0]).toMatchObject({ type: "reply_public", title: "Answer this conversation", status: "pending", leadId: null, assigneeUserId: o.userId });
@@ -1056,19 +1106,143 @@ suite("plays", () => {
       expect(await candidate(candidates[0].id)).toMatchObject({ status: "approved", leadId: null });
     });
 
-    it("approving a company saves the company with the signal - never a lead", async () => {
+    it("approving a company keeps it in the play - never a lead - and saves it to Companies only when its website is known", async () => {
       const o = await signup("company");
       const tag = u8();
       const domain = `globex-${tag}.example`;
       const { candidates } = await queued(o, [company(`Globex ${tag}`, { companyDomain: domain }), company(`Nodomain ${tag}`)]);
       const r = await approve(o, candidates.map((c: any) => c.id));
-      expect(r.body).toMatchObject({ approved: 2, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, notApplied: [] });
+      expect(r.body).toMatchObject({ approved: 2, companiesKept: 2, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, notApplied: [] });
       const cos = await db.select().from(S.companies).where(S.eq(S.companies.orgId, o.orgId));
       expect(cos).toHaveLength(1);
       expect(cos[0]).toMatchObject({ domain, name: `Globex ${tag}`, signalsCount: 1, intentScore: 20 });
       expect(await leadsOf(o.orgId)).toEqual([]);
       expect(await usageOf(o.orgId, "leads")).toBe(0);
       for (const c of candidates) expect((await candidate(c.id)).status).toBe("approved");
+    });
+
+    it("kept companies stay reachable: listed newest first with how many people were found, Find people works on them, and they can be dismissed", async () => {
+      const o = await signup("kept");
+      const tag = u8();
+      const domain = `globex-${tag}.example`;
+      const { play, candidates } = await queued(o, [company(`Globex ${tag}`, { companyDomain: domain }), company(`Nodomain ${tag}`), company(`Waiting ${tag}`), post(`kept-${tag}`), person(`kept-${tag}`, { companyName: `Somewhere ${tag}` })]);
+      const by = (name: string) => candidates.find((c: any) => c.companyName === `${name} ${tag}`);
+      const thread = candidates.find((c: any) => c.kind === "post");
+      const pat = candidates.find((c: any) => c.kind === "person");
+      const kept = (who: Org | string = o, extra = "") => req("GET", `/v1/plays/candidates?status=approved&kind=company${extra}`, typeof who === "string" ? who : who.token);
+      expect((await kept()).body).toMatchObject({ candidates: [], total: 0 });
+
+      // Approved one after the other, with the conversation and the person: two companies are kept.
+      const first = await approve(o, [by("Globex").id, thread.id, pat.id]);
+      expect(first.body).toMatchObject({ approved: 3, companiesKept: 1, tasksCreated: 1, leadsCreated: 1 });
+      const second = await approve(o, [by("Nodomain").id]);
+      expect(second.body).toMatchObject({ approved: 1, companiesKept: 1, leadsCreated: 0 });
+
+      // The list: companies only, most recently kept first, each with what a reviewer needs to act on it.
+      const list = await kept();
+      expect(list.status).toBe(200);
+      expect(list.body.candidates.map((c: any) => c.companyName)).toEqual([`Nodomain ${tag}`, `Globex ${tag}`]);
+      expect(list.body.total).toBe(2);
+      expect(list.body.counts).toEqual({ pending: 1, approved: 2, skipped: 0 });
+      expect(list.body.candidates[0]).toMatchObject({ id: by("Nodomain").id, kind: "company", status: "approved", playId: play.id, playName: "Acme customers", companyDomain: null, peopleFound: 0, evidenceUrl: by("Nodomain").evidenceUrl });
+      expect(list.body.candidates[0].relevantBecause).toMatch(/^Named as a customer of Acme/);
+      expect(list.body.candidates[0].decidedAt).toBeTruthy();
+      expect(list.body.candidates[1]).toMatchObject({ companyDomain: domain, peopleFound: 0 });
+      // Only the company with a website went to Companies - which is why the answer says "kept", not "saved".
+      expect((await db.select().from(S.companies).where(S.eq(S.companies.orgId, o.orgId))).map((c: any) => c.domain)).toEqual([domain]);
+      // Filtered by play, and paged, like the rest of the queue.
+      expect((await kept(o, `&playId=${play.id}&limit=1`)).body.candidates.map((c: any) => c.companyName)).toEqual([`Nodomain ${tag}`]);
+      expect((await kept(o, `&playId=${play.id}&limit=1&offset=1`)).body.candidates.map((c: any) => c.companyName)).toEqual([`Globex ${tag}`]);
+      // A read-only key can read it; another workspace sees none of it.
+      const other = await signup("kept-other");
+      expect((await kept(other)).body).toMatchObject({ candidates: [], total: 0 });
+
+      // Find people works on a kept company - by name where no website is known, by website where one is.
+      fake.people[`Nodomain ${tag}`] = [{ kind: "person", fullName: "Nora One", title: "VP Sales", linkedinUrl: `https://www.linkedin.com/in/nora-${tag}` }, { kind: "person", fullName: "Nick Two", title: "CEO", linkedinUrl: `https://www.linkedin.com/in/nick-${tag}` }];
+      fake.people[`Globex ${tag}`] = [{ kind: "person", fullName: "Gina Three", title: "CEO", linkedinUrl: `https://www.linkedin.com/in/gina-${tag}` }];
+      const found = await req("POST", `/v1/plays/candidates/${by("Nodomain").id}/find-people`, o.token, { titles: ["VP Sales", "CEO"], limit: 5 });
+      expect(found.status, found.text).toBe(200);
+      expect(found.body).toMatchObject({ added: 2, peopleFound: 2 });
+      expect((await req("POST", `/v1/plays/candidates/${by("Globex").id}/find-people`, o.token, { titles: ["CEO"] })).body).toMatchObject({ added: 1, peopleFound: 1 });
+      // The same people asked for again are not counted twice.
+      expect((await req("POST", `/v1/plays/candidates/${by("Globex").id}/find-people`, o.token, { titles: ["CEO"] })).body).toMatchObject({ added: 0, peopleFound: 1 });
+      // A person at a company of the same name in ANOTHER play is not this play's.
+      const elsewhere = await queued(o, [person(`other-play-${tag}`, { companyName: `Nodomain ${tag}` })], { name: "Another play" });
+      expect(elsewhere.candidates).toHaveLength(1);
+      const after = await kept();
+      expect(Object.fromEntries(after.body.candidates.map((c: any) => [c.companyName, c.peopleFound]))).toEqual({ [`Nodomain ${tag}`]: 2, [`Globex ${tag}`]: 1 });
+      // The count includes people already decided, and a waiting company has it too; people and conversations have none.
+      const nora = (await candidatesOf(play.id)).find((c: any) => c.fullName === "Nora One");
+      expect(nora).toMatchObject({ kind: "person", status: "pending", companyName: `Nodomain ${tag}`, evidenceUrl: by("Nodomain").evidenceUrl });
+      await decide(o, [{ id: nora.id, decision: "skip" }]);
+      expect((await kept()).body.candidates[0]).toMatchObject({ companyName: `Nodomain ${tag}`, peopleFound: 2 });
+      const waiting = (await req("GET", `/v1/plays/candidates?playId=${play.id}&limit=50`, o.token)).body.candidates;
+      expect(waiting.find((c: any) => c.kind === "company")).toMatchObject({ companyName: `Waiting ${tag}`, peopleFound: 0 });
+      for (const c of waiting.filter((x: any) => x.kind === "person")) expect(c.peopleFound).toBeNull();
+
+      // Dismiss: "skip" on a kept company takes it off the list, and nothing else changes.
+      const companiesBefore = await db.select().from(S.companies).where(S.eq(S.companies.orgId, o.orgId));
+      const dismissed = await decide(o, [{ id: by("Globex").id, decision: "skip", skipReason: "Not a fit after all" }]);
+      expect(dismissed.body).toMatchObject({ approved: 0, skipped: 1, companiesKept: 0, applied: [by("Globex").id], notApplied: [] });
+      expect(await candidate(by("Globex").id)).toMatchObject({ status: "skipped", skipReason: "Not a fit after all" });
+      expect((await kept()).body.candidates.map((c: any) => c.companyName)).toEqual([`Nodomain ${tag}`]);
+      expect((await kept()).body.counts).toEqual({ pending: 1, approved: 1, skipped: 1 });
+      expect(await db.select().from(S.companies).where(S.eq(S.companies.orgId, o.orgId))).toEqual(companiesBefore);
+      // The people already found there stay where they are.
+      expect((await candidatesOf(play.id)).filter((c: any) => c.fullName === "Gina Three").map((c: any) => c.status)).toEqual(["pending"]);
+      // Dismissed twice changes nothing more.
+      expect((await decide(o, [{ id: by("Globex").id, decision: "skip" }])).body.notApplied).toEqual([{ id: by("Globex").id, reason: "Already skipped.", code: "already_decided" }]);
+      // A kept conversation can be dismissed too: the task it made stays a task.
+      expect((await decide(o, [{ id: thread.id, decision: "skip" }])).body).toMatchObject({ skipped: 1, applied: [thread.id] });
+      expect((await candidate(thread.id)).status).toBe("skipped");
+      expect((await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId))).length).toBe(1);
+      // An approved PERSON is a lead: not dismissed from here, and the lead is untouched.
+      const person1 = await decide(o, [{ id: pat.id, decision: "skip" }]);
+      expect(person1.body).toMatchObject({ skipped: 0, applied: [], notApplied: [{ id: pat.id, reason: "Already approved.", code: "already_decided" }] });
+      expect((await candidate(pat.id)).status).toBe("approved");
+      expect((await leadsOf(o.orgId)).length).toBe(1);
+      // Approving a kept company again is not a second approval.
+      expect((await approve(o, [by("Nodomain").id])).body).toMatchObject({ approved: 0, companiesKept: 0, notApplied: [{ id: by("Nodomain").id, reason: "Already approved.", code: "already_decided" }] });
+      // Another workspace can neither see nor dismiss it.
+      expect((await decide(other, [{ id: by("Nodomain").id, decision: "skip" }])).body.notApplied).toEqual([{ id: by("Nodomain").id, reason: "Not found in this workspace.", code: "not_found" }]);
+      expect((await candidate(by("Nodomain").id)).status).toBe("approved");
+      // A read-only key reads the kept list and cannot dismiss.
+      const ro = (await req("POST", "/v1/auth/api-keys", o.token, { name: "ro", scope: "read" })).body.key as string;
+      expect((await kept(ro)).body.candidates.map((c: any) => c.companyName)).toEqual([`Nodomain ${tag}`]);
+      expect((await decide(ro, [{ id: by("Nodomain").id, decision: "skip" }])).status).toBe(403);
+      // It is all still there after a reload.
+      expect((await kept()).body).toMatchObject({ total: 1, candidates: [{ id: by("Nodomain").id, peopleFound: 2 }] });
+    });
+
+    it("every decision that is not applied says why in a word as well as a sentence", async () => {
+      const o = await signup("codes");
+      const tag = u8();
+      const { play, candidates } = await queued(o, [person(`code-a-${tag}`), person(`code-b-${tag}`)]);
+      // Its play goes away while the candidate row is still there (as a cascade that has not finished would leave it).
+      const [orphanPlay] = await db.insert(S.plays).values({ orgId: o.orgId, name: "Gone", type: "funding", config: {} }).returning();
+      const [orphan] = await db.insert(S.playCandidates).values({ orgId: o.orgId, playId: orphanPlay.id, kind: "person", relevantBecause: "Raised a round.", signalType: "funding", dedupeKey: `li:orphan-${tag}`, linkedinUrl: `https://www.linkedin.com/in/orphan-${tag}` }).returning();
+      const real = db.query.plays.findFirst.bind(db.query.plays);
+      vi.spyOn(db.query.plays, "findFirst").mockImplementation(async (...args: any[]) => {
+        const row = await real(...args);
+        return row?.id === orphanPlay.id ? undefined : row;
+      });
+      const r = await decide(o, [{ id: orphan.id, decision: "approve" }, { id: randomUUID(), decision: "approve" }, { id: candidates[0].id, decision: "skip" }, { id: candidates[0].id, decision: "approve" }]);
+      expect(r.body.notApplied.map((n: any) => [n.code, n.reason])).toEqual([
+        ["play_gone", "Its play no longer exists."],
+        ["not_found", "Not found in this workspace."],
+        ["already_decided", "Already skipped."],
+      ]);
+      vi.restoreAllMocks();
+      // A fault on our side: the one it happened on, and everything after it, are still waiting.
+      const leadsSvc = await import("./services/leads.js");
+      vi.spyOn(leadsSvc, "upsertLead").mockRejectedValueOnce(new Error("boom"));
+      const [extra] = await db.insert(S.playCandidates).values({ orgId: o.orgId, playId: play.id, kind: "person", relevantBecause: "Hiring.", signalType: "job_posting", dedupeKey: `li:extra-${tag}`, linkedinUrl: `https://www.linkedin.com/in/extra-${tag}` }).returning();
+      const failed = await approve(o, [candidates[1].id, extra.id]);
+      expect(failed.body.stopped).toMatchObject({ reason: "error" });
+      expect(failed.body.notApplied.map((n: any) => [n.id, n.code])).toEqual([[candidates[1].id, "error"], [extra.id, "error"]]);
+      expect(await usageOf(o.orgId, "leads")).toBe(0);
+      // Every code the server can send is one of the documented eight.
+      for (const n of [...r.body.notApplied, ...failed.body.notApplied]) expect(["already_decided", "being_decided", "removed", "not_found", "play_gone", "quota", "do_not_contact", "error"]).toContain(n.code);
     });
 
     it("a read-only API key can read the queue and cannot decide - and reading changes nothing", async () => {
@@ -1150,8 +1324,8 @@ suite("plays", () => {
       const r = await decide(o, [{ id: fresh.id, decision: "approve" }, { id: fresh.id, decision: "skip" }]);
       expect(r.body).toMatchObject({ approved: 0, skipped: 0, leadsCreated: 0 });
       expect(r.body.notApplied).toEqual([
-        { id: fresh.id, reason: "Someone else is deciding this one right now. Try again in a moment." },
-        { id: fresh.id, reason: "Someone else is deciding this one right now. Try again in a moment." },
+        { id: fresh.id, reason: "Someone else is deciding this one right now. Try again in a moment.", code: "being_decided" },
+        { id: fresh.id, reason: "Someone else is deciding this one right now. Try again in a moment.", code: "being_decided" },
       ]);
       expect(await leadsOf(o.orgId)).toEqual([]);
       expect(await usageOf(o.orgId, "leads")).toBe(0);
@@ -1176,7 +1350,7 @@ suite("plays", () => {
       await q`UPDATE play_candidates SET decided_at = now(), decided_by = ${o.userId} WHERE id = ${c.id}`;
       expect(await usageOf(o.orgId, "leads")).toBe(1);
       // Straight away the candidate is still held by the dead request's claim...
-      expect((await approve(o, [c.id])).body).toMatchObject({ approved: 0, applied: [], notApplied: [{ id: c.id, reason: "Someone else is deciding this one right now. Try again in a moment." }] });
+      expect((await approve(o, [c.id])).body).toMatchObject({ approved: 0, applied: [], notApplied: [{ id: c.id, reason: "Someone else is deciding this one right now. Try again in a moment.", code: "being_decided" }] });
       // ...and two minutes on, the same approval finishes the job: the lead that exists is used, and nobody is charged twice.
       await q`UPDATE play_candidates SET decided_at = now() - interval '121 seconds' WHERE id = ${c.id}`;
       const retry = await approve(o, [c.id]);
@@ -1323,8 +1497,8 @@ suite("plays", () => {
       const r = await approve(o, [p.id, w.id], { enroll: true });
       expect(r.body).toMatchObject({ approved: 0, leadsCreated: 0, leadsExisting: 0, enrolled: 0 });
       expect(r.body.notApplied).toEqual([
-        { id: p.id, reason: "This person has asked not to be contacted through Scout, so they were not added." },
-        { id: w.id, reason: "This person is on your do-not-contact list, so they were not added." },
+        { id: p.id, reason: "This person has asked not to be contacted through Scout, so they were not added.", code: "do_not_contact" },
+        { id: w.id, reason: "This person is on your do-not-contact list, so they were not added.", code: "do_not_contact" },
       ]);
       expect(await leadsOf(o.orgId)).toEqual([]);
       expect(await usageOf(o.orgId, "leads")).toBe(0);
@@ -1790,12 +1964,12 @@ suite("plays", () => {
       const lateCandidate = (await candidatesOf(play.id)).find((x: any) => x.leadId === late.id);
       await db.update(S.leads).set({ status: "unsubscribed" }).where(S.eq(S.leads.id, late.id));
       const refused = await approve(o, [lateCandidate.id]);
-      expect(refused.body).toMatchObject({ approved: 0, tasksCreated: 0, notApplied: [{ id: lateCandidate.id, reason: "This person is on your do-not-contact list, so they were not added." }] });
+      expect(refused.body).toMatchObject({ approved: 0, tasksCreated: 0, notApplied: [{ id: lateCandidate.id, reason: "This person is on your do-not-contact list, so they were not added.", code: "do_not_contact" }] });
       expect(await candidate(lateCandidate.id)).toMatchObject({ status: "skipped", skipReason: "On a do-not-contact list." });
       expect((await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId))).length).toBe(0);
 
       const d = await approve(o, [c.id], { enroll: true });
-      expect(d.body).toEqual({ approved: 1, skipped: 0, leadsCreated: 0, leadsExisting: 1, tasksCreated: 1, enrolled: 0, queuedForEmail: 0, notApplied: [], applied: [c.id] });
+      expect(d.body).toEqual({ approved: 1, skipped: 0, leadsCreated: 0, leadsExisting: 1, tasksCreated: 1, enrolled: 0, queuedForEmail: 0, companiesKept: 0, notApplied: [], applied: [c.id] });
       expect(await usageOf(o.orgId, "leads")).toBe(0);
       const [lead] = await db.select().from(S.leads).where(S.eq(S.leads.id, moved.id));
       expect(lead.tags).toEqual(["vip", "play", `play:${play.id.slice(0, 8)}`]);
@@ -2075,7 +2249,11 @@ suite("plays", () => {
       expect(r.body.notes).toEqual(["Read 4 pages of scout.example."]);
       // The suggestion that could not be created, and the type that does not exist, are not offered.
       expect(r.body.plays.map((p: any) => p.type)).toEqual(["funding", "competitor_customers"]);
-      expect(r.body.plays[0]).toEqual({ type: "funding", name: "Just raised", config: { industries: ["SaaS"], days: 14 }, targetTitles: ["Head of Sales"], why: "Fresh budget.", available: true });
+      expect(r.body.plays[0]).toEqual({ type: "funding", name: "Just raised", config: { industries: ["SaaS"], days: 14 }, targetTitles: ["Head of Sales"], why: "Fresh budget.", available: true, needsSearch: false });
+      // No search source is connected: said once for the plan, and per suggestion. This competitor has a website, so its play works today and needs no hint.
+      expect(r.body.searchDependable).toBe(false);
+      expect(r.body.plays[1]).toMatchObject({ type: "competitor_customers", needsSearch: false });
+      expect(r.body.plays[1].setupHint).toBeUndefined();
       // Each one can be created exactly as offered.
       for (const p of r.body.plays) expect((await req("POST", "/v1/plays", o.token, { name: p.name, type: p.type, config: p.config, targetTitles: p.targetTitles })).status).toBe(201);
       expect(await usageOf(o.orgId, "searches")).toBe(1);
@@ -2085,6 +2263,60 @@ suite("plays", () => {
       const withPixel = await req("POST", "/v1/plays/plan", o.token, { website: "scout.example" });
       expect(withPixel.body.plays.map((p: any) => p.type)).toEqual(["funding", "competitor_customers", "website_visitors"]);
       expect(withPixel.body.plays[2]).toMatchObject({ available: true, config: { minIntentScore: 30, days: 14 }, targetTitles: ["Head of Sales", "VP Sales"] });
+    });
+
+    it("with no search source connected, the suggestions that work today come first and the others say what they need", async () => {
+      const o = await signup("plan-order");
+      const plays = [
+        { type: "hiring_role", name: "Hiring SDRs", config: { roles: ["Sales Development Representative"] }, targetTitles: ["Head of Sales"], why: "Growing teams buy." },
+        { type: "competitor_customers", name: "Acme's customers", config: { competitors: [{ name: "Acme" }, { name: "Initech" }] }, targetTitles: ["VP Sales"], why: "They already buy this." },
+        { type: "public_asks", name: "Asking in public", config: { category: "sales engagement" }, targetTitles: [], why: "They are asking." },
+        { type: "funding", name: "Just raised", config: {}, targetTitles: ["CEO"], why: "Fresh budget." },
+      ];
+      fake.plan = plan({ plays });
+      const r = await req("POST", "/v1/plays/plan", o.token, { website: "scout.example" });
+      expect(r.status, r.text).toBe(200);
+      expect(r.body.searchDependable).toBe(false);
+      // Reads its source directly: Hacker News conversations, the funding news. Searched: job boards, and competitors nobody gave a website for.
+      expect(r.body.plays.map((p: any) => [p.type, p.needsSearch, typeof p.setupHint === "string"])).toEqual([
+        ["public_asks", false, true],
+        ["funding", false, false],
+        ["hiring_role", true, true],
+        ["competitor_customers", true, true],
+      ]);
+      const byType = Object.fromEntries(r.body.plays.map((p: any) => [p.type, p]));
+      expect(byType.competitor_customers.setupHint).toBe("None of these competitors has a website filled in, so each has to be searched for first, and a search source is not connected on our side yet. Add their websites and this works today.");
+      expect(byType.public_asks.setupHint).toMatch(/^Works today on Hacker News, which is read directly\./);
+      expect(byType.hiring_role.setupHint).toMatch(/^Searching job boards needs a search source/);
+      // All of them can still be created as offered.
+      for (const p of r.body.plays) expect([p.type, p.available, (await req("POST", "/v1/plays", o.token, { name: p.name, type: p.type, config: p.config, targetTitles: p.targetTitles })).status]).toEqual([p.type, true, 201]);
+
+      // Per suggestion, with its own settings: a website for one competitor is enough to work today; conversations without Hacker News are all searched.
+      fake.plan = plan({ plays: [{ ...plays[2], config: { category: "sales engagement", sources: ["reddit", "linkedin"] } }, { ...plays[1], config: { competitors: [{ name: "Acme", domain: "acme.example" }, { name: "Initech" }] } }] });
+      const mixed = await req("POST", "/v1/plays/plan", o.token, { website: "scout.example" });
+      expect(mixed.body.plays.map((p: any) => [p.type, p.needsSearch])).toEqual([["competitor_customers", false], ["public_asks", true]]);
+      expect(mixed.body.plays[0].setupHint).toMatch(/^Works today for every competitor whose website you give/);
+      expect(mixed.body.plays[1].setupHint).toMatch(/Add Hacker News, which is read directly\.$/);
+
+      // With a search source connected the planner's own order stands and nothing carries a hint.
+      process.env.SERPER_API_KEY = "serper-test-key-not-real";
+      try {
+        fake.plan = plan({ plays });
+        const connected = await req("POST", "/v1/plays/plan", o.token, { website: "scout.example" });
+        expect(connected.body.searchDependable).toBe(true);
+        expect(connected.body.plays.map((p: any) => [p.type, p.needsSearch, p.setupHint])).toEqual([
+          ["hiring_role", true, undefined],
+          ["competitor_customers", true, undefined],
+          ["public_asks", false, undefined],
+          ["funding", false, undefined],
+        ]);
+      } finally {
+        delete process.env.SERPER_API_KEY;
+      }
+      // The same rule, asked directly.
+      expect(svc.searchNeed("public_asks", { sources: ["hackernews"] })).toEqual({ needsSearch: false, hint: undefined });
+      expect(svc.searchNeed("competitor_customers", { competitors: [{ name: "A", domain: "a.example" }] })).toEqual({ needsSearch: false, hint: undefined });
+      for (const t of ["funding", "website_visitors", "job_changes", "engagers_upload"] as const) expect(svc.searchNeed(t)).toEqual({ needsSearch: false });
     });
 
     it("saves nothing, refuses an address that is not a public website, and gives the search back when planning breaks", async () => {
@@ -2122,7 +2354,7 @@ suite("plays", () => {
       // as a run that could not look gives its unit back. (Nothing internal is added to the answer.)
       expect(await usageOf(o.orgId, "searches")).toBe(1);
       expect("siteRead" in unread.body).toBe(false);
-      expect(Object.keys(unread.body).sort()).toEqual(["competitors", "icp", "notes", "plays", "product", "titles"]);
+      expect(Object.keys(unread.body).sort()).toEqual(["competitors", "icp", "notes", "plays", "product", "searchDependable", "titles"]);
     });
   });
 
@@ -2847,7 +3079,7 @@ suite("plays", () => {
       expect(fired()).toBe(true);
       expect(r.status).toBe(200);
       expect(r.body).toMatchObject({ approved: 0, leadsCreated: 0, leadsExisting: 0, enrolled: 0, queuedForEmail: 0, applied: [] });
-      expect(r.body.notApplied).toEqual([{ id: c.id, reason: "This was removed while it was being approved, so nobody was added." }]);
+      expect(r.body.notApplied).toEqual([{ id: c.id, reason: "This was removed while it was being approved, so nobody was added.", code: "removed" }]);
       expect(await leadsOf(o.orgId)).toEqual([]);
       expect(await usageOf(o.orgId, "leads")).toBe(0);
       expect((await jobsOf(o.orgId, "play.enroll")).length).toBe(0);
@@ -2893,7 +3125,7 @@ suite("plays", () => {
       const r = await approve(o, candidates.map((c: any) => c.id));
       expect(fired).toBe(true);
       expect(r.body).toMatchObject({ approved: 1, tasksCreated: 1, applied: [candidates[1].id] });
-      expect(r.body.notApplied).toEqual([{ id: candidates[0].id, reason: "This was removed while it was being approved, so nothing was added." }]);
+      expect(r.body.notApplied).toEqual([{ id: candidates[0].id, reason: "This was removed while it was being approved, so nothing was added.", code: "removed" }]);
       const made = await db.select().from(S.tasks).where(S.eq(S.tasks.orgId, o.orgId));
       expect(made).toHaveLength(1);
       expect(made[0].body).toContain(candidates[1].evidenceUrl);
@@ -2905,7 +3137,7 @@ suite("plays", () => {
       const r = await approve(a.o, [a.c.id], { enroll: true });
       expect(fired()).toBe(true);
       expect(r.body).toMatchObject({ approved: 0, leadsCreated: 0, enrolled: 0, queuedForEmail: 0 });
-      expect(r.body.notApplied).toEqual([{ id: a.c.id, reason: "Decided elsewhere a moment ago." }]);
+      expect(r.body.notApplied).toEqual([{ id: a.c.id, reason: "Decided elsewhere a moment ago.", code: "already_decided" }]);
       expect((await candidate(a.c.id)).status).toBe("skipped");
       expect(await leadsOf(a.o.orgId)).toEqual([]);
       expect(await usageOf(a.o.orgId, "leads")).toBe(0);
@@ -2915,7 +3147,7 @@ suite("plays", () => {
       const rb = await approve(b.o, [b.c.id], { enroll: true });
       expect(firedB()).toBe(true);
       expect(rb.body).toMatchObject({ approved: 0, enrolled: 0, queuedForEmail: 0 });
-      expect(rb.body.notApplied).toEqual([{ id: b.c.id, reason: "Decided elsewhere a moment ago." }]);
+      expect(rb.body.notApplied).toEqual([{ id: b.c.id, reason: "Decided elsewhere a moment ago.", code: "already_decided" }]);
       // The lead exists once and was paid for once; it is not enrolled by the request that lost.
       expect((await leadsOf(b.o.orgId)).length).toBe(1);
       expect(await usageOf(b.o.orgId, "leads")).toBe(1);

@@ -384,6 +384,9 @@ export function readPostingPage(page: string, slug: string | null, leverStyle: b
   return { ...(role ? { role } : {}), ...(company ? { company } : {}) };
 }
 
+/** What a customer is told when the job boards themselves could not be searched (an answer from the open web is not one about the boards). */
+export const JOB_BOARDS_NOT_SEARCHED = "The job boards could not be searched this time, so no postings could be looked for. This is not a result about your market - try again later.";
+
 export async function findHiringCompanies(cfg: { roles: string[]; keywords?: string[]; locations?: string[]; companyDomains?: string[] }, opts: PlayEngineOptions = {}): Promise<PlayEngineResult> {
   const run = new PlayRun(opts);
   const limit = findingLimit(opts);
@@ -443,10 +446,20 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
   const queries = buildHiringQueries(roles, keywords, locations);
   const byCompany = new Map<string, JobPosting>();
   let asked = 0;
+  /** Searches of one job board each (`site:`), and how many of them got an answer about that board. */
+  let boardSearches = 0;
+  let boardsAnswered = 0;
   for (const q of queries) {
     if (asked >= MAX_SEARCHES || run.expired || !run.canSearch || byCompany.size >= limit * 2) break;
     asked++;
-    for (const r of await run.search(q, 20)) {
+    const before = { searches: run.trace.searches, failed: run.trace.failedSearches };
+    const results = await run.search(q, 20);
+    if (/^site:/i.test(q) && run.trace.searches > before.searches) {
+      boardSearches++;
+      // A search that failed - or whose results were all from somewhere else and had to be discarded - did not search the board.
+      if (run.trace.failedSearches === before.failed) boardsAnswered++;
+    }
+    for (const r of results) {
       const p = parseJobResult(r);
       if (!p || !roles.some((role) => roleMatches(p.title, role))) continue;
       const key = normCompanyName(p.companyName);
@@ -464,45 +477,64 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
   /* Open each checkable posting once: gone means dropped, readable means its own title is the evidence. */
   let gone = 0;
   let nameless = 0;
+  /** Postings on a board that can be checked, whose check could not be finished. */
+  let unfinished = 0;
   const check = async (p: JobPosting): Promise<PlayFinding | null> => {
     let state: "open" | "unchecked" = "unchecked";
     let posting = p;
-    if (p.checkable && !run.expired) {
-      // One request per posting, paced per board, and only where the board's robots.txt allows it.
-      const page = await run.fetchPage(p.url, { maxRequests: 3 });
+    // What the board said when it was asked for the posting: null when it was not asked, or would not say.
+    let page: Awaited<ReturnType<PlayRun["fetchPage"]>> | null = null;
+    if (p.checkable) {
+      // A posting that can be checked and whose check did not finish - no time left, no requests left, the
+      // board not answering, a page that could not be read - is not reported at all: "has a posting" was said of
+      // one that had been taken down, because the check ran out of requests before it reached the page.
+      if (run.expired) {
+        unfinished++;
+        return null;
+      }
+      // One page per posting (three requests: boards move a posting from one address to another), paced per board, and
+      // only where the board's robots.txt allows it. Reading those rules is not taken out of the three.
+      page = await run.fetchPage(p.url, { maxRequests: 3, robotsCharged: false });
       if (!page.ok && page.kind === "missing") {
         gone++;
         return null;
       }
-      if (page.ok) {
-        const landed = new URL(page.url);
-        const board = BOARDS.find((b) => b.host.test(landed.hostname.toLowerCase().replace(/^www\./, "")));
-        // A closed posting sends the visitor back to the company's list of jobs.
-        const at = board ? board.posting.exec(landed.pathname) : null;
-        if (!board || !at || /[?&]error=/i.test(landed.search)) {
-          gone++;
-          return null;
-        }
-        const $ = loadHtml(page.body, 400_000);
-        if (!$) {
-          // Fetched but unreadable (see util/html.ts): nothing was learned from it, so the posting stays unchecked.
-          run.unreadable(page.url);
-        } else {
-          // Some boards answer for a closed posting with a page that says so.
-          if (CLOSED.test(firstText($, "title, h1, h2, [role='alert'], .error, .message, .closed, .job-closed", 4000))) {
-            gone++;
-            return null;
-          }
-          const said = readPostingPage(page.body, at[1] ?? null, board.board === "Lever");
-          // The page now advertises a different role: the result was out of date.
-          if (said.role && !roles.some((role) => roleMatches(said.role!, role))) {
-            gone++;
-            return null;
-          }
-          posting = { ...p, title: said.role ?? p.title, ...(said.company ? { companyName: said.company, unnamed: false } : {}) };
-          state = "open";
-        }
+      if (!page.ok && !(page.kind === "refused" && page.why !== "unreadable page")) {
+        unfinished++;
+        return null;
       }
+      // (A board that refuses the check - its robots.txt, a 403 - has answered: the posting is as unknown as one
+      // on a board that cannot be checked, and is reported as that: it "has a posting", nobody looked further.)
+    }
+    if (page?.ok) {
+      const landed = new URL(page.url);
+      const board = BOARDS.find((b) => b.host.test(landed.hostname.toLowerCase().replace(/^www\./, "")));
+      // A closed posting sends the visitor back to the company's list of jobs.
+      const at = board ? board.posting.exec(landed.pathname) : null;
+      if (!board || !at || /[?&]error=/i.test(landed.search)) {
+        gone++;
+        return null;
+      }
+      const $ = loadHtml(page.body, 400_000);
+      if (!$) {
+        // Fetched but unreadable (see util/html.ts): nothing was learned from it, so the posting is not reported.
+        run.unreadable(page.url);
+        unfinished++;
+        return null;
+      }
+      // Some boards answer for a closed posting with a page that says so.
+      if (CLOSED.test(firstText($, "title, h1, h2, [role='alert'], .error, .message, .closed, .job-closed", 4000))) {
+        gone++;
+        return null;
+      }
+      const said = readPostingPage(page.body, at[1] ?? null, board.board === "Lever");
+      // The page now advertises a different role: the result was out of date.
+      if (said.role && !roles.some((role) => roleMatches(said.role!, role))) {
+        gone++;
+        return null;
+      }
+      posting = { ...p, title: said.role ?? p.title, ...(said.company ? { companyName: said.company, unnamed: false } : {}) };
+      state = "open";
     }
     // Still known only by an address that is not a name: not shown under a made-up one.
     if (posting.unnamed) {
@@ -536,6 +568,12 @@ export async function findHiringCompanies(cfg: { roles: string[]; keywords?: str
   }
   if (nameless > 0) run.note(`${nameless} posting${nameless === 1 ? "" : "s"} ${nameless === 1 ? "was" : "were"} left out because the company behind ${nameless === 1 ? "it" : "them"} could not be named from the posting.`);
   if (gone > 0) run.note(`${gone} posting${gone === 1 ? "" : "s"} found by search ${gone === 1 ? "was" : "were"} no longer there when opened, so ${gone === 1 ? "it was" : "they were"} left out.`);
+  if (unfinished > 0) run.note(`${unfinished} posting${unfinished === 1 ? "" : "s"} found by search could not be opened to check that ${unfinished === 1 ? "it is" : "they are"} still there, so ${unfinished === 1 ? "it was" : "they were"} left out.`);
+
+  // Postings live on the job boards. When not one search of a board got an answer about that board, the boards were
+  // not searched - whatever a search of the open web sent back - and with nothing found any other way, this run
+  // did not look: that is said, instead of "nothing found".
+  if (boardSearches > 0 && boardsAnswered === 0 && fromSearch === 0 && careersReached === 0 && run.searchAnswered && !run.trace.blocked) run.block(JOB_BOARDS_NOT_SEARCHED);
 
   const trace = run.finish(run.searchAnswered || careersReached > 0, "Nothing could be searched or read, so no postings could be checked.");
   return { findings: rankFindings(findings, limit), trace };

@@ -7,7 +7,7 @@
  * as "a customer of Acme" when the page said no such thing.
  */
 import { describe, expect, it } from "vitest";
-import { caseSlugOf, cleanLogoName, customerLinksFromSitemap, extractCustomers, parseHeadline, slugCustomerName, storyWorthOpening, verifyAiCustomers } from "./extractCustomers.js";
+import { caseSlugOf, cleanLogoName, customerLinksFromSitemap, extractCustomers, parseHeadline, readLogoName, slugCustomerName, storyWorthOpening, verifyAiCustomers } from "./extractCustomers.js";
 import { cleanCompanyName, isDescriptorName, isSameCompany, isVendorName, slugToName } from "./shared.js";
 import { CUSTOMERS_PAGE, page } from "./kit.test.js";
 
@@ -539,8 +539,8 @@ describe("the company's full name", () => {
     expect(first("/customers/wonka-peninsula-beverages", `<h3>How Wonka Drove Change and Strengthened Alignment with Acme</h3>`)).toMatchObject({ name: "Wonka Peninsula Beverages", headline: "How Wonka Drove Change and Strengthened Alignment with Acme", storyUrl: "https://acme.com/customers/wonka-peninsula-beverages" });
     // Words in the address that are page furniture are not part of a name.
     expect(first("/customers/hooli-onboarding-success", `<h3>How Hooli Drove Change with Acme</h3>`)).toMatchObject({ name: "Hooli" });
-    // And a headline about somebody else is not stretched to fit.
-    expect(first("/customers/how-we-helped-a-bank", `<h3>How Initech Drove Change with Acme</h3>`)).toMatchObject({ name: "Initech" });
+    // An address that names nobody: the card's headline is not taken on trust (see "a name read from a line of a card").
+    expect(first("/customers/how-we-helped-a-bank", `<h3>How Initech Drove Change with Acme</h3>`)).toBeUndefined();
   });
 
   it("one story is one customer: two names for it become the fuller one", () => {
@@ -652,5 +652,189 @@ describe("more of what real story pages do", () => {
     // An everyday word in lower case is still a word, and a lower-case word that is not the headline's subject is not a name.
     expect(names(page("How teams transformed onboarding | Acme", `<main><article><h1>How teams transformed onboarding</h1></article></main>`), "https://acme.com/customers/teams")).toEqual([]);
     expect(names(page("Stories | Acme", `<main><article><h1>Closing the loop on feedback</h1></article></main>`), "https://acme.com/customers/loop")).toEqual([]);
+  });
+});
+
+/* ───────────────────────── what a second look at unseen sites found ───────────────────────── */
+
+describe("a name read from a line of a card is the story's customer only when the story's address carries it", () => {
+  const listing = (cards: string): string => page("Customers | Acme", `<main><h1>Customers</h1><div class="grid">${cards}<div class="item"><a href="/customers/globex"><h3>How Globex cut onboarding time</h3></a></div><div class="item"><a href="/customers/hooli"><h3>How Hooli ships faster</h3></a></div></div></main>`);
+  const read = (cards: string, url = "https://acme.com/customers") => extractCustomers(listing(cards), url, ACME);
+
+  it("a figure's caption on a story card names nobody: 'Volume increase supported' is not a company called Volume", () => {
+    // The card of a story whose company writes itself in lower case, with a figure beside its headline.
+    const out = read(`<div class="item"><a href="/customers/q9z"><p>How q9z built support that answers itself</p><div><span>3x</span><span>Volume increase supported</span></div></a></div>`);
+    const names = out.hits.map((h) => h.name);
+    expect(names).not.toContain("Volume");
+    // The headline's subject is the story's whole address, after "How": that is the customer, written as the page writes it.
+    expect(out.hits.find((h) => h.storyUrl === "https://acme.com/customers/q9z")).toMatchObject({ name: "q9z", confidence: 0.9, headline: "How q9z built support that answers itself" });
+  });
+
+  it("a headline about one company on a card that leads to another's story is not that story's customer", () => {
+    const out = read(`<div class="item"><a href="/customers/initech"><div>Soylent doubles its pipeline</div></a></div>`);
+    expect(out.hits.map((h) => h.name)).not.toContain("Soylent");
+    // The story is not counted as told: opening it is how its customer is learned.
+    expect(out.told).not.toContain("acme.com/customers/initech");
+  });
+
+  it("the address may carry the name whole, in part, joined up, or as its initials", () => {
+    const one = (href: string, headline: string) => read(`<div class="item"><a href="${href}"><h3>${headline}</h3></a></div>`).hits.find((h) => h.name !== "Globex" && h.name !== "Hooli");
+    expect(one("/customers/how-initech-drove-change", "How Initech Drove Change with Acme")).toMatchObject({ name: "Initech" });
+    expect(one("/customers/vandelay", "How Vandelay Industries cut costs")).toMatchObject({ name: "Vandelay Industries" });
+    expect(one("/customers/cityhealth-story", "How City Health doubled its bookings")).toMatchObject({ name: "City Health" });
+    expect(one("/customers/csw", "How Central Storage & Warehouse unified five warehouses")).toMatchObject({ name: "Central Storage & Warehouse" });
+    // A word any address might have ("global", "company") is not the name's.
+    expect(one("/customers/global-rollout", "How Global Payments rolled out in a month")).toBeUndefined();
+  });
+
+  it("on the story's own page, a headline's name counts when the address carries it or the page says it twice", () => {
+    const story = (path: string, title: string, h1: string) => extractCustomers(page(title, `<main><article><h1>${h1}</h1><p>Some text about the work.</p></article></main>`), `https://acme.com${path}`, ACME).hits.map((h) => h.name);
+    expect(story("/customers/how-we-helped-a-bank", "How Initech Drove Change with Acme | Acme", "How Initech Drove Change with Acme")).toEqual(["Initech"]);
+    // Said once, under an address that names nobody: not enough.
+    expect(story("/customers/how-we-helped-a-bank", "Customer stories | Acme", "Volume increase supported")).toEqual([]);
+    expect(story("/customers/q9z", "How q9z built support that answers itself | Acme", "How q9z built support that answers itself")).toEqual(["q9z"]);
+    // Three letters in lower case are a name only as the story's whole address and the headline's subject.
+    expect(story("/customers/all", "How all teams ship faster | Acme", "How all teams ship faster")).toEqual([]);
+  });
+});
+
+describe("a name followed by a description of the company", () => {
+  it("ends at the comma: the description is not part of the name", () => {
+    expect(parseHeadline("How Globex, Ruritania's Fastest Growing EdTech, Drove Sales Efficiency", "Acme")).toBe("Globex");
+    expect(parseHeadline("How Globex, the leading importer, cut costs by a third", "Acme")).toBe("Globex");
+    expect(parseHeadline("Globex, Inc. doubles its pipeline with Acme", "Acme")).toBe("Globex");
+    // No comma, no change.
+    expect(parseHeadline("How Globex Global Logistics saved 1,000 hours", "Acme")).toBe("Globex Global Logistics");
+    expect(parseHeadline("How Globex's team cut costs", "Acme")).toBe("Globex");
+  });
+});
+
+describe("a logo described by its file's name", () => {
+  it("loses what the file name says about the picture, and keeps the company", () => {
+    expect(readLogoName("voltage-park-logo-full")).toEqual({ name: "Voltage Park", fromFileName: true });
+    expect(readLogoName("globex_logo_dark_2x.png")).toEqual({ name: "Globex", fromFileName: true });
+    expect(readLogoName("logo-initech-wordmark-white")).toEqual({ name: "Initech", fromFileName: true });
+    expect(readLogoName("customer-soylent-icon-200x80")).toEqual({ name: "Soylent", fromFileName: true });
+    // An abbreviation gets its capitals back, on its own or run into a word.
+    expect(readLogoName("qvxz-securities-logo")).toEqual({ name: "QVXZ Securities", fromFileName: true });
+    expect(readLogoName("tvscredit")).toEqual({ name: "TVS Credit", fromFileName: true });
+    // A name somebody wrote is as it was written - and may end in a word a file name would not.
+    expect(readLogoName("Voltage Park Full logo")).toEqual({ name: "Voltage Park Full", fromFileName: false });
+    expect(readLogoName("Globex Logo")).toEqual({ name: "Globex", fromFileName: false });
+    expect(readLogoName("PW")).toEqual({ name: "PW", fromFileName: false });
+    expect(cleanLogoName("globex-logo-white.svg")).toBe("Globex");
+  });
+
+  it("names nobody when fewer than four letters are left, or one word that is two everyday words run together", () => {
+    for (const raw of ["pw", "pw_logo", "3m-logo-black", "logo-full", "logo", "angelone_logo", "angelone", "dropbox-logo", "firstbank"]) expect(readLogoName(raw), raw).toBeNull();
+    // One word that is not two: reported, as a file name gives it.
+    expect(readLogoName("soylent")).toEqual({ name: "Soylent", fromFileName: true });
+    expect(readLogoName("unext_logo")).toEqual({ name: "Unext", fromFileName: true });
+  });
+
+  it("ranks below every logo the page names in words, so a list fills with those first", () => {
+    const html = page(
+      "Acme",
+      `<main><h2>Trusted by teams everywhere</h2><div class="strip">
+        <img src="/l/1.svg" alt="qvxz-securities-logo"><img src="/l/2.svg" alt="tvscredit"><img src="/l/3.svg" alt="pw"><img src="/l/4.svg" alt="angelone_logo">
+        <img src="/l/5.svg" alt="Globex logo"><img src="/l/6.svg" alt="Initech"><img src="/l/7.svg" alt="Hooli"><img src="/l/8.svg" alt="voltage-park-logo-full">
+      </div></main>`,
+    );
+    const hits = extractCustomers(html, "https://acme.com/", ACME).hits.sort((a, b) => b.confidence - a.confidence);
+    expect(hits.map((h) => [h.name, h.confidence])).toEqual([
+      ["Globex", 0.8],
+      ["Initech", 0.65],
+      ["Hooli", 0.65],
+      ["QVXZ Securities", 0.4],
+      ["Voltage Park", 0.4],
+      ["TVS Credit", 0.35],
+    ]);
+    // The words shown as proof are the page's own.
+    expect(hits.find((h) => h.name === "Voltage Park")!.quote).toBe("voltage-park-logo-full");
+  });
+
+  it("does not stretch a story's name with what its logo's file is called", () => {
+    const out = extractCustomers(
+      page("Customers | Acme", `<main><h1>Customers</h1><div class="grid"><div class="item"><a href="/customers/voltage-park"><img src="/l/vp.svg" alt="voltage-park-logo-full"><h3>Why Voltage Park switched to Acme</h3></a></div><div class="item"><a href="/customers/globex"><h3>How Globex cut onboarding time</h3></a></div><div class="item"><a href="/customers/hooli"><h3>How Hooli ships faster</h3></a></div></div></main>`),
+      "https://acme.com/customers",
+      ACME,
+    );
+    expect(out.hits.map((h) => h.name).sort()).toEqual(["Globex", "Hooli", "Voltage Park"]);
+  });
+});
+
+describe("logos drawn without an image: the layer's name is the logo's", () => {
+  const leaf = (name: string): string => `<li><div class="f-1" data-framer-name="${name}"><div data-framer-component-type="SVG" class="f-2" style="background-image:url('data:image/svg+xml,x')"></div></div></li>`;
+  const wall = (names: string[], label = "Trusted by fast-growing companies around the world"): string =>
+    page("Acme", `<main><div data-framer-name="Section"><div data-framer-name="Container Large"><p>${label}</p><div data-framer-name="Ticker Dark Logos"><ul>${names.map(leaf).join("")}</ul></div><div data-framer-name="16px"></div></div></div></main>`);
+
+  it("reads a wall of them under a label that says they are customers", () => {
+    const hits = extractCustomers(wall(["Globex", "Initech", "Hooli", "Soylent"]), "https://acme.com/", ACME).hits;
+    expect(hits.map((h) => h.name)).toEqual(["Globex", "Initech", "Hooli", "Soylent"]);
+    expect(hits[0]).toMatchObject({ via: "logo", quote: "Globex", confidence: 0.65, headline: "Trusted by fast-growing companies around the world" });
+  });
+
+  it("the same with data-name", () => {
+    const html = page("Acme", `<main><h2>Our customers</h2><div class="row">${["Globex", "Initech", "Hooli"].map((n) => `<div data-name="${n}"><svg viewBox="0 0 1 1"><path d="M0 0"/></svg></div>`).join("")}</div></main>`);
+    expect(extractCustomers(html, "https://acme.com/", ACME).hits.map((h) => h.name)).toEqual(["Globex", "Initech", "Hooli"]);
+  });
+
+  it("layers that are furniture are not names, and neither is a layer with words or other layers in it", () => {
+    const hits = extractCustomers(wall(["Globex", "Initech", "Hooli", "Icon Wrapper", "Line", "Plus", "64px - Recommended for Desktop", "Variant 1", "Logo Wrapper", "Rectangle 9144", "Profile Image"]), "https://acme.com/", ACME).hits;
+    expect(hits.map((h) => h.name)).toEqual(["Globex", "Initech", "Hooli"]);
+    // "Ticker Dark Logos" and "Container Large" hold the logos; they are not one.
+    expect(hits.some((h) => /Ticker|Container|Section/.test(h.name))).toBe(false);
+    const worded = page("Acme", `<main><h2>Trusted by teams</h2><div><div data-framer-name="Globex"><p>Read our story</p><svg></svg></div><div data-framer-name="Initech"><p>Read more</p><svg></svg></div><div data-framer-name="Hooli"><p>More</p><svg></svg></div></div></main>`);
+    expect(extractCustomers(worded, "https://acme.com/", ACME).hits).toEqual([]);
+  });
+
+  it("without a label that says customers, or under one that says something else, they name nobody", () => {
+    expect(extractCustomers(wall(["Globex", "Initech", "Hooli"], "Everything in one place"), "https://acme.com/", ACME).hits).toEqual([]);
+    expect(extractCustomers(wall(["Globex", "Initech", "Hooli"], "Integrates with the tools you use"), "https://acme.com/", ACME).hits).toEqual([]);
+    expect(extractCustomers(wall(["Globex", "Initech", "Hooli"], "Backed by the best investors"), "https://acme.com/", ACME).hits).toEqual([]);
+  });
+});
+
+describe("testimonial cards with no quote markup", () => {
+  const card = (who: string, role: string, said: string): string =>
+    `<div class="p-4 border"><div class="flex"><a href="https://social.example/post/1"><img class="w-10 rounded-full" alt="Profile image of ${role}" src="/a/x.jpg"><div><div class="font-bold">${who}</div><div class="text-xs">${role}</div></div></a></div><div class="text">${said}</div></div>`;
+  // The paragraph under the heading is too long to be a label of its own: the heading is what says who is speaking.
+  const section = (label: string, cards: string): string =>
+    page("Acme", `<main><div class="container"><h2>${label}</h2><p>From the smallest sites to the very largest ones, in every part of the world there is, and on every day of the week, this is where the work gets done, and where it has been getting done for years.</p><div class="grid">${cards}</div></div></main>`);
+  const CARDS =
+    card("Jane Doe", "Co-founder and CEO at Globex", "We are massive users of Acme here at Globex.") +
+    card("Sam Lee", "Founder and CTO at 42things", "Been a very happy customer of Acme. Wonderful to see new, better options.") +
+    card("Dana Scully", "SEO consultant and former Initech lead", "My favourite alternative so far is Acme. Not free, but so easy to use.") +
+    card("Rob Hope", "Product designer and founder", "Just replaced my whole network's analytics with Acme and I am impressed.");
+
+  it("the line that says where the speaker works names a customer, under a heading that says customers are speaking", () => {
+    for (const label of ["People \u2764\uFE0F Acme", "What our customers say", "Testimonials", "Loved by teams everywhere", "Wall of love"]) {
+      const hits = extractCustomers(section(label, CARDS), "https://acme.com/", ACME).hits;
+      expect(hits.map((h) => h.name), label).toEqual(["Globex", "42things"]);
+      expect(hits[0], label).toMatchObject({ via: "testimonial", quote: "Co-founder and CEO at Globex", confidence: 0.65 });
+    }
+  });
+
+  it("the same cards under a heading that says something else name nobody", () => {
+    for (const label of ["Our speakers", "Meet the team", "Our investors", "Latest from the blog"]) expect(extractCustomers(section(label, CARDS), "https://acme.com/", ACME).hits, label).toEqual([]);
+  });
+
+  it("a line with nothing said beside it, an investor, and the site's own people are not customers", () => {
+    const bare = `<div class="p-4"><div class="font-bold">Jane Doe</div><div class="text-xs">Co-founder and CEO at Globex</div></div>`;
+    expect(extractCustomers(section("What our customers say", bare), "https://acme.com/", ACME).hits).toEqual([]);
+    // A grid of people and their jobs, with nothing said by any of them.
+    const people = ["Globex", "Initech", "Hooli", "Soylent"].map((c, i) => `<div class="p-4"><div class="font-bold">Person ${i} Doe</div><div class="text-xs">Head of Operations at ${c}</div></div>`).join("");
+    expect(extractCustomers(section("Trusted by teams everywhere", people), "https://acme.com/", ACME).hits).toEqual([]);
+    const others = card("Pat Kim", "General Partner at Massive Dynamic Ventures", "We backed Acme early and have never looked back since then.") + card("Lee Wong", "Head of Support at Acme", "We built Acme for teams like ours, and we use it every single day.");
+    expect(extractCustomers(section("What our customers say", others), "https://acme.com/", ACME).hits).toEqual([]);
+  });
+});
+
+describe("how much of the site a page links to", () => {
+  it("counts the site's other pages, not the page's own section or other sites", () => {
+    const html = page("Clients | Acme", `<body><nav><a href="/">Home</a><a href="/pricing">Pricing</a><a href="/docs/">Docs</a><a href="https://acme.com/blog?x=1">Blog</a><a href="https://other.example/">Other</a></nav><main><a href="/clients/leads">Leads</a><a href="/clients/win">Win</a><a href="/pricing/">Pricing again</a></main></body>`);
+    expect(extractCustomers(html, "https://acme.com/clients", ACME).siteLinks).toBe(4);
+    const booking = page("Rhonda | Acme", `<main><h1>Rhonda</h1><a href="/clients/leads">Leads</a><a href="/clients/win">Win</a><a href="/clients/client-update">Client Update</a></main>`);
+    expect(extractCustomers(booking, "https://acme.com/clients", ACME).siteLinks).toBe(0);
   });
 });

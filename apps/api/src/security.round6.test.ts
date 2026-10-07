@@ -294,7 +294,7 @@ suite("round 6: negative-path findings", () => {
 
   // ── 2. Ceilings under parallel requests ────────────────────────────────────────────
   describe("per-workspace ceilings hold for requests that arrive together", () => {
-    it("40 parallel creates of each kind never leave more rows than the cap", async () => {
+    it("40 parallel creates of each kind never leave more rows than the cap, and the cap itself stays reachable", async () => {
       const o = await signup("caps");
       const types = (await req("GET", "/v1/signals/types", o.token)).body.types;
       const sigType = typeof types[0] === "string" ? types[0] : (types[0].id ?? types[0].type);
@@ -320,14 +320,21 @@ suite("round 6: negative-path findings", () => {
         const rs = await Promise.all(Array.from({ length: 40 }, (_, i) => req("POST", mk(i)[0], o.token, mk(i)[1])));
         const n = await countOf(table, o.orgId, extra ?? "");
         report.push(`${noun}: cap ${cap}, rows ${n}, ${JSON.stringify(tally(rs))}`);
-        // Exactly the cap: never more, and the cap itself is still reachable.
-        expect(n, report.join(" | ")).toBe(Math.max(cap, already));
+        // Never more than the cap. The count is conservative (a row that has landed is counted
+        // with its reservation until its request has been answered), so a burst may stop one
+        // or two short of it - but every "created" answer is a row, and every other answer is the limit.
+        expect(n, report.join(" | ")).toBeLessThanOrEqual(Math.max(cap, already));
         const made = rs.filter((r) => r.status >= 200 && r.status < 300).length;
-        expect(made, report.join(" | ")).toBe(Math.max(0, cap - already));
+        expect(made, report.join(" | ")).toBe(n - already);
+        if (already < cap) expect(made, report.join(" | ")).toBeGreaterThanOrEqual(1);
         const refused = rs.filter((r) => r.status === 403);
         expect(refused.length, report.join(" | ")).toBe(40 - made);
         for (const r of refused) expect(r.body.error.code).toBe("limit_reached");
         expect(refused[0].body.error.message).toMatch(new RegExp(`reached the limit of ${cap} `));
+        // The cap itself is still reachable: one at a time, the remaining places fill and then it is full.
+        expect(limits.reservedCount(`row:`)).toBe(0);
+        for (let i = 0; i < cap + 1; i++) await req("POST", mk(100 + i)[0], o.token, mk(100 + i)[1]);
+        expect(await countOf(table, o.orgId, extra ?? ""), report.join(" | ")).toBe(Math.max(cap, already));
       }
     }, 120_000);
 
@@ -360,16 +367,210 @@ suite("round 6: negative-path findings", () => {
       // ...and then it is free again, by itself.
       expect(limits.reservedCount(`row:lists:${o.orgId}`)).toBe(0);
       await limits.assertRowCap(db, S.lists, o.orgId, "lists");
-      // A row that has landed is not counted twice with the reservation that made room for it.
+      // Outside a request a reservation stands for its row until it runs out - also once the
+      // row has landed (nothing tells it so). Conservative: a second create straight after
+      // the first is counted against both the row and the reservation.
       process.env.ROW_CAP_LISTS = "3";
       limits.resetReservations();
-      for (let i = 0; i < 3; i++) {
-        await limits.assertRowCap(db, S.lists, o.orgId, "lists");
-        await db.insert(S.lists).values({ orgId: o.orgId, name: `direct ${i}` });
-      }
+      await db.insert(S.lists).values({ orgId: o.orgId, name: "direct 0" });
+      await limits.assertRowCap(db, S.lists, o.orgId, "lists"); // 1 row + this one = 2
+      await db.insert(S.lists).values({ orgId: o.orgId, name: "direct 1" });
+      // 2 rows, 1 still reserved, 1 more wanted: refused although only 2 of 3 exist...
+      await expect(limits.assertRowCap(db, S.lists, o.orgId, "lists")).rejects.toMatchObject({ status: 403 });
+      // ...and exact again as soon as the reservation has run out.
+      vi.setSystemTime(Date.now() + 6_000);
+      await limits.assertRowCap(db, S.lists, o.orgId, "lists");
+      await db.insert(S.lists).values({ orgId: o.orgId, name: "direct 2" });
+      vi.setSystemTime(Date.now() + 6_000);
       await expect(limits.assertRowCap(db, S.lists, o.orgId, "lists")).rejects.toMatchObject({ status: 403 });
       expect(await countOf("lists", o.orgId)).toBe(3);
     });
+
+    /** A stand-in database whose row count is a number here, so the order of events is the test's to fix. */
+    function standIn() {
+      const state = { rows: 0, jobs: 0 };
+      const rowsDb = { select: () => ({ from: () => ({ where: async () => [{ n: state.rows }] }) }) };
+      const jobsDb = { execute: async () => [{ n: state.jobs }] };
+      return { state, rowsDb: rowsDb as any, jobsDb: jobsDb as any };
+    }
+    const gate = () => {
+      let open!: () => void;
+      const p = new Promise<void>((r) => {
+        open = r;
+      });
+      return { p, open };
+    };
+    const beat = () => new Promise((r) => setTimeout(r, 5));
+
+    it("a create that arrives after an earlier one has committed and ended still sees the ones in flight (fixed order of events)", async () => {
+      process.env.ROW_CAP_LISTS = "5";
+      const { state, rowsDb } = standIn();
+      const org = `org-${u8()}`;
+      const results: string[] = [];
+      const create = (name: string, commit: { p: Promise<void> }) =>
+        limits.withReservationScope(async () => {
+          try {
+            await limits.assertRowCap(rowsDb, { orgId: "org_id" }, org, "lists");
+          } catch (e: any) {
+            results.push(`${name}: refused (${e.code})`);
+            return;
+          }
+          await commit.p;
+          state.rows++;
+          results.push(`${name}: created`);
+        });
+      const g = Object.fromEntries(["A", "B", "C", "D", "E", "F", "G"].map((n) => [n, gate()]));
+      // Five creates are in flight: each counted 0 rows and was let through.
+      const five = ["A", "B", "C", "D", "E"].map((n) => create(n, g[n]));
+      await beat();
+      // The first commits and its request ends.
+      g.A.open();
+      await five[0];
+      await beat();
+      expect(state.rows).toBe(1);
+      // A sixth arrives: the database holds 1 row and four more are on their way. It does not fit.
+      const sixth = create("F", g.F);
+      await beat();
+      for (const n of ["B", "C", "D", "E", "F"]) g[n].open();
+      await Promise.all([...five, sixth]);
+      expect(results.filter((r) => r.endsWith("created")).sort()).toEqual(["A: created", "B: created", "C: created", "D: created", "E: created"]);
+      expect(results).toContain("F: refused (limit_reached)");
+      expect(state.rows).toBe(5);
+      // Nothing stays reserved once every request has been answered, and the next one is refused on the rows alone.
+      expect(limits.reservedCount(`row:lists:${org}`)).toBe(0);
+      await create("G", g.G);
+      expect(results).toContain("G: refused (limit_reached)");
+
+      // The same order of events for the job ceilings: refused once the workspace is AT the ceiling.
+      process.env.JOB_OPEN_TYPE_CAP = "5";
+      process.env.JOB_OPEN_TOTAL_CAP = "50";
+      const j = standIn();
+      const jobOrg = randomUUID();
+      const outcomes: string[] = [];
+      const enqueue = (name: string, commit: { p: Promise<void> }) =>
+        limits.withReservationScope(async () => {
+          try {
+            await limits.guardJobCapacity(j.jobsDb, jobOrg, "lead.enrich");
+          } catch (e: any) {
+            outcomes.push(`${name}: refused (${e.code})`);
+            return;
+          }
+          await commit.p;
+          j.state.jobs++;
+          outcomes.push(`${name}: queued`);
+        });
+      const h = Object.fromEntries(["A", "B", "C", "D", "E", "F"].map((n) => [n, gate()]));
+      const firstFive = ["A", "B", "C", "D", "E"].map((n) => enqueue(n, h[n]));
+      await beat();
+      h.A.open();
+      await firstFive[0];
+      await beat();
+      const late = enqueue("F", h.F);
+      await beat();
+      for (const n of ["B", "C", "D", "E", "F"]) h[n].open();
+      await Promise.all([...firstFive, late]);
+      expect(outcomes).toContain("F: refused (queue_full)");
+      expect(j.state.jobs).toBe(5);
+      expect(limits.reservedCount(`job:${jobOrg}`)).toBe(0);
+    });
+
+    it("200 rounds of 50 parallel creates under CPU load never pass the cap - with counts and commits landing in any order", async () => {
+      process.env.ROW_CAP_LISTS = "5";
+      process.env.JOB_OPEN_TYPE_CAP = "5";
+      process.env.JOB_OPEN_TOTAL_CAP = "7";
+      // A busy loop on the same thread, so timers and promise callbacks fire late and out of their usual order.
+      const spin = setInterval(() => {
+        const until = performance.now() + 2;
+        while (performance.now() < until);
+      }, 1);
+      const pause = (ms: number) => new Promise((r) => (ms <= 0 ? setImmediate(r) : setTimeout(r, ms)));
+      const worst = { rows: 0, jobs: 0, total: 0 };
+      let fewest = 99;
+      try {
+        for (let round = 0; round < 200; round++) {
+          const state = { rows: 0, jobsA: 0, jobsB: 0 };
+          // The count is read at some moment during the query, as a real one is.
+          const slowCount = async (read: () => number) => {
+            await pause(Math.random() * 3 - 1);
+            const n = read();
+            await pause(Math.random() * 3 - 1);
+            return [{ n }];
+          };
+          const rowsDb: any = { select: () => ({ from: () => ({ where: () => slowCount(() => state.rows) }) }) };
+          const org = randomUUID();
+          // Which count a job query is: the first of a guard is the type's, the second the total.
+          const jobsDbFor = (type: "A" | "B") => {
+            let calls = 0;
+            return { execute: () => slowCount(calls++ === 0 ? () => (type === "A" ? state.jobsA : state.jobsB) : () => state.jobsA + state.jobsB) } as any;
+          };
+          // Arrivals are spread out, so some creates arrive after earlier ones have committed and ended
+          // while others are still between their check and their insert.
+          const createRow = () =>
+            limits.withReservationScope(async () => {
+              await pause(Math.random() * 8 - 1);
+              try {
+                await limits.assertRowCap(rowsDb, { orgId: "org_id" }, org, "lists");
+              } catch {
+                return;
+              }
+              await pause(Math.random() * 6 - 1); // the insert
+              state.rows++;
+              await pause(Math.random() * 2 - 1); // the rest of the request (audit, the answer)
+            });
+          const queueJob = (type: "A" | "B") =>
+            limits.withReservationScope(async () => {
+              await pause(Math.random() * 8 - 1);
+              try {
+                await limits.guardJobCapacity(jobsDbFor(type), org, `type.${type}`);
+              } catch {
+                return;
+              }
+              await pause(Math.random() * 6 - 1);
+              if (type === "A") state.jobsA++;
+              else state.jobsB++;
+              await pause(Math.random() * 2 - 1);
+            });
+          await Promise.all([...Array.from({ length: 50 }, createRow), ...Array.from({ length: 25 }, () => queueJob("A")), ...Array.from({ length: 25 }, () => queueJob("B"))]);
+          worst.rows = Math.max(worst.rows, state.rows);
+          worst.jobs = Math.max(worst.jobs, state.jobsA, state.jobsB);
+          worst.total = Math.max(worst.total, state.jobsA + state.jobsB);
+          fewest = Math.min(fewest, state.rows);
+          if (state.rows > 5 || state.jobsA > 5 || state.jobsB > 5 || state.jobsA + state.jobsB > 7) break;
+          // Every request has been answered: nothing is left reserved, and one at a time the cap is reached exactly.
+          expect(limits.reservedCount(`row:lists:${org}`) + limits.reservedCount(`job:${org}`)).toBe(0);
+          for (let i = 0; i < 6; i++) await createRow();
+          expect(state.rows).toBe(5);
+        }
+      } finally {
+        clearInterval(spin);
+      }
+      expect(worst).toEqual({ rows: expect.any(Number), jobs: expect.any(Number), total: expect.any(Number) });
+      expect(worst.rows).toBeLessThanOrEqual(5);
+      expect(worst.jobs).toBeLessThanOrEqual(5);
+      expect(worst.total).toBeLessThanOrEqual(7);
+      // Conservative, not useless: a burst always creates something.
+      expect(fewest).toBeGreaterThanOrEqual(1);
+    }, 180_000);
+
+    it("the same through the real routes and database: rounds of 50 parallel creates under CPU load stay within the cap", async () => {
+      process.env.ROW_CAP_LISTS = "5";
+      const spin = setInterval(() => {
+        const until = performance.now() + 2;
+        while (performance.now() < until);
+      }, 1);
+      try {
+        for (let round = 0; round < 8; round++) {
+          const o = await signup(`caps-load-${round}`);
+          const rs = await Promise.all(Array.from({ length: 50 }, (_, i) => req("POST", "/v1/leads/lists", o.token, { name: `R${round}-${i}` })));
+          const n = await countOf("lists", o.orgId);
+          expect(n, `round ${round}: ${JSON.stringify(tally(rs))}`).toBeLessThanOrEqual(5);
+          expect(rs.filter((r) => r.status === 201).length).toBe(n);
+          expect(n).toBeGreaterThanOrEqual(1);
+        }
+      } finally {
+        clearInterval(spin);
+      }
+    }, 180_000);
 
     it("a request that adds several rows reserves all of them, and is told how many still fit", async () => {
       process.env.ROW_CAP_VISIBILITYPROMPTS = "10";
@@ -402,10 +603,23 @@ suite("round 6: negative-path findings", () => {
       const hook = (await req("POST", "/v1/webhooks", o.token, { url: `https://hooks.round6-test.example/jobs/${u8()}` })).body;
       await q`DELETE FROM jobs WHERE org_id = ${o.orgId}`;
       const e1 = await Promise.all(Array.from({ length: 40 }, () => req("POST", `/v1/leads/${lead.id}/enrich`, o.token, {})));
-      expect(await openJobs(o.orgId, "lead.enrich"), JSON.stringify(tally(e1))).toBe(5);
-      expect(tally(e1)).toEqual({ "202": 5, "429:queue_full": 35 });
+      // Never past the ceiling; a burst may stop short of it (the count is conservative), and every 202 is a job.
+      const queued1 = e1.filter((r) => r.status === 202).length;
+      expect(await openJobs(o.orgId, "lead.enrich"), JSON.stringify(tally(e1))).toBe(queued1);
+      expect(queued1).toBeGreaterThanOrEqual(1);
+      expect(queued1).toBeLessThanOrEqual(5);
+      expect(Object.keys(tally(e1)).sort()).toEqual(["202", "429:queue_full"]);
+      // One at a time the rest of the places fill, to the ceiling exactly.
+      for (let i = 0; i < 6; i++) await req("POST", `/v1/leads/${lead.id}/enrich`, o.token, {});
+      expect(await openJobs(o.orgId, "lead.enrich")).toBe(5);
       const e2 = await Promise.all(Array.from({ length: 40 }, () => req("POST", `/v1/webhooks/${hook.id}/test`, o.token, {})));
-      expect(await openJobs(o.orgId, "webhook.deliver"), JSON.stringify(tally(e2))).toBe(3);
+      const queued2 = e2.filter((r) => r.status === 202 || r.status === 200).length;
+      expect(await openJobs(o.orgId, "webhook.deliver"), JSON.stringify(tally(e2))).toBe(queued2);
+      expect(queued2).toBeGreaterThanOrEqual(1);
+      expect(queued2).toBeLessThanOrEqual(3);
+      expect(await openJobs(o.orgId)).toBeLessThanOrEqual(8);
+      for (let i = 0; i < 4; i++) await req("POST", `/v1/webhooks/${hook.id}/test`, o.token, {});
+      expect(await openJobs(o.orgId, "webhook.deliver")).toBe(3);
       expect(await openJobs(o.orgId)).toBe(8);
       const full = e2.find((r) => r.status === 429)!;
       expect(full.body.error).toMatchObject({ code: "queue_full", message: "Too much work is already queued for this workspace. Let it finish, then try again.", details: { retryAfterSeconds: 30 } });

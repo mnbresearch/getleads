@@ -258,6 +258,22 @@ describe("a search that never looked where it was asked to", () => {
     expect(trace.blockedReason).toBe("No search source is connected on our side, so this run could not search. This is not a result about your market.");
   });
 
+  it("is said again by the same run made a second time: the discarded answer is not remembered as 'nobody'", async () => {
+    // Within minutes of each other, with the search cache as it is between two runs of one process.
+    const provider = ignoresSite();
+    const blocked = [];
+    for (let i = 0; i < 2; i++) {
+      const run = new PlayRun({ searchOpts: { providers: [provider] } });
+      expect(await run.search('site:reddit.com "alternative to Acme"')).toEqual([]);
+      expect(await run.search('site:news.ycombinator.com "alternative to Acme"')).toEqual([]);
+      expect(run.trace).toMatchObject({ searches: 2, failedSearches: 2 });
+      const trace = run.finish(run.searchAnswered, "The searches answered, but none of the results was a person asking or complaining.");
+      blocked.push([trace.blocked, trace.blockedReason]);
+    }
+    const reason = "No search source is connected on our side, so this run could not search. This is not a result about your market.";
+    expect(blocked).toEqual([[true, reason], [true, reason]]);
+  });
+
   it("alongside searches that did answer, it is said in a note - and not counted twice", async () => {
     const run = new PlayRun({ searchOpts: { providers: [ignoresSite()] } });
     await run.search('site:reddit.com "alternative to Acme"');

@@ -2,7 +2,8 @@ const HONORIFICS = /^(mr|mrs|ms|dr|prof|sir|er|ca|adv)\.?\s+/i;
 const SUFFIXES = /,?\s+(phd|mba|cpa|ca|cfa|jr|sr|ii|iii|pmp|frm|acca)\.?$/i;
 
 export function splitName(fullName: string): { firstName?: string; lastName?: string; fullName: string } {
-  let n = fullName.replace(/\s+/g, " ").trim();
+  // A name is a line: only a line's worth of whatever is handed in is read.
+  let n = String(fullName ?? "").slice(0, 300).replace(/\s+/g, " ").trim();
   n = n.replace(HONORIFICS, "").replace(SUFFIXES, "").replace(/[()"']/g, "").trim();
   const parts = n.split(" ").filter(Boolean);
   if (parts.length === 0) return { fullName: n };

@@ -10,7 +10,7 @@ import { resetProviderSkips } from "../providers/health.js";
 import { resetSearchCache } from "../search/index.js";
 import type { AiMessage, SearchResult } from "../types.js";
 import { NO_AI, brokenSearch, model, searchWith, web, type FakeWeb, type Route } from "./kit.test.js";
-import { agedConfidence, askPlace, buildAskQueries, classifyAsk, findPublicAsks, linkedinPostAuthor, snippetDate, vanityMatches } from "./publicAsks.js";
+import { agedConfidence, askPlace, buildAskQueries, classifyAsk, findPublicAsks, linkedinPostAuthor, merelyListed, snippetDate, vanityMatches } from "./publicAsks.js";
 
 const r = (title: string, url: string, snippet = ""): SearchResult => ({ title, url, snippet, provider: "testsearch" });
 
@@ -673,5 +673,114 @@ describe("a Hacker News post that only mentions the subject is not about it", ()
     expect(classifyAsk("Ask HN: What do you use for onboarding contractors?", "", undefined)).toMatchObject({ kind: "ask", strong: true });
     expect(classifyAsk("Ask HN: Which CRM would you pick for a ten-person team?", "", undefined)).toMatchObject({ kind: "ask" });
     expect(classifyAsk("Ask HN: Best tool to verify email addresses?", "", undefined)).toMatchObject({ kind: "ask" });
+  });
+});
+
+/* ───────────────────────── what a second look at live Hacker News results found ───────────────────────── */
+
+describe("asking, as opposed to using the words of asking", () => {
+  it("'any ... using' is not 'anyone using': somebody has to be asked, and as a question", () => {
+    // A list of facts about one company's mail, in a thread about something else.
+    expect(classifyAsk("", "- We are not on any known/public blacklists Note that we are using Globex Workspaces, but that does not seem to be the issue.")).toBeNull();
+    expect(classifyAsk("", "I am curious how folks handle imports into systems like Acme, Initech, Hooli, or really any app that uses template based import.", "Acme")).toBeNull();
+    expect(classifyAsk("", "If anyone uses this in production they should read the changelog first.")).toBeNull();
+    // Somebody asked.
+    expect(classifyAsk("", "We have been on Acme for two years. Has anyone here used Clarify?", "Acme")).toMatchObject({ kind: "ask", strong: true, quote: "Has anyone here used Clarify?" });
+    expect(classifyAsk("Ask HN: Anyone using Acme for a team of forty", "", "Acme")).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("", "Does anybody know of a tool that verifies addresses in bulk?")).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("", "Can someone recommend a CRM that is not Acme?", "Acme")).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("", "Any recommendations for a CRM that handles contractors?")).toMatchObject({ kind: "ask", strong: true });
+    // "Any alternatives ...?" is what a seller's hook says too: an ask, but an unsure one.
+    expect(classifyAsk("", "Any good alternatives to Acme?", "Acme")).toMatchObject({ kind: "ask", strong: false });
+  });
+
+  it("'need to move' is somebody leaving only when they say so of themselves, and away from something", () => {
+    // An essay about a market.
+    expect(classifyAsk("Do you think Initech is Hooli circa the 1980s?", "The need to move upwards in the market in enterprise software is difficult, since sticking with Acme plus its new features is much simpler than the cost of switching.", "Acme")).toBeNull();
+    expect(classifyAsk("", "Companies are looking to move into new markets every year.", "Acme")).toBeNull();
+    expect(classifyAsk("", "We are thinking of moving to Acme next year.", "Acme")).toBeNull();
+    // Somebody leaving.
+    expect(classifyAsk("", "We need to move off Acme before the renewal.", "Acme")).toMatchObject({ kind: "ask", strong: true, leaving: true });
+    expect(classifyAsk("", "I'm thinking of switching away from Acme after the price change.", "Acme")).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("", "Our team has decided to migrate from Acme to something simpler.", "Acme")).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("", "We are planning to cancel Acme this quarter.", "Acme")).toMatchObject({ kind: "ask", strong: true });
+    expect(classifyAsk("", "It is time to move away from Acme.", "Acme")).toMatchObject({ kind: "ask", strong: true });
+  });
+
+  it("one product among several named side by side is an example, not the subject", () => {
+    expect(merelyListed("How do folks prepare imports into systems like Acme, Initech, Hooli, or really any app that takes a template?", "Acme")).toBe(true);
+    expect(merelyListed("Acme, Initech, or Hooli: which is most ripe for disruption?", "Acme")).toBe(true);
+    expect(merelyListed("Many engineers complain about Acme (bloated, expensive), Initech (complex, costly) and Hooli (overpriced).", "Initech")).toBe(true);
+    // Named on its own as well: it is what the text is about.
+    expect(merelyListed("We use Acme, Initech and Hooli. Acme is the one we want to replace.", "Acme")).toBe(false);
+    expect(merelyListed("Looking for an alternative to Acme.", "Acme")).toBe(false);
+    // A list in brackets is a list.
+    expect(merelyListed("The idea is simple: connect your stack (Stripe, Acme, PostHog, LiveKit, etc.) and chat with your data.", "Acme")).toBe(true);
+    // Two names are a comparison, not a list.
+    expect(merelyListed("Acme or Initech for a small team?", "Acme")).toBe(false);
+    expect(merelyListed("Nothing here names it.", "Acme")).toBe(false);
+  });
+});
+
+describe("Hacker News: who is complaining, and who is studying a market", () => {
+  const at = (daysAgo: number) => ({ created_at: new Date(NOW - daysAgo * 86_400_000).toISOString() });
+  const HITS = [
+    // A builder researching a market: the words of a complaint, and nobody complaining.
+    { objectID: "50000001", author: "builder1", title: "What's still broken in Acme document generation?", story_text: "Curious whether this is a real, unsolved problem. What do you hate about it?", ...at(20) },
+    // A startup-idea question that reports what others say - posted twice by the same author, once with "Ask HN:".
+    { objectID: "50000002", author: "founder2", title: "Acme, Initech, or Hooli: Which Is Most Ripe for Disruption?", story_text: "Many founders and engineers complain about Acme (bloated, expensive), Initech (complex, costly), and Hooli (overpriced).", ...at(30) },
+    { objectID: "50000003", author: "founder2", title: "Ask HN: Acme, Initech, or Hooli: Which Is Most Ripe for Disruption?", story_text: "Many founders and engineers complain about Acme (bloated, expensive), Initech (complex, costly), and Hooli (overpriced).", ...at(30) },
+    // An opinion essay that reads, in one line, like somebody who needs to move.
+    { objectID: "50000004", author: "essayist", title: "Do You Think Initech Is Hooli Circa the 1980s?", story_text: "The need to move upwards in the market is difficult, since sticking with Acme plus its new features is much simpler than switching.", ...at(60) },
+    // The product as one example in a list, in a question about something else.
+    { objectID: "50000005", author: "dataperson", title: "Ask HN: How are you cleaning data before imports?", story_text: "Hi all, I'm curious how folks handle the prep work for imports into systems like Acme, Initech, Hooli, or really any app that uses template based import.", ...at(140) },
+    // Somebody who uses it, complaining about it.
+    { objectID: "50000006", author: "user6", title: "Tell HN: Acme doubled our bill overnight", story_text: "We have been on Acme for three years and I am frustrated with Acme: support is useless and the price went up twice.", ...at(15) },
+    // A genuine ask, recent; and the same one posted again by the same author a minute later.
+    { objectID: "50000007", author: "asker7", title: "Ask HN: Alternatives to Acme for a small team?", story_text: "The new pricing does not work for us. What do you use instead?", ...at(5) },
+    { objectID: "50000008", author: "asker7", title: "Ask HN: Alternatives to Acme for a small team?", story_text: "The new pricing does not work for us. What do you use instead?", ...at(5) },
+    // The same title from somebody else is somebody else's ask.
+    { objectID: "50000009", author: "asker9", title: "Ask HN: Alternatives to Acme for a small team?", story_text: "Same question a year on. What do you use instead?", ...at(400) },
+  ];
+  const serve = (url: string): Route | undefined => (url.startsWith("https://hn.algolia.com/") ? { body: JSON.stringify({ hits: HITS }), type: "application/json" } : undefined);
+
+  it("keeps the asks and the complaint of somebody who has one, each once, with the recent ask on top", async () => {
+    use(serve);
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [searchWith(() => [])] } });
+    expect(findings.map((f) => [f.evidenceUrl!.split("=")[1], f.signalType, f.confidence])).toEqual([
+      ["50000007", "public_ask", 0.75],
+      ["50000006", "public_complaint", 0.7],
+      ["50000009", "public_ask", 0.35],
+    ]);
+    expect(findings[1]).toMatchObject({ relevantBecause: "Hacker News thread complaining about Acme.", evidenceQuote: "Tell HN: Acme doubled our bill overnight" });
+  });
+
+  it("somebody launching a product, or looking for people to try it, is selling", async () => {
+    const launch = [
+      // Announced by its title; the product is named in a list of what it connects to, and the author is "looking for" design partners.
+      { objectID: "50000101", author: "maker", title: "Launching Loomdata - a RevOps layer for early stage startups", story_text: "That is why I am making Loomdata. The idea is simple: connect your stack (Stripe, Acme, PostHog, LiveKit, etc.) and chat with your data. No need to switch platforms. Right now, I'm looking for design partners.", ...at(40) },
+      { objectID: "50000102", author: "maker2", title: "Ask HN: Would you use a simpler Acme?", story_text: "We are on Acme today. I'm looking for beta users for something simpler than Acme.", ...at(10) },
+    ];
+    use((url: string): Route | undefined => (url.startsWith("https://hn.algolia.com/") ? { body: JSON.stringify({ hits: launch }), type: "application/json" } : undefined));
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [searchWith(() => [])] } });
+    expect(findings).toEqual([]);
+    expect(classifyAsk("", "Right now, I'm looking for design partners.")).toBeNull();
+    expect(classifyAsk("Launching Loomdata", "Anyone using Acme who wants to try it?", "Acme")).toBeNull();
+    // Looking for a product is still an ask.
+    expect(classifyAsk("", "Right now, I'm looking for a CRM that is not Acme.", "Acme")).toMatchObject({ kind: "ask", strong: true });
+  });
+
+  it("a complaint is the speaker's own on Hacker News: a report of what others say is not one", () => {
+    expect(classifyAsk("Acme: which part is worst?", "Many founders and engineers complain about Acme being bloated and overpriced.", "Acme")).toMatchObject({ kind: "complaint", own: false });
+    expect(classifyAsk("What's still broken in Acme document generation?", "", "Acme")).toMatchObject({ kind: "complaint", own: false });
+    expect(classifyAsk("", "I am frustrated with Acme: our bill doubled.", "Acme")).toMatchObject({ kind: "complaint", own: true });
+  });
+
+  it("elsewhere a complaint is kept as before", async () => {
+    use(() => undefined);
+    const reddit = searchWith(() => [{ title: "Acme pricing is a rip-off : r/sales", url: "https://www.reddit.com/r/sales/comments/1abc999/acme_pricing/", snippet: "Acme is overpriced and the support is terrible.", provider: "stub" }]);
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["reddit"] }, { searchOpts: { providers: [reddit] } });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ signalType: "public_complaint", relevantBecause: "Reddit thread complaining about Acme." });
   });
 });

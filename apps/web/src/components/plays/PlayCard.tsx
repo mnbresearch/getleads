@@ -13,12 +13,14 @@ export interface RunProblem { message: string; quota: boolean }
  * nobody out there". It gets an amber banner with the server's own sentence instead.
  */
 export function PlayCard({
-  play, types, campaignName, clientName, running, problem, toggling, onRun, onUpload, onEdit, onToggle, onDelete, onReview, onError,
+  play, types, campaignName, clientName, searchHint, running, problem, toggling, onRun, onUpload, onEdit, onToggle, onDelete, onReview, onError,
 }: {
   play: PlayOut;
   types: PlayTypeInfo[] | null;
   campaignName?: string;
   clientName?: string;
+  /** The server's sentence for a kind of play that depends on web search, when none is connected. */
+  searchHint?: string;
   running: boolean;
   problem?: RunProblem;
   toggling: boolean;
@@ -50,6 +52,8 @@ export function PlayCard({
       </div>
       {inputs && <p className="mt-1 text-sm text-ink-300">{inputs}</p>}
       {titles.length > 0 && findsCompanies(types, play.type) && <p className="mt-1 text-xs text-ink-400">Looks for: {titles.slice(0, 4).join(", ")}{titles.length > 4 ? ` and ${titles.length - 4} more` : ""}</p>}
+
+      {searchHint && <p className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800" data-testid="search-hint">{clean(searchHint, 500)}</p>}
 
       <dl className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
         <div className={`rounded-lg p-2 ${counts.pending > 0 ? "bg-brand-50" : "bg-cream"}`}><dt className="text-ink-400">Waiting</dt><dd className="text-base font-semibold tabular-nums" data-testid="count-pending">{(counts.pending ?? 0).toLocaleString()}</dd></div>

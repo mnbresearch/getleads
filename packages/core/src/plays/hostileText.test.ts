@@ -13,12 +13,12 @@
  * makes a match fail at the last moment, and after the opening a pattern looks for first.
  */
 import { describe, expect, it } from "vitest";
-import { caseSlugOf, cleanLogoName, customerLinksFromSitemap, isCustomerPath, parseHeadline, slugCustomerName, storyKeyOf, storyWorthOpening, verifyAiCustomers } from "./extractCustomers.js";
+import { caseSlugOf, cleanLogoName, customerLinksFromSitemap, isCustomerPath, parseHeadline, readLogoName, slugCustomerName, storyKeyOf, storyWorthOpening, verifyAiCustomers } from "./extractCustomers.js";
 import { engagersFromRows } from "./engagers.js";
 import { fundingReason, headlineAmount, headlineRound, isFundingHeadline, publisherName } from "./funding.js";
 import { buildHiringQueries, parseJobResult, readPostingPage, roleMatches } from "./hiring.js";
 import { categoryFrom, competitorsInText, pickPersona } from "./plan.js";
-import { askPlace, buildAskQueries, classifyAsk, linkedinPostAuthor, snippetDate, vanityMatches } from "./publicAsks.js";
+import { askPlace, buildAskQueries, classifyAsk, linkedinPostAuthor, merelyListed, snippetDate, vanityMatches } from "./publicAsks.js";
 import { article, cleanCompanyName, cleanList, finishFinding, hostOf, isAudienceWord, isDescriptorName, isGenericWord, isSameCompany, isVendorName, parseRobots, robotsAllows, safeHttpUrl, sameSite, slugToName, stripDescriptorPrefix } from "./shared.js";
 import { cleanLine, cleanQuote, cutAtWord, mailSafeReason, normCompanyName, plainDashes, playDedupeKey, safeSentence } from "./util.js";
 
@@ -87,7 +87,7 @@ const FUNCTIONS: [string, (s: string) => unknown, string[]?][] = [
   ["isCustomerPath and caseSlugOf", (s) => [isCustomerPath(s), caseSlugOf(s), caseSlugOf(`/customers/${s}`)]],
   ["parseHeadline", (s) => [parseHeadline(s, "Acme"), parseHeadline("How Globex cut costs", s)], ["How ", "Case study: "]],
   ["slugCustomerName", (s) => [slugCustomerName(s, "Acme"), slugCustomerName("globex", s)]],
-  ["cleanLogoName", (s) => cleanLogoName(s)],
+  ["cleanLogoName and readLogoName", (s) => [cleanLogoName(s), readLogoName(s), readLogoName(s.toLowerCase().replace(/[^a-z]/g, "-"))]],
   ["storyWorthOpening and storyKeyOf", (s) => [storyWorthOpening(`https://acme.com/customers/${s}`, "Acme"), storyKeyOf(s), storyKeyOf(`https://acme.com/${s}`)]],
   // The pattern that was quadratic: an opening tag, then runs of whitespace it could split in any number of ways.
   ["customerLinksFromSitemap", (s) => customerLinksFromSitemap(s, "acme.com"), ["<loc>", "<loc><![CDATA[", "<loc>a", "<loc>a]]>", "<loc>a ]]>", "<sitemapindex><loc>", "<urlset><url><loc>https://acme.com/customers/x"]],
@@ -100,6 +100,7 @@ const FUNCTIONS: [string, (s: string) => unknown, string[]?][] = [
   ["buildAskQueries", (s) => buildAskQueries([{ kind: "competitor", value: s }, { kind: "problem", value: s }, { kind: "category", value: s }], ["linkedin", "reddit", "hackernews", "forums"])],
   ["askPlace", (s) => [askPlace(s), askPlace(`https://www.reddit.com/r/${s.slice(0, 1500)}`)]],
   ["classifyAsk", (s) => [classifyAsk(s, s, "Acme"), classifyAsk("Looking for an alternative to Acme", s, s)], ["Looking for ", "Ask HN: ", "alternative to Acme "]],
+  ["merelyListed", (s) => [merelyListed(s, "Acme"), merelyListed(`Acme, ${s}`, "Acme"), merelyListed("Acme, Initech and Hooli", s)], ["Acme, ", "Acme, Ab, "]],
   ["linkedinPostAuthor", (s) => linkedinPostAuthor(s), ["Jane Doe on LinkedIn: "]],
   ["vanityMatches", (s) => vanityMatches(s, s)],
   ["snippetDate", (s) => snippetDate(s), ["3 days ago ", "Jan 5, 2026 "]],
@@ -142,10 +143,10 @@ describe("1.5 MB of text made to be slow", () => {
     expect(tooSlow).toEqual([]);
   }, 180_000);
 
-  it("the check itself catches a slow pattern: the sitemap reader's old one, on a fifteenth of the text", () => {
+  it("the check itself catches a slow pattern: the sitemap reader's old one, on a thirtieth of the text", () => {
     const old = /<loc>\s*(?:<!\[CDATA\[)?\s*([^<\]\s]{1,2000})\s*(?:\]\]>)?\s*<\/loc>/gi;
     const t0 = performance.now();
-    old.exec(`<urlset><loc>${" ".repeat(24_000)}</urlset>`);
+    old.exec(`<urlset><loc>${" ".repeat(48_000)}</urlset>`);
     expect(performance.now() - t0).toBeGreaterThan(LIMIT_MS);
   });
 });

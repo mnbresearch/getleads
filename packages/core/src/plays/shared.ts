@@ -510,7 +510,17 @@ export interface FetchPageOptions {
   robots?: boolean;
   /** Accept a JSON body (an API) instead of a page. */
   json?: boolean;
+  /**
+   * False when reading a host's robots.txt is not to be taken out of `maxRequests`: for a
+   * call given a handful of requests to open one page, where the rules of the hosts on the
+   * way would otherwise use them up before the page is reached. The reads still happen, are
+   * still paced and still count as requests of the run. Default true.
+   */
+  robotsCharged?: boolean;
 }
+
+/** robots.txt requests one call may make when they are not taken out of its allowance: the page's host and the hosts it is sent on to. */
+const MAX_UNCHARGED_ROBOTS = 4;
 
 const NO_SEARCH_SOURCE = "No search source is connected on our side, so this run could not search. This is not a result about your market.";
 const EVERY_SEARCH_FAILED = "Every search failed, so nothing could be checked this time. This is not a result about your market - try again later.";
@@ -896,10 +906,19 @@ export class PlayRun {
     const budget = (): number => (o.maxRequests === undefined ? MAX_HOPS + 2 : o.maxRequests) - used;
     if (budget() <= 0) return { ok: false, kind: "budget", why: "request limit" };
 
+    // Reads of robots.txt: out of this call's allowance, or - when the caller says so - out of a small one of their own.
+    let rulesRead = 0;
+    const rulesBudget = o.robotsCharged === false ? (): number => MAX_UNCHARGED_ROBOTS - rulesRead : budget;
+    const rulesSent =
+      o.robotsCharged === false
+        ? (): void => {
+            rulesRead++;
+          }
+        : sent;
     const allowed =
       o.robots === false
         ? undefined
-        : async (u: URL): Promise<boolean> => robotsAllows(await this.rulesFor(u, budget, sent), `${u.pathname}${u.search}`);
+        : async (u: URL): Promise<boolean> => robotsAllows(await this.rulesFor(u, rulesBudget, rulesSent), `${u.pathname}${u.search}`);
     const got = await this.get(target, budget, sent, allowed);
     if ("stop" in got) {
       if (got.stop === "deadline") return { ok: false, kind: "deadline", why: "time limit" };

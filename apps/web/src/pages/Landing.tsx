@@ -152,7 +152,7 @@ const playCards = [
     label: "How it finds them",
     title: "One play per source of buying intent",
     body: "Companies a competitor names as customers. Teams hiring for the role you sell to. Fresh funding. People asking in public for a tool like yours. Visitors to your own site, contacts who changed jobs, or a list of post engagers you upload. Give Scout your website and it suggests which to run.",
-    guard: "It works from public pages and your own data. Some sources need set-up first, and the app says which are ready.",
+    guard: "It works from public pages and your own data. Not every source finds people every time: some need set-up or depend on web search, the app says which are ready, and a run that could not look says so instead of reporting nobody.",
   },
   {
     label: "The proof on every person",
@@ -354,9 +354,9 @@ export function LandingPage() {
             <span className="badge border border-brand-200 bg-brand-50 text-brand-700">New: Plays</span>
             <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Plays: buyers who need you this week, with the proof</h2>
             <p className="mt-3 text-ink-300">
-              A play watches one source of buying intent and brings you the people behind it. Each arrives with one sentence
-              saying why they are relevant and a link to the page that shows it. You approve or skip, and Scout then tells you
-              which play started real conversations.
+              A play watches one source of buying intent and looks for the people behind it. Each one it finds arrives with
+              one sentence saying why they are relevant and a link to the page that shows it. You approve or skip, and Scout
+              then tells you which play started real conversations.
             </p>
           </div>
 

@@ -3,6 +3,10 @@ import { summarizeWebSearchFailures, webSearch, type WebSearchOptions, type WebS
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { splitName } from "../util/names.js";
 
+/** How much of a search result's title and snippet is read (see `tidyResults` in search/index.ts, which passes on no more). */
+const MAX_TITLE_READ = 300;
+const MAX_SNIPPET_READ = 1_000;
+
 /**
  * Parse LinkedIn profile SERP titles. Common formats:
  *   "Jane Doe - Head of Growth - Acme Corp | LinkedIn"
@@ -10,6 +14,9 @@ import { splitName } from "../util/names.js";
  *   "Jane Doe | LinkedIn"
  */
 export function parseLinkedinTitle(title: string, snippet = ""): Omit<PersonCandidate, "source" | "confidence"> | null {
+  // A title and a snippet are lines. The patterns below are written for lines: only a line's worth of each is read.
+  title = String(title ?? "").slice(0, MAX_TITLE_READ);
+  snippet = String(snippet ?? "").slice(0, MAX_SNIPPET_READ);
   let t = title.replace(/\s*[|–-]\s*LinkedIn\s*$/i, "").replace(/\s+on LinkedIn:?.*$/i, "").trim();
   const parts = t.split(/\s+[-–—|]\s+/).map((s) => s.trim()).filter(Boolean);
   if (parts.length === 0) return null;

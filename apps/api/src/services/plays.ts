@@ -203,6 +203,9 @@ export interface PlayTypeField {
   kind: FieldKind;
   options?: { value: string; label: string }[];
   required?: boolean;
+  /** A number field's lowest accepted value. */
+  min?: number;
+  /** A number field's highest value; for tags and competitors how many, for text how many characters. */
   max?: number;
   placeholder?: string;
   help?: string;
@@ -212,6 +215,13 @@ export interface PlayTypeOut {
   name: string;
   summary: string;
   finds: "people" | "companies" | "conversations";
+  /**
+   * This type's own source is web search: without a connected search source a run is likely
+   * to say it could not search. False for a type that reads its source directly (a website,
+   * the news, Hacker News, the workspace's own data, an upload) - even when a part of it
+   * (a competitor given without a website, conversations on other sites) does use search;
+   * `setupHint` says which part.
+   */
   needsSearch: boolean;
   available: boolean;
   unavailableReason?: string;
@@ -221,7 +231,20 @@ export interface PlayTypeOut {
 }
 
 const BUYER_TITLES = ["Founder", "CEO", "Head of Sales", "VP Sales", "Head of Marketing"];
-const SEARCH_HINT = "Results depend on public search and may be thin until a search source is connected on our side.";
+/**
+ * What works without a connected search source, and what does not - the same list as
+ * docs/PLAYS.md "What works without a connected search source". Shown only while no
+ * dependable search source is configured.
+ */
+const NOT_CONNECTED = "a search source is not connected on our side yet";
+export const SEARCH_HINTS = {
+  competitor_customers: `Works today for every competitor whose website you give: its customer pages are read directly. A competitor given by name only has to be searched for first, and ${NOT_CONNECTED}.`,
+  competitor_customers_no_website: `None of these competitors has a website filled in, so each has to be searched for first, and ${NOT_CONNECTED}. Add their websites and this works today.`,
+  hiring_role: `Searching job boards needs a search source, and ${NOT_CONNECTED}: until it is, a run is likely to say it could not search (it never reports that as nobody hiring). What works today: list companies under "Only these companies" and their own careers pages are read directly.`,
+  public_asks: `Works today on Hacker News, which is read directly. LinkedIn, Reddit, X and forums are searched, and ${NOT_CONNECTED} - a run says so when it could not look there.`,
+  public_asks_no_hacker_news: `The places chosen here (LinkedIn, Reddit, X, forums) are all searched, and ${NOT_CONNECTED}: a run is likely to say it could not search. Add Hacker News, which is read directly.`,
+  find_people: `Finding people at a company uses web search, and ${NOT_CONNECTED}. Until it is, a search may come back saying it could not look - never as "nobody works there" - and the company stays in Review as a company.`,
+} as const;
 export const NO_PIXEL_REASON = "Add the tracking pixel to your website first (under Visitors). This play reads the companies that visit it.";
 export const NO_JOB_CHECK_REASON = "Job-change checks need a contact data provider, which this workspace's plan does not include yet.";
 
@@ -231,10 +254,11 @@ const CATALOGUE: Omit<PlayTypeOut, "available" | "unavailableReason" | "setupHin
     name: "Competitor customers",
     summary: "Companies a competitor names as customers on its own site - case studies, customer pages and logo walls.",
     finds: "companies",
-    needsSearch: true,
+    // Reads the competitor's own website when one is given.
+    needsSearch: false,
     fields: [
       { key: "competitors", label: "Competitors", kind: "competitors", required: true, max: 10, help: "Name each competitor and, if you know it, its website." },
-      { key: "maxPerCompetitor", label: "Most companies per competitor", kind: "number", max: 50, placeholder: "20" },
+      { key: "maxPerCompetitor", label: "Most companies per competitor", kind: "number", min: 1, max: 50, placeholder: "20" },
     ],
     defaultTitles: BUYER_TITLES,
   },
@@ -262,8 +286,8 @@ const CATALOGUE: Omit<PlayTypeOut, "available" | "unavailableReason" | "setupHin
       { key: "keywords", label: "Keywords", kind: "tags", max: 10 },
       { key: "industries", label: "Industries", kind: "tags", max: 10 },
       { key: "locations", label: "Locations", kind: "tags", max: 10 },
-      { key: "days", label: "Announced in the last (days)", kind: "number", max: 60, placeholder: "14" },
-      { key: "minAmountUsd", label: "Smallest round (USD)", kind: "number", placeholder: "1000000" },
+      { key: "days", label: "Announced in the last (days)", kind: "number", min: 1, max: 60, placeholder: "14" },
+      { key: "minAmountUsd", label: "Smallest round (USD)", kind: "number", min: 0, placeholder: "1000000" },
       { key: "country", label: "Country code", kind: "text", max: 2, placeholder: "US" },
     ],
     defaultTitles: BUYER_TITLES,
@@ -273,13 +297,14 @@ const CATALOGUE: Omit<PlayTypeOut, "available" | "unavailableReason" | "setupHin
     name: "Asking in public",
     summary: "People asking in public for a tool like yours, or complaining about a competitor - on LinkedIn, Reddit, Hacker News, X and forums.",
     finds: "conversations",
-    needsSearch: true,
+    // Hacker News is read directly; the other places are searched.
+    needsSearch: false,
     fields: [
       { key: "competitors", label: "Competitors", kind: "tags", max: 10 },
       { key: "problems", label: "Problems people describe", kind: "tags", max: 10, placeholder: "book meetings without cold calling" },
       { key: "category", label: "Your category", kind: "text", max: 120, placeholder: "sales engagement tool" },
       { key: "sources", label: "Where to look", kind: "select", options: [{ value: "linkedin", label: "LinkedIn" }, { value: "reddit", label: "Reddit" }, { value: "hackernews", label: "Hacker News" }, { value: "x", label: "X" }, { value: "forums", label: "Forums" }] },
-      { key: "days", label: "Posted in the last (days)", kind: "number", max: 90, placeholder: "30" },
+      { key: "days", label: "Posted in the last (days)", kind: "number", min: 1, max: 90, placeholder: "30" },
     ],
   },
   {
@@ -289,8 +314,8 @@ const CATALOGUE: Omit<PlayTypeOut, "available" | "unavailableReason" | "setupHin
     finds: "companies",
     needsSearch: false,
     fields: [
-      { key: "minIntentScore", label: "Lowest intent score", kind: "number", max: 100, placeholder: "30" },
-      { key: "days", label: "Visited in the last (days)", kind: "number", max: 90, placeholder: "14" },
+      { key: "minIntentScore", label: "Lowest intent score", kind: "number", min: 0, max: 100, placeholder: "30" },
+      { key: "days", label: "Visited in the last (days)", kind: "number", min: 1, max: 90, placeholder: "14" },
     ],
     defaultTitles: BUYER_TITLES,
   },
@@ -300,7 +325,7 @@ const CATALOGUE: Omit<PlayTypeOut, "available" | "unavailableReason" | "setupHin
     summary: "People you already know who moved to a new company or a new role.",
     finds: "people",
     needsSearch: false,
-    fields: [{ key: "days", label: "Changed in the last (days)", kind: "number", max: 90, placeholder: "30" }],
+    fields: [{ key: "days", label: "Changed in the last (days)", kind: "number", min: 1, max: 90, placeholder: "30" }],
   },
   {
     type: "engagers_upload",
@@ -313,9 +338,31 @@ const CATALOGUE: Omit<PlayTypeOut, "available" | "unavailableReason" | "setupHin
 ];
 
 /** Is a keyed web search provider configured? The keyless fallbacks are not dependable. */
-function dependableSearch(): boolean {
+export function dependableSearch(): boolean {
   const set = (k: string) => !!(process.env[k] ?? "").trim();
   return set("SERPER_API_KEY") || set("SERPAPI_KEY") || set("BRAVE_SEARCH_API_KEY") || (set("GOOGLE_CSE_API_KEY") && set("GOOGLE_CSE_CX"));
+}
+
+/**
+ * Does a play with these settings depend on web search, and what should be said about it
+ * while no dependable search source is connected? With no settings (the catalogue) the
+ * answer is about the type as it is normally set up.
+ */
+export function searchNeed(type: PlayType, config?: Record<string, unknown> | null): { needsSearch: boolean; hint?: string } {
+  if (type === "hiring_role") return { needsSearch: true, hint: SEARCH_HINTS.hiring_role };
+  if (type === "competitor_customers") {
+    const list = Array.isArray(config?.competitors) ? (config!.competitors as { domain?: unknown }[]) : null;
+    // Settings that name no website at all: every competitor has to be searched for.
+    if (list && list.length > 0 && !list.some((c) => typeof c?.domain === "string" && c.domain.trim())) return { needsSearch: true, hint: SEARCH_HINTS.competitor_customers_no_website };
+    return { needsSearch: false, hint: list && list.every((c) => typeof c?.domain === "string" && c.domain.trim()) ? undefined : SEARCH_HINTS.competitor_customers };
+  }
+  if (type === "public_asks") {
+    const chosen = Array.isArray(config?.sources) ? (config!.sources as unknown[]).filter((x) => typeof x === "string") : [];
+    // No places chosen means all of them, Hacker News included.
+    if (chosen.length > 0 && !chosen.includes("hackernews")) return { needsSearch: true, hint: SEARCH_HINTS.public_asks_no_hacker_news };
+    return { needsSearch: false, hint: chosen.length === 1 ? undefined : SEARCH_HINTS.public_asks };
+  }
+  return { needsSearch: false };
 }
 
 /** Why a type cannot work in this workspace yet, per type. A missing key means it can. */
@@ -331,12 +378,26 @@ export async function playAvailability(org: Pick<Organization, "id" | "plan" | "
 export async function playTypes(org: Pick<Organization, "id" | "plan" | "planLimits">): Promise<PlayTypeOut[]> {
   const unavailable = await playAvailability(org);
   const thin = !dependableSearch();
-  return CATALOGUE.map((t) => ({
-    ...t,
-    available: !unavailable[t.type],
-    ...(unavailable[t.type] ? { unavailableReason: unavailable[t.type] } : {}),
-    ...(t.needsSearch && thin ? { setupHint: SEARCH_HINT } : {}),
-  }));
+  return CATALOGUE.map((t) => {
+    const hint = thin ? searchNeed(t.type).hint : undefined;
+    return {
+      ...t,
+      available: !unavailable[t.type],
+      ...(unavailable[t.type] ? { unavailableReason: unavailable[t.type] } : {}),
+      ...(hint ? { setupHint: hint } : {}),
+    };
+  });
+}
+
+/** What GET /v1/plays/types answers: the catalogue, whether search is dependable here, and what "Find people" needs. */
+export async function playCatalogue(org: Pick<Organization, "id" | "plan" | "planLimits">) {
+  const searchDependable = dependableSearch();
+  return {
+    types: await playTypes(org),
+    searchDependable,
+    // Finding people at a company any play has found is always a web search.
+    findPeople: { needsSearch: true as const, ...(searchDependable ? {} : { setupHint: SEARCH_HINTS.find_people }) },
+  };
 }
 
 // ── Shapes that leave the server ──
@@ -426,7 +487,7 @@ const SIGNAL_TYPE = /^[a-z0-9_:-]{1,60}$/;
  * text-direction override, a `javascript:` link or a link with a password in it in front
  * of a reviewer.
  */
-export function candidateOut(c: PlayCandidate, play: { name: string; type: string }) {
+export function candidateOut(c: PlayCandidate, play: { name: string; type: string }, extra: { peopleFound?: number } = {}) {
   const pending = c.status === "pending";
   const profile = c.linkedinUrl ? profileUrlOrNull(c.linkedinUrl, 500) : null;
   return {
@@ -458,6 +519,8 @@ export function candidateOut(c: PlayCandidate, play: { name: string; type: strin
     scoreReasons: (c.scoreReasons ?? []).slice(0, 10).map((r) => cleanText(r, 200)).filter((r): r is string => !!r),
     leadId: c.leadId,
     alreadyLead: c.alreadyLead,
+    /** For a company: the person candidates its play already holds for it (waiting, approved or skipped). Null for a person or a conversation. */
+    peopleFound: c.kind === "company" ? (extra.peopleFound ?? 0) : null,
     // While a candidate waits, `decided_at` only ever holds an approval's short-lived claim.
     decidedAt: pending ? null : c.decidedAt,
     createdAt: c.createdAt,
@@ -472,10 +535,46 @@ export interface CandidateQuery {
   offset: number;
 }
 
+/**
+ * How many people each of these company candidates' plays already hold for the company:
+ * person candidates of the same play at the same website, or - where no website is known on
+ * one side - under the same company name. The same rule a run uses to decide a company is
+ * already covered. One grouped query for the page. Read-only.
+ */
+export async function peopleFoundFor(orgId: string, companyCandidates: PlayCandidate[]): Promise<Map<string, number>> {
+  const out = new Map<string, number>();
+  if (!companyCandidates.length) return out;
+  const { db } = getDb();
+  const playIds = [...new Set(companyCandidates.map((c) => c.playId))];
+  const domains = [...new Set(companyCandidates.map((c) => c.companyDomain?.toLowerCase()).filter((v): v is string => !!v))];
+  const names = [...new Set(companyCandidates.map((c) => c.companyName?.trim().toLowerCase()).filter((v): v is string => !!v))];
+  if (!domains.length && !names.length) return out;
+  const match = [domains.length ? inArray(sql`lower(${playCandidates.companyDomain})`, domains) : undefined, names.length ? inArray(sql`lower(btrim(${playCandidates.companyName}))`, names) : undefined].filter((x): x is NonNullable<typeof x> => !!x);
+  const groups = await withStatementTimeout(db, READ_STATEMENT_MS, (tx) =>
+    tx
+      .select({ playId: playCandidates.playId, domain: sql<string | null>`lower(${playCandidates.companyDomain})`, name: sql<string | null>`lower(btrim(${playCandidates.companyName}))`, n: sql<number>`count(*)::int` })
+      .from(playCandidates)
+      .where(and(eq(playCandidates.orgId, orgId), eq(playCandidates.kind, "person"), inArray(playCandidates.playId, playIds), match.length === 2 ? sql`(${match[0]} OR ${match[1]})` : match[0]))
+      .groupBy(playCandidates.playId, sql`lower(${playCandidates.companyDomain})`, sql`lower(btrim(${playCandidates.companyName}))`),
+  );
+  for (const c of companyCandidates) {
+    const domain = c.companyDomain?.toLowerCase() || null;
+    const name = c.companyName?.trim().toLowerCase() || null;
+    let n = 0;
+    // A group counts once, whether it matches by website, by name or by both.
+    for (const g of groups) if (g.playId === c.playId && ((domain && g.domain === domain) || (name && g.name === name))) n += Number(g.n) || 0;
+    out.set(c.id, n);
+  }
+  return out;
+}
+
 /** The review queue: one page, the total for the filter, and the counts per status. Read-only. */
 export async function listCandidates(orgId: string, q: CandidateQuery) {
   const { db } = getDb();
   const scope = and(eq(playCandidates.orgId, orgId), q.playId ? eq(playCandidates.playId, q.playId) : undefined, q.kind ? eq(playCandidates.kind, q.kind) : undefined);
+  // Waiting: best fit first. Decided: most recently decided first, so what was just approved
+  // (a kept company, say) is at the top of its list.
+  const order = q.status === "pending" ? [sql`${playCandidates.score} DESC NULLS LAST`, desc(playCandidates.createdAt)] : [sql`coalesce(${playCandidates.decidedAt}, ${playCandidates.createdAt}) DESC`];
   // One page and one grouped count, both time-limited: a queue of any size answers or says it cannot.
   const { rows, grouped } = await withStatementTimeout(db, READ_STATEMENT_MS, async (tx) => ({
     rows: await tx
@@ -484,14 +583,15 @@ export async function listCandidates(orgId: string, q: CandidateQuery) {
       // The join is scoped too: a candidate is only ever shown under a play of this workspace.
       .innerJoin(plays, and(eq(plays.id, playCandidates.playId), eq(plays.orgId, orgId)))
       .where(and(scope, eq(playCandidates.status, q.status)))
-      .orderBy(...(q.status === "pending" ? [sql`${playCandidates.score} DESC NULLS LAST`, desc(playCandidates.createdAt)] : [desc(playCandidates.createdAt)]), desc(playCandidates.id))
+      .orderBy(...order, desc(playCandidates.id))
       .limit(q.limit)
       .offset(q.offset),
     grouped: await tx.select({ status: playCandidates.status, n: sql<number>`count(*)::int` }).from(playCandidates).where(scope).groupBy(playCandidates.status),
   }));
   const counts = noCounts();
   for (const g of grouped) if (g.status === "pending" || g.status === "approved" || g.status === "skipped") counts[g.status] = Number(g.n) || 0;
-  return { candidates: rows.map((r) => candidateOut(r.candidate, { name: r.playName, type: r.playType })), total: counts[q.status], counts };
+  const people = await peopleFoundFor(orgId, rows.map((r) => r.candidate).filter((c) => c.kind === "company"));
+  return { candidates: rows.map((r) => candidateOut(r.candidate, { name: r.playName, type: r.playType }, { peopleFound: people.get(r.candidate.id) })), total: counts[q.status], counts };
 }
 
 // ── From a finding to a stored candidate ──
@@ -724,6 +824,19 @@ export interface Decision {
   decision: "approve" | "skip";
   skipReason?: string;
 }
+/**
+ * Why a decision was not applied, for a client to act on without reading the sentence:
+ *  - `already_decided`: approved or skipped before, here or by someone else
+ *  - `being_decided`: another request holds it right now
+ *  - `removed`: gone while it was being approved (the person erased, the lead deleted)
+ *  - `not_found`: no such candidate in this workspace
+ *  - `play_gone`: its play was deleted
+ *  - `quota`: the lead allowance ran out; it is still waiting
+ *  - `do_not_contact`: on the platform's or the workspace's do-not-contact list
+ *  - `error`: a fault on our side; it is still waiting
+ */
+export type NotAppliedCode = "already_decided" | "being_decided" | "removed" | "not_found" | "play_gone" | "quota" | "do_not_contact" | "error";
+
 export interface DecideResult {
   approved: number;
   skipped: number;
@@ -732,7 +845,9 @@ export interface DecideResult {
   tasksCreated: number;
   enrolled: number;
   queuedForEmail: number;
-  notApplied: { id: string; reason: string }[];
+  notApplied: { id: string; reason: string; code: NotAppliedCode }[];
+  /** Company candidates approved by this request: each is kept in its play (and saved to Companies when its website is known). */
+  companiesKept: number;
   /** The ids whose decision was applied, in the order they were sent. */
   applied: string[];
   stopped?: { reason: "quota" | "error"; message: string };
@@ -786,12 +901,12 @@ async function loadPlayContext(orgId: string, playId: string): Promise<PlayConte
 }
 
 type Approval =
-  | { result: "approved"; leadId?: string; created?: boolean; existing?: boolean; task?: boolean; enrollable?: boolean }
-  | { result: "not_applied"; reason: string }
+  | { result: "approved"; leadId?: string; created?: boolean; existing?: boolean; task?: boolean; enrollable?: boolean; company?: boolean }
+  | { result: "not_applied"; reason: string; code: NotAppliedCode }
   | { result: "stopped"; reason: "quota" | "error"; message: string };
 
 /**
- * Decide candidates: approve (a person becomes a lead, a company is saved, a conversation
+ * Decide candidates: approve (a person becomes a lead, a company is kept in its play, a conversation
  * becomes a task) or skip.
  *
  *  - Only a candidate that is still waiting, in this workspace, is touched. Anything else
@@ -813,16 +928,16 @@ export function decideCandidates(orgId: string, userId: string | null, decisions
 
 async function decideNow(orgId: string, userId: string | null, decisions: Decision[], opts: { enroll?: boolean }): Promise<DecideResult> {
   const { db } = getDb();
-  const out: DecideResult = { approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, notApplied: [], applied: [] };
+  const out: DecideResult = { approved: 0, skipped: 0, leadsCreated: 0, leadsExisting: 0, tasksCreated: 0, enrolled: 0, queuedForEmail: 0, companiesKept: 0, notApplied: [], applied: [] };
   const ids = [...new Set(decisions.map((d) => d.id))];
-  const before = new Map<string, { status: string }>();
+  const before = new Map<string, { status: string; kind: string }>();
   for (const part of chunked(ids, 500)) {
-    for (const r of await db.select({ id: playCandidates.id, status: playCandidates.status }).from(playCandidates).where(and(eq(playCandidates.orgId, orgId), inArray(playCandidates.id, part)))) before.set(r.id, r);
+    for (const r of await db.select({ id: playCandidates.id, status: playCandidates.status, kind: playCandidates.kind }).from(playCandidates).where(and(eq(playCandidates.orgId, orgId), inArray(playCandidates.id, part)))) before.set(r.id, r);
   }
-  const whyNot = async (id: string): Promise<string> => {
+  const whyNot = async (id: string): Promise<{ id: string; reason: string; code: NotAppliedCode }> => {
     const [row] = await db.select({ status: playCandidates.status }).from(playCandidates).where(and(eq(playCandidates.id, id), eq(playCandidates.orgId, orgId))).limit(1);
-    if (!row) return NOT_FOUND_HERE;
-    return row.status === "pending" ? BEING_DECIDED : `Already ${row.status}.`;
+    if (!row) return { id, reason: NOT_FOUND_HERE, code: "not_found" };
+    return row.status === "pending" ? { id, reason: BEING_DECIDED, code: "being_decided" } : { id, reason: `Already ${row.status}.`, code: "already_decided" };
   };
   const release = (id: string) =>
     db
@@ -840,16 +955,32 @@ async function decideNow(orgId: string, userId: string | null, decisions: Decisi
 
   for (const d of decisions) {
     if (out.stopped) {
-      out.notApplied.push({ id: d.id, reason: NOT_REACHED });
+      out.notApplied.push({ id: d.id, reason: NOT_REACHED, code: out.stopped.reason === "quota" ? "quota" : "error" });
       continue;
     }
     const known = before.get(d.id);
     if (!known) {
-      out.notApplied.push({ id: d.id, reason: NOT_FOUND_HERE });
+      out.notApplied.push({ id: d.id, reason: NOT_FOUND_HERE, code: "not_found" });
+      continue;
+    }
+    // Dismissing something that was kept: an approved company or conversation can be skipped
+    // afterwards (it leaves the "kept" list). Nothing else changes - a company saved to
+    // Companies stays there, a task already created stays a task. An approved PERSON is a
+    // lead by now and is not undone from here.
+    if (d.decision === "skip" && known.status === "approved" && (known.kind === "company" || known.kind === "post")) {
+      const done = await db
+        .update(playCandidates)
+        .set({ status: "skipped", skipReason: cleanText(d.skipReason, 200), decidedBy: userId, decidedAt: sql`now()` })
+        .where(and(eq(playCandidates.id, d.id), eq(playCandidates.orgId, orgId), eq(playCandidates.status, "approved"), inArray(playCandidates.kind, ["company", "post"])))
+        .returning({ id: playCandidates.id });
+      if (done.length) {
+        out.skipped++;
+        out.applied.push(d.id);
+      } else out.notApplied.push(await whyNot(d.id));
       continue;
     }
     if (known.status !== "pending") {
-      out.notApplied.push({ id: d.id, reason: `Already ${known.status}.` });
+      out.notApplied.push({ id: d.id, reason: `Already ${known.status}.`, code: "already_decided" });
       continue;
     }
     if (d.decision === "skip") {
@@ -861,7 +992,7 @@ async function decideNow(orgId: string, userId: string | null, decisions: Decisi
       if (done.length) {
         out.skipped++;
         out.applied.push(d.id);
-      } else out.notApplied.push({ id: d.id, reason: await whyNot(d.id) });
+      } else out.notApplied.push(await whyNot(d.id));
       continue;
     }
     const [claimed] = await db
@@ -870,13 +1001,13 @@ async function decideNow(orgId: string, userId: string | null, decisions: Decisi
       .where(and(eq(playCandidates.id, d.id), eq(playCandidates.orgId, orgId), eq(playCandidates.status, "pending"), unclaimed))
       .returning();
     if (!claimed) {
-      out.notApplied.push({ id: d.id, reason: await whyNot(d.id) });
+      out.notApplied.push(await whyNot(d.id));
       continue;
     }
     let r: Approval;
     try {
       const ctx = await contextOf(claimed.playId);
-      r = ctx ? await approveClaimed(claimed, ctx, userId) : { result: "not_applied", reason: "Its play no longer exists." };
+      r = ctx ? await approveClaimed(claimed, ctx, userId) : { result: "not_applied", reason: "Its play no longer exists.", code: "play_gone" };
     } catch (e) {
       // The detail goes to the operator's log; the caller gets a sentence. No customer text in either.
       console.warn(`[plays] approval of candidate ${claimed.id} failed: ${errorLine(e)}`);
@@ -888,13 +1019,14 @@ async function decideNow(orgId: string, userId: string | null, decisions: Decisi
       if (r.created) out.leadsCreated++;
       if (r.existing) out.leadsExisting++;
       if (r.task) out.tasksCreated++;
+      if (r.company) out.companiesKept++;
       if (r.leadId && r.enrollable) toEnroll.set(claimed.playId, [...(toEnroll.get(claimed.playId) ?? []), r.leadId]);
     } else if (r.result === "not_applied") {
-      out.notApplied.push({ id: d.id, reason: r.reason });
+      out.notApplied.push({ id: d.id, reason: r.reason, code: r.code });
     } else {
       await release(claimed.id);
       out.stopped = { reason: r.reason, message: r.message };
-      out.notApplied.push({ id: d.id, reason: r.reason === "quota" ? "Not added: the plan's lead allowance is used up. It is still waiting for review." : NOT_REACHED });
+      out.notApplied.push({ id: d.id, reason: r.reason === "quota" ? "Not added: the plan's lead allowance is used up. It is still waiting for review." : NOT_REACHED, code: r.reason === "quota" ? "quota" : "error" });
     }
   }
 
@@ -941,10 +1073,10 @@ const DECIDED_ELSEWHERE = "Decided elsewhere a moment ago.";
 const REMOVED_MEANWHILE = "This was removed while it was being approved, so nothing was added.";
 
 /** Why a claimed candidate could not be marked decided: someone else decided it, or it is gone (its play deleted, the person erased). */
-async function whyNotFinished(c: PlayCandidate): Promise<string> {
+async function whyNotFinished(c: PlayCandidate): Promise<{ result: "not_applied"; reason: string; code: NotAppliedCode }> {
   const { db } = getDb();
   const [still] = await db.select({ id: playCandidates.id }).from(playCandidates).where(and(eq(playCandidates.id, c.id), eq(playCandidates.orgId, c.orgId))).limit(1);
-  return still ? DECIDED_ELSEWHERE : REMOVED_MEANWHILE;
+  return still ? { result: "not_applied", reason: DECIDED_ELSEWHERE, code: "already_decided" } : { result: "not_applied", reason: REMOVED_MEANWHILE, code: "removed" };
 }
 
 /** What approving a play's candidate stamps on the lead. */
@@ -986,7 +1118,7 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
       await tx.insert(tasks).values({ orgId, type: "reply_public", title: "Answer this conversation", body: conversationTaskBody(c), dueAt: new Date(), assigneeUserId: userId });
       return true;
     });
-    if (!done) return { result: "not_applied", reason: await whyNotFinished(c) };
+    if (!done) return whyNotFinished(c);
     return { result: "approved", task: true };
   }
 
@@ -996,8 +1128,11 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
       await upsertCompany(orgId, domain, { name: cleanText(c.companyName, 200) ?? undefined });
       await db.update(companies).set({ signalsCount: sql`${companies.signalsCount} + 1`, lastSignalAt: new Date(), intentScore: sql`LEAST(100, ${companies.intentScore} + 20)` }).where(and(eq(companies.orgId, orgId), eq(companies.domain, domain)));
     }
-    if (!(await finishCandidate(c, { status: "approved" }, userId))) return { result: "not_applied", reason: await whyNotFinished(c) };
-    return { result: "approved" };
+    if (!(await finishCandidate(c, { status: "approved" }, userId))) return whyNotFinished(c);
+    // Kept: the candidate stays in the play as an approved company, where "Find people"
+    // works on it. Only a company with a known website is also saved to Companies (above) -
+    // so the answer says "kept", which is true for both.
+    return { result: "approved", company: true };
   }
 
   const marks = leadMarks(c, play);
@@ -1009,13 +1144,13 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
     const lead = c.leadId ? await db.query.leads.findFirst({ where: and(eq(leads.id, c.leadId), eq(leads.orgId, orgId)) }) : null;
     if (!lead) {
       await finishCandidate(c, { status: "skipped", skipReason: "The lead this was about no longer exists." }, userId);
-      return { result: "not_applied", reason: "The lead this was about no longer exists." };
+      return { result: "not_applied", reason: "The lead this was about no longer exists.", code: "removed" };
     }
     // Do-not-contact, again: asking a person to reach out is contact too.
     const block = await contactBlock(orgId, [canonicalEmail(lead.email), lead.email], { leadStatus: lead.status, db });
     if (block) {
       await finishCandidate(c, { status: "skipped", skipReason: "On a do-not-contact list." }, userId);
-      return { result: "not_applied", reason: block.list === "platform" ? PLATFORM_LISTED_REASON : WORKSPACE_LISTED_REASON };
+      return { result: "not_applied", reason: block.list === "platform" ? PLATFORM_LISTED_REASON : WORKSPACE_LISTED_REASON, code: "do_not_contact" };
     }
     // The decision, the marks on the lead and the task are written together: decided or
     // removed meanwhile, and none of them is.
@@ -1028,7 +1163,7 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
       await tx.insert(tasks).values({ orgId, leadId: lead.id, type: "job_change", title: "Reach out about the move", body: (cleanText(c.relevantBecause, 300) ?? "").slice(0, TASK_BODY_MAX), dueAt: new Date(), assigneeUserId: userId });
       return true;
     });
-    if (!done) return { result: "not_applied", reason: await whyNotFinished(c) };
+    if (!done) return whyNotFinished(c);
     await emitEvent(orgId, "play.candidate_approved", { leadId: lead.id, playId: play.id, candidateId: c.id }, { type: "lead", id: lead.id });
     return { result: "approved", leadId: lead.id, existing: true, task: true };
   }
@@ -1039,11 +1174,11 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
     if ((await platformListed([email], db)).size) {
       // The address may not be kept at all, so the candidate goes.
       await db.delete(playCandidates).where(and(eq(playCandidates.id, c.id), eq(playCandidates.orgId, orgId)));
-      return { result: "not_applied", reason: PLATFORM_LISTED_REASON };
+      return { result: "not_applied", reason: PLATFORM_LISTED_REASON, code: "do_not_contact" };
     }
     if ((await workspaceListed(orgId, [email], db)).size) {
       await finishCandidate(c, { status: "skipped", skipReason: "On your do-not-contact list." }, userId);
-      return { result: "not_applied", reason: WORKSPACE_LISTED_REASON };
+      return { result: "not_applied", reason: WORKSPACE_LISTED_REASON, code: "do_not_contact" };
     }
   }
 
@@ -1102,7 +1237,7 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
   if (!(await finishCandidate(c, { status: "approved", leadId: lead.id }, userId))) {
     const [still] = await db.select({ status: playCandidates.status }).from(playCandidates).where(and(eq(playCandidates.id, c.id), eq(playCandidates.orgId, orgId))).limit(1);
     // Approved elsewhere: that approval stands, and the lead is the one it found or made.
-    if (still?.status === "approved") return { result: "not_applied", reason: DECIDED_ELSEWHERE };
+    if (still?.status === "approved") return { result: "not_applied", reason: DECIDED_ELSEWHERE, code: "already_decided" };
     // Skipped elsewhere, or gone. A lead this approval made a moment ago is taken back out
     // (a skipped person was not wanted, an erased person must not come back as a lead, and a
     // deleted play adds nobody), and what it cost is given back. A lead the workspace
@@ -1126,7 +1261,7 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
         console.warn(`[plays] could not take back a lead whose candidate was removed mid-approval (${lead.id}): ${errorLine(e)}`);
       }
     }
-    return { result: "not_applied", reason: still ? DECIDED_ELSEWHERE : "This was removed while it was being approved, so nobody was added." };
+    return still ? { result: "not_applied", reason: DECIDED_ELSEWHERE, code: "already_decided" } : { result: "not_applied", reason: "This was removed while it was being approved, so nobody was added.", code: "removed" };
   }
 
   if (ctx.listId) await db.insert(listLeads).values({ listId: ctx.listId, leadId: lead.id }).onConflictDoNothing();
@@ -1633,13 +1768,16 @@ export async function planFor(org: Organization, domain: string) {
   const plan = await playEngines().planPlays({ website: domain, knownCompetitors: savedCompetitors(org) }, engineOptions(org, Date.now() + 90_000));
   const unavailable = await playAvailability(org);
   const titles = (Array.isArray(plan?.titles) ? plan.titles : []).map((t) => cleanText(t, 100)).filter((t): t is string => !!t).slice(0, 20);
-  const suggestions: { type: PlayType; name: string; config: Record<string, unknown>; targetTitles: string[]; why: string; available: boolean; unavailableReason?: string }[] = [];
+  const searchDependable = dependableSearch();
+  const suggestions: { type: PlayType; name: string; config: Record<string, unknown>; targetTitles: string[]; why: string; available: boolean; unavailableReason?: string; needsSearch: boolean; setupHint?: string }[] = [];
   const offer = (type: unknown, name: unknown, config: unknown, targetTitles: unknown, why: unknown) => {
     if (typeof type !== "string" || !(PLAY_TYPES as readonly string[]).includes(type) || suggestions.some((s) => s.type === type)) return;
     const t = type as PlayType;
     const parsed = PLAY_CONFIG[t].safeParse(config ?? {});
     if (!parsed.success) return;
     const reason = unavailable[t];
+    // About this suggestion with its own settings: a competitor with no website needs a search, one with a website does not.
+    const need = searchNeed(t, parsed.data as Record<string, unknown>);
     suggestions.push({
       type: t,
       name: cleanText(name, 120) ?? CATALOGUE.find((c) => c.type === t)!.name,
@@ -1648,6 +1786,8 @@ export async function planFor(org: Organization, domain: string) {
       why: cleanText(why, 300) ?? "",
       available: !reason,
       ...(reason ? { unavailableReason: reason } : {}),
+      needsSearch: need.needsSearch,
+      ...(!searchDependable && need.hint ? { setupHint: need.hint } : {}),
     });
   };
   for (const p of Array.isArray(plan?.plays) ? plan.plays.slice(0, 12) : []) offer(p?.type, p?.name, p?.config, p?.targetTitles, p?.why);
@@ -1670,7 +1810,9 @@ export async function planFor(org: Organization, domain: string) {
     icp: cleanIcp(plan?.icp),
     titles,
     competitors,
-    plays: suggestions,
+    // With no dependable search source, what works today comes first (the order is otherwise the planner's).
+    plays: searchDependable ? suggestions : [...suggestions.filter((p) => p.available && !p.needsSearch), ...suggestions.filter((p) => !(p.available && !p.needsSearch))],
+    searchDependable,
     notes,
   };
 }

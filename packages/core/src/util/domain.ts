@@ -34,6 +34,9 @@ const SOCIAL_HOSTS = [
 ];
 
 export function extractDomain(input: string): string | null {
+  if (typeof input !== "string") return null;
+  // The host stands at the start of an address: what follows the first two thousand characters cannot change it.
+  if (input.length > 2_100) input = input.slice(0, 2_100);
   try {
     const u = input.includes("://") ? new URL(input) : new URL(`https://${input}`);
     let host = u.hostname.toLowerCase();
@@ -61,7 +64,16 @@ export function rootDomain(domain: string) {
 }
 
 export function normalizeLinkedinUrl(url: string): string | null {
-  const m = url.match(/linkedin\.com\/(in|company)\/([A-Za-z0-9\-_%.]+)/i);
+  if (typeof url !== "string") return null;
+  // A profile's name in an address is short; one of thousands of characters is not a profile.
+  const m = url.slice(0, 2_000).match(/linkedin\.com\/(in|company)\/([A-Za-z0-9\-_%.]{1,200})/i);
   if (!m) return null;
-  return `https://www.linkedin.com/${m[1].toLowerCase()}/${decodeURIComponent(m[2]).replace(/\/+$/, "").toLowerCase()}`;
+  let slug: string;
+  try {
+    slug = decodeURIComponent(m[2]);
+  } catch {
+    // "%zz" and the like: not an address anyone can open. (This used to throw, out of whatever was reading a list of results.)
+    return null;
+  }
+  return `https://www.linkedin.com/${m[1].toLowerCase()}/${slug.replace(/\/+$/, "").toLowerCase()}`;
 }

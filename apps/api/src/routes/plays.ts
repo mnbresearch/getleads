@@ -27,12 +27,13 @@ import {
   linkOrNull,
   listCandidates,
   parsePlayConfig,
+  peopleFoundFor,
   planFor,
   playCreateInput,
   playOut,
   playPatchInput,
   playPerformance,
-  playTypes,
+  playCatalogue,
   RUN_BUSY_MS,
   runInProgress,
   runningPlays,
@@ -90,7 +91,7 @@ const nextRunFor = (runEveryHours: number | null | undefined, type: string) => (
 
 // ── Catalogue and planning ──
 
-playRoutes.get("/types", async (c) => c.json({ types: await playTypes(c.get("auth").org) }));
+playRoutes.get("/types", async (c) => c.json(await playCatalogue(c.get("auth").org)));
 
 /** What to run for a product, from its website. Saves nothing. */
 playRoutes.post("/plan", rateLimit({ perMinute: 6, name: "plays-plan" }), zValidator("json", z.object({ website: z.string().trim().min(1).max(300) })), async (c) => {
@@ -191,7 +192,9 @@ playRoutes.post("/candidates/:id/find-people", rateLimit({ perMinute: 12, name: 
   }
   // A search that could not look at anything is not charged.
   if (r.blocked) await giveBack();
-  return c.json({ added: r.added.length, candidates: r.added.map((x) => candidateOut(x, play)), ...(r.note ? { note: r.note } : {}) });
+  // How many people the play now holds for this company, so a "kept company" row can be updated in place.
+  const peopleFound = (await peopleFoundFor(oid, [candidate]).catch(() => new Map<string, number>())).get(candidate.id) ?? r.added.length;
+  return c.json({ added: r.added.length, candidates: r.added.map((x) => candidateOut(x, play)), peopleFound, ...(r.note ? { note: r.note } : {}) });
 });
 
 // ── Results ──

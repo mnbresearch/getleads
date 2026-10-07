@@ -48,10 +48,15 @@ export interface JobChangeResult {
   comparedCompany: boolean;
 }
 
+/** How much of a name or a title is read: far more than any real one. */
+const MAX_FIELD_READ = 300;
+
 /** Normalise a company name enough to compare two spellings of the same employer. */
 export function normalizeCompany(name?: string | null): string {
-  if (!name) return "";
+  if (!name || typeof name !== "string") return "";
+  // A name is a line. A provider can send anything as one; a dozen passes over a megabyte is a second of work for nothing.
   return name
+    .slice(0, MAX_FIELD_READ)
     .toLowerCase()
     .replace(/&/g, " and ")
     .replace(/[.,'"]/g, "")
@@ -74,8 +79,9 @@ export function normalizeCompany(name?: string | null): string {
 
 /** Normalise a title enough to tell a real move from a reworded one. */
 export function normalizeTitle(title?: string | null): string {
-  if (!title) return "";
+  if (!title || typeof title !== "string") return "";
   return title
+    .slice(0, MAX_FIELD_READ)
     .toLowerCase()
     .replace(/&/g, " and ")
     .replace(/\b(vice president)\b/g, "vp")

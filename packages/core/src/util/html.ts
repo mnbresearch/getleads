@@ -34,8 +34,12 @@ export const HTML_LIMITS = {
   tagChars: 4_000,
 } as const;
 
-/** Why a page is refused: nested too deeply, too many elements, or a tag the parser cannot read quickly. */
-export type UnreadableHtml = "nesting" | "elements" | "tag";
+/**
+ * Why a page is refused: nested too deeply, too many elements, a tag the parser cannot read
+ * quickly, or content misplaced in a way that makes the parser move it around ("moved":
+ * thousands of things written straight into a table, outside any cell).
+ */
+export type UnreadableHtml = "nesting" | "elements" | "tag" | "moved";
 
 export interface HtmlShape {
   reason: UnreadableHtml | null;
@@ -46,6 +50,8 @@ export interface HtmlShape {
   tagChars: number;
   /** Everything that reads as a tag, opening or closing, wherever it stands. */
   tags: number;
+  /** Pieces of content written straight into a table, outside any cell: the parser lifts each one out in front of the table. */
+  misplaced: number;
 }
 
 /**
@@ -58,11 +64,16 @@ const MAX_ATTRIBUTE_COST = 30_000_000;
 
 /**
  * For most tags it reads, the parser walks up its stack of open elements. So the nesting a
- * page may have shrinks once it has more tags than a full page of elements: 400 levels up
- * to 60,000 tags, 200 at 120,000, never fewer than 100.
+ * page may have shrinks once it has more tags than a large page has: 400 levels up to
+ * 30,000 tags, 200 at 60,000, 100 at 120,000 (as many as a page of 60,000 elements can
+ * have with every one closed), never fewer than 60. The largest real page seen has 23,500
+ * tags and 31 levels. At the floor, the most a page under the size cap can cost this way is
+ * about a third of a second (265,000 stray closing tags inside 60 levels of drawing markup).
  */
-const MAX_TAG_LEVELS = HTML_LIMITS.depth * HTML_LIMITS.elements;
-export const depthAllowed = (tags: number): number => Math.max(100, Math.min(HTML_LIMITS.depth, Math.floor(MAX_TAG_LEVELS / Math.max(1, tags))));
+const MAX_TAG_LEVELS = (HTML_LIMITS.depth * HTML_LIMITS.elements) / 2;
+const MIN_DEPTH_ALLOWED = 60;
+export const depthAllowed = (tags: number): number =>
+  Math.max(MIN_DEPTH_ALLOWED, Math.min(HTML_LIMITS.depth, Math.floor(MAX_TAG_LEVELS / Math.max(1, tags))));
 
 const VOID = new Set("area base basefont bgsound br col embed frame hr img input keygen link meta param source track wbr".split(" "));
 /** Closed by the next of their kind or by their parent: they do not pile up, so they are not counted as a level. */
@@ -70,6 +81,19 @@ const IMPLIED_END = new Set("p li dt dd option optgroup tr td th thead tbody tfo
 /** A new one closes the one still open. Each time that happens the parser has repair work to do, so it may happen only so often. */
 const CLOSES_ITSELF = new Set("a button nobr select".split(" "));
 const MAX_REPAIRS = 5_000;
+/**
+ * A table holds rows and cells. Anything else written straight into it - an element, a
+ * line of text - is lifted out by the parser and put in front of the table, one piece at
+ * a time, each costing a search through what is already there. A real table has none or
+ * a stray few; past this many the page is refused.
+ */
+const MAX_MISPLACED = 5_000;
+/** What a table may hold directly, and what is put inside it without being moved. */
+const TABLE_PART = new Set("caption colgroup col thead tbody tfoot tr td th script style template form".split(" "));
+/** A cell or a caption: content inside one is where it belongs. */
+const OPENS_CELL = new Set(["td", "th", "caption"]);
+const CLOSES_CELL = new Set(["td", "th", "caption", "tr", "thead", "tbody", "tfoot", "colgroup"]);
+
 /** Their content is text, whatever it looks like, up to their own closing tag. */
 const RAW_TEXT = new Map<string, RegExp>("style textarea title xmp iframe noembed noframes noscript".split(" ").map((n) => [n, new RegExp(`</${n}(?=[\\s/>])`, "gi")]));
 const DATA_SCRIPT = /type\s{0,5}=\s{0,5}["']?application\/ld\+json/i;
@@ -247,7 +271,7 @@ export function scanHtml(html: string, limits: { depth: number; elements: number
  * every tag that is not closed on itself opens a level, and only its own closing tag ends it.
  */
 function scan(html: string, limits: { depth: number; elements: number; tagChars: number }, unread?: [number, number][], xml = false): HtmlShape {
-  const shape: HtmlShape = { reason: null, depth: 0, elements: 0, tagChars: 0, tags: 0 };
+  const shape: HtmlShape = { reason: null, depth: 0, elements: 0, tagChars: 0, tags: 0, misplaced: 0 };
   if (typeof html !== "string" || !html) return shape;
   const n = html.length;
   const refuse = (reason: UnreadableHtml): HtmlShape => {
@@ -268,10 +292,27 @@ function scan(html: string, limits: { depth: number; elements: number; tagChars:
       const top = open.pop();
       if (top === undefined) return;
       openCount.set(top, (openCount.get(top) ?? 1) - 1);
+      if (top === "table") cells.pop();
       if (top === name) return;
     }
   };
   const inForeign = (): boolean => (openCount.get("svg") ?? 0) + (openCount.get("math") ?? 0) > 0;
+  /** Is a cell (or caption) open in each open table, innermost last. `cells.length` is the number of open tables. */
+  const cells: boolean[] = [];
+  /** Is the reader directly inside a table, outside any cell? (Where content is misplaced.) */
+  const looseInTable = (): boolean => cells.length > 0 && !cells[cells.length - 1] && open[open.length - 1] === "table";
+  const misplaced = (): boolean => ++shape.misplaced > MAX_MISPLACED;
+  /**
+   * Where the last tag (or comment, or the text of a script) ended: the text between there and the next
+   * one is looked at when it stands loose in a table. A comment in the middle of it does not hide it.
+   */
+  let textFrom = 0;
+  let textSeen = false;
+  const looseText = (to: number): boolean => {
+    if (textSeen) return true;
+    for (let i = textFrom; i < to; i++) if (!isSpace(html.charCodeAt(i))) return true;
+    return false;
+  };
 
   const quotes = new Quotes(html);
   const nextGt = finder(html, ">");
@@ -322,6 +363,16 @@ function scan(html: string, limits: { depth: number; elements: number; tagChars:
         if (chars > shape.tagChars) shape.tagChars = chars;
         if (chars > limits.tagChars) return refuse("tag");
         const name = tag.nameEnd - tag.nameStart <= 40 ? html.slice(tag.nameStart, tag.nameEnd).toLowerCase() : "?";
+        if (!xml && cells.length) {
+          // Text, or an element that is not part of a table, standing loose in one.
+          if (looseInTable() && ((looseText(lt) && misplaced()) || (!closing && !TABLE_PART.has(name) && name !== "table" && misplaced()))) return refuse("moved");
+          if (open[open.length - 1] === "table") {
+            if (!closing && OPENS_CELL.has(name)) cells[cells.length - 1] = true;
+            else if (CLOSES_CELL.has(name)) cells[cells.length - 1] = false;
+          }
+        }
+        textFrom = tag.end;
+        textSeen = false;
         if (xml) {
           if (closing) {
             if (open[open.length - 1] === name) closeThrough(name);
@@ -340,10 +391,12 @@ function scan(html: string, limits: { depth: number; elements: number; tagChars:
             resume = scriptEnd(html, tag.end);
             // Data a page carries for its readers (JSON-LD and the like) is kept; code is not read by anything.
             if (unread && !(tag.end - lt <= 400 && DATA_SCRIPT.test(html.slice(lt, tag.end)))) unread.push([tag.end, resume]);
+            textFrom = resume;
           } else if (raw) {
             raw.lastIndex = tag.end;
             const m = raw.exec(html);
             resume = m ? m.index : n;
+            textFrom = resume;
             if (unread && name === "style") unread.push([tag.end, resume]);
           } else if (!VOID.has(name) && !IMPLIED_END.has(name) && !(tag.selfClosing && inForeign())) {
             if (CLOSES_ITSELF.has(name) && openCount.get(name)) {
@@ -351,6 +404,7 @@ function scan(html: string, limits: { depth: number; elements: number; tagChars:
               closeThrough(name);
             }
             push(name);
+            if (name === "table" && !xml) cells.push(false);
             if (open.length > limits.depth) return refuse("nesting");
           }
         }
@@ -368,6 +422,11 @@ function scan(html: string, limits: { depth: number; elements: number; tagChars:
         // A doctype, a processing instruction or a malformed closing tag: skipped up to its ">".
         const gt = nextGt(lt + 2);
         resume = gt < 0 ? n : gt + 1;
+      }
+      if (resume > lt && cells.length) {
+        // Not text: what stood before it is remembered, and the text to look at starts again after it.
+        textSeen = looseText(lt);
+        textFrom = resume;
       }
     }
     lt = html.indexOf("<", next);
@@ -422,12 +481,138 @@ class Unreadable extends Error {
   }
 }
 
-/** The parser's own tree builder, counting as it goes and stopping the parse at the limits. */
-function limitedAdapter(maxDepth: number): typeof treeAdapter {
+/**
+ * What moving content around may cost in one parse, counted in list entries searched or
+ * shifted: about a tenth of a second. A real page spends a few hundred.
+ */
+const MAX_MOVE_WORK = 100_000_000;
+/** What handing one child of a block over to another element counts for (see `detachNode` below). */
+const MOVE_COST = 20;
+/** A block with fewer children than this is emptied the plain way. */
+const MIN_DRAINED = 32;
+
+/**
+ * The parser's tree builder, with the page's limits enforced as the tree is built and
+ * with the three operations that move content made cheap:
+ *
+ * - Content misplaced in a table is put in front of the table. The stock builder looks
+ *   for the table among its siblings from the first one, for every piece; the table is
+ *   the last of them, so here the search starts at the end.
+ * - Closing a formatting element around a block (<b><div>...</b>) hands every child of the
+ *   block to a new element, first child first. The stock builder takes each one off the
+ *   front of the list, shifting all the others; here the block is emptied in one go once
+ *   the last child has been handed over ("draining").
+ * - What is left of either is counted, and a page that keeps the parser moving content
+ *   around - the same block re-homed for each of thousands of tags - is given up on.
+ *
+ * The tree is the stock builder's, node for node.
+ */
+function limitedAdapter(maxDepth: number): { adapter: typeof treeAdapter; settle: () => void } {
   let depth = 0;
   let elements = 0;
-  return {
+  let work = 0;
+  type DomNode = Parameters<typeof treeAdapter.detachNode>[0];
+  type Parent = Parameters<typeof treeAdapter.appendChild>[0];
+  const spend = (amount: number): void => {
+    work += amount;
+    if (work > MAX_MOVE_WORK) throw new Unreadable("moved");
+  };
+  /** The block being emptied from the front, and how many of its first children are already gone from it. */
+  let draining: Parent | null = null;
+  let drained = 0;
+  const settle = (): void => {
+    if (!draining) return;
+    const kids = draining.children;
+    if (drained >= kids.length) kids.length = 0;
+    else kids.splice(0, drained);
+    draining = null;
+    drained = 0;
+  };
+  const insertBefore = (parentNode: Parent, newNode: DomNode, referenceNode: DomNode): void => {
+    const kids = parentNode.children as DomNode[];
+    const at = kids.lastIndexOf(referenceNode);
+    spend(kids.length - at);
+    const prev = referenceNode.prev;
+    if (prev) {
+      prev.next = newNode;
+      newNode.prev = prev;
+    }
+    referenceNode.prev = newNode;
+    newNode.next = referenceNode;
+    kids.splice(at, 0, newNode);
+    newNode.parent = parentNode;
+  };
+  const adapter: typeof treeAdapter = {
     ...treeAdapter,
+    // Whatever reads or changes a list of children works on a settled tree. (The rest - names, attributes,
+    // new nodes - is the stock builder's, untouched: the parser asks for those millions of times.)
+    setTemplateContent(templateElement, contentElement) {
+      settle();
+      treeAdapter.setTemplateContent(templateElement, contentElement);
+    },
+    getTemplateContent(templateElement) {
+      settle();
+      return treeAdapter.getTemplateContent(templateElement);
+    },
+    setDocumentType(document, name, publicId, systemId) {
+      settle();
+      treeAdapter.setDocumentType(document, name, publicId, systemId);
+    },
+    insertText(parentNode, text) {
+      settle();
+      treeAdapter.insertText(parentNode, text);
+    },
+    getChildNodes(node) {
+      settle();
+      return treeAdapter.getChildNodes(node);
+    },
+    insertBefore(parentNode, newNode, referenceNode) {
+      settle();
+      insertBefore(parentNode, newNode as DomNode, referenceNode as DomNode);
+    },
+    insertTextBefore(parentNode, text, referenceNode) {
+      settle();
+      const prev = referenceNode.prev;
+      if (prev && prev.type === "text") (prev as unknown as { data: string }).data += text;
+      else insertBefore(parentNode, treeAdapter.createTextNode(text) as DomNode, referenceNode as DomNode);
+    },
+    appendChild(parentNode, newNode) {
+      if (parentNode === draining) settle();
+      treeAdapter.appendChild(parentNode, newNode);
+    },
+    getFirstChild(node) {
+      if (node !== draining) return treeAdapter.getFirstChild(node);
+      const first = (node.children as DomNode[])[drained];
+      if (first) return first;
+      settle();
+      return null;
+    },
+    detachNode(node) {
+      const parent = node.parent;
+      if (!parent) return;
+      const kids = parent.children as DomNode[];
+      const { prev, next } = node;
+      if (parent === draining ? kids[drained] === node : kids[0] === node && kids.length >= MIN_DRAINED) {
+        // The first child still there: it stays in the list until the block is settled.
+        if (parent !== draining) {
+          settle();
+          draining = parent;
+        }
+        drained++;
+        spend(MOVE_COST);
+      } else {
+        settle();
+        // Near the end, where the parser takes one out now and then.
+        const at = kids.lastIndexOf(node);
+        spend(kids.length - at);
+        if (at >= 0) kids.splice(at, 1);
+      }
+      node.prev = null;
+      node.next = null;
+      if (prev) prev.next = next;
+      if (next) next.prev = prev;
+      node.parent = null;
+    },
     createElement(tagName, namespaceURI, attrs) {
       // html, head and body are made for every page, written or not: three more than the page's own.
       if (++elements > HTML_LIMITS.elements + 3) throw new Unreadable("elements");
@@ -441,6 +626,7 @@ function limitedAdapter(maxDepth: number): typeof treeAdapter {
       depth--;
     },
   };
+  return { adapter, settle };
 }
 
 /**
@@ -452,7 +638,10 @@ export function loadHtml(html: string, maxChars = MAX_HTML_CHARS): cheerio.Cheer
   const shape = scanHtml(text);
   if (shape.reason) return null;
   try {
-    return cheerio.load(text, { treeAdapter: limitedAdapter(depthAllowed(shape.tags)) });
+    const { adapter, settle } = limitedAdapter(depthAllowed(shape.tags));
+    const $ = cheerio.load(text, { treeAdapter: adapter });
+    settle();
+    return $;
   } catch {
     return null;
   }

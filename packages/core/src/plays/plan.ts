@@ -34,11 +34,19 @@ const COMPANY_SIZES = ["1-10", "11-50", "51-200", "201-500", "501-1000", "1001-5
  * scored against the site's own description and headings and the best one wins (the earlier
  * of two equals); the last row is the default when nothing matches.
  */
+/**
+ * The words of a product for the people who answer customers. "Support" alone is too common a
+ * word ("we support Safari"); with what it is a support of - a stack, a platform, a team -
+ * it is this.
+ */
+const SUPPORT_WORDS =
+  /\b(?:customer support|helpdesk|help desk|tickets?|customer success|live chat|customer service|contact cent(?:er|re)|support (?:stack|platform|software|tools?|desk|teams?|agents?|inbox|queue|motion|operations|ops|experience|automation))\b/i;
+
 const PERSONAS: { match: RegExp; titles: string[]; roles: string[] }[] = [
   { match: /\b(?:sales|outbound|prospect\w*|lead[- ]gen\w*|leads|buyers|deals|pipeline|crm|revenue|cold email|sdr|quota)\b/i, titles: ["VP Sales", "Head of Sales", "Sales Director", "Head of Growth", "Chief Revenue Officer", "Founder"], roles: ["Sales Development Representative", "Account Executive"] },
   { match: /\b(?:marketing|seo|content|campaigns?|brand|advertis\w*|ads|social media|newsletter|demand gen\w*)\b/i, titles: ["Chief Marketing Officer", "VP Marketing", "Head of Marketing", "Head of Growth", "Marketing Director"], roles: ["Marketing Manager", "Growth Marketer", "Content Marketer"] },
   { match: /\b(?:recruit\w*|hiring|talent|applicants?|payroll|people ops|human resources|hr|onboarding employees|employee)\b/i, titles: ["Chief People Officer", "VP People", "Head of HR", "Head of Talent", "HR Director"], roles: ["Recruiter", "HR Manager", "People Operations Manager"] },
-  { match: /\b(?:customer support|helpdesk|help desk|tickets?|customer success|live chat|customer service|contact cent(?:er|re))\b/i, titles: ["Head of Customer Support", "VP Customer Success", "Director of Customer Experience", "Head of Customer Success"], roles: ["Customer Support Specialist", "Customer Success Manager"] },
+  { match: SUPPORT_WORDS, titles: ["Head of Customer Support", "VP Customer Success", "Director of Customer Experience", "Head of Customer Success"], roles: ["Customer Support Specialist", "Customer Success Manager"] },
   { match: /\b(?:security|compliance|soc 2|gdpr|iso 27001|vulnerabilit\w*|pentest\w*|threat)\b/i, titles: ["Chief Information Security Officer", "Head of Security", "VP Engineering", "Compliance Manager"], roles: ["Security Engineer", "Compliance Manager"] },
   { match: /\b(?:financ\w*|accounting|invoic\w*|expenses?|audit\w*|bookkeep\w*|tax|accounts payable|billing|treasury)\b/i, titles: ["Chief Financial Officer", "VP Finance", "Finance Director", "Controller", "Head of Finance"], roles: ["Accountant", "Finance Manager", "Financial Controller"] },
   { match: /\b(?:analytics|data warehouse|business intelligence|dashboards?|data pipeline\w*|etl|data team)\b/i, titles: ["Head of Data", "VP Analytics", "Director of Data", "Chief Data Officer"], roles: ["Data Analyst", "Data Engineer"] },
@@ -52,6 +60,8 @@ const PERSONAS: { match: RegExp; titles: string[]; roles: string[] }[] = [
 
 const CATEGORY_NOUN = "platform|software|tool|app|crm|solution|suite|system|service|api|marketplace|agency|consultancy|studio|engine|assistant|network";
 
+const SUPPORT_CATEGORY = "customer support software";
+
 /** What a site sells, by the words it uses for it, when it never says "X is a ... platform". First match wins. */
 const CATEGORY_WORDS: [RegExp, string][] = [
   [/\b(?:e-?mail)\s+(?:verif\w+|validation|checker)\b|\bverif(?:y|ies|ying)\s+(?:e-?mail)(?:\s+address(?:es)?|s)?\b/i, "email verification tool"],
@@ -61,7 +71,7 @@ const CATEGORY_WORDS: [RegExp, string][] = [
   [/\be-?mail marketing\b|\bnewsletters?\b/i, "email marketing tool"],
   [/\b(?:error|crash|performance|application)\s+(?:monitoring|tracking)\b|\bapplication performance\b|\bobservability\b/i, "application monitoring tool"],
   [/\bproduct analytics\b/i, "product analytics tool"],
-  [/\bshared inbox\b|\bcustomer support\b|\bhelp ?desk\b|\bticketing\b|\bcustomer service\b/i, "customer support software"],
+  [/\bshared inbox\b|\bcustomer support\b|\bhelp ?desk\b|\bticketing\b|\bcustomer service\b|\bsupport (?:stack|platform|software|tools?|desk|teams?)\b/i, SUPPORT_CATEGORY],
   [/\bperformance (?:management|reviews?)\b|\bpeople management\b|\bhr (?:and \w+ )?(?:software|platform|tools?)\b|\bhris\b|\bemployee engagement\b/i, "HR software"],
   [/\bapplicant tracking\b|\brecruiting software\b/i, "applicant tracking system"],
   [/\bproject management\b/i, "project management tool"],
@@ -102,7 +112,10 @@ const withoutBoilerplate = (text: string): string => text.replace(BOILERPLATE, "
  * description counts three times, its main headline twice, its other headings and opening
  * text once - so one stray word ("content" in "Skip to main content") cannot decide it.
  */
-export function pickPersona(site: { description?: string; headline?: string; headings?: string[]; text?: string }): { titles: string[]; roles: string[] } {
+export function pickPersona(site: { description?: string; headline?: string; headings?: string[]; text?: string; category?: string }): { titles: string[]; roles: string[] } {
+  // A product that says it is for support is bought by the people who run support, whatever else its page
+  // talks about: "composable infrastructure, no-code or all-code" describes how it is built, not who buys it.
+  if (site.category === SUPPORT_CATEGORY || site.category === "live chat software") return PERSONAS.find((p) => p.match === SUPPORT_WORDS)!;
   const parts: [string, number][] = [
     [withoutBoilerplate((site.description ?? "").slice(0, 2000)), 3],
     [withoutBoilerplate((site.headline ?? "").slice(0, 1000)), 2],
@@ -123,6 +136,30 @@ export function pickPersona(site: { description?: string; headline?: string; hea
   return best;
 }
 
+/** What a company puts before or after its name to get a web address: getacme.com, acmehq.com, acme-app.io. */
+const DOMAIN_AFFIX = /^(?:get|use|try|go|join|hey|with|my|the|meet|hello|team)(?=[a-z0-9]{3})|(?:app|hq|ai|io|labs?|software|online|inc|co)$/g;
+
+/**
+ * Is this name the site's own product? The same company (`isSameCompany`), and also the same
+ * name shortened or lengthened by whole words: "Clearstat" on the site of Clearstat
+ * Analytics, "Clearstat Analytics" on the site of Clearstat. A site compares itself with
+ * others under its own name ("Clearstat vs Rival"), and its own name is not a competitor.
+ */
+export function isOwnProduct(name: string, own: { name?: string; domain?: string }): boolean {
+  if (isSameCompany(name, own)) return true;
+  const words = (s: string): string[] => cleanLine(s, 80).toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  const a = words(name);
+  const b = words(own.name ?? "");
+  if (a.length && b.length && a[0].length >= 3) {
+    const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+    if (short.every((w, i) => long[i] === w)) return true;
+  }
+  // The address with what was put around the name taken off: "Clearstat" on getclearstat.com.
+  const label = own.domain ? rootDomain(own.domain.slice(0, 300).toLowerCase().replace(/^www\./, "")).split(".")[0].replace(/[^a-z0-9]/g, "") : "";
+  const bare = label.replace(DOMAIN_AFFIX, "");
+  return bare.length >= 4 && bare !== label && a.join("") === bare;
+}
+
 const COMPARE_PATH = /(?:^|[/-])(?:vs|versus|alternatives?|compare|comparison|comparisons|competitors?)(?:[/-]|$)/i;
 
 const GLUED = /\p{Ll}(?:See|We|Read|Learn|Try|Get|Compare|Why|How|Our|View|More|Start|Switch|Book|Watch|Explore|Vs|Find|Discover|Check|Sign|Join|Use|Make|Build|Stop|Go)$/u;
@@ -138,7 +175,7 @@ export function competitorsInText(text: string, own: { name?: string; domain?: s
     if (!name || !/^[\p{Lu}\p{N}]/u.test(name)) return;
     // "HubSpotSee", "PipedriveWe": a name with a button's first word stuck to it is not a name.
     if (name.split(" ").some((w) => GLUED.test(w))) return;
-    if (isSameCompany(name, own)) return;
+    if (isOwnProduct(name, own)) return;
     if (/^(?:Competitors?|Others?|Alternatives?|Everyone|Them|Us|The Rest|Spreadsheets?|Excel|Email|Legacy|Traditional|Manual|In-house|DIY|Agencies|Freelancers|Consultants)$/i.test(name)) return;
     if (!out.some((o) => normCompanyName(o) === normCompanyName(name))) out.push(name);
   };
@@ -169,7 +206,7 @@ function competitorFromLink(pathname: string, text: string, own: { name?: string
   const spelled = m ? m[0] : null;
   if (!spelled || !/^[\p{Lu}\p{N}]/u.test(spelled)) return null;
   const name = cleanCompanyName(spelled, 3);
-  return name && !isSameCompany(name, own) ? name : null;
+  return name && !isOwnProduct(name, own) ? name : null;
 }
 
 interface Node {
@@ -482,6 +519,8 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
       run.block(`${domain} could not be read (unreadable page), so these suggestions are general. Check the address and try again.`);
     } else {
       const own = { name: site.name, domain: siteDomain };
+      // The home page was read before its own name was known: what it calls itself is not one of its competitors.
+      site.competitors = site.competitors.filter((n) => !isOwnProduct(n, own));
       // The site's own comparison pages name its competitors better than anything else can.
       // Asked for where the site really answers (with "www" if that is where it lives), so each is one request.
       let origin = `https://${siteDomain}`;
@@ -511,11 +550,11 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
   const product: PlayPlan["product"] = { domain: siteDomain || cleanLine(literal, 120), ...(site?.name ? { name: site.name } : {}), ...(site?.description ? { description: site.description } : {}) };
 
   /* Rules first: they always give an answer. A model, when there is one, refines it. */
-  const persona = pickPersona({ description: site?.description, headline: site?.headline, headings: site?.headings, text: site?.text });
-  let titles = persona.titles.slice();
-  let roles = persona.roles.slice();
   // What it is, by its own words: the description and main headline first, then its section headings.
   let category = site ? (categoryFrom(withoutBoilerplate(`${site.description ?? ""}. ${site.headline ?? ""}`)) ?? categoryFrom(withoutBoilerplate(site.headings.slice(0, 20).join(". ")))) : undefined;
+  const persona = pickPersona({ description: site?.description, headline: site?.headline, headings: site?.headings, text: site?.text, category });
+  let titles = persona.titles.slice();
+  let roles = persona.roles.slice();
   let problems: string[] = [];
   const icp: IcpCriteria = {};
 
@@ -535,7 +574,7 @@ export async function planPlays(input: { website: string; knownCompetitors?: { n
       if (industries.length) icp.industries = industries;
       if (sizes.length) icp.companySizes = sizes;
       if (keywords.length) icp.keywords = keywords;
-      for (const n of stringList(res.competitors, 5, 60)) if (!isSameCompany(n, { name: site.name, domain: siteDomain })) addCompetitor(n, "ai");
+      for (const n of stringList(res.competitors, 5, 60)) if (!isOwnProduct(n, { name: site.name, domain: siteDomain })) addCompetitor(n, "ai");
     }
   }
   icp.titles = titles;

@@ -55,15 +55,24 @@ export function parseRss(xml: string): NewsItem[] {
   if (unreadableXml(xml)) return [];
   const $ = cheerio.load(xml, { xmlMode: true });
   const out: NewsItem[] = [];
+  // An item's fields are its own children. They used to be looked for anywhere beneath it (`find`), which
+  // for items written inside each other meant reading everything beneath every one of them, and sorting
+  // what was found: 399 unclosed <item> tags, 9 KB of feed, took half a second, and a full-size feed minutes.
+  const field = (item: { children?: unknown[] }, name: string): string => {
+    for (const child of (item.children ?? []) as { type?: string; name?: string }[]) {
+      if (child.type === "tag" && child.name === name) return $(child as never).text();
+    }
+    return "";
+  };
   $("item").each((_, el) => {
     // A feed item's fields are lines. Whatever a feed sends, only so much of each is kept.
-    const title = $(el).find("title").first().text().trim().slice(0, 500);
-    const address = $(el).find("link").first().text().trim() || $(el).find("guid").first().text().trim();
+    const title = field(el, "title").trim().slice(0, 500);
+    const address = field(el, "link").trim() || field(el, "guid").trim();
     // An address is not cut short (that would be another address): one longer than any real one is left out.
     const link = address.length <= 2000 ? address : "";
-    const pub = $(el).find("pubDate").first().text().trim().slice(0, 100);
-    const source = $(el).find("source").first().text().trim().slice(0, 200) || undefined;
-    const desc = $(el).find("description").first().text().slice(0, 20_000);
+    const pub = field(el, "pubDate").trim().slice(0, 100);
+    const source = field(el, "source").trim().slice(0, 200) || undefined;
+    const desc = field(el, "description").slice(0, 20_000);
     const summary = desc ? (loadHtml(desc)?.text() ?? "").replace(/\s+/g, " ").trim().slice(0, 400) : undefined;
     if (title && link) out.push({ title: title.replace(/\s+-\s+[^-]+$/, ""), url: link, source, publishedAt: pub ? new Date(pub) : undefined, summary });
   });
@@ -92,8 +101,12 @@ const RE_LEAD = new RegExp(`^${NAME}\\s+${VERB_RE}\\b`);
 const RE_DESC = new RegExp(`^(?:[A-Za-z-]+\\s+){0,4}(?:startup|fintech|edtech|saas|d2c|unicorn|company|firm|brand|platform)\\s+${NAME}\\s+${VERB_RE}\\b`, "i");
 const RE_MONEY = new RegExp(`${NAME}\\s+${VERB_RE}\\s+(?:\\$|₹|Rs|INR|€|£)`);
 
+const MAX_HEADLINE_READ = 500;
+
 /** Extract the company name from a headline: "Acme raises $10M ..." → Acme */
 export function companyFromHeadline(title: string): string | undefined {
+  // A headline is a line; a feed can send anything as one. The patterns below are written for a line.
+  title = String(title ?? "").slice(0, MAX_HEADLINE_READ);
   const t = title.replace(/^(exclusive|breaking|report|update)[:\s-]+/i, "").trim();
   const m = t.match(RE_LEAD) ?? t.match(RE_DESC) ?? t.match(RE_MONEY) ?? t.match(/^([A-Z][A-Za-z0-9.&'-]*(?:\s+[A-Z][A-Za-z0-9.&'-]*){1,2}|[A-Z]{2,}[A-Za-z0-9.&'-]*)\s+[a-z]/);
   let name = m?.[1]?.trim();

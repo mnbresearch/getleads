@@ -780,7 +780,8 @@ export async function reserveSendSlot(input: {
  * back when the send does not go out.
  *
  * `answeringInbound`: the recipient wrote to this workspace recently (the caller decides
- * what "recently" is). See the note on the warm-up ladder below.
+ * what "recently" is). It matters only for a workspace's own sender - see the note on the
+ * warm-up ladder below.
  */
 export async function reserveManualSend(
   org: Organization,
@@ -796,17 +797,22 @@ export async function reserveManualSend(
   // The warm-up ladder exists to hold back mail nobody asked for while a new sender earns its
   // reputation. An answer to someone who wrote in is the opposite of that, and a new sender
   // on its first days (20 a day) could not answer the replies its own campaign brought in.
-  // So `answeringInbound` lifts the ladder - and only the ladder: the sender's own configured
-  // limit, the cut for poor deliverability, the workspace ceiling and the kill switch all
-  // still bind, and the send still takes a slot, so it counts toward the day's total.
+  // So `answeringInbound` lifts the ladder for a workspace's OWN sender - and only the ladder:
+  // the sender's own configured limit, the cut for poor deliverability, the workspace ceiling
+  // and the kill switch all still bind, and the send still takes a slot, so it counts toward
+  // the day's total.
+  //
+  // Never for the shared platform sender. "Wrote in" is a row the workspace can create by
+  // itself (POST /v1/campaigns/inbound), and that sender's reputation is every workspace's:
+  // its recommended daily cap binds every send, answer or not.
+  const lifted = opts.answeringInbound === true && account.provider !== "system";
   const withoutLadder = (configured: number) => (health.status === "warn" ? Math.floor(configured / 2) : configured);
-  const systemConfigured = health.dailyCap ?? systemSenderDailyCap(org);
-  const systemCap = account.provider === "system" ? (opts.answeringInbound ? withoutLadder(systemConfigured) : Math.min(systemConfigured, health.recommendedDailyCap)) : null;
+  const systemCap = account.provider === "system" ? Math.min(health.dailyCap ?? systemSenderDailyCap(org), health.recommendedDailyCap) : null;
   const slot = await reserveSendSlot({
     orgId: org.id,
     accountId: account.id,
     today,
-    accountCap: opts.answeringInbound ? withoutLadder(account.dailyLimit) : Math.min(account.dailyLimit, health.recommendedDailyCap),
+    accountCap: lifted ? withoutLadder(account.dailyLimit) : Math.min(account.dailyLimit, health.recommendedDailyCap),
     orgCeiling,
     system: systemCap !== null ? { cap: systemCap, sentFloor: health.sentToday ?? 0 } : null,
   });

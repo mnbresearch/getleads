@@ -30,7 +30,9 @@ export function buildCompanyQueries(input: CompanySearchInput): string[] {
 export function extractCompaniesFromResults(results: SearchResult[]): CompanyCandidate[] {
   const out: CompanyCandidate[] = [];
   const seen = new Set<string>();
-  for (const r of results) {
+  for (const found of results) {
+    // A title is a line: only a line's worth of it is read by the patterns below.
+    const r = typeof found.title === "string" && found.title.length <= 300 ? found : { ...found, title: String(found.title ?? "").slice(0, 300) };
     const li = normalizeLinkedinUrl(r.url);
     if (li && li.includes("/company/")) {
       const name = r.title.replace(/\s*[|–-]\s*LinkedIn\s*$/i, "").split(/\s+[|–-]\s+/)[0].trim();

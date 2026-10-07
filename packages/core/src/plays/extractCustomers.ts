@@ -55,6 +55,13 @@ export interface PageExtraction {
    * in words of the page. Opening such a story again adds nothing.
    */
   told: string[];
+  /**
+   * How many different pages of the same site this page links to outside its own section
+   * (counted up to 40). A page of the site carries the site's navigation; something else
+   * served at an address that was only guessed - a user's booking page, an app screen -
+   * links to nothing but itself.
+   */
+  siteLinks: number;
   /** The page was refused before it was read: nested too deeply, too many elements, or a tag the parser cannot read quickly. */
   unreadable?: boolean;
 }
@@ -265,7 +272,7 @@ const CONTENT_ROOT = new Set(["main", "article", "section"]);
 const QUOTE_ROOT = new Set(["blockquote", "figure", "article"]);
 
 /** The attributes this file reads, and the longest value any of them is read to. Real ones are a few hundred characters. */
-const READ_ATTRIBUTES = ["class", "id", "role", "alt", "title", "aria-label", "src", "data-src", "data-lazy-src", "srcset", "href"];
+const READ_ATTRIBUTES = ["class", "id", "role", "alt", "title", "aria-label", "src", "data-src", "data-lazy-src", "srcset", "href", "data-framer-name", "data-name", "data-framer-component-type"];
 const MAX_ATTRIBUTE = 4000;
 
 interface Measure {
@@ -504,6 +511,13 @@ function nameBeforeVerb(tokens: string[], opts: { stopAtTo?: boolean } = {}): st
       ended = true;
       break;
     }
+    // "CoLearn, Indonesia's fastest growing EdTech, drove ...": a comma after the name starts a description of
+    // the company, when the sentence goes on to say what the company did.
+    if (/[\p{L}\p{N}],$/u.test(t) && toks.slice(i + 1, i + 14).some((x) => POSSESSIVE.test(x) || isVerb(x))) {
+      name.push(t.slice(0, -1));
+      ended = true;
+      break;
+    }
     name.push(t);
   }
   if (!ended || !name.length || name.length > 4) return null;
@@ -667,6 +681,10 @@ const POSITIVE_LABEL = new RegExp(
 
 const STORY_LABEL = /\b(?:case studies|success stories|(?:customer|client)\s+(?:stories|spotlights?|case studies|wins|success))\b/i;
 
+/** A heading over what customers say: "What our customers say", "Testimonials", "Wall of love", "People \u2764 Acme". */
+const VOICES_LABEL =
+  /\bwhat\s+(?:our\s+|your\s+)?(?:customers|clients|users|people|teams|they)\s+(?:say|are\s+saying|think|have\s+to\s+say)\b|\btestimonials?\b|\bwall\s+of\s+love\b|\b(?:customer|client|user)\s+(?:reviews|love|voices|feedback|quotes)\b|\bdon['\u2019]?t\s+(?:just\s+)?take\s+our\s+word\b|\bhear\s+(?:it\s+)?from\s+(?:our\s+)?(?:customers|clients|users)\b|\bin\s+their\s+(?:own\s+)?words\b|\b(?:people|customers|clients|teams|users|developers|founders|companies)\s*(?:love|loves|\u2764|\u2665|[\u{1F493}-\u{1F49F}]|\u{1F60D})/iu;
+
 const NEGATIVE_LABEL =
   /\b(?:integrat\w*|partners?|partnerships?|investors?|backed by|funded by|as (?:seen|featured) (?:in|on)|featured (?:in|on)|in the (?:news|press)|press|media coverage|awards?|recogni[sz]ed by|certifi\w*|complian\w*|works with|connects? (?:with|to)|built (?:with|on)|powered by|tech(?:nology)? stack|sponsors?|sponsored|marketplace|plug-?ins?|add-?ons?|our team|leadership|advisors?|board of|members? of|accredit\w*|badges?|reviews? on|rated on|available on|download on|supported (?:platforms|tools|apps)|compatible with|ecosystem|alumni|speakers?|contributors?|resellers?|vendors?|suppliers?|data sources?|destinations?|connectors?)\b/i;
 
@@ -717,6 +735,17 @@ interface LogoItem {
   explicit: boolean;
 }
 
+/**
+ * What a site builder calls the layer a logo is drawn on, when the logo is not an image
+ * with a description: Framer writes it as `data-framer-name`, other tools as `data-name`.
+ * Most layers are furniture ("Icon Wrapper", "Line", "64px", "Variant 1"); those are not names.
+ */
+const LAYER_FURNITURE =
+  /^(?:icon|image|img|logo|logos|svg|vector|frame|group|rectangle|ellipse|circle|line|plus|minus|dot|divider|spacer|wrapper|container|row|column|item|card|default|variant|primary|secondary|desktop|tablet|phone|mobile|light|dark|bg|background|mask|shape|path|arrow|chevron|star|check|button|label|text|heading|header|footer|content|avatar|photo|picture|placeholder|ticker|slide|slider|carousel|marquee|open|closed|selected|unselected|hover|normal|highlight|highlighted|top|bottom|left|right|on|off|empty|main|section|layer|component|grid|stack|padding|margin|gap)(?:$|[\s_/-])|(?:wrapper|container|icon|icons|image|button|divider|grid|section|card|component|group|frame|layer|logos|background|box|block|list|stack)$|^\d|\d+px\b/i;
+const layerName = (n: Node): string => attr(n, "data-framer-name") || attr(n, "data-name");
+const isPicture = (n: Node): boolean =>
+  isTag(n, "img", "svg", "picture", "canvas") || attr(n, "role") === "img" || /^(?:svg|image)$/i.test(attr(n, "data-framer-component-type")) || /background-image/i.test((n.attribs?.style ?? "").slice(0, 400));
+
 const LOGOS = new WeakMap<Node, LogoItem | null>();
 /** The description a logo carries (alt, aria-label, title), or null for anything that is not a nameable logo. */
 function logoItem(n: Node): LogoItem | null {
@@ -751,14 +780,101 @@ function readLogo(n: Node): LogoItem | null {
     if (!raw) return null;
     return { node: n, raw, explicit: /logo|brand|wordmark/i.test(`${raw} ${around}`) };
   }
+  // A named layer that holds a picture, no words and no other named layer: the layer's name is what the picture shows.
+  const layer = layerName(n);
+  if (layer && layer.length >= 2 && layer.length <= 60 && n.blank !== undefined && !LAYER_FURNITURE.test(layer)) {
+    const inner = descendants(n, 14);
+    if (inner.length > 12 || inner.some((d) => layerName(d))) return null;
+    // A picture with a description of its own is read by that description, above.
+    if (inner.some((d) => isTag(d, "img") && (attr(d, "alt") || attr(d, "aria-label") || attr(d, "title")))) return null;
+    if (!isPicture(n) && !inner.some(isPicture)) return null;
+    return { node: n, raw: layer, explicit: /logo|brand|wordmark/i.test(`${layer} ${around}`) };
+  }
   return null;
 }
 
-/** "Globex logo", "logo of Globex", "globex-logo-white.svg" as the company's name, or null. */
-export function cleanLogoName(raw: string): string | null {
+/**
+ * Words a picture's file name carries about the picture and not about the company: what it
+ * is, its variant, its colour, its size, its format.
+ */
+const FILE_VARIANT = new Set(
+  (
+    "logo logos logotype logomark wordmark mark icon full dark light white black color colour colored coloured grey gray greyscale grayscale mono monochrome " +
+    "inverted inverse reversed negative transparent svg png jpg jpeg webp gif avif img image small large sm md lg xl 1x 2x 3x 4x x2 x3 rgb cmyk horizontal " +
+    "vertical stacked square primary secondary default new final copy min hd"
+  ).split(" "),
+);
+const FILE_PREFIX = new Set("logo logos client clients customer customers company brand img image icon".split(" "));
+/** A size or a version in a file name: "200", "120x40", "64px", "v2", "02". */
+const FILE_NUMBER = /^(?:\d+|\d+x\d+|\d+px|\d+w|v\d+)$/;
+/**
+ * Everyday words that brands are made of in pairs. A file name gives no capitals and no
+ * spaces: "angelone" is Angel One, "dropbox" is Dropbox, and nothing in the file name says
+ * which. A single word of a file name that is two of these run together is not reported.
+ */
+const COMPOUND_WORDS = new Set(
+  (
+    "angel one two three first next credit bank capital pay money cash card fund loan trade market shop store cart sales force work works day time life " +
+    "health care book face note page word press post mail snow flake cloud flare air table drop box hub spot zen desk zoom info mix panel sound data base " +
+    "soft ware net web link site line point view vision sight light house home land sea sky sun moon star fire water rock stone wood tree leaf green blue " +
+    "red gold silver bright smart quick fast easy simple clear pure true safe sure open free high big new good best top prime main core edge side way path " +
+    "road bridge gate door key lock pass port ship boat car auto bike fly jet move run walk jump step lab labs tech logic mind brain think idea plan team " +
+    "club group zone space place map guide scout pilot hero king queen master chief boss max plus ultra super mega micro mini nano grand great happy lucky " +
+    "wise bold brave cool fresh clean bit byte code dev app apps cyber digital media news tube flix play game pixel photo video music radio cast stream " +
+    "chat talk call voice text sign form sheet doc docs file drive sync stack flow grid chart graph metric count track trace watch guard shield secure " +
+    "trust proof check mark stamp seal badge deal lead leads grow growth scale rise peak mount hill wave tide river lake ocean bay coast shore farm field " +
+    "garden flower bloom seed root branch bird bee wolf fox bear lion tiger eagle hawk owl cat dog horse fish door wall roof floor room office school " +
+    "college class course learn teach study tutor skill job hire talent people human person kid baby family friend buddy mate pal crowd tribe nation " +
+    "world globe earth planet city town village metro urban local express rapid swift turbo power energy fuel charge volt spark flash glow shine beam ray"
+  ).split(/\s+/),
+);
+/** Written like a file's name, not like a name: lower case, no spaces ("hdfc-securities-logo", "angelone_logo", "pw"). */
+const writtenAsFileName = (s: string): boolean => /^[a-z0-9]+(?:[-_.+][a-z0-9]+)*$/.test(s);
+/** An abbreviation spelled in a file name: a few consonants with no vowel between them ("hdfc", "tvs", "kpmg"). */
+const isInitials = (t: string): boolean => /^[bcdfghjklmnpqrstvwxz]{2,5}$/.test(t);
+const twoWordsRunTogether = (t: string): boolean => {
+  if (t.length < 6 || t.length > 24 || !/^[a-z]+$/.test(t)) return false;
+  for (let i = 3; i <= t.length - 3; i++) if (COMPOUND_WORDS.has(t.slice(0, i)) && COMPOUND_WORDS.has(t.slice(i))) return true;
+  return false;
+};
+
+/**
+ * The company a logo's description names, or null: "Globex logo", "logo of Globex",
+ * "globex-logo-white.svg". `fromFileName` says the description was a file's name rather
+ * than words somebody wrote: such a name is rebuilt without its capitals and spaces, so
+ *
+ * - what the file name says about the picture goes ("voltage-park-logo-full" is Voltage Park),
+ * - an abbreviation gets its capitals back ("hdfc-securities" is HDFC Securities, "tvscredit" TVS Credit),
+ * - fewer than four letters name nobody ("pw"),
+ * - one word that is two everyday words run together is not guessed at ("angelone"),
+ *
+ * and whoever reports it ranks it below a name the page wrote out.
+ */
+export function readLogoName(raw: string): { name: string; fromFileName: boolean } | null {
   let s = cleanLine(raw, 160);
   if (!s || NOT_A_CUSTOMER_ALT.test(s)) return null;
   s = s.replace(/\.(?:svg|png|jpe?g|webp|gif|avif)$/i, "");
+  if (writtenAsFileName(s)) {
+    let tokens = s.split(/[-_.+]+/).filter(Boolean);
+    while (tokens.length > 1 && FILE_PREFIX.has(tokens[0])) tokens = tokens.slice(1);
+    while (tokens.length && (FILE_VARIANT.has(tokens[tokens.length - 1]) || FILE_NUMBER.test(tokens[tokens.length - 1]))) tokens = tokens.slice(0, -1);
+    tokens = tokens.filter((t) => t !== "logo" && t !== "logos");
+    if (!tokens.length || tokens.length > 5) return null;
+    if (tokens.join("").replace(/[^a-z]/g, "").length < 4) return null;
+    if (tokens.length === 1) {
+      const t = tokens[0];
+      if (twoWordsRunTogether(t)) return null;
+      // "tvscredit": an abbreviation and a word.
+      for (let i = 2; i <= 4 && i <= t.length - 4; i++) {
+        if (isInitials(t.slice(0, i)) && COMPOUND_WORDS.has(t.slice(i))) {
+          tokens = [t.slice(0, i), t.slice(i)];
+          break;
+        }
+      }
+    }
+    const name = cleanCompanyName(tokens.map((t) => (isInitials(t) ? t.toUpperCase() : /^[a-z]/.test(t) ? t[0].toUpperCase() + t.slice(1) : t)).join(" "), 4);
+    return name ? { name, fromFileName: true } : null;
+  }
   if (!/\s/.test(s) && /[-_]/.test(s)) s = s.replace(/[-_]+/g, " ");
   s = s
     .replace(/^(?:the\s+)?(?:logo|logotype|image|icon)\s+(?:of|for)\s+/i, "")
@@ -770,7 +886,13 @@ export function cleanLogoName(raw: string): string | null {
   for (let i = 0; i < 3; i++) s = s.replace(/\s+(?:white|black|dark|light|colou?r|colou?red|gr[ae]yscale|gr[ae]y|mono(?:chrome)?|inverted|reversed|svg|png|icon|image|img|small|large|\dx)$/i, "").trim();
   if (!s) return null;
   if (s === s.toLowerCase() && !/[.]/.test(s)) s = slugToName(s);
-  return cleanCompanyName(s, 4);
+  const name = cleanCompanyName(s, 4);
+  return name ? { name, fromFileName: false } : null;
+}
+
+/** The name alone (see `readLogoName`). */
+export function cleanLogoName(raw: string): string | null {
+  return readLogoName(raw)?.name ?? null;
 }
 
 /* ───────────────────────────────── cards and headlines ───────────────────────────────── */
@@ -1023,10 +1145,46 @@ function nameWithSlugRest(name: string, slug: string, competitor: string): strin
  * A brand that writes itself in lower case ("How ivision transformed ...") is still a name
  * when the story's own address is that word and the headline uses it as its subject.
  */
-function lowerCaseSubject(text: string, spelled: string): boolean {
-  if (spelled.length < 4 || isGenericWord(spelled) || isAudienceWord(spelled)) return false;
+function lowerCaseSubject(text: string, spelled: string, wholeSlug = false): boolean {
+  // Four letters or more - or three when the word is the story's whole address ("How n8n built ..." under
+  // /customers/n8n): no everyday word of three letters is a story's address by chance.
+  if (spelled.length < (wholeSlug ? 3 : 4) || isGenericWord(spelled) || isAudienceWord(spelled)) return false;
+  if (ENGLISH_WORDS.has(spelled.toLowerCase()) || FUNCTION_WORDS.has(spelled.toLowerCase())) return false;
   const m = new RegExp(`^(?:how|why)\\s+${escapeRegExp(spelled)}\\s+(\\S+)`, "i").exec(text);
   return !!m && isVerb(m[1], true);
+}
+
+/**
+ * Does the story's address carry this name, or a word of it? "How Globex cut costs" on a
+ * card that leads to /customers/globex is about Globex. "Volume increase supported" - a
+ * figure's caption on a card that leads to /customers/n8n - reads the same way to
+ * `parseHeadline` ("Volume" did something), and is about nobody.
+ */
+function slugCarries(slug: string, name: string): boolean {
+  const flat = slug.toLowerCase().replace(/[^a-z0-9]+/g, "");
+  const key = normCompanyName(name);
+  if (key.length >= 3 && flat.includes(key)) return true;
+  const inSlug = new Set(slug.toLowerCase().split(/[^a-z0-9]+/).filter(Boolean));
+  const words = name.split(/[^\p{L}\p{N}]+/u).filter(Boolean);
+  for (const raw of words) {
+    const t = raw.toLowerCase();
+    if (t.length < 2 || isGenericWord(t) || isAudienceWord(t) || ENGLISH_WORDS.has(t)) continue;
+    if (inSlug.has(t) || (t.length >= 4 && flat.includes(t))) return true;
+  }
+  // The address may be the name's initials: /customer-stories/csw for Central Storage & Warehouse.
+  const initials = words.filter((w) => !CONNECTING_WORDS.has(w.toLowerCase())).map((w) => w[0].toLowerCase()).join("");
+  return initials.length >= 3 && inSlug.has(initials);
+}
+const CONNECTING_WORDS = new Set(["and", "of", "the", "for", "de", "la"]);
+
+/** Is this name written in the text as a word of its own (not as part of a longer word)? */
+function saysName(text: string, name: string): boolean {
+  const t = text.slice(0, 2_000).toLowerCase();
+  const n = name.toLowerCase();
+  for (let at = t.indexOf(n); at >= 0; at = t.indexOf(n, at + 1)) {
+    if (!WORD_CHAR_BEFORE.test(t.slice(Math.max(0, at - 2), at)) && !WORD_CHAR_AFTER.test(t.slice(at + n.length, at + n.length + 2))) return true;
+  }
+  return false;
 }
 
 /** Does the story's address spell this name ("/customers/cloudflare" for Cloudflare, ".../olos-recipe" for Olo)? */
@@ -1049,6 +1207,10 @@ const storyKey = (url: string): string => url.replace(/[?#].*$/, "").replace(/\/
 /* ───────────────────────────────── the page ───────────────────────────────── */
 
 const MAX_HITS_PER_PAGE = 120;
+/** How sure a logo named only by its file's name is: less than the least sure logo named in words (0.45), whatever label it stands under. */
+const FILE_NAME_CONFIDENCE = 0.4;
+/** The same for a picture that does not say it is a logo. */
+const FILE_NAME_CONFIDENCE_PLAIN = 0.35;
 const NOT_A_CUSTOMER_ROLE = /\b(?:investor|analyst at|journalist|editor|reporter|board member|advisor|adviser|venture partner|general partner)\b/i;
 
 /**
@@ -1085,7 +1247,7 @@ export function pickEvidence<T extends { confidence: number; headline?: string }
 export const storyKeyOf = (url: string): string => storyKey(url);
 
 export function extractCustomers(html: string, pageUrl: string, competitor: { name: string; domain: string }): PageExtraction {
-  const empty: PageExtraction = { hits: [], links: [], text: "", title: "", customerPage: false, told: [] };
+  const empty: PageExtraction = { hits: [], links: [], text: "", title: "", customerPage: false, told: [], siteLinks: 0 };
   let base: URL;
   try {
     base = new URL(pageUrl);
@@ -1208,10 +1370,18 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
 
   /* Links worth reading next: navigation included, since that is where "Customers" lives. */
   const links = new Map<string, CrawlLink>();
+  /** Pages of the same site, outside this page's own section, that it links to. */
+  const elsewhere = new Set<string>();
+  const ownPath = base.pathname.replace(/\/+$/, "").toLowerCase();
   $("a[href]").each((_, el) => {
-    if (links.size >= 400) return;
+    if (links.size >= 400 && elsewhere.size >= 40) return;
     const u = resolveLink($(el).attr("href"), base.href);
     if (!u || !sameSite(u.href, competitor.domain)) return;
+    if (elsewhere.size < 40) {
+      const path = u.pathname.replace(/\/+$/, "").toLowerCase();
+      if (path !== ownPath && !(ownPath && path.startsWith(`${ownPath}/`))) elsewhere.add(path);
+    }
+    if (links.size >= 400) return;
     u.search = "";
     const score = crawlScore(u);
     if (score <= 0) return;
@@ -1270,12 +1440,13 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     }
     return k;
   };
-  const logoNames = new Map<string, string | null>();
-  const logoName = (raw: string): string | null => {
-    let name = logoNames.get(raw);
-    if (name === undefined) logoNames.set(raw, (name = cleanLogoName(raw)));
-    return name;
+  const logoReads = new Map<string, { name: string; fromFileName: boolean } | null>();
+  const logoRead = (raw: string): { name: string; fromFileName: boolean } | null => {
+    let read = logoReads.get(raw);
+    if (read === undefined) logoReads.set(raw, (read = readLogoName(raw)));
+    return read;
   };
+  const logoName = (raw: string): string | null => logoRead(raw)?.name ?? null;
 
   /* 1. Case-study links: /customers/globex, with the card around them. */
   const caseLinks = new Map<string, { anchors: Node[]; url: string }>();
@@ -1402,8 +1573,11 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
       const spelledIn = speller(fromSlug.tokens);
       for (const t of texts) {
         const spelled = spelledIn(t.text);
+        // A brand written in lower case is a name when it is the headline's subject - in a heading, or, when
+        // it is the story's whole address ("How n8n built ..." under /customers/n8n), in any line of the card.
+        const whole = !!spelled && fromSlug.tokens.length === 1 && spelled.toLowerCase() === slug.toLowerCase();
         // A slug made of everyday words ("/customers/remote-teams") only counts when the page capitalises it as a name.
-        if (!spelled || (!writtenAsName(spelled) && !(t.heading && !fromSlug.weak && lowerCaseSubject(t.text, spelled))) || (fromSlug.weak && !capitalised(spelled))) continue;
+        if (!spelled || (!writtenAsName(spelled) && !(!fromSlug.weak && (t.heading || whole) && lowerCaseSubject(t.text, spelled, whole))) || (fromSlug.weak && !capitalised(spelled))) continue;
         const fuller = fullerName(spelled, [...logos, ...heads, ...named, ...loose]);
         const name = fuller?.name ?? spelled;
         // The words shown as proof name the company the way it is reported.
@@ -1421,6 +1595,10 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
       for (const t of texts) {
         const read = parseHeadline(t.text, competitor.name);
         if (!read) continue;
+        // A name read out of a line on the card is this story's customer only when the story's own address
+        // carries it. Without that the line may be anything that reads like a headline: a figure's caption
+        // ("Volume increase supported"), a teaser about somebody else. The story itself says who it is about.
+        if (!slugCarries(slug, read)) continue;
         const longer = nameWithSlugRest(read, slug, competitor.name);
         const name = longer ?? read;
         const kind = headKind(t.text, { heading: t.heading, name: read });
@@ -1462,14 +1640,17 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     const spelledIn = speller(fromSlug ? fromSlug.tokens : []);
     for (const h of pieces) {
       const spelled = spelledIn(h.text);
-      if (spelled && (writtenAsName(spelled) || (h.heading && !fromSlug?.weak && lowerCaseSubject(h.text, spelled))) && !(fromSlug?.weak && !capitalised(spelled))) {
+      const whole = !!spelled && fromSlug?.tokens.length === 1 && spelled.toLowerCase() === pageSlug.toLowerCase();
+      if (spelled && (writtenAsName(spelled) || (!fromSlug?.weak && (h.heading || whole) && lowerCaseSubject(h.text, spelled, whole))) && !(fromSlug?.weak && !capitalised(spelled))) {
         const name = fullerName(spelled, pieces)?.name ?? spelled;
         const headline = pageHeadline(name);
         add({ name, quote: h.text, via: "case_study", headline, mention: headline ? undefined : mentionOf(headKind(h.text, { heading: h.heading })), confidence: 0.9, storyUrl, dedicated: true });
         break;
       }
       const read = parseHeadline(h.text, competitor.name);
-      if (read) {
+      // The name a headline gives is the story's customer when the story's address carries it, or when the
+      // page says it twice: in its main heading and in its title.
+      if (read && (slugCarries(pageSlug, read) || pieces.some((other) => other !== h && saysName(other.text, read)))) {
         const longer = nameWithSlugRest(read, pageSlug, competitor.name);
         const name = longer ?? read;
         const headline = pageHeadline(read);
@@ -1499,18 +1680,23 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
   const MAX_LOGOS_SEEN = 20_000;
   const takeLogos = (items: LogoItem[], label: string, confidence: number, declaredOnly = false): void => {
     logosSeen += items.length;
-    const named = items.map((it) => ({ it, name: logoName(it.raw) })).filter((x): x is { it: LogoItem; name: string } => !!x.name);
+    const named = items
+      .map((it) => ({ it, read: logoRead(it.raw) }))
+      .filter((x): x is { it: LogoItem; read: { name: string; fromFileName: boolean } } => !!x.read)
+      .map(({ it, read }) => ({ it, name: read.name, fromFileName: read.fromFileName }));
     // One picture is not a wall of customers: a lone logo under "trusted by" is as often the site's own, a
     // badge or a stray image with a file name for a description. Two different names or nothing.
     if (new Set(named.map((x) => normCompanyName(x.name))).size < 2) return;
     // A wall is several logos. Without the word "logo" anywhere, one or two pictures are not a wall -
     // and under a "customer stories" heading the pictures are story thumbnails, so only declared logos count.
     const wall = named.length >= 3 && !declaredOnly && !STORY_LABEL.test(label);
-    for (const { it, name } of named) {
+    for (const { it, name, fromFileName } of named) {
       if (!it.explicit && !wall) continue;
       // Pictures inside a testimonial are people unless they say "logo".
       if (!it.explicit && ancestors(it.node, 4).some((a) => isTag(a, "blockquote") || /testimonial|quote|review/i.test(attr(a, "class")))) continue;
-      add({ name, quote: cleanLine(it.raw, 200), via: "logo", headline: label || undefined, confidence: it.explicit ? confidence : confidence - 0.15, domain: linkedDomain(it.node, name) });
+      // A name rebuilt from a file's name comes after every name the page wrote out: it fills what is left of a list, not the top of it.
+      const sure = fromFileName ? (it.explicit ? FILE_NAME_CONFIDENCE : FILE_NAME_CONFIDENCE_PLAIN) : it.explicit ? confidence : confidence - 0.15;
+      add({ name, quote: cleanLine(it.raw, 200), via: "logo", headline: label || undefined, confidence: sure, domain: linkedDomain(it.node, name) });
     }
   };
   /** Asked of the same blocks by every label near them, so each answer is kept. */
@@ -1640,6 +1826,71 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     if (name) add({ name, quote: t, via: "testimonial", confidence: 0.7 });
   }
 
+  /*
+   * 6b. Testimonial cards with no quote markup: a line that says who is speaking and where they work
+   * ("Co-founder and CEO at Globex") beside what they said. Only under a label that says these are
+   * customers speaking - the same rule a wall of logos is held to - since the same line under "Our
+   * speakers" or "Meet the team" names nobody's customer.
+   */
+  const SPEAKER = /^(.{2,90}?)\s(?:at|@)\s+([^,|\u00B7\u2022]{2,60})$/i;
+  const speaks = (t: string): RegExpExecArray | null => {
+    const at = t.length <= 160 ? SPEAKER.exec(t) : null;
+    return at && TITLE_WORDS.test(at[1]) && !/[.!?]\s/.test(at[1]) ? at : null;
+  };
+  /**
+   * The company a line names as its speaker's employer, with the card the line stands in: the smallest block
+   * around it that also holds what was said (a sentence of its own) and nobody else's line. A grid of names
+   * and job titles with nothing said is a list of people, not of customers. Asked once per element: the
+   * stretches looked through after two labels overlap.
+   */
+  const speakerOf = kept((e: Node): { name: string; line: string; card: Node } | null => {
+    // One line of its own: who is speaking.
+    if (e.blank !== undefined || e.solid === undefined || e.solid < 8 || e.solid > 160) return null;
+    if ((e.children ?? []).some((c) => c.type === "tag" && !INLINE.has(c.name ?? ""))) return null;
+    const t = lineOf(e, 200);
+    if (!t || NOT_A_CUSTOMER_ROLE.test(t)) return null;
+    const at = speaks(t);
+    if (!at) return null;
+    let card: Node | null = null;
+    for (const a of ancestors(e, 5)) {
+      if (isTag(a, "body", "main", "html")) break;
+      const pieces = segmentsOf(a, 14);
+      // More than a card holds, or a second speaker: this is the row or the grid, not the card.
+      if (pieces.length >= 14 || pieces.filter((p) => speaks(p.text)).length > 1) break;
+      if (pieces.some((p) => p.text.length >= 30 && p.text !== t && !speaks(p.text))) {
+        card = a;
+        break;
+      }
+    }
+    if (!card) return null;
+    const name = cleanCompanyName(at[2], 4);
+    // "Partner at Benchmark Capital" is an investor speaking, not a customer.
+    if (!name || (/\bpartner\b/i.test(t) && /\b(?:capital|ventures?|vc|partners|fund|equity|investments?)\b/i.test(name))) return null;
+    return { name, line: t, card };
+  });
+  for (let i = 0; i < all.length; i++) {
+    if (full()) break;
+    const el = all[i];
+    const label = labelText(el);
+    if (!label || NEGATIVE_LABEL.test(label) || !(POSITIVE_LABEL.test(label) || VOICES_LABEL.test(label))) continue;
+    let limit: Node = el;
+    for (let k = 0; k < 4 && limit.parent && limit.parent.type === "tag" && limit.parent.name !== "html"; k++) limit = limit.parent;
+    const limitAt = indexOf.get(limit);
+    const limitEnd = isTag(limit, "body") ? all.length - 1 : limitAt !== undefined ? lastInside[limitAt] : i;
+    const end = Math.min(all.length - 1, limitEnd, i + 500);
+    for (let j = i + Math.min(lastInside[i] - i, 200) + 1; j <= end; j++) {
+      const e = all[j];
+      // The next section ends this one; a small heading inside a card (a speaker's name) does not.
+      if (isTag(e, "h1", "h2")) break;
+      const other = labelText(e);
+      if (other && (NEGATIVE_LABEL.test(other) || (j > i + 1 && isHeading(e) && (POSITIVE_LABEL.test(other) || VOICES_LABEL.test(other))))) break;
+      const said = speakerOf(e);
+      // (A card that holds the label too is the whole section.)
+      if (!said || inside(said.card, el)) continue;
+      add({ name: said.name, quote: said.line, via: "testimonial", confidence: 0.65 });
+    }
+  }
+
   /* 7. Structured data, only for names the visible page also shows. */
   for (const s of structured.slice(0, 40)) {
     if (full()) break;
@@ -1655,6 +1906,7 @@ export function extractCustomers(html: string, pageUrl: string, competitor: { na
     text,
     title,
     customerPage,
+    siteLinks: elsewhere.size,
   };
 }
 

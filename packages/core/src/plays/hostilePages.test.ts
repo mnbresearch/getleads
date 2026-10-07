@@ -59,18 +59,24 @@ const REFUSED: [string, string][] = [
   // Nothing in the text of these nests; the parser nests every one of them.
   ["list items and definitions in turn, which the parser nests", body(fill("<li><dd>", 40_000))],
   ["elements closed on themselves, which the parser does not close", body(fill("<br><div/>", 40_000))],
+  // Content the parser has to move: each piece written straight into a table is lifted out in front of it.
+  ["a table with 59,900 line breaks written straight into it (293 KB: 3.8 s in the parser before)", `<html><body><table>${"<br>x".repeat(59_900)}`],
+  ["a table row with 59,000 images outside any cell", body(`<table><tr>${"<img>".repeat(59_000)}`)],
 ];
 
-/** Pages inside every limit, aimed at the reader's own loops: what used to be read again for every element. */
+/**
+ * Pages inside every limit, aimed at the reader's own loops: what used to be read again for every element.
+ * (The deepest ones carry fewer elements than a full page: the nesting a page may have shrinks as its tags grow.)
+ */
 const ACCEPTED: [string, string][] = [
   ["60 chains of 300 nested <header> in main (verifier)", body(`<main>${chain("header", 300).repeat(60)}</main>`)],
   ["60 chains of 300 nested <div class=nav> beside a long text (verifier)", body(`<p>${"long text ".repeat(4_000)}</p>${chain("div", 300, " class=nav").repeat(60)}`)],
   ["60 chains of 300 nested <span> (verifier)", body(chain("span", 300, "", "trusted by").repeat(60))],
-  ["90 chains of 300 nested <footer>", body(chain("footer", 300).repeat(90))],
+  ["90 chains of 200 nested <footer>", body(chain("footer", 200).repeat(90))],
   ["520 logo walls (verifier)", body(`<section><h2>Trusted by teams</h2><div class="customers-logos">${'<img alt="Globex logo" src="/a.svg">'.repeat(40)}</div></section>`.repeat(520))],
   ["17,000 sibling .footer blocks (verifier)", body('<div class="footer"><p>some text here</p></div>'.repeat(17_000))],
   ["4,900 unclosed links", body(seq(4_900, (i) => `<a href=/c/${i}>x`))],
-  ["390 nested <div> around 25,000 elements", body("<div>".repeat(390) + empties(25_000))],
+  ["390 nested <div> around 14,000 elements", body("<div>".repeat(390) + empties(14_000))],
   ["20,000 story links side by side", body(`<div>${seq(20_000, (i) => `<a href="/customers/co${i}">Co${i}</a>`)}</div>`)],
   ["3,000 story links that share one large block", body(`<div>${empties(450)}${seq(3_000, (i) => `<a href="/customers/co${i}">Co${i}</a>`)}${empties(20_000)}</div>`)],
   ["9,000 story cards: a link, a heading and a logo each", body(seq(7_000, (i) => `<div class=card><a href="/customers/co${i}"><h3>How Co${i} cut costs</h3><img alt="Co${i} logo" src=a.svg></a></div>`))],
@@ -78,10 +84,10 @@ const ACCEPTED: [string, string][] = [
   ["300 labels, each four blocks above its logos", body(seq(300, (i) => `<div><p>Trusted by</p><div><div><div><div><img alt="Co${i} logo" src=a.svg><img alt="Dx${i} logo" src=b.svg>${empties(150)}</div></div></div></div></div>`))],
   ["5,000 attributions in one large testimonial", body(`<div class="testimonial"><blockquote>q</blockquote>${seq(5_000, (i) => `<cite>Jane Doe, VP Sales at Globex${i}</cite>`)}<p>${"word ".repeat(20_000)}</p></div>`)],
   ["5,000 attributions whose quote is four blocks up", body(`<div><blockquote>q</blockquote>${empties(20_000)}${seq(5_000, (i) => `<div><div><div><cite>Jane Doe, VP Sales at Globex${i}</cite></div></div></div>`)}</div>`)],
-  ["190 headings inside each other, around 30,000 elements", body(`${"<h2><div>".repeat(190)}Case study: Globex${empties(30_000)}`)],
+  ["190 headings inside each other, around 14,000 elements", body(`${"<h2><div>".repeat(190)}Case study: Globex${empties(14_000)}`)],
   ["5,000 main headings", body(seq(5_000, (i) => `<h1>How Globex${i} cut costs</h1>`) + empties(20_000))],
-  ["390 nested <span> around a label and 25,000 elements", body(`${"<span>".repeat(390)}Trusted by${empties(25_000)}`)],
-  ["390 blocks classed customers inside each other, 600 logos", body(`${'<div class="customers">'.repeat(390)}${seq(600, (i) => `<img alt="Co${i} logo" src=a.svg>`)}${empties(20_000)}`)],
+  ["390 nested <span> around a label and 14,000 elements", body(`${"<span>".repeat(390)}Trusted by${empties(14_000)}`)],
+  ["390 blocks classed customers inside each other, 600 logos", body(`${'<div class="customers">'.repeat(390)}${seq(600, (i) => `<img alt="Co${i} logo" src=a.svg>`)}${empties(14_000)}`)],
   ["600 logos under a class of 300,000 characters", body(`<div class="customers"><div class="${"tok ".repeat(75_000)}">${seq(600, (i) => `<div class=x><img alt="Co${i} logo" src=a.svg></div>`)}</div></div>`)],
   ["6,000 attributions under a class of 300,000 characters", body(`<div class="${"tok ".repeat(75_000)}">${seq(6_000, (i) => `<cite>Jane Doe, VP Sales at Globex${i}</cite>`)}</div>`)],
   ["55,000 paragraphs", body(seq(55_000, (i) => `<p>line ${i}`))],
@@ -90,6 +96,10 @@ const ACCEPTED: [string, string][] = [
   ["20,000 comparison links", body(seq(20_000, (i) => `<a href="/vs/rival${i}"><span>Acme vs Rival${i}</span><span>See how we compare</span></a>`))],
   ["60 chains of 300 nested headings with text", body(chain("h2", 1, "", chain("div", 300, "", "Acme vs Rival")).repeat(60))],
   ["an ordinary large page: 13,000 blocks", body("<div><p>hello</p><img src=x><br></div>".repeat(13_000))],
+  ["an ordinary data table: 45,000 rows and cells, none of them closed", body(`<h2>Our customers</h2><table>${"<tr><td>a<td>b<td>c<td>d".repeat(9_000)}</table>`)],
+  // Closing a formatting element around a block makes the parser hand all the block's children to a new element.
+  ["a bold block of 59,000 line breaks, closed out of order (1.8 s in the parser before)", body(`<b><div>${"<br>".repeat(59_000)}</b>`)],
+  ["a link around 50,000 line breaks and 4,900 more links (2.9 s in the parser before)", body(`<a><div>${"<br>".repeat(50_000)}${"<a>y".repeat(4_900)}`)],
 ];
 
 /** For the engines that read a page through the same reader as above: every refused page and the verifier's accepted ones. */
@@ -119,7 +129,7 @@ describe("reading a page for customers", () => {
     for (const url of ["https://acme.com/customers", "https://acme.com/customers/globex"]) {
       let out: ReturnType<typeof extractCustomers> | undefined;
       expect(await timed(() => (out = extractCustomers(html, url, ACME)))).toBeLessThan(SECOND);
-      expect(out).toEqual({ hits: [], links: [], text: "", title: "", customerPage: false, told: [], unreadable: true });
+      expect(out).toEqual({ hits: [], links: [], text: "", title: "", customerPage: false, told: [], siteLinks: 0, unreadable: true });
     }
   });
 
@@ -143,7 +153,7 @@ describe("reading a page for customers", () => {
     expect(names(ACCEPTED[12][1]).slice(0, 4)).toEqual(["Co0", "Dx0", "Co1", "Dx1"]);
     // 600 logos in a block classed "customers", however long the class beside it is.
     expect(names(ACCEPTED[19][1])).toHaveLength(120);
-    // A heading that holds 30,000 empty elements after its words is still read by its words.
+    // A heading that holds 14,000 empty elements after its words is still read by its words.
     expect(names(ACCEPTED[15][1])).toEqual(["Globex"]);
     // And the ordinary customers page gives what it always gave.
     expect(names(CUSTOMERS_PAGE).sort()).toEqual(["Globex", "Hooli", "Initech", "Oscorp", "Soylent", "Stark Industries", "Tyrell", "Umbrella Corp", "Wayne Enterprises"]);
@@ -298,13 +308,14 @@ describe("the engines", () => {
     expect(await timed(() => readPostingPage(html, "globex", false))).toBeLessThan(SECOND);
   });
 
-  it("a posting whose page cannot be read stays unchecked: it is not called open", async () => {
+  it("a posting whose page cannot be read was not checked: it is not called open, and not reported at all", async () => {
     const posting = { title: "Sales Development Representative - Globex", url: "https://boards.greenhouse.io/globex/jobs/4012345", snippet: "Globex is hiring" };
     for (const html of [REFUSED[1][1], REFUSED[10][1]]) {
       resetSearchCache();
       use({ "https://boards.greenhouse.io/globex/jobs/4012345": html });
       const { findings, trace } = await findHiringCompanies({ roles: ["Sales Development Representative"] }, { searchOpts: { providers: [searchWith((q) => (q.includes("site:boards.greenhouse.io") ? [posting] : []))] } });
-      expect(findings.map((f) => [f.companyName, f.relevantBecause, f.confidence])).toEqual([["Globex", "Has a posting for Sales Development Representative on Greenhouse.", 0.65]]);
+      expect(findings).toEqual([]);
+      expect(trace.notes).toContain("1 posting found by search could not be opened to check that it is still there, so it was left out.");
       expect(trace.pagesRefused).toBe(1);
       expect(trace.notes).toContain("A page on boards.greenhouse.io is built in a way that cannot be read quickly (far too many or too deeply nested elements), so it was skipped.");
     }

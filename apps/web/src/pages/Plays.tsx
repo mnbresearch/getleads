@@ -4,7 +4,7 @@ import { apiFetch, expectLists, expectShape, ProspexError } from "../lib/api";
 import { useMe } from "../lib/me";
 import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { plural } from "../lib/plural";
-import { clean, isForbidden, isMissingRoute, isQuota, messageOf, runFailed, runIdOf, runSentence, type PlayOut, type PlayRun, type PlayTypeInfo } from "../lib/plays";
+import { clean, isForbidden, isMissingRoute, isQuota, messageOf, runFailed, runIdOf, runSentence, workingFirst, type PlayOut, type PlayRun, type PlayTypeInfo } from "../lib/plays";
 import { PlanFlow } from "../components/plays/PlanFlow";
 import { PlayCard, type RunProblem } from "../components/plays/PlayCard";
 import { PlayForm } from "../components/plays/PlayForm";
@@ -44,6 +44,11 @@ export function PlaysPage() {
 
   const [types, setTypes] = useState<PlayTypeInfo[] | null>(null);
   const [typesErr, setTypesErr] = useState<string | null>(null);
+  // Whether the server has a search source connected. `false` puts what works today first
+  // and shows the server's hints; anything else (true, or a server that does not say)
+  // leaves everything as it was.
+  const [searchDependable, setSearchDependable] = useState<boolean | undefined>(undefined);
+  const [findHint, setFindHint] = useState<string | undefined>(undefined);
   // An API without these routes at all: the feature has not reached this server yet.
   const [typesMissing, setTypesMissing] = useState(false);
   const [playsMissing, setPlaysMissing] = useState(false);
@@ -59,6 +64,10 @@ export function PlaysPage() {
   const [clients, setClients] = useState<(Named & { status?: string })[]>([]);
 
   const [homeTab, setHomeTab] = useState<Tab | null>(null);
+  // Companies approved earlier, which stay under Review until someone finds people there or
+  // dismisses them. Shown on the Review tab when nobody is waiting, so they are not lost
+  // behind a tab that otherwise looks empty.
+  const [kept, setKept] = useState(0);
   const [showPlan, setShowPlan] = useState(false);
   // Decisions the server has confirmed since the plays were last loaded, so the count on the
   // Review tab follows the queue without a request per decision.
@@ -99,9 +108,11 @@ export function PlaysPage() {
 
   const loadTypes = useCallback(() => {
     setTypesErr(null);
-    apiFetch<{ types: PlayTypeInfo[] }>("GET", "/v1/plays/types")
+    apiFetch<{ types: PlayTypeInfo[]; searchDependable?: unknown; findPeople?: { setupHint?: unknown } }>("GET", "/v1/plays/types")
       .then((r) => {
         if (!alive.current) return;
+        setSearchDependable(typeof r.searchDependable === "boolean" ? r.searchDependable : undefined);
+        setFindHint(r.searchDependable === false ? clean(r.findPeople?.setupHint, 500) || undefined : undefined);
         setTypes(expectLists(r, "types").types.filter((t) => t && typeof t.type === "string").map((t) => ({ ...t, name: clean(t.name, 80) || t.type, summary: clean(t.summary, 300), fields: Array.isArray(t.fields) ? t.fields.filter((f) => f && typeof f.key === "string" && !["__proto__", "constructor", "prototype"].includes(f.key)) : [] })));
         setTypesMissing(false);
       })
@@ -123,8 +134,21 @@ export function PlaysPage() {
         setDecided((d) => d - counted);
         if (firstLoad.current) {
           firstLoad.current = false;
-          setHomeTab(list.some((p) => (p.counts?.pending ?? 0) > 0) ? "review" : "plays");
+          const waiting = list.some((p) => (p.counts?.pending ?? 0) > 0);
+          setHomeTab(waiting ? "review" : "plays");
           if (list.length === 0) setShowPlan(true);
+          // Nobody is waiting, so the page opens on Plays: ask whether any company is kept, for
+          // the note on the Review tab. (When Review is open, its own list reports the number.)
+          if (!waiting && list.length > 0 && new URLSearchParams(window.location.search).get("tab") !== "review") {
+            apiFetch<{ candidates?: unknown; total?: unknown }>("GET", "/v1/plays/candidates?status=approved&kind=company&limit=1")
+              .then((k) => {
+                if (!alive.current) return;
+                const first = Array.isArray(k?.candidates) ? (k.candidates[0] as { peopleFound?: unknown } | undefined) : undefined;
+                // A server that does not count the people found has no such section to point at.
+                if (first && typeof first.peopleFound === "number") setKept((now) => now || (typeof k.total === "number" && k.total > 0 ? Math.floor(k.total) : 1));
+              })
+              .catch(() => { /* a note only - never an error on the page */ });
+          }
         }
       })
       .catch((e) => { if (!alive.current || mine !== playsSeq.current) return; if (isMissingRoute(e)) setPlaysMissing(true); else setListErr(messageOf(e)); });
@@ -347,7 +371,14 @@ export function PlaysPage() {
   const batchDone = batch && batch.ids.length > 0 ? batch.ids.map((id) => batch.outcomes[id]).filter(Boolean) : [];
   const allBlocked = !!batch && batch.ids.length > 0 && batchDone.length === batch.ids.length && batchDone.every((o) => o.status === "blocked");
   const batchTypes = batch ? plays.filter((p) => batch.ids.includes(p.id)).map((p) => p.type) : [];
-  const whatIsMissing = (types ?? []).find((t) => batchTypes.includes(t.type) && t.setupHint)?.setupHint ?? (types ?? []).find((t) => t.setupHint)?.setupHint ?? batchDone.find((o) => o.note)?.note ?? "";
+  // What is missing, in the server's words: the hint of a kind in this group that depends on
+  // search; failing that, what a blocked run itself said.
+  const whatIsMissing = (types ?? []).find((t) => batchTypes.includes(t.type) && t.needsSearch && t.setupHint)?.setupHint ?? batchDone.find((o) => o.note)?.note ?? (types ?? []).find((t) => batchTypes.includes(t.type) && t.setupHint)?.setupHint ?? "";
+  const typeOf = (type: string) => (types ?? []).find((t) => t.type === type);
+  // With no search source connected, plays that do not depend on one come first.
+  const shownPlays = workingFirst(plays, (p) => typeOf(p.type)?.needsSearch === true, searchDependable);
+  // "Work today" in the picker also means available at all (the pixel is installed, the plan covers it).
+  const shownTypes = types ? workingFirst(types, (t) => t.needsSearch === true || t.available === false, searchDependable) : types;
   const campaignNames = useMemo(() => new Map(campaigns.map((c) => [c.id, c.name])), [campaigns]);
   const pickers = { icps, lists, campaigns, clients: clients.filter((c) => c.status !== "archived"), error: pickErr, retry: loadPickers };
   const clientNames = useMemo(() => new Map(clients.map((c) => [c.id, c.name])), [clients]);
@@ -391,6 +422,7 @@ export function PlaysPage() {
               <button key={t.id} type="button" aria-current={tab === t.id ? "page" : undefined} data-testid={`tab-${t.id}`} className={`flex shrink-0 items-center gap-1.5 px-3 py-2 text-sm ${tab === t.id ? "border-b-2 border-brand-400 font-medium text-brand-600" : "text-ink-400 hover:text-ink-100"}`} onClick={() => go(t.id)}>
                 {t.label}
                 {t.id === "review" && pending > 0 && <span className="badge bg-brand-600 text-white" data-testid="pending-count" aria-label={`${plural(pending, "person", "people")} waiting`}>{pending.toLocaleString()}</span>}
+                {t.id === "review" && pending === 0 && kept > 0 && <span className="badge bg-black/[0.05] text-ink-300" data-testid="kept-tab-count" aria-label={`${plural(kept, "company", "companies")} kept`}>{kept.toLocaleString()} kept</span>}
                 {t.id === "plays" && plays.length > 0 && <span className="text-xs text-ink-400">({plays.length})</span>}
               </button>
             ))}
@@ -400,7 +432,7 @@ export function PlaysPage() {
           {tab === "review" && (plays.length === 0 ? (
             <Empty title="Nothing to review yet" hint="A play finds people who need you and puts them here, each with one sentence saying why and a link to the proof. You approve or skip. Start by telling Scout your website." action={<button type="button" className="btn-primary" onClick={() => { setShowPlan(true); go("plays"); }}>Start from your website</button>} />
           ) : (
-            <ReviewQueue plays={plays} types={types} campaignNames={campaignNames} playId={playFilter} kind={kindFilter} onFilter={(next) => go("review", { playId: next.playId ?? playFilter, kind: next.kind ?? kindFilter })} epoch={epoch} shortcuts={!anyDialog} toast={toast} onPendingChange={onPendingChange} onForbidden={onForbidden} onGoToPlays={() => go("plays")} />
+            <ReviewQueue plays={plays} types={types} campaignNames={campaignNames} findHint={findHint} playId={playFilter} kind={kindFilter} onFilter={(next) => go("review", { playId: next.playId ?? playFilter, kind: next.kind ?? kindFilter })} epoch={epoch} shortcuts={!anyDialog} toast={toast} onPendingChange={onPendingChange} onKeptCount={setKept} onForbidden={onForbidden} onGoToPlays={() => go("plays")} />
           ))}
 
           {tab === "plays" && (
@@ -412,7 +444,7 @@ export function PlaysPage() {
                     <button type="button" className="shrink-0 text-amber-800 underline" onClick={() => setBatch(null)}>Dismiss</button>
                   </div>
                   {whatIsMissing && <p className="mt-1">{whatIsMissing}</p>}
-                  <p className="mt-1">This is about how Scout searches, not about your market - nothing was looked at, so nothing was ruled out. Two kinds of play work today without it:</p>
+                  <p className="mt-1">This is about how Scout searches, not about your market - nothing was looked at, so nothing was ruled out. Plays that read their source directly do not depend on it. Two you can start now:</p>
                   <ul className="mt-2 space-y-2">
                     <li className="flex flex-wrap items-center gap-x-3 gap-y-1"><span className="min-w-0 flex-1 basis-64"><span className="font-medium">People who engaged.</span> Upload the people who reacted to a post, signed up or attended, and review them here.</span><button type="button" className="btn-secondary shrink-0 bg-surface py-1" onClick={() => openForm("engagers_upload")}>Start an upload play</button></li>
                     <li className="flex flex-wrap items-center gap-x-3 gap-y-1"><span className="min-w-0 flex-1 basis-64"><span className="font-medium">Competitor customers, with the competitor&apos;s website.</span> Given the website, Scout reads that site&apos;s own customer pages directly.</span><button type="button" className="btn-secondary shrink-0 bg-surface py-1" onClick={() => openForm("competitor_customers")}>Add a competitor&apos;s website</button></li>
@@ -439,8 +471,9 @@ export function PlaysPage() {
                 <>
                   {showPlan && <h2 className="mb-3 mt-8 text-base font-semibold text-ink-50">Your plays</h2>}
                   <ul className="grid gap-3 md:grid-cols-2" data-testid="play-list">
-                    {plays.map((p) => (
+                    {shownPlays.map((p) => (
                       <PlayCard
+                        searchHint={searchDependable === false && typeOf(p.type)?.needsSearch ? typeOf(p.type)?.setupHint : undefined}
                         key={p.id}
                         play={p}
                         types={types}
@@ -485,7 +518,7 @@ export function PlaysPage() {
             </div>
           </div>
         ) : (
-          formOpen && <PlayForm key={formType ?? "pick"} startType={formType} types={types} typesError={typesErr} onRetryTypes={loadTypes} pickers={pickers} toast={toast} onForbidden={onForbidden} onSaved={(play) => {
+          formOpen && <PlayForm key={formType ?? "pick"} startType={formType} findHint={findHint} searchDependable={searchDependable} types={shownTypes} typesError={typesErr} onRetryTypes={loadTypes} pickers={pickers} toast={toast} onForbidden={onForbidden} onSaved={(play) => {
             onCreated(play);
             setShowPlan(false);
             // Closed while the save was in flight: the play exists, but "Your play is ready"
@@ -496,7 +529,7 @@ export function PlaysPage() {
         )}
       </Modal>
       <Modal open={!!editing} onClose={() => setEditing(null)} title="Edit play" wide>
-        {editing && <PlayForm key={editing.id} initial={editing} types={types} typesError={typesErr} onRetryTypes={loadTypes} pickers={pickers} toast={toast} onForbidden={onForbidden} onSaved={(play) => { setPlays((list) => list.map((p) => (p.id === play.id ? play : p))); setEditing(null); void loadPlays(); }} />}
+        {editing && <PlayForm key={editing.id} initial={editing} findHint={findHint} searchDependable={searchDependable} types={types} typesError={typesErr} onRetryTypes={loadTypes} pickers={pickers} toast={toast} onForbidden={onForbidden} onSaved={(play) => { setPlays((list) => list.map((p) => (p.id === play.id ? play : p))); setEditing(null); void loadPlays(); }} />}
       </Modal>
       <UploadModal play={uploadFor} onClose={() => setUploadFor(null)} onDone={() => { void loadPlays(); setEpoch((e) => e + 1); }} onReview={(p) => { setUploadFor(null); go("review", { playId: p.id }); }} onForbidden={onForbidden} />
     </Page>

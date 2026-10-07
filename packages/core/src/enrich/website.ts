@@ -1,4 +1,4 @@
-import { loadHtml, shortText } from "../util/html.js";
+import { MAX_HTML_CHARS, fitHtml, loadHtml, shortText } from "../util/html.js";
 import type { CompanyProfile, PersonCandidate } from "../types.js";
 import { fetchText, pMap } from "../util/http.js";
 import { rootDomain } from "../util/domain.js";
@@ -6,7 +6,47 @@ import { isPublicHost } from "../util/publicHost.js";
 import { assertPublicHost, isSsrfBlocked } from "../util/egress.js";
 import { splitName } from "../util/names.js";
 
-const EMAIL_RE = /[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi;
+/** The two halves of an email address, read outwards from its "@": at most 64 characters before it, a host of at most 255 and an ending of 2 to 24 letters after. */
+const EMAIL_LOCAL = /[A-Z0-9._%+-]{1,64}$/i;
+const EMAIL_HOST = /^[A-Z0-9.-]{1,255}\.[A-Z]{2,24}/i;
+/** No page lists more addresses than this, and none has more "@" signs that could be part of one: a page made of nothing else is not read to its end. */
+const MAX_EMAILS_PER_PAGE = 5_000;
+const MAX_AT_SIGNS_READ = 20_000;
+/** Can this character stand right before an "@" in an address (letter, digit, . _ % + -), or right after one (letter, digit, . -)? */
+const endsLocal = (c: number): boolean => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 46 || c === 95 || c === 37 || c === 43 || c === 45;
+const startsHost = (c: number): boolean => (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c === 46 || c === 45;
+
+/**
+ * The email addresses written in a text, in order.
+ *
+ * This used to be one pattern run over the whole page - `[A-Z0-9._%+-]+@...` - and a page
+ * of 100,000 letters with no "@" in it kept the process busy for seven seconds: from every
+ * letter the pattern read on to the end, found no "@", and started again one letter along.
+ * Here the text is searched for "@" and each address is read outwards from there, so the
+ * work is the length of the text plus a little for each "@".
+ */
+export function emailsOnPage(text: string): string[] {
+  const out: string[] = [];
+  if (typeof text !== "string") return out;
+  let after = 0;
+  let read = 0;
+  for (let at = text.indexOf("@"); at >= 0 && out.length < MAX_EMAILS_PER_PAGE; at = text.indexOf("@", at + 1)) {
+    // Not into the address before it: "a@b.co@d.com" holds one address, as it always did.
+    if (at <= after || !endsLocal(text.charCodeAt(at - 1)) || !startsHost(text.charCodeAt(at + 1))) continue;
+    if (++read > MAX_AT_SIGNS_READ) break;
+    const local = EMAIL_LOCAL.exec(text.slice(Math.max(after, at - 64), at));
+    if (!local) continue;
+    const host = EMAIL_HOST.exec(text.slice(at + 1, at + 282));
+    if (!host) continue;
+    out.push(`${local[0]}@${host[0]}`);
+    after = at + 1 + host[0].length;
+  }
+  return out;
+}
+
+/** How much of what a page calls its name and its description is kept on the company's record. */
+const MAX_NAME = 200;
+const MAX_DESCRIPTION = 2_000;
 const PAGES = ["", "/about", "/about-us", "/team", "/our-team", "/contact", "/contact-us", "/company", "/leadership", "/people"];
 
 const TECH_SIGNATURES: [RegExp, string][] = [
@@ -125,21 +165,27 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
   const people = new Map<string, PersonCandidate>();
   const rd = rootDomain(domain);
 
-  for (const { path, html } of pages) {
-    if (!html) continue;
-    // Through the shared guard (util/html.ts): a page built to stall the parser is refused, not parsed.
+  for (const { path, html: fetched } of pages) {
+    if (!fetched) continue;
+    // Each page is read in one go (a tenth of a second for the largest a fetch returns). Between two of them
+    // the process gets to answer whoever else is waiting, instead of reading six in a row.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    // What is read is the page at the size the parser is given (util/html.ts: code, styles and comments go
+    // first when a page is longer), by the patterns below as well as by the parser.
+    const html = fitHtml(fetched, MAX_HTML_CHARS);
+    // Through the shared guard: a page built to stall the parser is refused, not parsed.
     const $ = loadHtml(html);
     if (!$) continue;
     if (path === "") {
-      profile.name = clean($('meta[property="og:site_name"]').attr("content")) ?? clean($("title").text().split(/[|–-]/)[0]);
+      profile.name = clean($('meta[property="og:site_name"]').attr("content"), MAX_NAME) ?? clean($("title").text().slice(0, 2_000).split(/[|–-]/)[0], MAX_NAME);
       profile.description =
-        clean($('meta[name="description"]').attr("content")) ?? clean($('meta[property="og:description"]').attr("content"));
+        clean($('meta[name="description"]').attr("content"), MAX_DESCRIPTION) ?? clean($('meta[property="og:description"]').attr("content"), MAX_DESCRIPTION);
       $("script[type='application/ld+json']").each((_, el) => {
         try {
           const j = JSON.parse($(el).text());
           const org = Array.isArray(j) ? j.find((x) => x["@type"] === "Organization") : j["@type"] === "Organization" ? j : null;
           if (org) {
-            profile.name = profile.name ?? org.name;
+            profile.name = profile.name ?? (typeof org.name === "string" ? clean(org.name, MAX_NAME) : undefined);
             if (org.foundingDate) profile.foundedYear = Number(String(org.foundingDate).slice(0, 4)) || undefined;
             if (org.address?.addressLocality) profile.location = [org.address.addressLocality, org.address.addressCountry].filter(Boolean).join(", ");
             if (org.address?.addressCountry) profile.country = org.address.addressCountry;
@@ -149,7 +195,7 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
       });
       for (const [re, name] of TECH_SIGNATURES) if (re.test(html)) tech.add(name);
     }
-    for (const m of html.match(EMAIL_RE) ?? []) {
+    for (const m of emailsOnPage(html)) {
       const e = m.toLowerCase();
       if (/\.(png|jpg|jpeg|gif|svg|webp|css|js)$/.test(e)) continue;
       if (e.endsWith(`@${rd}`) || e.endsWith(`.${rd}`)) emails.add(e);
@@ -192,8 +238,9 @@ export async function crawlCompanyWebsite(domain: string, opts: CrawlOptions = {
   return profile;
 }
 
-function clean(s?: string | null) {
-  const t = s?.replace(/\s+/g, " ").trim();
+/** One line of text, or nothing. `max` is how much of it is kept: a name or a description is a line or a paragraph, whatever a page sends as one. */
+function clean(s?: string | null, max = 20_000) {
+  const t = s?.slice(0, max * 4).replace(/\s+/g, " ").trim().slice(0, max);
   return t ? t : undefined;
 }
 

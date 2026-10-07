@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { resetSearchCache, webSearch, type SearchProvider } from "./index.js";
+import { resetSearchCache, webSearch, webSearchDetailed, type SearchProvider } from "./index.js";
+import { honorSiteOperator } from "./providers.js";
 import { ProviderUnavailableError } from "../providers/health.js";
 import type { SearchResult } from "../types.js";
 
@@ -65,6 +66,48 @@ describe("a search never re-serves an outage as an empty result", () => {
     await webSearch("nonsense query", { providers: [empty] });
     // Briefly cached: this is what the cache is for, and it expires in five minutes.
     expect(calls).toBe(1);
+  });
+
+  it("does not believe an empty answer whose results were all thrown away for being off the site asked for", async () => {
+    let calls = 0;
+    // An engine that ignores `site:`: what it sends is from anywhere, and the provider discards it.
+    const ignoresSite: SearchProvider = {
+      name: "stub",
+      available: () => true,
+      search: async (q) => {
+        calls++;
+        return honorSiteOperator(q, [r("https://vendor.example/alternative-to-acme"), r("https://other.example/acme")]);
+      },
+    };
+    const query = 'site:reddit.com "alternative to Acme"';
+    for (let i = 0; i < 2; i++) {
+      const o = await webSearchDetailed(query, { providers: [ignoresSite] });
+      expect(o.results).toEqual([]);
+      // Both times the caller is told the site was never searched: the second is not a remembered "nobody".
+      expect(o.cached).toBeUndefined();
+      expect(o.attempts).toMatchObject([{ provider: "stub", ok: true, count: 0, offSite: 2 }]);
+    }
+    expect(calls).toBe(2);
+    // The same engine asked without a site answers, and that answer is remembered as before.
+    const plain: SearchProvider = { ...ignoresSite, search: async () => (calls++, []) };
+    await webSearchDetailed('"alternative to Acme"', { providers: [plain] });
+    expect((await webSearchDetailed('"alternative to Acme"', { providers: [plain] })).cached).toBe(true);
+    expect(calls).toBe(3);
+  });
+
+  it("still remembers a site search that kept some results, and one that was honoured and found nothing", async () => {
+    let calls = 0;
+    const partly: SearchProvider = {
+      name: "stub",
+      available: () => true,
+      search: async (q) => (calls++, honorSiteOperator(q, [r("https://www.reddit.com/r/sales/comments/1/x/"), r("https://vendor.example/x")])),
+    };
+    expect((await webSearchDetailed("site:reddit.com acme", { providers: [partly], minResults: 1 })).results).toHaveLength(1);
+    expect((await webSearchDetailed("site:reddit.com acme", { providers: [partly], minResults: 1 })).cached).toBe(true);
+    const honoured: SearchProvider = { name: "stub", available: () => true, search: async (q) => (calls++, honorSiteOperator(q, [])) };
+    await webSearchDetailed("site:reddit.com nothing", { providers: [honoured] });
+    expect((await webSearchDetailed("site:reddit.com nothing", { providers: [honoured] })).cached).toBe(true);
+    expect(calls).toBe(2);
   });
 
   it("caches a real answer and does not ask twice", async () => {

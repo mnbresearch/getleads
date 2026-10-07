@@ -117,7 +117,7 @@ function fieldValue(field: PlayTypeField, raw: unknown): unknown {
  * and what it needs is more use than not seeing it.
  */
 export function PlayForm({
-  types, typesError, onRetryTypes, initial, startType, pickers, onSaved, onForbidden, toast,
+  types, typesError, onRetryTypes, initial, startType, findHint, searchDependable, pickers, onSaved, onForbidden, toast,
 }: {
   types: PlayTypeInfo[] | null;
   typesError: string | null;
@@ -125,6 +125,9 @@ export function PlayForm({
   initial?: PlayOut;
   /** Open a new play straight at this kind (when it exists and is available), skipping the picker. */
   startType?: string;
+  /** The server's sentence about finding people when no search source is connected. */
+  findHint?: string;
+  searchDependable?: boolean;
   pickers: Pickers;
   onSaved: (play: PlayOut, created: boolean) => void;
   onForbidden: (message: string) => void;
@@ -171,7 +174,7 @@ export function PlayForm({
   if (!type) {
     return (
       <div>
-        <p className="mb-3 text-sm text-ink-300">A play watches one source of buying intent and brings you the people behind it, each with a reason and the proof. Pick where to look.</p>
+        <p className="mb-3 text-sm text-ink-300">A play watches one source of buying intent and looks for the people behind it. Each one it finds comes with a reason and the proof. Pick where to look.{searchDependable === false ? " The kinds that work today are listed first." : ""}</p>
         <ul className="grid gap-3 sm:grid-cols-2" aria-label="Kinds of play">
           {types.map((t) => {
             // Unavailable only when the server says so; a server that does not say is not refusing.
@@ -192,7 +195,7 @@ export function PlayForm({
                 </span>
                 <span className={`text-sm ${!off ? "text-ink-300" : "text-ink-400"}`}>{t.summary}</span>
                 {off && <span className="text-xs font-medium text-amber-700">Not available yet: {t.unavailableReason || "this workspace is not set up for it."}</span>}
-                {!off && t.setupHint && <span className="text-xs text-amber-700">{t.setupHint}</span>}
+                {!off && t.setupHint && <span className={`text-xs ${t.needsSearch || searchDependable === undefined ? "text-amber-700" : "text-ink-400"}`} data-testid="type-hint">{t.setupHint}</span>}
               </button>
             </li>
             );
@@ -285,6 +288,7 @@ export function PlayForm({
         <label className="label" htmlFor="play-titles">Job titles to look for</label>
         <TagInput inputId="play-titles" value={titles} onChange={setTitles} max={20} placeholder="VP Sales, Head of Growth…" />
         <p className="mt-1 text-xs text-ink-400">When the play finds a company, these are the people Scout looks for there. Leave empty to get the company and choose people yourself.</p>
+        {findHint && <p className="mt-1 text-xs text-amber-700" data-testid="find-hint">{findHint}</p>}
       </div>}
 
       <div><label className="label" htmlFor="play-icp">Score against an ideal customer</label><select id="play-icp" className="input" value={icpId} onChange={(e) => setIcpId(e.target.value)}><option value="">Do not score</option>{pickers.icps.map((i) => <option key={i.id} value={i.id}>{i.name}</option>)}</select></div>

@@ -157,6 +157,7 @@ export function openapi(apiUrl: string) {
       scoreReasons: arr(),
       leadId: { ...nullable(uuid), description: "The lead, once approved - or straight away when the person was already a lead" },
       alreadyLead: bool,
+      peopleFound: { type: ["integer", "null"], description: "For a company: the person candidates its play already holds for it (waiting, approved or skipped). Null for a person or a conversation" },
       decidedAt: nullable(dateTime),
       createdAt: dateTime,
     },
@@ -635,7 +636,7 @@ export function openapi(apiUrl: string) {
       "/v1/plays/types": {
         get: {
           tags: ["Plays"],
-          summary: "The seven kinds of play: what each finds, the settings it takes (`fields`, for building a form) and whether it can work in this workspace yet. `available` is false with a plain `unavailableReason` when it cannot (website_visitors without the tracking snippet installed; job_changes when the plan cannot check anyone). A type that depends on public search stays available and carries a `setupHint` when results may be thin",
+          summary: "The seven kinds of play: what each finds, the settings it takes (`fields`, for building a form) and whether it can work in this workspace yet. `available` is false with a plain `unavailableReason` when it cannot (website_visitors without the tracking snippet installed; job_changes when the plan cannot check anyone). `needsSearch` is true for a type whose own source is web search (hiring across job boards). `searchDependable` says whether a search source is connected on the server: when it is not, a type that depends on search - wholly or in part - stays available and carries a `setupHint` saying what works today and what does not (customers of a competitor whose website is given, recently funded companies, Hacker News conversations, uploads and website visitors read their source directly; job boards, conversations on LinkedIn / Reddit / X / forums, and finding people at a company need a search source), and a run that could not search says so rather than reporting nobody. `findPeople` says the same about the Find people step",
           responses: ok(
             obj(
               {
@@ -658,7 +659,8 @@ export function openapi(apiUrl: string) {
                             kind: { ...str, enum: ["tags", "text", "number", "competitors", "select"], description: "`select`: choose any number of `options` and send their values as an array (one value only when `max` is 1)" },
                             options: arr(obj({ value: str, label: str }, ["value", "label"])),
                             required: bool,
-                            max: num,
+                            min: { ...num, description: "A number field's lowest accepted value" },
+                            max: { ...num, description: "A number field's highest value; for tags and competitors how many, for text how many characters" },
                             placeholder: str,
                             help: str,
                           },
@@ -670,8 +672,10 @@ export function openapi(apiUrl: string) {
                     ["type", "name", "summary", "finds", "needsSearch", "available", "fields"],
                   ),
                 ),
+                searchDependable: { ...bool, description: "False when no search source is connected on the server" },
+                findPeople: obj({ needsSearch: bool, setupHint: str }, ["needsSearch"]),
               },
-              ["types"],
+              ["types", "searchDependable", "findPeople"],
             ),
           ),
         },
@@ -689,10 +693,14 @@ export function openapi(apiUrl: string) {
                   icp: { type: "object", description: "ICP criteria: industries, titles, seniorities, departments, companySizes, locations, countries, keywords, excludeKeywords, techStack (each a list of strings, all optional)" },
                   titles: arr(),
                   competitors: arr(obj({ name: str, domain: str, source: { ...str, enum: ["saved", "site", "ai"], description: "saved: from the workspace's settings. site: named on the website itself. ai: suggested by a model" } }, ["name", "source"])),
-                  plays: arr(obj({ type: playType, name: str, config: { type: "object", description: "Ready to send to POST /v1/plays" }, targetTitles: arr(), why: str, available: bool, unavailableReason: str }, ["type", "name", "config", "targetTitles", "why", "available"])),
+                  plays: {
+                    ...arr(obj({ type: playType, name: str, config: { type: "object", description: "Ready to send to POST /v1/plays" }, targetTitles: arr(), why: str, available: bool, unavailableReason: str, needsSearch: { ...bool, description: "This suggestion, with its settings, depends on web search" }, setupHint: str }, ["type", "name", "config", "targetTitles", "why", "available", "needsSearch"])),
+                    description: "When `searchDependable` is false, the suggestions that work today come first and the others carry a `setupHint`",
+                  },
+                  searchDependable: bool,
                   notes: { ...arr(), description: "Plain sentences about what could and could not be read" },
                 },
-                ["product", "icp", "titles", "competitors", "plays", "notes"],
+                ["product", "icp", "titles", "competitors", "plays", "searchDependable", "notes"],
               ),
             ),
             ...res("402", "quota_exceeded: no search units left this month", errorBody),
@@ -712,7 +720,7 @@ export function openapi(apiUrl: string) {
       "/v1/plays/candidates": {
         get: {
           tags: ["Plays"],
-          summary: "The review queue: what plays have found, each with its reason and evidence. Newest first; pending candidates come highest score first, then newest. `counts` is the workspace-wide number in each state",
+          summary: "The review queue: what plays have found, each with its reason and evidence. Pending candidates come highest score first, then newest; approved and skipped ones most recently decided first. `counts` is the number in each state for the filter. `status=approved&kind=company` is the list of companies kept in their plays: each carries `peopleFound`, Find people works on it, and it can be dismissed with a `skip` decision",
           parameters: [
             { name: "status", in: "query", schema: { ...str, enum: ["pending", "approved", "skipped"] } },
             { name: "playId", in: "query", schema: uuid },
@@ -726,7 +734,7 @@ export function openapi(apiUrl: string) {
       "/v1/plays/candidates/decide": {
         post: {
           tags: ["Plays"],
-          summary: "Approve or skip up to 200 candidates. Approving a person creates a lead that carries the reason and the evidence link (one lead unit when the person is new; none when they were already a lead). Approving a company saves the company. Approving a post creates a task to answer that conversation, never a lead. Skipping only marks the candidate. Approving sends nothing. With `enroll: true`, approved people are also added to the play's campaign: those with a usable address now (`enrolled`), the others after their address has been found (`queuedForEmail`). Being added to a campaign does not start it. A decision for a candidate that is not pending, or not this workspace's, is listed in `notApplied` and changes nothing. When the plan's lead allowance runs out the batch stops, the rest stay pending, and `stopped` says so",
+          summary: "Approve or skip up to 200 candidates. Approving a person creates a lead that carries the reason and the evidence link (one lead unit when the person is new; none when they were already a lead). Approving a company keeps it in the play (`companiesKept`), where Find people works on it; a company whose website is known is also saved to the workspace's companies. Approving a post creates a task to answer that conversation, never a lead. Skipping only marks the candidate; `skip` is also accepted for an already approved company or post (it is dismissed from the kept list and nothing else changes). Approving sends nothing. With `enroll: true`, approved people are also added to the play's campaign: those with a usable address now (`enrolled`), the others after their address has been found (`queuedForEmail`). Being added to a campaign does not start it. A decision for a candidate that is not pending, or not this workspace's, is listed in `notApplied` with a sentence and a machine-readable `code`, and changes nothing. When the plan's lead allowance runs out the batch stops, the rest stay pending, and `stopped` says so",
           requestBody: j(
             obj(
               {
@@ -746,7 +754,21 @@ export function openapi(apiUrl: string) {
                 tasksCreated: int,
                 enrolled: int,
                 queuedForEmail: int,
-                notApplied: arr(obj({ id: str, reason: str }, ["id", "reason"])),
+                notApplied: arr(
+                  obj(
+                    {
+                      id: str,
+                      reason: str,
+                      code: {
+                        ...str,
+                        enum: ["already_decided", "being_decided", "removed", "not_found", "play_gone", "quota", "do_not_contact", "error"],
+                        description: "already_decided: approved or skipped before. being_decided: another request holds it right now. removed: gone while it was being approved. not_found: no such candidate here. play_gone: its play was deleted. quota: the lead allowance ran out, it is still waiting. do_not_contact: on a do-not-contact list. error: a fault on our side, it is still waiting",
+                      },
+                    },
+                    ["id", "reason", "code"],
+                  ),
+                ),
+                companiesKept: { ...int, description: "Company candidates approved by this request" },
                 applied: { ...arr(uuid), description: "The ids whose decision was applied, in the order they were sent. An id is in `applied` or in `notApplied`, never both" },
                 stopped: obj({ reason: { ...str, enum: ["quota", "error"] }, message: str }, ["reason", "message"]),
               },
@@ -758,10 +780,10 @@ export function openapi(apiUrl: string) {
       "/v1/plays/candidates/{id}/find-people": {
         post: {
           tags: ["Plays"],
-          summary: "For a company candidate: find people there. Each one is added to the same play's queue as a person candidate with the company's reason and evidence. Only for company candidates. Uses one search unit. At most 12 a minute",
+          summary: "For a company candidate: find people there. Each one is added to the same play's queue as a person candidate with the company's reason and evidence. Only for company candidates - waiting or already approved (kept). Uses one search unit, given back when the search could not look. `peopleFound` is how many people the play now holds for the company. At most 12 a minute",
           parameters: [idParam("The company candidate")],
           requestBody: j(obj({ titles: { ...tagList(10), description: "Defaults to the play's target titles" }, limit: { type: "integer", minimum: 1, maximum: 5, default: 3 } })),
-          responses: { ...ok(obj({ added: int, candidates: arr(candidateOut), note: str }, ["added", "candidates"])), ...res("402", "quota_exceeded: no search units left this month", errorBody) },
+          responses: { ...ok(obj({ added: int, candidates: arr(candidateOut), peopleFound: int, note: str }, ["added", "candidates", "peopleFound"])), ...res("402", "quota_exceeded: no search units left this month", errorBody) },
         },
       },
       "/v1/plays/performance": {

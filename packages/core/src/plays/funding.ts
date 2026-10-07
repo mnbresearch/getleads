@@ -8,7 +8,7 @@
 import { fetchGoogleNews, scanSignals, type ParsedSignal } from "../signals/news.js";
 import { PlayRun, cleanCompanyName, cleanList, clampInt, findingLimit, finishFinding, isVendorName, rankFindings, safeHttpUrl, stripDescriptorPrefix } from "./shared.js";
 import type { PlayEngineOptions, PlayEngineResult, PlayFinding } from "./types.js";
-import { cleanLine, cleanQuote, normCompanyName } from "./util.js";
+import { cleanLine, cleanQuote, mailSafeReason, normCompanyName } from "./util.js";
 
 const SAME_ROUND_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -31,14 +31,22 @@ const plainHyphens = (s: string): string => String(s ?? "").slice(0, MAX_HEADLIN
 const SAID_BEFORE = /(?:valued at|valuation of|valuing\s+\S+(?:\s+\S+)?\s+at|worth)\s*(?:about|around|nearly|over|more than|up to|roughly|approximately|~)?\s*$/i;
 const SAID_AFTER = /^\s*\+?\s*(?:post-?money\s+|pre-?money\s+)?valuation\b/i;
 
-function compact(v: number): string {
-  const fmt = (x: number, suffix: string): string => {
-    const r = Math.round(x * 10) / 10;
-    return `${Number.isInteger(r) ? r : r.toFixed(1)}${suffix}`;
-  };
-  if (v >= 1e9) return fmt(v / 1e9, "B");
-  if (v >= 1e6) return fmt(v / 1e6, "M");
-  if (v >= 1e3) return fmt(v / 1e3, "K");
+/**
+ * "12M", "1.5B", "500K". `places` is how many decimals are kept: one for a figure of ours,
+ * two for a figure a headline wrote, so that "$133.65M" is shown as $133.65M and "$1,250
+ * million" as $1.25B - a rounded "$133.7M" or "$1.3B" is not what was reported.
+ */
+function compact(v: number, places = 1): string {
+  const scale = 10 ** places;
+  const units: [number, string][] = [[1e9, "B"], [1e6, "M"], [1e3, "K"]];
+  for (let i = 0; i < units.length; i++) {
+    const [size, suffix] = units[i];
+    if (v < size) continue;
+    const r = Math.round((v / size) * scale) / scale;
+    // 999.96 thousand is a million, not "1000K".
+    if (r >= 1000 && i > 0) return `${Number((r / 1000).toFixed(places))}${units[i - 1][1]}`;
+    return `${Number(r.toFixed(places))}${suffix}`;
+  }
   return String(Math.round(v));
 }
 
@@ -73,7 +81,7 @@ export function headlineAmount(headline: string): { usd: number; inDollars: bool
     // A bare "$12" in a funding headline is a typo or a share price, not a round.
     if (usd < 10_000) continue;
     const indian = unit === "crore" || unit === "cr" || unit === "lakh";
-    const amount = indian ? `${m[3]} ${unit === "lakh" ? "lakh" : "crore"}` : compact(n * mult);
+    const amount = indian ? `${m[3]} ${unit === "lakh" ? "lakh" : "crore"}` : compact(n * mult, 2);
     return { usd, inDollars: currency === "USD", shown: currency === "USD" ? `$${amount}` : `${currency} ${amount}` };
   }
   return null;
@@ -173,14 +181,27 @@ const PUBLISHERS: Record<string, string> = {
   citybiz: "citybiz",
 };
 
-/** The outlet's name as a reader knows it, or "" when all the feed gave is a web address we cannot put a name to. */
+/** A web address, whole: with or without its scheme, "www." and whatever follows the host. */
+const ADDRESS = /^(?:https?:\/\/)?(?:www\.)?([a-z0-9-]{1,63}(?:\.[a-z0-9-]{1,63}){1,6})(?::\d{1,5})?(?:[/?#]\S{0,160})?$/i;
+/** An address inside a longer source line ("ET Now | economictimes.com"). */
+const ADDRESS_INSIDE = /(?:https?:\/\/|www\.)\S{0,160}|(?<![\p{L}\p{N}.@-])[a-z0-9-]{1,63}(?:\.[a-z]{2,24}){1,3}(?![\p{L}\p{N}-])(?:\/\S{0,160})?/giu;
+
+/**
+ * The outlet's name as a reader knows it, or "" when all the feed gave is a web address we
+ * cannot put a name to. A feed may give the address bare ("techcrunch.com") or whole
+ * ("https://ascendants.in/"): either way it is read down to its host first. What comes back
+ * is a name or nothing - never an address, and never punctuation on its own.
+ */
 export function publisherName(source: unknown): string {
-  const s = cleanLine(source, 80);
+  const s = cleanLine(source, 200);
   if (!s) return "";
-  if (!/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/i.test(s)) return cleanLine(s, 60);
-  const labels = s.toLowerCase().split(".");
-  for (const l of labels) if (PUBLISHERS[l]) return PUBLISHERS[l];
-  return "";
+  const address = ADDRESS.exec(s);
+  if (address) {
+    for (const label of address[1].toLowerCase().split(".")) if (Object.hasOwn(PUBLISHERS, label)) return PUBLISHERS[label];
+    return "";
+  }
+  const name = cleanLine(s.replace(ADDRESS_INSIDE, " ").replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}.)!?]+$/gu, ""), 60);
+  return /[\p{L}\p{N}]/u.test(name) ? name : "";
 }
 
 export function fundingReason(s: { title: string; source?: string; occurredAt?: Date }): string {
@@ -191,7 +212,10 @@ export function fundingReason(s: { title: string; source?: string; occurredAt?: 
   else if (amount) what = `Raised ${amount.shown}`;
   else if (round) what = `Raised ${/^[aeiou]/i.test(round) ? "an" : "a"} ${round} round`;
   else what = "Announced new funding";
-  const source = publisherName(s.source);
+  // "reported by" is only written with a name after it - one that is still there once the sentence has
+  // been made safe to send (which takes addresses out).
+  const named = publisherName(s.source);
+  const source = named && mailSafeReason(`reported by ${named}`) === `reported by ${named}` ? named : "";
   const d = s.occurredAt instanceof Date && Number.isFinite(s.occurredAt.getTime()) ? s.occurredAt : null;
   const on = d ? ` on ${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]} ${d.getUTCFullYear()}` : "";
   return source ? `${what}, reported by ${source}${on}.` : d ? `${what}, reported${on}.` : `${what}.`;

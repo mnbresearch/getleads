@@ -5,21 +5,17 @@ import { EmailStatusBadge, Empty, LoadError, ScoreBar, Spinner } from "../ui";
 import { ExtLink } from "../ExtLink";
 import { plural } from "../../lib/plural";
 import {
-  ago, candidateName, clean, DECIDE_MAX, decisionSummary, hostOf, isForbidden, isQuota, lookup, messageOf, normalizeDecide, REVIEW_PAGE, SKIP_REASONS, typeName, typeTone,
+  ago, candidateName, clean, DECIDE_MAX, decisionSummary, hostOf, isForbidden, isQuota, leavesQueue, lookup, messageOf, normalizeDecide, REVIEW_PAGE, SKIP_REASONS, typeName, typeTone,
   type Candidate, type DecideResult, type PlayOut, type PlayTypeInfo,
 } from "../../lib/plays";
+
+import { FindTitlesForm } from "./FindTitlesForm";
+import { KeptCompanies, type FindOutcome } from "./KeptCompanies";
 
 type Decision = { id: string; decision: "approve" | "skip"; skipReason?: string };
 /** When this few are left on screen and the server holds more, the next ones are fetched. */
 const TOP_UP_AT = 10;
-/**
- * A refusal that means "this is no longer waiting": someone else decided it, or it was
- * removed. The server says so in a sentence; these are the openings of the ones it uses.
- * Such a card has nothing left to decide, so it leaves the queue with a quiet note - it does
- * not stay behind marked "still waiting", which it is not.
- */
-const NO_LONGER_WAITING = /^(already (approved|skipped)\b|decided elsewhere\b|this was removed while it was being approved|not found in this workspace|its play no longer exists)/i;
-/** How many "saved company" follow-ups stay on screen. */
+/** How many "kept company" lines stay on screen where their cards were. */
 const SAVED_SHOWN = 5;
 type Notice = { message: string; detail?: string; quota?: boolean; tone: "amber" | "red" };
 
@@ -51,12 +47,14 @@ function isTyping(el: EventTarget | null): boolean {
  * reviewer never has to reach for the pointer.
  */
 export function ReviewQueue({
-  plays, types, campaignNames, playId, kind, onFilter, epoch, shortcuts, toast, onPendingChange, onForbidden, onGoToPlays,
+  plays, types, campaignNames, findHint, playId, kind, onFilter, epoch, shortcuts, toast, onPendingChange, onKeptCount, onForbidden, onGoToPlays,
 }: {
   plays: PlayOut[];
   types: PlayTypeInfo[] | null;
   /** Campaign id -> name, so the enrol choice can say which campaign it means. */
   campaignNames: Map<string, string>;
+  /** The server's sentence about Find people when no search source is connected (absent otherwise). */
+  findHint?: string;
   playId: string;
   kind: string;
   onFilter: (next: { playId?: string; kind?: string }) => void;
@@ -67,6 +65,8 @@ export function ReviewQueue({
   toast: (m: string, k?: "ok" | "err") => void;
   /** The number waiting changed by this much (negative when people were added). */
   onPendingChange: (decided: number) => void;
+  /** How many companies are kept, for the note on the Review tab. */
+  onKeptCount?: (n: number | ((now: number) => number)) => void;
   onForbidden: (message: string) => void;
   onGoToPlays: () => void;
 }) {
@@ -84,6 +84,8 @@ export function ReviewQueue({
   const [reasonFor, setReasonFor] = useState<string | null>(null);
   const [titlesFor, setTitlesFor] = useState<string | null>(null);
   const [stale, setStale] = useState(false);
+  // Bumped when a company is approved, so "Companies kept" is read again from the server.
+  const [keptKey, setKeptKey] = useState(0);
   // Companies just approved: saved, but with nobody to contact yet. Each keeps a line with
   // the next step (Find people) until it is used or dismissed.
   // `before` is the card that now sits where the company was, so the line appears in place -
@@ -216,6 +218,7 @@ export function ReviewQueue({
     setBusy((b) => Object.fromEntries(Object.entries(b).filter(([id]) => !ids.includes(id))));
 
     const refused = new Map(sum.notApplied.map((x) => [x.id, x.reason]));
+    const refusal = new Map(sum.notApplied.map((x) => [x.id, x]));
     const changed = sum.approved + sum.skipped;
     const sent = new Set(answered.map((a) => a.id));
     // Which cards leave: the ones the server names as applied. A server that only counts is
@@ -228,9 +231,13 @@ export function ReviewQueue({
     const applied = byName ? (named ?? []).filter((id) => sent.has(id)) : inferred ? answered.filter((a) => !refused.has(a.id)).map((a) => a.id) : [];
     // Refused because it is no longer waiting at all (decided elsewhere, or removed): there
     // is nothing here to retry, so these leave too - quietly, and never counted as approved.
-    const elsewhere = exact ? [...refused].filter(([, why]) => NO_LONGER_WAITING.test(why)).map(([id]) => id) : [];
-    for (const id of elsewhere) refused.delete(id);
-    const leaving = [...applied, ...elsewhere];
+    // The server says which with a code; an older one only with its sentence.
+    const why = (id: string) => leavesQueue(refusal.get(id) ?? { reason: refused.get(id) ?? "" });
+    const elsewhere = exact ? [...refused.keys()].filter((id) => why(id) === "elsewhere") : [];
+    // On a do-not-contact list: not added, and nothing to decide - it leaves as well.
+    const listed = exact ? [...refused.keys()].filter((id) => why(id) === "do_not_contact") : [];
+    for (const id of [...elsewhere, ...listed]) refused.delete(id);
+    const leaving = [...applied, ...elsewhere, ...listed];
 
     const notChanged = (why: string) => `Still waiting - this was not changed: ${why}`;
     const errs: Record<string, string> = {};
@@ -289,11 +296,15 @@ export function ReviewQueue({
       // working down a long queue never reaches the bottom of a page.
       else if (exact && left.length <= TOP_UP_AT && remaining > left.length) load("more", left.length);
     }
-    if (changed + elsewhere.length > 0) onPendingChange(changed + elsewhere.length);
+    if (changed + elsewhere.length + listed.length > 0) onPendingChange(changed + elsewhere.length + listed.length);
+    if (companies.length) setKeptKey((k) => k + 1);
     if (!failure || !bulk) {
       const withReason = { ...sum, notApplied: sum.notApplied.filter((x) => errs[x.id]) };
       const extra = [
-        companies.length === 1 ? "Saved the company. Press Find people to look for the right person there." : companies.length > 1 ? `Saved ${companies.length} companies. Press Find people on each to look for the right person there.` : "",
+        // "Kept", not "saved": the company stays in its play. (One with a known website is
+        // also saved to Companies; one without is not, so "saved" would not always be true.)
+        companies.length === 1 ? `Kept ${candidateName(companies[0])}. Press Find people to look for the right person there.` : companies.length > 1 ? `Kept ${companies.length} companies. Press Find people on each to look for the right person there.` : "",
+        listed.length === 1 ? "1 is on a do-not-contact list, so they were not added and have left your queue." : listed.length > 1 ? `${listed.length} are on a do-not-contact list, so they were not added and have left your queue.` : "",
         elsewhere.length === 1 ? "1 had already been decided elsewhere and has left your queue." : elsewhere.length > 1 ? `${elsewhere.length} had already been decided elsewhere and have left your queue.` : "",
       ].filter(Boolean).join(" ");
       if (changed > 0) toast(`${decisionSummary(withReason)}${extra ? ` ${extra}` : ""}`, "ok");
@@ -305,12 +316,12 @@ export function ReviewQueue({
     if (!exact && (changed > 0 || sum.stopped)) { refocus.current = true; load(); }
   }, [enroll, hasCampaign, load, onForbidden, onPendingChange, toast]);
 
-  const findPeople = useCallback(async (c: Candidate, titles?: string[]) => {
+  const findPeople = useCallback(async (c: Candidate, titles?: string[]): Promise<FindOutcome> => {
     setTitlesFor(null);
     setBusy((b) => ({ ...b, [c.id]: "find" }));
     setCardErr((m) => { const n = { ...m }; delete n[c.id]; return n; });
     try {
-      const r = await apiFetch<{ added: number; candidates: Candidate[]; note?: string }>("POST", `/v1/plays/candidates/${encodeURIComponent(c.id)}/find-people`, titles?.length ? { titles } : {});
+      const r = await apiFetch<{ added: number; candidates: Candidate[]; peopleFound?: number; note?: string }>("POST", `/v1/plays/candidates/${encodeURIComponent(c.id)}/find-people`, titles?.length ? { titles } : {});
       const added = typeof r.added === "number" && r.added > 0 ? r.added : 0;
       const people = (Array.isArray(r.candidates) ? r.candidates : []).filter((p) => p && typeof p.id === "string" && (p.status === undefined || p.status === "pending") && !gone.current.has(p.id));
       const fits = people.filter((p) => !kind || p.kind === kind);
@@ -331,11 +342,13 @@ export function ReviewQueue({
       const note = clean(r.note, 300);
       if (added > 0) toast(`Found ${plural(added, "person", "people")} at ${company}. ${fresh.length ? "They are next in the queue, with the same reason and proof." : "They are waiting in the queue under People."}${note ? ` ${note}` : ""}`);
       else toast(note || `Nobody was found at ${company} this time.`, note ? "ok" : "err");
+      return { ok: true, added, ...(typeof r.peopleFound === "number" ? { peopleFound: r.peopleFound } : {}) };
     } catch (e) {
       const said = messageOf(e);
       setCardErr((m) => ({ ...m, [c.id]: `Nobody was looked up: ${said}` }));
       if (isForbidden(e)) onForbidden(said);
       if (isQuota(e)) setNotice({ tone: "amber", quota: true, message: said });
+      return { ok: false, message: said };
     } finally {
       setBusy((b) => { const n = { ...b }; delete n[c.id]; return n; });
     }
@@ -359,6 +372,7 @@ export function ReviewQueue({
       else void now.current.findPeople(c, titles);
     },
   }), []);
+  const needsTitles = useCallback((c: Candidate) => !(playsById.get(c.playId)?.targetTitles ?? []).length, [playsById]);
 
   // ── Keyboard: A approve, S skip, J / K move ─────────────────────────────────────────────
   const live = useRef({ rows, activeId, busy, decide });
@@ -448,6 +462,21 @@ export function ReviewQueue({
             <span className="block text-xs text-ink-400">Off unless you tick it. Approving sends nothing by itself - a campaign only sends once you have started it.</span>
           </span>
         </label>
+      )}
+
+      {(!kind || kind === "company") && (
+        <KeptCompanies
+          playId={playId}
+          refreshKey={keptKey}
+          openByDefault={!loading && rows.length === 0}
+          findHint={findHint}
+          needsTitles={needsTitles}
+          onFind={findPeople}
+          onDismissed={dismissSaved}
+          onCount={onKeptCount}
+          onForbidden={onForbidden}
+          toast={toast}
+        />
       )}
 
       {unplaced.length > 0 && (
@@ -685,35 +714,20 @@ const CandidateCard = memo(function CandidateCard({
   );
 });
 
-/** Asks which job titles to look for, for a play that has none saved. */
-function FindTitlesForm({ id, name, busy, onFind }: { id: string; name: string; busy: boolean; onFind: (titles: string[]) => void }) {
-  const [draft, setDraft] = useState("");
-  const wanted = draft.split(",").map((t) => t.trim().slice(0, 100)).filter(Boolean).slice(0, 10);
-  return (
-    <form className="mt-2 flex flex-wrap items-end gap-2" data-testid="find-titles" onSubmit={(e) => { e.preventDefault(); if (wanted.length) onFind(wanted); }}>
-      <div className="min-w-0 flex-1 basis-56">
-        <label className="label" htmlFor={`find-titles-${id}`}>Which job titles to look for at {name}</label>
-        <input id={`find-titles-${id}`} className="input py-1.5" autoFocus maxLength={600} placeholder="VP Operations, Head of Customer Success" value={draft} onChange={(e) => setDraft(e.target.value)} />
-      </div>
-      <button type="submit" className="btn-secondary py-1.5" disabled={busy || wanted.length === 0}>Find</button>
-      <p className="basis-full text-xs text-ink-400">This play has no job titles saved. Separate several with commas - or add them to the play under Edit so you are not asked again.</p>
-    </form>
-  );
-}
-
 /**
- * A company that was just approved. Approving saved it, but a company is nobody to write
- * to: the line says what happened and keeps the next step - Find people - one press away,
- * since the card itself has left the queue.
+ * A company that was just approved. Approving kept it in its play, but a company is nobody
+ * to write to: the line says what happened and keeps the next step - Find people - one press
+ * away, since the card itself has left the queue. (After a reload the company is under
+ * "Companies kept".)
  */
 function SavedCompany({ c, busy, error, titlesOpen, onFind, onDismiss }: { c: Candidate; busy: boolean; error?: string; titlesOpen: boolean; onFind: (titles?: string[]) => void; onDismiss: () => void }) {
   const name = candidateName(c);
   return (
     <li className="rounded-lg border border-emerald-200 bg-emerald-50/60 px-3 py-2 text-sm [overflow-wrap:anywhere]" data-testid="saved-company" data-id={c.id}>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2">
-        <span className="min-w-0 flex-1 text-ink-100" role="status">Saved the company <span className="font-medium text-ink-50">{name}</span>. Press Find people to look for the right person there.</span>
+        <span className="min-w-0 flex-1 text-ink-100" role="status">Kept <span className="font-medium text-ink-50">{name}</span>. Press Find people to look for the right person there.</span>
         <button type="button" className="btn-secondary shrink-0 py-1" disabled={busy} aria-expanded={titlesOpen || undefined} onClick={() => onFind()}>{busy ? "Finding people…" : "Find people"}</button>
-        <button type="button" className="shrink-0 text-ink-400 hover:text-ink-100" aria-label={`Dismiss the note about ${name}`} onClick={onDismiss}>✕</button>
+        <button type="button" className="shrink-0 text-ink-400 hover:text-ink-100" aria-label={`Hide the note about ${name}`} onClick={onDismiss}>✕</button>
       </div>
       {titlesOpen && <FindTitlesForm id={c.id} name={name} busy={busy} onFind={onFind} />}
       {error && <div className="mt-2 rounded-lg bg-red-50 px-3 py-2 text-red-700" role="alert">{error}</div>}

@@ -1380,23 +1380,41 @@ suite("security: jobs, sending, AI output", () => {
       expect(ceiling.body.error.message).toMatch(/daily sending ceiling/);
       expect(mail.calls).toHaveLength(2);
 
-      // The shared platform sender, two days old for this workspace: the same rule.
+    });
+
+    it("the shared platform sender is never exempt: its warm-up cap holds an answer too, however the inbound message got there", async () => {
+      const age = (id: string, days: number) => db.execute(schema.sql`UPDATE email_accounts SET created_at = now() - (${days} || ' days')::interval WHERE id = ${id}`);
+      const usedToday = (id: string, n: number) => db.update(schema.emailAccounts).set({ sentToday: n, sentTodayDate: svc.accountDay() }).where(eq(schema.emailAccounts.id, id));
+      // The shared sender, two days old for this workspace: the ladder allows 20 a day, the workspace's allowance is 30.
       process.env.SYSTEM_SENDER_DAILY_CAP = "30";
       const s = await replySetup();
+      expect(s.acct.provider).toBe("system");
       await age(s.acct.id, 2);
-      await usedToday(s.acct.id, 20);
-      const coldSystem = await newInbound(s.org.id, s.campaign.id);
-      await longAgo(coldSystem.inbound.id);
-      const capped = await sendReply(s.token, coldSystem.inbound.id);
-      expect([capped.status, capped.body.error.code]).toEqual([429, "daily_limit"]);
+      await usedToday(s.acct.id, 19);
+      // One slot left under the ladder: the answer goes.
       expect((await sendReply(s.token, s.inbound.id)).status).toBe(200);
+      expect((await account(s.acct.id)).sentToday).toBe(20);
+      // At the ladder: a person who wrote in a moment ago still does not get an answer through this sender today.
+      const wroteIn = await newInbound(s.org.id, s.campaign.id);
+      const held = await sendReply(s.token, wroteIn.inbound.id);
+      expect([held.status, held.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(held.body.error.message).toMatch(/daily limit/);
+      expect((await account(s.acct.id)).sentToday).toBe(20);
+      // An "inbound" message the workspace recorded itself through the API buys nothing either.
+      const [lead] = await db.insert(schema.leads).values({ orgId: s.org.id, email: `self-${uid()}@example.com`, fullName: "Self Made", emailStatus: "valid" }).returning();
+      const made = await req("POST", "/v1/campaigns/inbound", s.token, { from: lead.email, subject: "Re: hello", text: "Yes, tell me more." });
+      expect(made.status, made.text).toBe(200);
+      const [selfMade] = await db.select().from(schema.messages).where(schema.and(eq(schema.messages.orgId, s.org.id), eq(schema.messages.leadId, lead.id), eq(schema.messages.direction, "inbound")));
+      expect(selfMade).toBeTruthy();
+      const viaApi = await sendReply(s.token, selfMade.id);
+      expect([viaApi.status, viaApi.body.error.code]).toEqual([429, "daily_limit"]);
+      expect(mail.calls).toHaveLength(1);
+      expect((await account(s.acct.id)).sentToday).toBe(20);
+      expect(await usageOf(s.org.id, "emails")).toBe(1);
+      // Once the shared sender is warmed for this workspace, only its allowance binds.
+      await age(s.acct.id, 60);
+      expect((await sendReply(s.token, wroteIn.inbound.id)).status).toBe(200);
       expect((await account(s.acct.id)).sentToday).toBe(21);
-      // The shared sender's own allowance for the workspace still binds an answer.
-      await usedToday(s.acct.id, 30);
-      const next = await newInbound(s.org.id, s.campaign.id);
-      const full = await sendReply(s.token, next.inbound.id);
-      expect([full.status, full.body.error.code]).toEqual([429, "daily_limit"]);
-      expect(full.body.error.message).toMatch(/shared sender's daily limit .* \(30\/day\)/);
     });
 
     it("replies outside a campaign count toward the shared-sender allowance, and deleting the account does not reset it", async () => {

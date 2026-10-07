@@ -26,6 +26,12 @@ const FIXED_PATHS = ["/customers", "/case-studies", "/customer-stories", "/succe
 const MAX_PAGES_PER_COMPETITOR = 12;
 const MAX_AI_PAGES_PER_COMPETITOR = 3;
 const MAX_COMPETITORS = 10;
+/** Once the site's own customer pages have named this many, paths it never mentioned are no longer guessed at. */
+const ENOUGH_TO_STOP_GUESSING = 5;
+/** A page of the site links to at least this many of the site's other pages (its navigation); a stray page at a guessed address does not. */
+const MIN_SITE_LINKS = 3;
+/** A title that says the page is about customers. */
+const CUSTOMERS_TITLE = /\b(?:customers?|clients?|case\s+stud(?:y|ies)|success\s+stor(?:y|ies)|testimonials?|wall\s+of\s+love|trusted\s+by)\b/i;
 
 /** "/de/case-studies", "/pt-br/clientes": the same pages again in another language. */
 const inAnotherLanguage = (url: string): boolean => {
@@ -141,15 +147,18 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
 
     const queue = new Map<string, Queued>();
     const done = new Set<string>();
-    const push = (url: string, score: number, kind: Queued["kind"] = "page"): void => {
+    /** Addresses the site itself pointed to, on a page or in its sitemap. A fixed path that is not among them is a guess. */
+    const linked = new Set<string>();
+    const push = (url: string, score: number, kind: Queued["kind"] = "page", guess = false): void => {
       const k = keyOf(url);
+      if (!guess) linked.add(k);
       if (done.has(k)) return;
       const have = queue.get(k);
       if (!have || score > have.score) queue.set(k, { url, score, kind });
     };
     push(`https://${site}/`, 100);
     push(`https://${site}/sitemap.xml`, 85, "sitemap");
-    for (const p of FIXED_PATHS) push(`https://${site}${p}`, 70);
+    for (const p of FIXED_PATHS) push(`https://${site}${p}`, 70, "page", true);
 
     interface Seen {
       hit: CustomerHit;
@@ -207,6 +216,8 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
     let aiPages = 0;
     let droppedByCheck = 0;
     let examinedHere = 0;
+    /** Customers named so far on the site's customer pages (its listing, its stories). */
+    let listed = 0;
     let homepageDone = false;
     let sitemapChildren = 0;
     /** Asking for a path without its final slash was answered with a redirect to the one with it. */
@@ -250,6 +261,9 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
       if (next.score < 30) break;
       // Paths the site never mentioned are only guessed at while it has shown few customers of its own accord.
       if (next.score === 35 && hits.size >= 5) break;
+      // And not at all once one of its customer pages has named enough: the page was found, the other guesses are other things.
+      const guess = next.kind === "page" && (next.score === 70 || next.score === 35) && !linked.has(keyOf(next.url));
+      if (guess && listed >= ENOUGH_TO_STOP_GUESSING) continue;
       // A page already read in one language is not read again in another.
       if (next.kind === "page" && inAnotherLanguage(next.url) && done.has(keyOf(withoutLanguage(next.url)))) continue;
       // A story a listing page already told in full is not opened again - unless a model is connected and
@@ -308,6 +322,15 @@ export async function findCompetitorCustomers(cfg: { competitors: { name: string
       }
       pagesExamined++;
       examinedHere++;
+      // A page at an address that was only guessed (and that nothing on the site points to) is read as a customers
+      // page only when it plainly is one: it carries the site's navigation, and it names customers the way such a
+      // page does - stories linked from it, logos, or a title that says so. Whatever else answers at "/clients" or
+      // "/stories" (a user's public booking page, say) is somebody else's page: nothing on it is taken or followed.
+      if (guess && !linked.has(keyOf(page.url))) {
+        const plainly = out.siteLinks >= MIN_SITE_LINKS && (CUSTOMERS_TITLE.test(out.title) || out.hits.some((h) => h.via === "logo" || (h.via === "case_study" && !!h.storyUrl)));
+        if (!plainly) continue;
+      }
+      if (out.customerPage) listed += out.hits.length;
       for (const h of out.hits) keep(h, page.url, out.title, out.customerPage);
       for (const t of out.told) covered.add(t);
       for (const l of out.links) push(l.url, l.score - (inAnotherLanguage(l.url) ? 40 : 0));

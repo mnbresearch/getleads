@@ -73,6 +73,10 @@ describe("a page's shape, read in one pass", () => {
     ["a tag crowded with attributes", `<a ${attributes(60_000)}>`, "tag"],
     ["a closing tag crowded with attributes", `<a></a ${attributes(60_000)}>`, "tag"],
     ["a link opened thousands of times without being closed", numbered((i) => `<a href=/c/${i}>x`, 120_000), "nesting"],
+    ["a table with 59,900 line breaks and words written straight into it", "<table>" + "<br>x".repeat(59_900), "moved"],
+    ["a table row with thousands of images outside any cell", "<table><tr>" + "<img>".repeat(6_000), "moved"],
+    ["a table with thousands of lines of text between its rows", "<table>" + "<tr><td>a</td></tr>x".repeat(6_000), "moved"],
+    ["a table in a cell of a table, with thousands of paragraphs straight in the inner one", "<table><tr><td>".repeat(90) + "<table>" + "<p>x".repeat(6_000), "moved"],
   ])("refuses %s", (_what, html, reason) => {
     expect(unreadableHtml(html)).toBe(reason);
     expect(loadHtml(html)).toBeNull();
@@ -85,6 +89,9 @@ describe("a page's shape, read in one pass", () => {
     ["a quoted value of 200,000 characters", `<img alt="Globex logo" src="data:image/png;base64,${"A".repeat(200_000)}">`],
     ["a drawing with a long path", `<svg><path d="${"M0 0L10 10 ".repeat(2_000)}"/></svg>`],
     ["an empty page", ""],
+    ["a data table of 45,000 cells and rows, none of them closed", "<table>" + "<tr><td>a<td>b<td>c<td>d".repeat(9_000)],
+    ["a data table of 9,000 rows written out in full (45,000 elements)", "<table>\n" + "<tr>\n  <td>a</td> <td><b>b</b><br>c</td>\n</tr>\n".repeat(9_000) + "</table>"],
+    ["a table with a few thousand things out of place", "<table>" + "<tr><td>a</td></tr><br>x".repeat(2_000) + "</table>"],
   ])("reads %s", (_what, html) => {
     expect(unreadableHtml(html)).toBeNull();
     expect(loadHtml(html)).not.toBeNull();
@@ -92,9 +99,10 @@ describe("a page's shape, read in one pass", () => {
 
   it("allows less nesting once a page has more tags than a full page of elements", () => {
     expect(depthAllowed(1)).toBe(HTML_LIMITS.depth);
-    expect(depthAllowed(60_000)).toBe(400);
-    expect(depthAllowed(120_000)).toBe(200);
-    expect(depthAllowed(10_000_000)).toBe(100);
+    expect(depthAllowed(30_000)).toBe(400);
+    expect(depthAllowed(60_000)).toBe(200);
+    expect(depthAllowed(120_000)).toBe(100);
+    expect(depthAllowed(10_000_000)).toBe(60);
     // 390 levels and then 150,000 closing tags that close nothing: each one makes the parser walk all 390.
     const html = "<span>".repeat(390) + "</i>".repeat(150_000);
     expect(unreadableHtml(html)).toBe("nesting");
@@ -212,8 +220,133 @@ describe("parsing through the guard", () => {
     ["nothing but <", fill("<")],
     ["nothing but comments", fill("<!--x-->")],
     ["nothing but <script>", fill("<script>")],
+    ["a table and <br>x", "<table>" + fill("<br>x")],
+    ["a table row and <br>x", "<table><tr>" + fill("<br>x")],
+    ["a table and y<br>", "<table>" + fill("y<br>")],
+    ["a table and <input>", "<table>" + fill("<input>")],
+    ["a table and text between comments", "<table>" + fill("y<!---->")],
+    ["a table in a button and text", "<button><table>" + fill("x y ")],
+    ["90 tables in cells and <br>", "<table><tr><td>".repeat(90) + "<table>" + fill("<br>")],
+    ["a table and </s><area>, then x y </rt></param>", "<table>" + fill("</s><area>", SIZE / 2) + fill("x y </rt></param>", SIZE / 2)],
+    ["<b><div> and <br>, closed with </b>", "<b><div>" + fill("<br>", SIZE - 20) + "</b>"],
+    ["<a><div><br> and then <a>y", "<a><div>" + fill("<br>", SIZE / 2) + fill("<a>y", SIZE / 2)],
+    ["60 levels of a drawing and stray closing tags", "<svg>" + "<g>".repeat(59) + fill("</x>")],
+    ["99 levels of a drawing and stray closing tags", "<svg>" + "<g>".repeat(98) + fill("</x>")],
+    ["390 levels and list items", "<div>".repeat(390) + fill("<li>x")],
+    ["390 levels and definitions", "<div>".repeat(390) + fill("<dd>x")],
+    ["a list 390 deep and list items", "<ul><li>".repeat(390) + fill("<li>")],
+    ["<select> and <option>x", "<select>" + fill("<option>x")],
+    ["<select><option>x</select>", fill("<select><option>x</select>")],
+    ["<select><input>", fill("<select><input>")],
+    ["<template><td>x</template>", fill("<template><td>x</template>")],
+    ["<button><p>x", fill("<button><p>x")],
+    ["a button and <p>x", "<button>" + fill("<p>x")],
+    ["<a>x", fill("<a>x")],
+    ["<form>", fill("<form>")],
+    ["<svg><b>", fill("<svg><b>")],
+    ["<math><mi><b>", fill("<math><mi><b>")],
+    ["<svg><foreignObject><p>", fill("<svg><foreignObject><p>")],
+    ["<![CDATA[x]]>", fill("<![CDATA[x]]>")],
+    ["a drawing and <![CDATA[x]]>", "<svg>" + fill("<![CDATA[x]]>")],
+    ["null bytes", fill("\u0000")],
+    ["null bytes in a table", "<table>" + fill("x\u0000")],
+    ["a tag with a null byte in its name", fill("<a\u0000b>")],
+    ["character references that end nowhere", fill("&notit;&#x110000;&")],
   ])("answers within a second for 800 KB of %s", (_what, html) => {
     expect(timed(() => loadHtml(html, SIZE), 1_000)).toBeLessThan(1_000);
+  });
+
+  it("counts what is written straight into a table, and not what stands in a cell or a caption", () => {
+    const count = (html: string): number => scanHtml(html).misplaced;
+    // A line break and a word before the first row, a paragraph and a word between two rows, a word after a closed cell.
+    expect(count("<table><br>x<tr><td>in a cell<br><p>fine</p></td>y</tr><p>z<tr><td>ok</td></tr></table>")).toBe(5);
+    // Rows, cells, captions, column groups, scripts, forms and the space between them are where they belong.
+    expect(count("<table>\n <caption>Plans <b>2026</b><br></caption>\n <colgroup><col><col></colgroup>\n <thead><tr><th>a<br>b</th></tr></thead>\n <tbody>\n <tr><td>1<br><img></td></tr>\n </tbody><script>x()</script><form></form></table>")).toBe(0);
+    // A table inside a cell starts its own count; back in the outer cell nothing is out of place.
+    expect(count("<table><tr><td><table><br><tr><td>x</td></tr></table>words <br> here</td></tr></table>")).toBe(1);
+    // Outside a table nothing is counted, and after the table closes neither.
+    expect(count("<p>x<br>y</p><table><tr><td>a</td></tr></table>x<br>y<br>")).toBe(0);
+    // Inside a block that stands in a cell, nothing is loose.
+    expect(count("<table><tr><td><div>x<br>y<br></div><ul><li>a<br>b</ul></td></tr></table>")).toBe(0);
+  });
+
+  // The parser lifts each misplaced piece out in front of the table. With the stock tree builder every such
+  // move searched the table's siblings from the front: 59,900 of them took four seconds.
+  it("moves a few thousand misplaced pieces as the parser would, and quickly", () => {
+    const html = "<div><p>before</p><table>" + "<br>x<tr><td>a</td></tr>".repeat(2_400) + "</table><p>after</p></div>";
+    expect(scanHtml(html).misplaced).toBe(4_800);
+    let $: ReturnType<typeof loadHtml> = null;
+    expect(timed(() => ($ = loadHtml(html)))).toBeLessThan(250);
+    expect($).not.toBeNull();
+    expect($!.html()).toBe(cheerio.load(html).html());
+    expect($!("div > br").length).toBe(2_400);
+    expect($!("table tr").length).toBe(2_400);
+  });
+
+  // Closing a formatting element around a block makes the parser hand every child of the block to a new
+  // element. The stock tree builder took each one off the front of the list, shifting the rest: 59,000
+  // of them took two to three seconds. Here the block is emptied in one go.
+  it.each([
+    ["<b><div> + 59,000 <br> + </b>", (n: number) => "<b><div>" + "<br>".repeat(n) + "</b>after", "div > b > br"],
+    ["<a><div> + 50,000 <br> + 4,900 <a>", (n: number) => "<a><div>" + "<br>".repeat(n) + "<a>y".repeat(n / 10), "div > a > br"],
+    ["<b><div> + 50,000 <br> + 5,000 </b><b>", (n: number) => "<b><div>" + "<br>".repeat(n) + "</b><b>".repeat(n / 10), "div > b > br"],
+    ["<i><b><div> + 50,000 <br> + 2,000 </i><i>", (n: number) => "<i><b><div>" + "<br>".repeat(n) + "</i><i>".repeat(n / 25), "div br"],
+    ["<a><div> + 20,000 <i></i> + 300 <a>", (n: number) => "<a><div>" + "<i></i>".repeat(n) + "<a>".repeat(300), "div > a > i"],
+  ])("reads a page that closes a formatting element around a large block, in the time it takes to read: %s", (_what, make, inside) => {
+    const html = make(49_000);
+    expect(unreadableHtml(html)).toBeNull();
+    let $: ReturnType<typeof loadHtml> = null;
+    expect(timed(() => ($ = loadHtml(html)), 500)).toBeLessThan(500);
+    expect($).not.toBeNull();
+    expect($!(inside).length).toBe(49_000);
+    // At a size the stock builder manages too, the tree is the same.
+    const small = make(2_000);
+    expect(loadHtml(small)!.root().html()).toBe(cheerio.load(small).root().html());
+  });
+
+  it("reads a page that does so a hundred times over, and one where a block is emptied one child at a time for other reasons", () => {
+    for (const html of [
+      ("<p><b><div>" + "<br>".repeat(600) + "</b></div>").repeat(90),
+      "<b><div>" + "<br>x".repeat(5_000) + "</b>after",
+      "<p><a href=/a><div>" + "<i>x</i>".repeat(3_000) + "</div><a href=/b>next</a>" + "</a><a>".repeat(20),
+      // The first child of a long list taken out while the rest stays: a second <body> tag is merged, a <frameset> replaces the body.
+      "<head></head>" + "<i></i>".repeat(100) + "<body class=x>" + "<i></i>".repeat(100),
+      "<html><head></head><frameset><frame></frameset>",
+    ]) {
+      const $ = loadHtml(html);
+      expect($, html.slice(0, 30)).not.toBeNull();
+      expect($!.root().html()).toBe(cheerio.load(html).root().html());
+    }
+  });
+
+  it("builds the same tree as the stock parser for misplaced and misnested markup, with every link in place", () => {
+    const pages = [
+      "<table>x<br>y<tr>z<td>a</td>w</tr>v</table>u",
+      "<table><b>x<tr><td>a</td></tr>y</b>z</table>",
+      "<div>a<table>b<table>c</table>d</table>e</div>",
+      "<table><tr><td><table>x<br><tr>y<td>z</table>w</table>",
+      "<table><a href=/x>one<tr><td><a href=/y>two</table>three",
+      "<b>1<p>2</b>3</p>4",
+      "<a>1<div>2<div>3<a>4</a>5</div>6</div>7",
+      "<b><i><u>1<div>2<p>3</u>4</i>5</b>6<br>7</div>8",
+      "<p><b><table><tr><td>x</b>y</td></tr>z</table>w",
+      "<template><table>x<br></table></template><table><template>y</template>z</table>",
+      "<svg><table>x<br>y</table></svg><math><mi><table>z<p>w</table></math>",
+      "<select><table>x<br></select><button><table>y<button>z</table>",
+      "<ul><li><b>1<li>2</b>3<table>4<li>5</table></ul>",
+      "<table>x<!-- c -->y<script></script>z<input type=hidden>w<input>v<form>u</form></table>",
+    ];
+    type Linked = { children?: Linked[]; parent?: Linked | null; prev?: Linked | null; next?: Linked | null };
+    const linked = (node: Linked): boolean =>
+      (node.children ?? []).every((kid, i, kids) => kid.parent === node && (kid.prev ?? null) === (kids[i - 1] ?? null) && (kid.next ?? null) === (kids[i + 1] ?? null) && linked(kid));
+    for (const html of pages) {
+      for (const page of [html, html.repeat(40)]) {
+        const $ = loadHtml(page);
+        expect($, html).not.toBeNull();
+        expect($!.root().html(), html).toBe(cheerio.load(page).root().html());
+        expect(linked($!.root()[0] as unknown as Linked), html).toBe(true);
+      }
+    }
   });
 
   it("never throws, whatever it is given", () => {

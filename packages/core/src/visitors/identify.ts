@@ -144,8 +144,10 @@ function isPrivate(ip: string) {
 
 /** Guess a clean company name from an org string like "ACME TECHNOLOGIES PRIVATE LIMITED". */
 export function cleanOrgName(name?: string) {
-  if (!name) return undefined;
+  if (!name || typeof name !== "string") return undefined;
+  // An organisation's name is a line. A lookup service can send anything as one; only a line's worth is read.
   return name
+    .slice(0, 200)
     .replace(/^AS\d+\s+/, "")
     .replace(/\b(private|pvt\.?|limited|ltd\.?|llc|inc\.?|corp\.?|corporation|gmbh|s\.?a\.?|plc|co\.?|company)\b\.?/gi, "")
     .replace(/[,.\s]+$/, "")

@@ -130,9 +130,14 @@ const JOB_AD = /\b(?:we(?:'re|\u2019re| are) hiring|is hiring|now hiring|hiring 
 const MARKETING =
   /\b(?:top|best)\s+\d+\b|\b\d+\s+(?:best|top|great|free|powerful|proven|awesome|must-have)\b|\b\d+\s+(?:\w+\s+)?(?:alternatives|competitors|tools|platforms|apps|options)\b|\balternatives?\s+(?:&|and)\s+competitors\b|\bhere(?:'s|\u2019s| is| are)\s+(?:\d+|the top|my top|our|why|how|what|a list)\b|\bin this (?:post|article|guide|video|blog|review)\b|\b(?:we|i)\s+(?:compared|reviewed|tested|ranked|analy[sz]ed)\b|\b(?:ultimate|complete|definitive|comprehensive|in-depth)\s+(?:guide|comparison|review|list)\b|\bpros and cons\b|\b(?:full|detailed|honest|head-to-head)\s+(?:comparison|review)\b|\b(?:sign up|get started|book a demo|request a demo|start (?:your|a) free trial|free trial|link in (?:the )?(?:comments|bio)|dm me|comment\s+\S+\s+below|use code|limited time|% off)\b|\b(?:we|our team)\s+(?:built|created|made|launched|just launched|are building|offer|provide)\b|\bintroducing\b|\b(?:in|for)\s+20\d\d\b|\bsponsored\b|\bwebinar\b|\bcase study\b|\bpress release\b/i;
 
-/** Somebody announcing what they made ("Show HN: ...", "I built an open-source CRM after ...") is selling, not asking. */
+/**
+ * Somebody announcing what they made ("Show HN: ...", "Launching ...", "I built an open-source CRM after ...") is
+ * selling, not asking - and so is one who is "looking for design partners" or beta users for it.
+ */
 const LAUNCH =
-  /^(?:show|launch)\s+hn\b|\b(?:i|we)(?:['\u2019]ve| have)?\s+(?:just\s+|recently\s+|finally\s+)?(?:built|made|launched|created|released|open-?sourced|shipped|developed|wrote|am building|are building)\b|\b(?:i['\u2019]m|i am|we['\u2019]re|we are)\s+(?:building|launching|releasing|working on)\b|\bintroducing\b|\b(?:my|our)\s+(?:new\s+)?(?:startup|side project|open-?source\s+\w+|saas|launch)\b/i;
+  /^(?:show|launch)\s+hn\b|^(?:launching|launched|announcing)\b|\blooking for\s+(?:design partners?|beta (?:users|testers|customers)|early (?:users|adopters|customers|feedback)|pilot (?:users|customers)|testers|feedback|co-?founders?|investors?)\b|\b(?:i|we)(?:['\u2019]ve| have)?\s+(?:just\s+|recently\s+|finally\s+)?(?:built|made|launched|created|released|open-?sourced|shipped|developed|wrote|am building|are building)\b|\b(?:i['\u2019]m|i am|we['\u2019]re|we are)\s+(?:building|launching|releasing|working on)\b|\bintroducing\b|\b(?:my|our)\s+(?:new\s+)?(?:startup|side project|open-?source\s+\w+|saas|launch)\b/i;
+
+const LAUNCH_TITLE = /^(?:(?:show|launch)\s+hn\b|launching\b|launched\b|announcing\b|introducing\b)/i;
 
 /** "Tired of Acme? Try Globex" - a question put to the reader by someone selling the answer. */
 const VENDOR_HOOK =
@@ -142,11 +147,18 @@ const FIRST_PERSON = /(?:^|[^\p{L}])(?:i|i'm|i\u2019m|i've|i\u2019ve|we|we're|we
 
 const ASK_STRONG: RegExp[] = [
   /\b(?:i'?m|i\u2019m|i am|we'?re|we\u2019re|we are|i'?ve been|we'?ve been|am|currently)\s+(?:looking|searching|hunting|shopping)\s+(?:for|around)\b/i,
-  /\b(?:any|anyone|anybody|does anyone|has anyone|can anyone|could anyone|can someone|could someone)\b[^.?!]{0,80}\b(?:recommend|suggest|know (?:of|a|an|any)|have experience|experience with|uses?|used|using|tried|switched|moved)\b/i,
+  // Somebody is asked: "anyone", "anybody", "someone" - as a question ("Has anyone here used ...?", "Anyone using ... for ...").
+  // ("any" alone is not a person: "any known blacklists ... we are using" asked nobody anything. "Any recommendations ...?"
+  // is the next pattern's, and "any alternatives ...?" - which a seller writes as readily as a buyer - is among the weak ones.)
+  /\b(?:anyone|anybody|someone|somebody)\b[^.?!]{0,80}\b(?:recommend|suggest|know (?:of|a|an|any)|have experience|experience with|uses?|used|using|tried|switched|moved)\b[^.!]{0,120}\?/i,
+  /^(?:ask hn:\s*)?(?:(?:has|have|does|do|did|can|could|is|are|would|will)\s+)?(?:anyone|anybody)\b[^.?!]{0,80}\b(?:recommend|suggest|know (?:of|a|an|any)|have experience|experience with|uses?|used|using|tried|switched|moved)\b/i,
   /\b(?:recommendations?|suggestions?|advice)\b[^.!]{0,60}(?:\?|\bplease\b|\bneeded\b|\bwanted\b|\bwelcome\b|\bappreciated\b)/i,
   /\bwhat\b[^.?!]{0,80}\b(?:do you|are you|does your team|is everyone|are people|are you all|would you|should (?:i|we))\b[^.?!]{0,60}\b(?:use|using|recommend|suggest|go with|choose|pick)\b/i,
   /\b(?:which|what)\b[^.?!]{0,60}\b(?:should (?:i|we)|would you (?:recommend|suggest|choose|pick|use))\b/i,
-  /\b(?:thinking (?:of|about)|considering|planning (?:on|to)|want(?:ing)? to|looking to|about to|need to|trying to|time to|ready to|decided to)\s+(?:switch(?:ing)?|mov(?:e|ing)|migrat(?:e|ing)|leav(?:e|ing)|replac(?:e|ing)|ditch(?:ing)?|cancel(?:l?ing)?|drop(?:ping)?)\b/i,
+  // Leaving: said by the one who is leaving ("we need to move off ...", "I'm thinking of cancelling ..."), and for a
+  // move, a move away ("from", "off", "away"). "The need to move upwards in the market" is nobody leaving anything.
+  /(?:^|[^\p{L}])(?:i|we|i'm|i\u2019m|we're|we\u2019re|i am|we are|i've|i\u2019ve|we've|we\u2019ve|my team|our team|my company|our company)(?![\p{L}'\u2019])[^.?!]{0,30}?\b(?:thinking (?:of|about)|considering|planning (?:on|to)|want(?:ing)? to|looking to|about to|need(?:ing)? to|trying to|ready to|decided to|going to|have to)\s+(?:(?:switch(?:ing)?|mov(?:e|ing)|migrat(?:e|ing)|transition(?:ing)?)\b[^.?!]{0,40}?\b(?:from|off|away)\b|(?:leav(?:e|ing)|replac(?:e|ing)|ditch(?:ing)?|cancel(?:l?ing)?|drop(?:ping)?)\b)/iu,
+  /\btime to\s+(?:switch|move|migrate)\b[^.?!]{0,40}?\b(?:from|off|away)\b/i,
   /\b(?:i|we)\s+(?:really\s+|just\s+|urgently\s+)?(?:need|want)\s+(?:an?|some|to find an?)\s+[^.?!]{0,50}\b(?:alternatives?|replacements?|tool|software|platform|solution|recommendations?)\b/i,
   // (Any "Ask HN: ...?" used to count. A question on Hacker News is not, by itself, somebody looking for a product.)
   /^ask hn:[^?]{0,140}(?:\balternatives?\b|\brecommend|\bwhat (?:do|does|are) (?:you|your team|people|folks)(?: all)? us(?:e|ing)\b|\blooking for\b|\b(?:which|best|any good)\b[^?]{0,60}\b(?:tool|tools|software|service|platform|crm|app|library|provider|solution)\b)/i,
@@ -179,6 +191,50 @@ export interface AskVerdict {
   strong: boolean;
   /** For an ask that mentions a competitor: is it about leaving it? */
   leaving: boolean;
+  /** For a complaint: the line itself is somebody speaking for themselves ("we", "my", "I") - not a report of what others say. */
+  own?: boolean;
+}
+
+/**
+ * Somebody studying a market, or inviting opinions about one: "What's still broken in ...?",
+ * "Which is most ripe for disruption?", "Do you think ...?". The words of a complaint are
+ * all there, and nobody is complaining.
+ */
+const MARKET_RESEARCH =
+  /\bwhat(?:['\u2019]s| is| are)\s+(?:still\s+)?(?:broken|missing|wrong|painful|the (?:biggest|worst|main) (?:problems?|pains?|pain points?|issues?|gaps?))\b|\bripe for disruption\b|\bwhich\b[^.?!]{0,60}\b(?:most|worst|biggest)\b[^.?!]{0,40}\?|\bdo you think\b|\bwhat do you (?:hate|dislike|wish)\b|\bwould (?:you|anyone) pay\b|\b(?:is|whether) (?:this|there|it)(?: is)? a real(?:,? unsolved)? problem\b|\b(?:validat(?:e|ing)|researching)\b[^.?!]{0,40}\b(?:idea|market|problem|pain)\b|\bstartup ideas?\b|\bpain points?\b/i;
+
+/**
+ * Is the product only one of several named side by side ("... into systems like Globex,
+ * Initech, Hooli, or really any app that ...", "Globex, Initech, or Hooli: which ...")?
+ * Then the text is about all of them, or about none: the product is an example, not the subject.
+ */
+export function merelyListed(text: string, product: string): boolean {
+  const c = escapeRegExp(cleanLine(product, 80));
+  const whole = cleanQuote(text, 900);
+  if (!whole || !c) return false;
+  // A name: one to three capitalised words; a full stop only inside one ("Apollo.io"), never at its end.
+  const word = "[\\p{Lu}\\p{N}][\\p{L}\\p{N}+&'\u2019-]{0,30}(?:\\.[\\p{L}\\p{N}]{1,10}){0,2}";
+  const item = `${word}(?:\\s${word}){0,2}`;
+  const named = new RegExp(`(?<![\\p{L}\\p{N}])${c}(?![\\p{L}\\p{N}])`, "giu");
+  // A list: three or more names, with commas (and "and"/"or" before the last), the product among them.
+  const list = new RegExp(`${item}(?:\\s*,\\s*${item}){1,6}(?:\\s*,?\\s*(?:and|or)\\s+${item})?`, "gu");
+  /** Is the product named in this reading of the text, and only inside lists? */
+  const onlyListed = (t: string): boolean => {
+    const spans: [number, number][] = [];
+    for (const m of t.matchAll(list)) {
+      if (m[0].split(/\s*,\s*|\s+(?:and|or)\s+/).filter(Boolean).length >= 3) spans.push([m.index ?? 0, (m.index ?? 0) + m[0].length]);
+    }
+    let mentions = 0;
+    for (const m of t.matchAll(named)) {
+      mentions++;
+      const at = m.index ?? 0;
+      if (!spans.some(([from, to]) => at >= from && at < to)) return false;
+    }
+    return mentions > 0;
+  };
+  // Brackets are read both ways: as a description after each name ("Globex (bloated, expensive), Initech (complex) and
+  // Hooli" - the list is the names), and as the list itself ("connect your stack (Globex, Initech, Hooli, etc.)").
+  return onlyListed(whole.replace(/\s*\([^()]{0,80}\)/g, "")) || onlyListed(whole.replace(/[()]/g, " ").replace(/\s+/g, " "));
 }
 
 function lines(text: string): string[] {
@@ -214,11 +270,14 @@ export function classifyAsk(title: string, snippet: string, product?: string): A
     // The complaint has to be about the product: the same line names it, or the title does.
     const titleNames = named.test(t);
     for (const line of candidates) {
-      if (COMPLAINT.test(line) && (named.test(line) || titleNames)) return { kind: "complaint", quote: line, strong: firstPerson, leaving };
+      if (COMPLAINT.test(line) && (named.test(line) || titleNames)) return { kind: "complaint", quote: line, strong: firstPerson, leaving, own: FIRST_PERSON.test(line) && !REPORTED.test(line) };
     }
   }
   return null;
 }
+
+/** What other people are said to feel: "many founders complain about ...", "users hate ...". */
+const REPORTED = /\b(?:many|most|some|lots of|a lot of|several|all)\s+(?:\w+\s+){0,3}(?:complain|hate|say|struggle|are (?:frustrated|unhappy|tired))\b|\b(?:people|users|customers|founders|engineers|teams|companies|everyone)\s+(?:\w+\s+){0,2}(?:complain|hate|say|struggle)\b/i;
 
 /* ───────────────────────────────── people ───────────────────────────────── */
 
@@ -443,7 +502,7 @@ const TOOL_SEEKING = /\b(?:tools?|software|services?|apps?|platforms?|products?|
  * mention is read; otherwise only the sentences that name the subject are, and a hit with
  * none is not a hit.
  */
-function hnHit(raw: unknown, subject: AskSubject): { result: SearchResult; shown: string; when: Date | null } | null {
+function hnHit(raw: unknown, subject: AskSubject): { result: SearchResult; shown: string; when: Date | null; post: string } | null {
   const h = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : null;
   const id = h ? String(h.objectID ?? "") : "";
   if (!h || !/^\d{1,12}$/.test(id)) return null;
@@ -453,6 +512,8 @@ function hnHit(raw: unknown, subject: AskSubject): { result: SearchResult; shown
   const ownTitle = comment ? "" : cleanLine(h.title, 300);
   const thread = cleanLine(comment ? h.story_title : h.title, 200);
   if (!ownTitle && !body) return null;
+  // A post that announces something by its own title is somebody selling, wherever in it the subject is named.
+  if (ownTitle && LAUNCH_TITLE.test(ownTitle)) return null;
   const named = subject.kind === "competitor" ? new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu") : null;
   const titleOnSubject = !!ownTitle && (named ? named.test(ownTitle) : topicOverlap(ownTitle, subject.value));
   let title = "";
@@ -478,7 +539,10 @@ function hnHit(raw: unknown, subject: AskSubject): { result: SearchResult; shown
   }
   const created = typeof h.created_at === "string" ? new Date(h.created_at) : typeof h.created_at_i === "number" ? new Date(h.created_at_i * 1000) : null;
   const when = created && Number.isFinite(created.getTime()) && created.getTime() <= Date.now() + 86_400_000 && created.getUTCFullYear() >= 2006 ? created : null;
-  return { result: { title, url: `https://news.ycombinator.com/item?id=${id}`, snippet, provider: "hackernews" }, shown: ownTitle || (thread ? `Comment on: ${thread}` : "Comment on Hacker News"), when };
+  // Who posted what: the same author posting the same title twice is one post.
+  const author = typeof h.author === "string" ? h.author.slice(0, 60).toLowerCase() : "";
+  const post = author && ownTitle ? `${author}|${ownTitle.toLowerCase().replace(/^(?:ask|tell)\s+hn\s*:\s*/, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim()}` : "";
+  return { result: { title, url: `https://news.ycombinator.com/item?id=${id}`, snippet, provider: "hackernews" }, shown: ownTitle || (thread ? `Comment on: ${thread}` : "Comment on Hacker News"), when, post };
 }
 
 interface Candidate {
@@ -532,6 +596,11 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
     if (subject.kind === "competitor" ? !new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu").test(text) : !topicOverlap(text, subject.value)) return;
     const verdict = classifyAsk(r.title, snippet, subject.kind === "competitor" ? subject.value : undefined);
     if (!verdict) return;
+    // One product among several named side by side is an example, not what the post is about - unless it is the one being left.
+    if (subject.kind === "competitor" && !verdict.leaving && merelyListed(text, subject.value)) return;
+    // On Hacker News a complaint is kept only from the one who has it: a founder asking what is broken in a product,
+    // or reporting that "many engineers complain", is studying a market.
+    if (place.source === "hackernews" && verdict.kind === "complaint" && (!verdict.own || MARKET_RESEARCH.test(text))) return;
     const u = new URL(url);
     u.hash = "";
     const key = place.source === "hackernews" ? `hn:${u.searchParams.get("id")}` : `${u.hostname.replace(/^www\./, "")}${u.pathname.replace(/\/$/, "")}`.toLowerCase();
@@ -547,6 +616,7 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
   /* Hacker News, asked directly: its own public search, newest first, every thread dated. */
   if (sources.includes("hackernews")) {
     let calls = 0;
+    const posts = new Set<string>();
     outer: for (let round = 0; round < 2; round++) {
       for (const subject of subjects) {
         if (calls >= MAX_HN_CALLS || run.expired || !run.canSearch) break outer;
@@ -561,7 +631,9 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
         run.countSearch(hits !== null);
         for (const h of (hits ?? []).slice(0, 40)) {
           const hit = hnHit(h, subject);
-          if (hit) offer(hit.result, subject, hit.when, hit.shown);
+          if (!hit || (hit.post && posts.has(hit.post))) continue;
+          if (hit.post) posts.add(hit.post);
+          offer(hit.result, subject, hit.when, hit.shown);
         }
       }
     }

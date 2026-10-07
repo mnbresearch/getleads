@@ -779,8 +779,9 @@ campaignRoutes.post(
     if (!sendOrg) throw notFound("Workspace");
     // Kill switch, the sender's daily cap, the workspace ceiling and the shared sender's cap:
     // the limits a sequence send is held to. This route used to pass none of them.
-    // Answering someone who wrote in during the last 14 days is not held back by a new
-    // sender's warm-up ladder (every other limit still applies). A reply sent long after the
+    // Answering someone who wrote in during the last 14 days is not held back by the warm-up
+    // ladder of the workspace's own new sender (every other limit still applies; the shared
+    // platform sender is never exempt - see reserveManualSend). A reply sent long after the
     // conversation went quiet is a cold send again, and is treated as one.
     const [wroteIn] = await db
       .select({ id: messages.id })

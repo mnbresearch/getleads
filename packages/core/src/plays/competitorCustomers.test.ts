@@ -133,7 +133,8 @@ describe("reading a competitor's site", () => {
   it("guesses the usual paths when the site does not say where its customers are, and stops at twelve", async () => {
     use({
       "https://quiet.com/": page("Quiet", `<main><h1>Quiet software</h1><p>We make tools.</p></main>`),
-      "https://quiet.com/clients": page("Clients | Quiet", `<main><h1>Our clients</h1><div class="logos"><img src="/c/1.svg" alt="Northwind Traders logo"><img src="/c/2.svg" alt="Contoso logo"></div></main>`),
+      // A page of the site: it carries the site's navigation, as every page of a site does.
+      "https://quiet.com/clients": page("Clients | Quiet", `<nav><a href="/">Home</a><a href="/product">Product</a><a href="/pricing">Pricing</a><a href="/about">About</a></nav><main><h1>Our clients</h1><div class="logos"><img src="/c/1.svg" alt="Northwind Traders logo"><img src="/c/2.svg" alt="Contoso logo"></div></main>`),
     });
     const { findings, trace } = await findCompetitorCustomers({ competitors: [{ name: "Quiet", domain: "quiet.com" }] });
     expect(findings.map((f) => f.companyName).sort()).toEqual(["Contoso", "Northwind Traders"]);
@@ -691,5 +692,73 @@ describe("small things in the sentence", () => {
     expect(findings[0].relevantBecause).toBe('Named as a customer of Acme in their case study "USGlobex increased sales by 20%".');
     // The proof still shows the page's words exactly.
     expect(findings[0].evidenceQuote).toBe("USGlobex increased sales by 20%.");
+  });
+});
+
+describe("addresses that were only guessed", () => {
+  const NAV = `<nav><a href="/">Home</a><a href="/product">Product</a><a href="/pricing">Pricing</a><a href="/about">About</a><a href="/docs">Docs</a></nav>`;
+  // A home page that says nothing about where the site's customers are.
+  const HOME = page("Calco - scheduling for everyone", `${NAV}<main><h1>Scheduling for everyone</h1><p>Book meetings without the back and forth.</p></main>`);
+  // What answers at /clients on a site whose users have public pages of their own: a user called "clients".
+  const BOOKING = page("Rhonda | Calco", `<main><h1>Rhonda</h1><a href="/clients/leads"><h2>Leads</h2><span>15m</span></a><a href="/clients/win"><h2>Discovery Call</h2><span>15m</span></a><a href="/clients/client-update"><h2>Client Update</h2><span>30m</span></a><a href="/clients/client-onboarding"><h2>Client Onboarding</h2><span>45m</span></a></main>`);
+  const stories = (n: number): string => Array.from({ length: n }, (_, i) => `<div class="card"><a href="/customers/client${i}co"><h3>How Client${i}co saves ten hours a week</h3></a></div>`).join("");
+
+  it("a guessed address that answers with somebody else's page is not read as a customers page", async () => {
+    use({
+      "https://calco.com/": HOME,
+      "https://calco.com/clients": BOOKING,
+      // Another user's page, reached by a redirect from a guessed address.
+      "https://calco.com/stories": { status: 307, location: "/stories/30min?user=stories" },
+      "https://calco.com/stories/30min?user=stories": page("30 min | Stories | Calco", `<main><h1>Stories</h1><a href="/stories/30min">30 min meeting</a></main>`),
+    });
+    const { findings, trace } = await findCompetitorCustomers({ competitors: [{ name: "Calco", domain: "calco.com" }] });
+    // "Leads", "Update" and "Win" were reported from exactly this: event types on a user's booking page.
+    expect(findings).toEqual([]);
+    expect(net.pages()).toContain("https://calco.com/clients");
+    expect(net.pages().some((u) => u.startsWith("https://calco.com/clients/"))).toBe(false);
+    expect(trace.blocked).toBe(false);
+    expect(trace.notes).toContain("No customers were named on the pages of Calco that could be read.");
+  });
+
+  it("the same address is read when it is a page of the site that names customers", async () => {
+    use({
+      "https://calco.com/": HOME,
+      "https://calco.com/clients": page("Our clients | Calco", `${NAV}<main><h1>Our clients</h1><div class="grid">${stories(3)}</div></main>`),
+    });
+    const { findings } = await findCompetitorCustomers({ competitors: [{ name: "Calco", domain: "calco.com" }] });
+    expect(findings.map((f) => f.companyName).sort()).toEqual(["Client0co", "Client1co", "Client2co"]);
+  });
+
+  it("are no longer tried once a customers page of the site has named five or more", async () => {
+    use({
+      "https://calco.com/": HOME,
+      "https://calco.com/customers": page("Customers | Calco", `${NAV}<main><h1>Customers</h1><div class="grid">${stories(6)}</div></main>`),
+      "https://calco.com/clients": BOOKING,
+    });
+    const { findings } = await findCompetitorCustomers({ competitors: [{ name: "Calco", domain: "calco.com" }] });
+    expect(findings.map((f) => f.companyName).sort()).toEqual(["Client0co", "Client1co", "Client2co", "Client3co", "Client4co", "Client5co"]);
+    // The home page, the sitemap, the first guess - which was the customers page - and nothing after it.
+    expect(net.pages()).toEqual(["https://calco.com/", "https://calco.com/sitemap.xml", "https://calco.com/customers"]);
+  });
+
+  it("go on being tried while the site has named fewer than five", async () => {
+    use({
+      "https://calco.com/": HOME,
+      "https://calco.com/customers": page("Customers | Calco", `${NAV}<main><h1>Customers</h1><div class="grid">${stories(2)}</div></main>`),
+      "https://calco.com/testimonials": page("Testimonials | Calco", `${NAV}<main><h1>Testimonials</h1><figure><blockquote>It just works.</blockquote><figcaption>Jane Doe, VP Operations at Globex</figcaption></figure></main>`),
+    });
+    const { findings } = await findCompetitorCustomers({ competitors: [{ name: "Calco", domain: "calco.com" }] });
+    expect(findings.map((f) => f.companyName).sort()).toEqual(["Client0co", "Client1co", "Globex"]);
+    expect(net.pages()).toContain("https://calco.com/resources/case-studies");
+  });
+
+  it("an address the site itself links to is not a guess, whatever it looks like", async () => {
+    use({
+      // The home page links to /clients: a page with no navigation of its own is still the site's customers page.
+      "https://calco.com/": page("Calco", `${NAV}<main><h1>Scheduling</h1><a href="/clients">Our clients</a></main>`),
+      "https://calco.com/clients": page("Clients", `<main><h1>Our clients</h1><div class="logos"><img src="/c/1.svg" alt="Northwind Traders logo"><img src="/c/2.svg" alt="Contoso logo"></div></main>`),
+    });
+    const { findings } = await findCompetitorCustomers({ competitors: [{ name: "Calco", domain: "calco.com" }] });
+    expect(findings.map((f) => f.companyName).sort()).toEqual(["Contoso", "Northwind Traders"]);
   });
 });

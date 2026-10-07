@@ -85,6 +85,8 @@ export interface Candidate {
   alreadyLead: boolean;
   decidedAt: string | null;
   createdAt: string;
+  /** For a company: how many people this play already holds for it. Null for a person or a post; absent on an older server. */
+  peopleFound?: number | null;
 }
 
 export type FieldKind = "tags" | "text" | "number" | "competitors" | "select";
@@ -127,7 +129,7 @@ export interface PlayTypeInfo {
 
 export interface Competitor { name: string; domain?: string; source?: string }
 
-export interface PlanPlay { type: string; name: string; config: Record<string, unknown>; targetTitles: string[]; why: string; available: boolean; unavailableReason?: string }
+export interface PlanPlay { type: string; name: string; config: Record<string, unknown>; targetTitles: string[]; why: string; available: boolean; unavailableReason?: string; needsSearch?: boolean; setupHint?: string }
 export interface PlayPlan {
   product: { domain: string; name?: string; description?: string };
   icp: Record<string, unknown>;
@@ -135,6 +137,8 @@ export interface PlayPlan {
   competitors: Competitor[];
   plays: PlanPlay[];
   notes: string[];
+  /** False when no search source is connected on the server's side. Absent on an older server. */
+  searchDependable?: boolean;
 }
 
 export interface DecideResult {
@@ -145,7 +149,7 @@ export interface DecideResult {
   tasksCreated: number;
   enrolled: number;
   queuedForEmail: number;
-  notApplied: { id: string; reason: string }[];
+  notApplied: { id: string; reason: string; code?: string }[];
   /** The ids whose decision was applied. Absent on a server that only sends the counts. */
   applied?: string[];
   stopped?: { reason: "quota" | "error" | string; message: string };
@@ -450,7 +454,7 @@ export function normalizeDecide(raw: unknown): DecideResult {
     tasksCreated: n(r.tasksCreated),
     enrolled: n(r.enrolled),
     queuedForEmail: n(r.queuedForEmail),
-    notApplied: Array.isArray(r.notApplied) ? r.notApplied.filter((x) => x && typeof x.id === "string").map((x) => ({ id: x.id, reason: clean(x.reason, 300) || "The server did not apply this one." })) : [],
+    notApplied: Array.isArray(r.notApplied) ? r.notApplied.filter((x) => x && typeof x.id === "string").map((x) => ({ id: x.id, reason: clean(x.reason, 300) || "The server did not apply this one.", ...(typeof x.code === "string" && x.code ? { code: x.code } : {}) })) : [],
     ...(Array.isArray(r.applied) ? { applied: r.applied.filter((x): x is string => typeof x === "string") } : {}),
     ...(stopped ? { stopped } : {}),
   };
@@ -460,6 +464,34 @@ export function candidateName(c: Pick<Candidate, "kind" | "fullName" | "firstNam
   if (c.kind === "post") return "Public conversation";
   if (c.kind === "company") return clean(c.companyName, 160) || clean(c.companyDomain, 160) || "Unnamed company";
   return clean(c.fullName, 160) || clean([c.firstName, c.lastName].filter(Boolean).join(" "), 160) || "Name not known";
+}
+
+/**
+ * Why a refused decision means the card should leave the queue anyway - or null when it is
+ * still waiting and should stay with its reason.
+ *
+ * The server says which with a `code`. Without one (an older server) the opening words of
+ * its sentence are read instead.
+ */
+const CODE_LEAVES: Record<string, "elsewhere" | "do_not_contact" | null> = {
+  already_decided: "elsewhere", removed: "elsewhere", not_found: "elsewhere", play_gone: "elsewhere",
+  do_not_contact: "do_not_contact",
+  being_decided: null, quota: null, error: null,
+};
+const SENTENCE_LEAVES = /^(already (approved|skipped)\b|decided elsewhere\b|this was removed while it was being approved|not found in this workspace|its play no longer exists)/i;
+export function leavesQueue(entry: { reason: string; code?: string }): "elsewhere" | "do_not_contact" | null {
+  if (entry.code && Object.prototype.hasOwnProperty.call(CODE_LEAVES, entry.code)) return CODE_LEAVES[entry.code];
+  return SENTENCE_LEAVES.test(entry.reason) ? "elsewhere" : null;
+}
+
+/**
+ * The same items, with the ones whose own source is web search moved after the rest - used
+ * only when the server says no search source is connected, so what works today comes first.
+ * The order within each group is kept.
+ */
+export function workingFirst<T>(items: T[], needsSearch: (item: T) => boolean, searchDependable: boolean | undefined): T[] {
+  if (searchDependable !== false) return items;
+  return [...items.filter((x) => !needsSearch(x)), ...items.filter((x) => needsSearch(x))];
 }
 
 /** The plan limit was reached (402). The server's sentence is shown; this adds the way out. */

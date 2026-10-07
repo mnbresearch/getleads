@@ -284,7 +284,8 @@ describe("what was raised, and what was not", () => {
     expect(headlineAmount("Wonka bags Rs 1,750 Cr funding")).toMatchObject({ shown: "INR 1,750 crore" });
     expect(headlineAmount("Soylent Raises USD 16.7M Series B")).toMatchObject({ inDollars: true, shown: "$16.7M" });
     expect(headlineAmount("Oscorp raises $153-million in funding")).toMatchObject({ usd: 153_000_000, shown: "$153M" });
-    expect(headlineAmount("Stark Secures $133.65M Series A")).toMatchObject({ shown: "$133.7M" });
+    // Two decimals in the headline are two decimals in the sentence: "$133.7M" is not what was reported.
+    expect(headlineAmount("Stark Secures $133.65M Series A")).toMatchObject({ shown: "$133.65M" });
     expect(fundingReason({ title: "Globex Secures $17M CAD in Funding", source: "AI Insider" })).toBe("Raised CAD 17M, reported by AI Insider.");
     // A bare number is not money.
     expect(headlineAmount("Globex backs 18 new startups")).toBeNull();
@@ -327,6 +328,17 @@ describe("who reported it", () => {
     expect(publisherName("The Globe and Mail")).toBe("The Globe and Mail");
     expect(publisherName("some-unknown-site.example")).toBe("");
     expect(publisherName(undefined)).toBe("");
+    // A feed may give the address whole. It is read down to its host before it is looked up - and an address is never the name.
+    expect(publisherName("https://techcrunch.com/")).toBe("TechCrunch");
+    expect(publisherName("http://www.siliconangle.com/2026/10/06/a-story?utm=x")).toBe("SiliconANGLE");
+    expect(publisherName("www.bloomberg.com/news")).toBe("Bloomberg");
+    expect(publisherName("https://ascendants.example/")).toBe("");
+    expect(publisherName("https://")).toBe("");
+    expect(publisherName("//")).toBe("");
+    expect(publisherName(" - ")).toBe("");
+    // An address beside a name is dropped; the name stays.
+    expect(publisherName("ET Now | economictimes.example")).toBe("ET Now");
+    expect(publisherName("Read at https://x.example/a now")).toBe("Read at now");
     const at = new Date("2026-09-25T10:00:00Z");
     expect(fundingReason({ title: "Globex secures $16M Series B", source: "app.dealroom.co", occurredAt: at })).toBe("Raised $16M Series B, reported by Dealroom on 25 Sep 2026.");
     expect(fundingReason({ title: "Globex secures $16M Series B", source: "en.wowtale.example", occurredAt: at })).toBe("Raised $16M Series B, reported on 25 Sep 2026.");
@@ -372,5 +384,42 @@ ${item("Oscorp secures $16M Series B led by Five Elms Capital", "some-unknown-si
       expect(f.evidenceQuote).toContain(f.companyName!);
       expect(f.relevantBecause).not.toMatch(/\.(?:com|co|example)\b/);
     }
+  });
+});
+
+describe("what a second look at live feeds found", () => {
+  const at = new Date("2026-10-06T08:00:00Z");
+
+  it("a publisher given as a web address never leaves 'reported by' with nothing after it", () => {
+    // The feed's own words for the outlet were its address; once made safe to send, the address is taken out of a sentence.
+    expect(fundingReason({ title: "Globex Secures \u00A3425,000 to Scale Its Platform", source: "https://ascendants.example/", occurredAt: at })).toBe("Raised GBP 425K, reported on 6 Oct 2026.");
+    expect(fundingReason({ title: "Globex Secures \u00A3425,000 to Scale Its Platform", source: "https://techcrunch.com/", occurredAt: at })).toBe("Raised GBP 425K, reported by TechCrunch on 6 Oct 2026.");
+    expect(fundingReason({ title: "Globex raises $5M", source: "https://ascendants.example/" })).toBe("Raised $5M.");
+    for (const source of ["https://ascendants.example/", "www.x.example/news", "x.example", "//", "-", "|", "https://", "ET Now | economictimes.example", "Tech.example", "", undefined]) {
+      const sentence = mailSafeReason(fundingReason({ title: "Globex raises $5M seed", source, occurredAt: at }));
+      expect(sentence, String(source)).not.toMatch(/reported by\s+(?:on\b|\.|$)/);
+      expect(sentence, String(source)).toMatch(/^Raised \$5M seed, reported(?: by [\p{L}\p{N}][^,]*)? on 6 Oct 2026\.$/u);
+    }
+  });
+
+  it("shows an amount as the headline writes it: two decimals stay, and a thousand million is a billion and a quarter, not 1.3", () => {
+    expect(headlineAmount("Globex Secures $133.65M Series A")!.shown).toBe("$133.65M");
+    expect(headlineAmount("Globex raises $1,250 million")!.shown).toBe("$1.25B");
+    expect(headlineAmount("Globex raises $2.50 million")!.shown).toBe("$2.5M");
+    expect(headlineAmount("Globex raises $2.00 million")!.shown).toBe("$2M");
+    expect(headlineAmount("Globex raises $7.125M")!.shown).toBe("$7.13M");
+    expect(headlineAmount("Globex raises \u20AC999,999")!.shown).toBe("EUR 1M");
+    expect(headlineAmount("Globex raises $12M")!.shown).toBe("$12M");
+    expect(headlineAmount("Globex raises $1.5 billion")!.shown).toBe("$1.5B");
+    // A figure of ours (a minimum, a total) keeps one decimal.
+    expect(formatUsd(133_650_000)).toBe("$133.7M");
+    expect(fundingReason({ title: "Globex Secures $133.65M Series A to Produce Iron", source: "Business Wire", occurredAt: at })).toBe("Raised $133.65M Series A, reported by Business Wire on 6 Oct 2026.");
+  });
+
+  it("a round with a suffix is reported as the round, without the suffix and without becoming another round", () => {
+    expect(headlineRound("Globex closes $100M Series C-1")).toBe("Series C");
+    expect(headlineRound("Globex closes Series C-1 extension")).toBe("Series C");
+    expect(headlineRound("Globex raises Series B2")).toBe("Series B2");
+    expect(fundingReason({ title: "Globex Raises $100M Series C-1", source: "Reuters", occurredAt: at })).toBe("Raised $100M Series C, reported by Reuters on 6 Oct 2026.");
   });
 });

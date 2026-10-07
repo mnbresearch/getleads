@@ -4,7 +4,7 @@ import { apiFetch, expectShape } from "../../lib/api";
 import { Spinner, TagInput } from "../ui";
 import { CompetitorsInput } from "./PlayForm";
 import { plural } from "../../lib/plural";
-import { clean, competitorsOf, findsCompanies, isForbidden, isQuota, messageOf, playInputs, runFailed, runSentence, typeName, typeTone, type Competitor, type PlanPlay, type PlayOut, type PlayPlan, type PlayTypeInfo } from "../../lib/plays";
+import { clean, competitorsOf, findsCompanies, isForbidden, isQuota, messageOf, playInputs, runFailed, runSentence, typeName, typeTone, workingFirst, type Competitor, type PlanPlay, type PlayOut, type PlayPlan, type PlayTypeInfo } from "../../lib/plays";
 
 const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && !!x.trim()).map((x) => clean(x, 100)) : []);
 
@@ -98,7 +98,7 @@ export function PlanFlow({
       if (mine !== seq.current) return;
       const p = expectShape(r, (x) => Array.isArray(x.plays));
       const planTitles = strings(p.titles);
-      setPlan({ ...p, product: p.product && typeof p.product === "object" ? p.product : { domain: site }, titles: planTitles, competitors: competitorsOf(p.competitors), notes: (Array.isArray(p.notes) ? p.notes : []).map((n) => clean(n, 400)).filter(Boolean), plays: p.plays.filter((x) => x && typeof x.type === "string") });
+      setPlan({ ...p, product: p.product && typeof p.product === "object" ? p.product : { domain: site }, titles: planTitles, competitors: competitorsOf(p.competitors), notes: (Array.isArray(p.notes) ? p.notes : []).map((n) => clean(n, 400)).filter(Boolean), plays: workingFirst(p.plays.filter((x) => x && typeof x.type === "string"), (x) => x.needsSearch === true, p.searchDependable === false ? false : undefined) });
       setCompetitors(competitorsOf(p.competitors));
       setTitles(planTitles);
       setCreated({}); setCreating({}); setCreateErr({}); setRan({});
@@ -257,6 +257,7 @@ export function PlanFlow({
                     {p.why && <p className="mt-1 text-sm text-ink-300"><span className="font-medium text-ink-200">Why:</span> {clean(p.why, 400)}</p>}
                     {inputs && <p className="mt-1 text-xs text-ink-400">{inputs}</p>}
                     {p.targetTitles.length > 0 && findsCompanies(types, p.type) && <p className="mt-1 text-xs text-ink-400">Looks for: {p.targetTitles.slice(0, 4).join(", ")}{p.targetTitles.length > 4 ? ` and ${p.targetTitles.length - 4} more` : ""}</p>}
+                    {!unavailable && p.setupHint && <p className={`mt-2 text-xs ${p.needsSearch ? "text-amber-700" : "text-ink-400"}`} data-testid="plan-hint">{clean(p.setupHint, 500)}</p>}
                     {unavailable && <p className="mt-2 text-xs font-medium text-amber-700">Not available yet: {clean(p.unavailableReason, 300) || "this workspace is not set up for it."}</p>}
                     {blocked && <p className="mt-2 text-xs font-medium text-amber-700">{blocked}</p>}
                     {failed && (

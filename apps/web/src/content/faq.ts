@@ -36,7 +36,7 @@ export const FAQS: Faq[] = [
   },
   {
     q: "Where do the people in a play come from?",
-    a: "From public pages and your own data. Scout reads published customer pages and case studies, public job postings, funding news and public posts, and can use your own website visitors, your existing contacts and lists you upload. It does not buy contact lists, and each candidate says where its reason came from, with a link when that is a public page.",
+    a: "From public pages and your own data. Scout reads published customer pages, public job postings, funding news and public posts, and can use your website visitors, your existing contacts and lists you upload. It buys no contact lists. Each candidate says where its reason came from, and a source that could not be searched says so - it is never reported as nobody found.",
   },
   {
     q: "Does Scout log in to my LinkedIn or X account?",
