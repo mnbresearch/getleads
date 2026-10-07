@@ -376,7 +376,9 @@ export function PlaysPage() {
   const whatIsMissing = (types ?? []).find((t) => batchTypes.includes(t.type) && t.needsSearch && t.setupHint)?.setupHint ?? batchDone.find((o) => o.note)?.note ?? (types ?? []).find((t) => batchTypes.includes(t.type) && t.setupHint)?.setupHint ?? "";
   const typeOf = (type: string) => (types ?? []).find((t) => t.type === type);
   // With no search source connected, plays that do not depend on one come first.
-  const shownPlays = workingFirst(plays, (p) => typeOf(p.type)?.needsSearch === true, searchDependable);
+  // The play's own answer when the server gives one (it depends on the play's settings), else its kind's.
+  const playNeedsSearch = (p: (typeof plays)[number]) => (typeof p.needsSearch === "boolean" ? p.needsSearch : typeOf(p.type)?.needsSearch === true);
+  const shownPlays = workingFirst(plays, playNeedsSearch, searchDependable);
   // "Work today" in the picker also means available at all (the pixel is installed, the plan covers it).
   const shownTypes = types ? workingFirst(types, (t) => t.needsSearch === true || t.available === false, searchDependable) : types;
   const campaignNames = useMemo(() => new Map(campaigns.map((c) => [c.id, c.name])), [campaigns]);
@@ -473,7 +475,7 @@ export function PlaysPage() {
                   <ul className="grid gap-3 md:grid-cols-2" data-testid="play-list">
                     {shownPlays.map((p) => (
                       <PlayCard
-                        searchHint={searchDependable === false && typeOf(p.type)?.needsSearch ? typeOf(p.type)?.setupHint : undefined}
+                        searchHint={searchDependable === false && playNeedsSearch(p) ? (p.setupHint ?? typeOf(p.type)?.setupHint) : undefined}
                         key={p.id}
                         play={p}
                         types={types}

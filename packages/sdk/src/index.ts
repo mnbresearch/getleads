@@ -241,6 +241,9 @@ export interface Play {
   counts: { pending: number; approved: number; skipped: number };
   /** True while a run of this play is under way (started less than 15 minutes ago and not finished). */
   running: boolean;
+  /** Whether this play, with its own settings, depends on web search - and what to say while none is connected. */
+  needsSearch?: boolean;
+  setupHint?: string;
 }
 
 export interface PlayRun {

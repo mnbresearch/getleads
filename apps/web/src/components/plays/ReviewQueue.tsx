@@ -621,7 +621,7 @@ const CandidateCard = memo(function CandidateCard({
   const consequence = c.kind === "post"
     ? "Approving creates a task to answer it. No lead is created."
     : c.kind === "company"
-      ? "Approving saves the company. Find people to get someone to contact."
+      ? "Approving keeps the company in this play. Find people to get someone to contact."
       : c.alreadyLead
         ? "Approving adds this reason to the lead you already have."
         : willEnroll ? "Approving makes them a lead and adds them to the campaign." : "";

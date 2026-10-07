@@ -411,6 +411,9 @@ const noCounts = (): PlayCounts => ({ pending: 0, approved: 0, skipped: 0 });
 
 export function playOut(p: Play, counts: PlayCounts = noCounts(), running = false) {
   const last = p.lastResult as Record<string, unknown> | null;
+  // Judged on this play's own settings, not its type: a competitor play that names no
+  // website has to search for each competitor, a conversations play without Hacker News too.
+  const need = searchNeed(p.type, p.config as Record<string, unknown> | null);
   return {
     id: p.id,
     // Cleaned on the way out too: a name saved before names were cleaned is still shown as one clean line.
@@ -431,6 +434,8 @@ export function playOut(p: Play, counts: PlayCounts = noCounts(), running = fals
     lastResult: last ? { status: String(last.status ?? ""), found: Number(last.found) || 0, added: Number(last.added) || 0, duplicates: Number(last.duplicates) || 0, note: typeof last.note === "string" ? last.note : null } : null,
     createdAt: p.createdAt,
     updatedAt: p.updatedAt,
+    needsSearch: need.needsSearch,
+    ...(need.hint ? { setupHint: need.hint } : {}),
     counts,
     /** A run of this play is under way (started less than fifteen minutes ago and not finished). */
     running,

@@ -38,6 +38,9 @@ export interface PlayOut {
   counts: PlayCounts;
   /** A run of this play is in progress. Absent on a server that does not say. */
   running?: boolean;
+  /** Whether this play, with its own settings, depends on web search - and what to say while none is connected. */
+  needsSearch?: boolean;
+  setupHint?: string;
 }
 
 export interface PlayRun {
