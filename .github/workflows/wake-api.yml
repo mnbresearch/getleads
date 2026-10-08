@@ -1,0 +1,41 @@
+# Wakes the API at the start of the working day.
+#
+# On Render's free plan the API sleeps after 15 idle minutes. While it is up, the API keeps
+# itself awake between 10:00 and 19:00 India time (apps/api/src/lib/keepAwake.ts) - but a
+# sleeping instance cannot wake itself, so this asks for /health once a day just before the
+# window opens. From then on the API's own pings take over until 19:00.
+#
+# No secrets: /health is public. Optional repository variable:
+#   SCOUT_API_URL   defaults to https://api.mnbresearch.com
+# To stop it: disable this workflow in the Actions tab (or set KEEP_AWAKE=off on Render to
+# stop the daytime pings too).
+name: Wake API - Daily
+
+on:
+  schedule:
+    - cron: "25 4 * * *" # 04:25 UTC = 09:55 India time
+  workflow_dispatch:
+
+# Reads nothing from the repository and writes nothing: no token permissions at all.
+permissions: {}
+
+jobs:
+  wake:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ask the API for /health until it answers
+        env:
+          API_URL: ${{ vars.SCOUT_API_URL || 'https://api.mnbresearch.com' }}
+        run: |
+          set -u
+          url="${API_URL%/}/health"
+          # A cold start takes about a minute; give it up to ~4 minutes in all.
+          for i in 1 2 3 4 5 6; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 40 "$url" || true)
+            echo "attempt $i: HTTP $code"
+            if [ "$code" = "200" ]; then exit 0; fi
+            sleep 5
+          done
+          echo "::warning::The API did not answer /health with 200 after 6 attempts"
+          exit 0

@@ -431,6 +431,26 @@ Plays ([docs/PLAYS.md](docs/PLAYS.md)) need **no new required environment variab
 
 **What needs a search source:** companies hiring for a role across job boards, conversations on LinkedIn, Reddit, X and forums, a competitor given by name only, and the step that finds people at a company any play has found. With no key these fall back to a keyless search that is often refused from cloud addresses: a run then says it could not search - it never reports that as "nobody found" - and the app marks these with a hint and lists the types that work first. Connect any one of the existing optional search keys, which you may already have set: `GOOGLE_CSE_API_KEY` + `GOOGLE_CSE_CX`, `SERPER_API_KEY`, `SERPAPI_KEY` or `BRAVE_SEARCH_API_KEY`.
 
+### B13. Keeping the free API awake during the working day
+
+On Render's free plan the API sleeps after 15 minutes without a request. While it sleeps the embedded worker does not run (no campaign sends, no scheduled plays) and the next visitor waits about a minute for it to start.
+
+**What happens now, with no settings:**
+
+- Between **10:00 and 19:00 India time** the API asks its own public address for `/health` every 10 minutes, which keeps it up. Outside that window it sends nothing and sleeps as before. It only runs where `RENDER_EXTERNAL_URL` is set (Render sets it on every web service), so local development and other hosts are untouched.
+- `.github/workflows/wake-api.yml` asks for `/health` once a day at 09:55 India time, because a sleeping instance cannot wake itself. No secrets; optional repository variable `SCOUT_API_URL`.
+
+**Why a window and not all day:** two free allowances. Render gives the whole workspace 750 instance hours a month and suspends every free service when they run out; awake all day is about 744. Neon's free plan gives 100 compute hours a month and suspends the database when they run out; the worker queries the database every 1.5 seconds while the API is up, so at the smallest size (0.25 CU) 9 hours a day is about 70 of the 100, leaving room for visits outside the window. Widen the window only after moving off the free plans.
+
+| Switch | Effect |
+|---|---|
+| `KEEP_AWAKE=off` | No pings at all (also `false`, `0`, `no`). |
+| `KEEP_AWAKE_HOURS=10-19` | The window: start hour (included) to end hour (excluded), 0-24. |
+| `KEEP_AWAKE_TZ=Asia/Kolkata` | The time zone of the window. |
+| `KEEP_AWAKE_URL` | The address to ping instead of `RENDER_EXTERNAL_URL`. |
+
+On a paid instance (which never sleeps) set `KEEP_AWAKE=off` and disable the workflow. Rolling back to a release without this simply stops the pings.
+
 ---
 
 ## Part C - What each key unlocks (feature map)

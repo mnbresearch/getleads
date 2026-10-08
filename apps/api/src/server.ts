@@ -6,6 +6,7 @@ import { ensureRecurringJobs, handlers, startRecurringJobKeeper } from "./jobs.j
 import { migrateLegacyLinkTokens } from "./lib/linkTokens.js";
 import { describeError } from "./lib/errors.js";
 import { gracefulShutdown, httpTimeouts, shutdownGraceMs } from "./shutdown.js";
+import { startKeepAwake } from "./lib/keepAwake.js";
 
 /** Name, code and a redacted one-line message. Never the error object: an ORM error carries the statement and every bound value. */
 const errLine = (e: unknown) => {
@@ -70,6 +71,11 @@ async function main() {
     console.log(`[api] Prospex API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop} trustedProxy=${env.trustedProxy} adminTokenAccess=${env.adminApiToken ? "on" : "off"}`);
   });
 
+  // Free Render instances sleep after 15 idle minutes; during the working-day window this
+  // keeps this one (and its worker) up. Inert unless RENDER_EXTERNAL_URL or KEEP_AWAKE_URL is
+  // set; KEEP_AWAKE=off turns it off (lib/keepAwake.ts).
+  const stopKeepAwake = startKeepAwake();
+
   let stopping = false;
   const shutdown = (signal: string) => {
     if (stopping) {
@@ -81,6 +87,7 @@ async function main() {
       return;
     }
     stopping = true;
+    stopKeepAwake?.();
     const graceMs = shutdownGraceMs();
     console.log(`[api] ${signal}: shutting down (no new connections; up to ${Math.round(graceMs / 1000)} s for requests and jobs in progress)`);
     void gracefulShutdown({ server, stopWorker: stop, stopKeeper, graceMs })
