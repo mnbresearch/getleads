@@ -76,6 +76,11 @@ export const apiKeys = pgTable(
     lastUsedAt: ts("last_used_at"),
     revokedAt: ts("revoked_at"),
     createdAt: ts("created_at").notNull().defaultNow(),
+    // Migration 0023. NULL: never expires (every key made before expiry existed).
+    expiresAt: ts("expires_at"),
+    // The key this one replaced when it was made by "rotate".
+    rotatedFromId: uuid("rotated_from_id"),
+    createdBy: uuid("created_by"),
   },
   (t) => ({ hashIdx: uniqueIndex("api_keys_hash_idx").on(t.keyHash) }),
 );
@@ -1279,3 +1284,42 @@ export const playCandidates = pgTable(
   }),
 );
 export type PlayCandidate = typeof playCandidates.$inferSelect;
+
+// ── Product analytics and checkout follow-up (migration 0023) ───────────────────────────
+// The platform's own funnel for the admin dashboard. Server events carry org/user ids only;
+// page views carry no identifier at all (counted, not followed).
+export const productEvents = pgTable("product_events", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  name: text("name").notNull(),
+  orgId: uuid("org_id").references(() => organizations.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+  path: text("path"),
+  props: jsonb("props").$type<Record<string, unknown>>().notNull().default({}),
+  createdAt: ts("created_at").notNull().defaultNow(),
+});
+export type ProductEvent = typeof productEvents.$inferSelect;
+
+export const checkoutSessions = pgTable("checkout_sessions", {
+  id: uuid("id").primaryKey().defaultRandom(),
+  orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+  userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+  plan: text("plan").notNull(),
+  provider: text("provider").notNull().default("stripe"),
+  providerSessionId: text("provider_session_id").unique(),
+  status: text("status").notNull().default("open"),
+  createdAt: ts("created_at").notNull().defaultNow(),
+  completedAt: ts("completed_at"),
+  followupStatus: text("followup_status"),
+  followupAt: ts("followup_at"),
+});
+export type CheckoutSession = typeof checkoutSessions.$inferSelect;
+
+export const emailOptOuts = pgTable(
+  "email_opt_outs",
+  {
+    userId: uuid("user_id").notNull().references(() => users.id, { onDelete: "cascade" }),
+    kind: text("kind").notNull(),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({ pk: primaryKey({ columns: [t.userId, t.kind] }) }),
+);
