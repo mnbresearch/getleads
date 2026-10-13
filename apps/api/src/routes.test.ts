@@ -67,6 +67,7 @@ suite("route surface", () => {
   const SKIP: { match: RegExp; why: string }[] = [
     { match: /^\/docs$|^\/openapi\.json$/, why: "static documents, no behaviour to assert here" },
     { match: /^\/internal\/jobs\/run$/, why: "drains the real job queue; covered by the jobs suite" },
+    { match: /^\/v1\/public\/email-opt-out$/, why: "signed unsubscribe link; the HMAC in the URL is the credential (checkout.followup.test.ts)" },
     { match: /^\/v1\/billing\/plans$/, why: "the public price list; the pricing page reads it before anyone signs in" },
     // Exactly this route, not /v1/public/* - a future public route should have to earn its
     // own line here rather than inherit one. Its tests are in "client workspaces over HTTP".
@@ -247,7 +248,11 @@ suite("route surface", () => {
         !/webhook|capture|track|unsubscribe|px|upgrade-requests/.test(String(r.path)) &&
         // The email provider's bounce/complaint webhook: signed (Svix), and refused with 401
         // on a bad signature or 503 when no secret is configured. Tested in hardening.jobs.
-        String(r.path) !== "/v1/email-events/resend",
+        String(r.path) !== "/v1/email-events/resend" &&
+        // The anonymous page-view counter (always 204, stores no identifier) and the signed
+        // one-click unsubscribe. Tested in analytics.product and checkout.followup.
+        String(r.path) !== "/v1/public/pv" &&
+        String(r.path) !== "/v1/public/email-opt-out",
     );
     expect(writes.length).toBeGreaterThan(10);
 

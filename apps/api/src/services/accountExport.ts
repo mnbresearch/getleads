@@ -96,6 +96,9 @@ export const EXPORT_TABLES: TableSpec[] = [
   { key: "plays", table: S.plays },
   { key: "playRuns", table: S.playRuns },
   { key: "playCandidates", table: S.playCandidates },
+  // Migration 0023: the workspace's own usage events (no email or IP is ever stored in them) and its checkouts.
+  { key: "productEvents", table: S.productEvents },
+  { key: "checkoutSessions", table: S.checkoutSessions },
   { key: "signals", table: S.signals },
   { key: "signalSubscriptions", table: S.signalSubscriptions },
   { key: "signalMatches", table: S.signalMatches, cursor: [S.signalMatches.signalId, S.signalMatches.subscriptionId] },

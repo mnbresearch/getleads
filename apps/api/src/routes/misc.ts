@@ -1,21 +1,23 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import Stripe from "stripe";
 import { isPublicHost } from "@prospex/core";
-import { and, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, inArray, integrations, isPlanId, leads, limitsFor, messages, organizations, planOverrides, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
+import { and, checkoutSessions, desc, emailAccounts, enqueue, eq, events, getDb, getUsage, inArray, integrations, isPlanId, leads, limitsFor, messages, organizations, planOverrides, PLANS, sql, webhooks, companies, campaigns } from "@prospex/db";
 import { sendingHealthForAccount, systemSenderHealthForOrg } from "../services/campaigns.js";
 import { icpLearningFor } from "../services/insights.js";
 import { env } from "../env.js";
 import { campaignAttribution, leadFunnel, sourcePerformance } from "../services/analytics.js";
 import { sealOrgJson } from "../lib/credentials.js";
-import { badRequest, notFound } from "../lib/errors.js";
-import { orgId, requireAuth, requireUser, type Env } from "../middleware.js";
+import { ApiError, badRequest, notFound } from "../lib/errors.js";
+import { orgId, rateLimit, requireAuth, requireUser, type Env } from "../middleware.js";
 import { INTEGRATION_PROVIDERS, integrationName, validateIntegrationConfig } from "../services/integrations.js";
 import { audit } from "../lib/audit.js";
 import { ownerOrAdmin } from "../lib/roles.js";
 import { newWebhookSecret, publicWebhook } from "../lib/webhookSecret.js";
 import { assertRowCap, guardJobCapacity, withOrgLock } from "../lib/limits.js";
+import { sanitizeProductPath, trackProduct } from "../lib/productEvents.js";
+import { FOLLOWUP_KIND, recordOptOut, verifyOptOutSignature } from "../services/checkoutFollowup.js";
 /** Channel/data providers configured via the same integrations table (config-only, no lead sync). */
 const CHANNEL_PROVIDERS = ["whatsapp", "apollo", "hunter", "pdl", "ipinfo"];
 /** Credential fields each provider cannot work without (what its sync/send reads). */
@@ -324,6 +326,15 @@ miscRoutes.post("/billing/checkout", requireAuth, requireUser, ownerOrAdmin("bil
     cancel_url: `${env.appUrl}/settings/billing?canceled=1`,
     metadata: { orgId: a.org.id, plan: c.req.valid("json").plan },
   });
+  // Every started checkout is remembered, so one that is never finished can be noticed (and,
+  // if the operator turns it on, followed up once - services/checkoutFollowup.ts). A failure
+  // here must not cost the customer their checkout link: logged without data and carried on.
+  await db
+    .insert(checkoutSessions)
+    .values({ orgId: a.org.id, userId: a.user!.id, plan: requestedPlan, provider: "stripe", providerSessionId: session.id, status: "open" })
+    .onConflictDoNothing()
+    .catch((e) => console.warn(`[billing] could not record checkout session: ${(e as Error)?.name ?? "error"}`));
+  await trackProduct("checkout_started", { orgId: a.org.id, userId: a.user!.id, props: { plan: requestedPlan } });
   return c.json({ url: session.url });
 });
 
@@ -355,12 +366,17 @@ miscRoutes.post("/billing/webhook", async (c) => {
     const s = event.data.object as Stripe.Checkout.Session;
     const orgId = s.metadata?.orgId;
     const plan = s.metadata?.plan;
+    await recordCheckoutOutcome(s.id, "completed", orgId, plan);
     if (orgId && plan && isPlanId(plan)) {
       await db.update(organizations).set({ plan, planLimits: limitsFor(plan), stripeSubscriptionId: String(s.subscription ?? "") }).where(eq(organizations.id, orgId));
     } else if (orgId) {
       console.error(`[billing] checkout ${s.id} for org ${orgId} names unknown plan ${JSON.stringify(plan)}; plan NOT changed`);
       await db.update(organizations).set({ stripeSubscriptionId: String(s.subscription ?? "") }).where(eq(organizations.id, orgId));
     }
+  }
+  if (event.type === "checkout.session.expired") {
+    const s = event.data.object as Stripe.Checkout.Session;
+    await recordCheckoutOutcome(s.id, "expired", s.metadata?.orgId, s.metadata?.plan);
   }
   if (event.type === "customer.subscription.updated") {
     const sub = event.data.object as Stripe.Subscription;
@@ -389,7 +405,8 @@ miscRoutes.post("/billing/webhook", async (c) => {
   }
   if (event.type === "customer.subscription.deleted") {
     const sub = event.data.object as Stripe.Subscription;
-    await db.update(organizations).set({ plan: "free", planLimits: limitsFor("free"), stripeSubscriptionId: null }).where(eq(organizations.stripeCustomerId, String(sub.customer)));
+    const cancelled = await db.update(organizations).set({ plan: "free", planLimits: limitsFor("free"), stripeSubscriptionId: null }).where(eq(organizations.stripeCustomerId, String(sub.customer))).returning({ id: organizations.id });
+    for (const o of cancelled) await trackProduct("subscription_cancelled", { orgId: o.id, props: { plan: planForPrice(sub.items?.data?.[0]?.price?.id) ?? null } });
   }
   if (event.type === "invoice.payment_failed") {
     // Not a downgrade: Stripe retries, and the subscription events above carry the outcome.
@@ -403,5 +420,169 @@ miscRoutes.post("/billing/webhook", async (c) => {
   }
   return c.json({ received: true });
 });
+
+/**
+ * A Stripe checkout finished or lapsed: its checkout_sessions row says so. Only a row that is
+ * still open moves, so a replayed webhook records nothing twice. A completed checkout whose
+ * row is missing (started before rows were kept, or the insert failed) is still counted.
+ */
+async function recordCheckoutOutcome(sessionId: string | undefined, status: "completed" | "expired", orgId: string | undefined | null, plan: string | undefined | null) {
+  if (!sessionId) return;
+  try {
+    const { db } = getDb();
+    const moved = await db
+      .update(checkoutSessions)
+      .set(status === "completed" ? { status, completedAt: new Date() } : { status })
+      .where(and(eq(checkoutSessions.providerSessionId, sessionId), status === "completed" ? inArray(checkoutSessions.status, ["open", "expired"]) : eq(checkoutSessions.status, "open")))
+      .returning({ orgId: checkoutSessions.orgId, userId: checkoutSessions.userId, plan: checkoutSessions.plan });
+    if (status !== "completed") return;
+    const row = moved[0];
+    if (row) await trackProduct("checkout_completed", { orgId: row.orgId, userId: row.userId, props: { plan: row.plan } });
+    else if (orgId && plan && isPlanId(plan)) {
+      // No row moved: either it was already completed (a replayed event - count nothing) or
+      // there never was one (started before rows were kept). Creating the missing row as
+      // completed, once, is what makes a replay of THAT event count nothing too.
+      const created = await db
+        .insert(checkoutSessions)
+        .values({ orgId, plan, providerSessionId: sessionId, status: "completed", completedAt: new Date() })
+        .onConflictDoNothing({ target: checkoutSessions.providerSessionId })
+        .returning({ id: checkoutSessions.id });
+      if (created.length) await trackProduct("checkout_completed", { orgId, props: { plan } });
+    }
+  } catch (e) {
+    console.warn(`[billing] could not record the checkout outcome: ${(e as Error)?.name ?? "error"}`);
+  }
+}
+
+// ── Public page-view beacon ──
+/**
+ * Counts visits to the public site (landing, pricing, sign-up) for the admin funnel.
+ *
+ * Nothing identifies the visitor: no IP, no cookie, no id, no user agent is stored - only the
+ * path (no query string), the host of the referring site and any utm_* tags. A browser that
+ * sends Do Not Track or Global Privacy Control is not counted at all. The answer is always an
+ * empty 204, whether the view was counted, ignored, malformed or over the rate limit, so the
+ * page learns nothing from it and never retries.
+ */
+const PV_MAX_BYTES = 2048;
+// The only pages the site counts (apps/web/src/lib/pageview.ts). Anything else is not a
+// visit to us, so a script cannot invent paths to fill the table.
+const PV_PATHS: ReadonlySet<string> = new Set(["/", "/pricing", "/signup", "/login"]);
+// A ceiling for the whole process, on top of the per-address limit: a script rotating
+// through many addresses still cannot write more than this many rows a minute.
+const PV_GLOBAL_PER_MINUTE = 600;
+let pvWindowStart = 0;
+let pvWindowCount = 0;
+const pvGlobalAllows = (nowMs = Date.now()) => {
+  if (nowMs - pvWindowStart >= 60_000) {
+    pvWindowStart = nowMs;
+    pvWindowCount = 0;
+  }
+  pvWindowCount++;
+  return pvWindowCount <= PV_GLOBAL_PER_MINUTE;
+};
+const pvLimiter = rateLimit({ perMinute: 30, burst: 30, name: "public-pv" });
+const ownHosts = () => {
+  const out = new Set<string>();
+  for (const u of [env.appUrl, env.apiUrl]) {
+    try {
+      out.add(new URL(u).hostname.toLowerCase().replace(/^www\./, ""));
+    } catch {}
+  }
+  return out;
+};
+/** The referring site's host, lower-case; null for our own pages, a non-web URL or junk. */
+export function referrerHost(ref: unknown): string | null {
+  if (typeof ref !== "string" || !ref || ref.length > 2000) return null;
+  try {
+    const u = new URL(ref);
+    if (u.protocol !== "http:" && u.protocol !== "https:") return null;
+    const host = u.hostname.toLowerCase();
+    if (!host || ownHosts().has(host.replace(/^www\./, ""))) return null;
+    return host.slice(0, 80);
+  } catch {
+    return null;
+  }
+}
+const utm = (v: unknown) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]+/g, " ").trim().slice(0, 80) || null : null);
+
+miscRoutes.post("/public/pv", async (c) => {
+  const empty = () => c.body(null, 204);
+  if (c.req.header("dnt") === "1" || c.req.header("sec-gpc") === "1") return empty();
+  let limited = false;
+  try {
+    await pvLimiter(c, async () => {});
+  } catch (e) {
+    if (e instanceof ApiError && e.status === 429) limited = true;
+    else throw e;
+  }
+  if (limited) return empty();
+  const declared = Number(c.req.header("content-length") ?? 0);
+  if (declared > PV_MAX_BYTES) return empty();
+  let body: Record<string, unknown>;
+  try {
+    const text = await c.req.text();
+    if (text.length > PV_MAX_BYTES) return empty();
+    const parsed = JSON.parse(text);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return empty();
+    body = parsed as Record<string, unknown>;
+  } catch {
+    return empty();
+  }
+  const path = sanitizeProductPath(body.path);
+  if (!path || !PV_PATHS.has(path)) return empty();
+  if (!pvGlobalAllows()) return empty();
+  const props: Record<string, string | null> = {};
+  const host = referrerHost(body.ref);
+  if (host) props.referrer_host = host;
+  for (const [from, to] of [["utm_source", "source"], ["utm_medium", "medium"], ["utm_campaign", "campaign"]] as const) {
+    const v = utm(body[from]);
+    if (v) props[to] = v;
+  }
+  // The pricing section being seen is its own funnel step; the web sends "/pricing" for it.
+  await trackProduct(path === "/pricing" ? "pricing_viewed" : "page_view", { path, props });
+  return empty();
+});
+
+// ── One-click email opt-out (checkout reminders) ──
+const OPT_OUT_KINDS: ReadonlySet<string> = new Set([FOLLOWUP_KIND]);
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const PAGE_CSP = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'";
+const optOutPage = (title: string, body: string) =>
+  `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex"><title>${title}</title><body style="font-family:system-ui;padding:40px;text-align:center;color:#1e293b">${body}</body>`;
+const optOutLimiter = rateLimit({ perMinute: 20, name: "email-opt-out" });
+
+/**
+ * The unsubscribe link in a checkout reminder: `?u=<userId>&k=<kind>&s=<signature>`. The
+ * signature is an HMAC of the user id and kind under a key derived from JWT_SECRET, so a link
+ * only opts out the person it was sent to. A bad or missing signature is a 400 that changes
+ * nothing. POST opts out (the mail client's RFC 8058 one-click, or the button on the page).
+ * GET only shows that button: mail security scanners open every link in a message before
+ * the person does, and a GET that unsubscribed would unsubscribe people who never clicked.
+ * Doing it twice is fine.
+ */
+const handleOptOut = async (c: Context<Env>) => {
+  c.header("content-security-policy", PAGE_CSP);
+  const u = c.req.query("u") ?? "";
+  const k = c.req.query("k") ?? "";
+  const s = c.req.query("s") ?? "";
+  if (!UUID_RE.test(u) || !OPT_OUT_KINDS.has(k) || !verifyOptOutSignature(u, k, s)) {
+    return c.html(optOutPage("Link not valid", "<h2>This link is not valid</h2><p>It may have been copied incorrectly. Nothing was changed.</p>"), 400);
+  }
+  if (c.req.method !== "POST") {
+    // u, k and s were checked above (a uuid, a known kind, a hex signature), so they are safe in the form.
+    const action = `?u=${encodeURIComponent(u)}&k=${encodeURIComponent(k)}&s=${encodeURIComponent(s)}`;
+    return c.html(
+      optOutPage(
+        "Unsubscribe",
+        `<h2>Stop checkout reminders?</h2><p>We will not send you reminders about unfinished upgrades again.</p><form method="post" action="${action}"><button type="submit" style="font:inherit;padding:10px 18px;border-radius:8px;border:1px solid #cbd5e1;background:#fff;cursor:pointer">Unsubscribe</button></form>`,
+      ),
+    );
+  }
+  await recordOptOut(u, k);
+  return c.html(optOutPage("Unsubscribed", "<h2>You're unsubscribed</h2><p>We won't send you checkout reminders again.</p>"));
+};
+miscRoutes.get("/public/email-opt-out", optOutLimiter, handleOptOut);
+miscRoutes.post("/public/email-opt-out", optOutLimiter, handleOptOut);
 
 // Admin org management now lives in routes/admin.ts, mounted at /v1/admin.

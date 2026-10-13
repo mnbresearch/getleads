@@ -108,6 +108,38 @@ export interface Lead {
   createdAt: string;
 }
 
+/** An API key as listed. `status` is "expiring" when it expires within 7 days. */
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  prefix: string;
+  scope: "full" | "read";
+  scopes: string[];
+  lastUsedAt: string | null;
+  revokedAt: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  rotatedFromId: string | null;
+  status: "active" | "expiring" | "expired" | "revoked";
+}
+
+/** A key just created: `key` is shown this once. */
+export interface ApiKeyCreated {
+  id: string;
+  name: string;
+  prefix: string;
+  scope: "full" | "read";
+  expiresAt: string | null;
+  key: string;
+  note?: string;
+}
+
+/** A key just made by rotation. `previous.worksUntil` is null when the old key was revoked at once. */
+export interface ApiKeyRotated extends ApiKeyCreated {
+  rotatedFromId: string;
+  previous: { id: string; prefix: string; revoked: boolean; worksUntil: string | null };
+}
+
 export interface Sender {
   name: string;
   company: string;
@@ -545,7 +577,22 @@ export class Prospex {
 
   auth = {
     me: () => this.request<{ user: unknown; org: { id: string; name: string; plan: string; limits: Record<string, number | boolean> } }>("GET", "/v1/auth/me"),
-    createApiKey: (name: string) => this.request<{ id: string; key: string; prefix: string }>("POST", "/v1/auth/api-keys", { name }),
+    /**
+     * Create a key. `opts.scope` "read" makes a read-only key; `opts.expiresInDays` (1-730)
+     * makes one that stops working on its own. Calling with a name alone works as it always did.
+     */
+    createApiKey: (name: string, opts: { scope?: "full" | "read"; expiresInDays?: number | null } = {}) =>
+      this.request<ApiKeyCreated>("POST", "/v1/auth/api-keys", { name, ...(opts.scope ? { scope: opts.scope } : {}), ...(opts.expiresInDays ? { expiresInDays: opts.expiresInDays } : {}) }),
+    /** Every key in the workspace, newest first, with its status. Never the keys themselves. */
+    listApiKeys: () => this.request<{ apiKeys: ApiKeyInfo[] }>("GET", "/v1/auth/api-keys"),
+    /**
+     * Replace a key with a new one (same name and access). `overlapMinutes` (0-1440, default 0)
+     * is how long the old key keeps working; 0 stops it at once. The new key is returned once.
+     */
+    rotateApiKey: (id: string, opts: { overlapMinutes?: number; expiresInDays?: number | null } = {}) =>
+      this.request<ApiKeyRotated>("POST", `/v1/auth/api-keys/${idSegment(id, "id")}/rotate`, { ...(opts.overlapMinutes !== undefined ? { overlapMinutes: opts.overlapMinutes } : {}), ...(opts.expiresInDays ? { expiresInDays: opts.expiresInDays } : {}) }),
+    /** Revoke a key: it stops working immediately. */
+    revokeApiKey: (id: string) => this.request<{ ok: boolean }>("DELETE", `/v1/auth/api-keys/${idSegment(id, "id")}`),
   };
 
   search = {

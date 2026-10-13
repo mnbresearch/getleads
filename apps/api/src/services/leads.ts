@@ -1,4 +1,5 @@
 import { and, companies, consume, eq, getDb, leads, sql, type Company, type Lead, type NewLead } from "@prospex/db";
+import { markActivated } from "../lib/productEvents.js";
 import type { CompanyProfile, PipelineLead } from "@prospex/core";
 import { extractDomain, inferDepartment, inferSeniority, isPublicHost, splitName } from "@prospex/core";
 import { emitEvent } from "../lib/events.js";
@@ -348,6 +349,8 @@ export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts:
     .values({ ...clean, orgId, source: stripNul(input.source ?? "manual").slice(0, 100) } as NewLead)
     .returning();
   await emitEvent(orgId, "lead.created", { id: row.id, email: row.email, fullName: row.fullName, title: row.title, score: row.score }, { type: "lead", id: row.id });
+  // The platform funnel's "activated" step: recorded once per workspace, the first time it has a lead. Never throws.
+  void markActivated(orgId);
   return { lead: row, created: true, ...(emailRejected ? { emailRejected } : {}) };
 }
 

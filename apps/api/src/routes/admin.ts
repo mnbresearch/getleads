@@ -49,6 +49,9 @@ import { canonicalEmail } from "../services/leads.js";
 import { mailingAddressOf } from "../services/campaigns.js";
 import { addressFingerprint, auditForResponse } from "../lib/privacySuppression.js";
 import { dataSubjectReport, eraseDataSubject } from "../lib/privacyErase.js";
+import { productFunnel } from "../lib/productEvents.js";
+import { systemMailerConfig } from "../lib/mailer.js";
+import { followupAfterHours, followupMode, runCheckoutFollowups, sendFollowupTest } from "../services/checkoutFollowup.js";
 
 export const adminRoutes = new Hono<Env>();
 
@@ -973,4 +976,69 @@ adminRoutes.post("/data-subject/erase", rateLimit({ perMinute: 10, name: "admin-
   const r = await eraseDataSubject(email);
   await adminAudit(c, "admin.data_subject_erased", null, { targetType: "data_subject", targetId: addressFingerprint(email), data: { workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, eventsDeleted: r.eventsDeleted } });
   return c.json({ ok: true, workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, globallySuppressed: true });
+});
+
+// ── Growth: the platform's own funnel and checkouts ──
+//
+// Counts only. Page views carry no identifier, so visits are views, not people. The checkout
+// list names the workspace and its owner's address (the one person the admin would contact
+// about it) and nobody else's.
+
+adminRoutes.get("/analytics/funnel", zValidator("query", z.object({ days: z.enum(["7", "30", "90"]).default("30") })), async (c) => {
+  return c.json(await productFunnel(Number(c.req.valid("query").days)));
+});
+
+const CHECKOUT_STATUSES = ["open", "completed", "expired", "abandoned"] as const;
+adminRoutes.get(
+  "/checkouts",
+  zValidator("query", z.object({ status: z.enum(CHECKOUT_STATUSES).optional(), limit: z.coerce.number().int().min(1).max(500).default(100) })),
+  async (c) => {
+    const { status, limit } = c.req.valid("query");
+    const { db } = getDb();
+    // "abandoned": judged abandoned by the follow-up run (it has an outcome) and never paid.
+    const filter =
+      status === "abandoned"
+        ? sql`cs.followup_status IS NOT NULL AND cs.status <> 'completed' AND cs.followup_status NOT IN ('skipped:completed_later', 'skipped:plan_already')`
+        : status
+          ? sql`cs.status = ${status}`
+          : sql`true`;
+    const rows = (await db.execute(sql`
+      SELECT cs.id, cs.org_id, o.name AS org_name, o.plan AS org_plan, cs.plan, cs.status, cs.created_at, cs.completed_at, cs.followup_status, cs.followup_at,
+        (SELECT u.email FROM users u WHERE u.org_id = cs.org_id AND u.role = 'owner' ORDER BY u.created_at ASC LIMIT 1) AS owner_email
+      FROM checkout_sessions cs JOIN organizations o ON o.id = cs.org_id
+      WHERE ${filter}
+      ORDER BY cs.created_at DESC
+      LIMIT ${limit}`)) as unknown as Record<string, unknown>[];
+    const checkouts = [...rows].map((r) => ({
+      id: r.id,
+      orgId: r.org_id,
+      orgName: r.org_name,
+      orgPlan: r.org_plan,
+      plan: r.plan,
+      status: r.status,
+      createdAt: r.created_at,
+      completedAt: r.completed_at,
+      followupStatus: r.followup_status,
+      followupAt: r.followup_at,
+      ownerEmail: r.owner_email ?? null,
+    }));
+    return c.json({ checkouts, followup: { mode: followupMode(), afterHours: followupAfterHours(), mailer: !!systemMailerConfig() } });
+  },
+);
+
+/** What a follow-up run would do right now. Writes nothing, sends nothing. */
+adminRoutes.post("/checkout-followup/preview", rateLimit({ perMinute: 10, name: "admin-followup-preview" }), async (c) => {
+  const r = await runCheckoutFollowups({ preview: true });
+  return c.json({ ...r, mailer: !!systemMailerConfig() });
+});
+
+/** The sample reminder, to ADMIN_EMAIL only. There is no way to name another recipient. */
+adminRoutes.post("/checkout-followup/test", rateLimit({ perMinute: 3, name: "admin-followup-test" }), async (c) => {
+  const r = await sendFollowupTest();
+  await adminAudit(c, "admin.checkout_followup_test", null, { targetType: "email", data: { sent: r.sent, reason: r.reason ?? null } });
+  if (!r.sent) {
+    const message = r.reason === "no_mailer" ? "No mail provider is set up, so the test could not be sent." : r.reason === "ADMIN_EMAIL is not set" ? "ADMIN_EMAIL is not set, so there is nowhere to send the test." : "The test email could not be sent.";
+    return c.json({ sent: false, reason: r.reason, message }, 200);
+  }
+  return c.json({ sent: true, to: env.adminEmail });
 });

@@ -161,7 +161,7 @@ export function PrivacyPage() {
 
       <Section n={6} title="Cookies and local storage">
         <p>
-          The Scout app does not use advertising or third-party tracking cookies. When you sign in, your session token is kept in your browser's storage so you stay signed in, and short-lived values (such as which page to return to after a session expires) are kept in session storage. Clearing your browser storage signs you out. Our pages load their fonts from our own site. The demo video on our home page is served by YouTube in its privacy-enhanced mode, and nothing is loaded from YouTube until you press play.
+          The Scout app does not use advertising or third-party tracking cookies. When you sign in, your session token is kept in your browser's storage so you stay signed in, and short-lived values (such as which page to return to after a session expires) are kept in session storage. Clearing your browser storage signs you out. Our pages load their fonts from our own site. To know how many people find Scout, our public pages count page views: each count records the page path (without its query string), the referring site's name and any campaign tag in the link - never your IP address, a cookie or any identifier, so a visit cannot be linked to you or to other visits. Nothing is counted when your browser sends Do Not Track or Global Privacy Control. The demo video on our home page is served by YouTube in its privacy-enhanced mode, and nothing is loaded from YouTube until you press play.
         </p>
       </Section>
 
@@ -208,6 +208,8 @@ export function PrivacyPage() {
           <>Individual website-visit records: {RETENTION.visitDays} days. The per-company summary built from them is kept until the workspace is deleted.</>,
           <>People a play found who were not approved are deleted {RETENTION.playCandidateDays} days after they were found. Companies and public conversations a play found are deleted {RETENTION.playCandidateDays} days after they were approved, and the record of each run after {RETENTION.playCandidateDays} days. A person who was approved is kept for as long as the lead made from them.</>,
           <>The activity feed (which webhooks are delivered from): {RETENTION.eventDays} days.</>,
+          <>Anonymous page-view counts and our own product usage events (for example "signed up" or "started a checkout"; they carry the workspace and account they belong to, never an email address, password or payment detail): 395 days.</>,
+          <>Records of online checkouts that were started (the plan and whether it was completed): 400 days. If you start an upgrade and do not finish it, we may send the person who started it one reminder email; every such email has a one-click unsubscribe link.</>,
           <>Sign-in attempts (email address and IP address): failed attempts up to {RETENTION.loginFailureDays} days, successful sign-ins {RETENTION.loginSuccessDays} days.</>,
           <>Password-reset, email-confirmation and sign-in tokens: {RETENTION.expiredTokenDays} days after they expire. Team invitations: {RETENTION.closedInviteDays} days after they are accepted, revoked or expire.</>,
           <>Background job records: {RETENTION.finishedJobDays} days once finished, {RETENTION.failedJobDays} days if they failed. A finished search keeps the list of leads it found until the workspace is deleted.</>,

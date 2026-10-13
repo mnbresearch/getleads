@@ -62,6 +62,7 @@ export const AUDIT_WORDS: Record<string, string> = {
   // Credentials
   "apikey.created": "API key created",
   "apikey.revoked": "API key revoked",
+  "apikey.rotated": "API key rotated",
   "webhook.created": "Webhook added",
   "webhook.deleted": "Webhook deleted",
   "webhook.secret.rotated": "Webhook secret rotated",

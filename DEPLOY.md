@@ -451,6 +451,18 @@ On Render's free plan the API sleeps after 15 minutes without a request. While i
 
 On a paid instance (which never sleeps) set `KEEP_AWAKE=off` and disable the workflow. Rolling back to a release without this simply stops the pings.
 
+### B14. API key expiry and rotation, growth analytics, checkout reminders
+
+Migration `0023` adds three nullable columns to `api_keys` and three new tables (`product_events`, `checkout_sessions`, `email_opt_outs`). Nothing existing changes. **No new required settings.**
+
+**API keys** ([docs/API_KEYS.md](docs/API_KEYS.md)). New keys carry 256 random bits (old keys keep working). A key can be given an expiry (1-730 days) and can be rotated from Settings > API keys or `POST /v1/auth/api-keys/{id}/rotate`, with an overlap of up to 24 hours so a deployment can switch without a gap. An expired key answers 401 exactly like an unknown one.
+
+**Growth analytics** ([docs/ANALYTICS.md](docs/ANALYTICS.md)). The admin dashboard has a Growth tab: the funnel from anonymous page views through sign-up, verified, activated (first lead), checkout started and paid, with daily numbers, top sources, sign-in success and failure counts and API key use. Page views from the public site store no IP, cookie or per-visitor id and are not recorded at all when the browser sends Do Not Track or Global Privacy Control. Server events carry workspace and user ids, never an email, password, token or card detail. Kept 395 days.
+
+**Checkout reminders.** Every online checkout started is recorded; one that is not finished within `CHECKOUT_FOLLOWUP_AFTER_HOURS` (default 24) can get one reminder email to the person who started it. `CHECKOUT_FOLLOWUP` is `off` by default; `dry_run` decides and records what it would do without sending; `on` sends. It never emails an address on the do-not-contact list, a person who unsubscribed (one-click link in every reminder) or a workspace that was reminded in the last 14 days. Preview and "send test to ADMIN_EMAIL" are on the Growth tab. In Stripe, also enable the `checkout.session.expired` event on the webhook endpoint. While Stripe is not configured nothing here does anything.
+
+**Rolling back.** The previous release ignores the new tables and columns. Two consequences: an **expired key works again** (revoke keys you want dead rather than relying on expiry while rolled back), and an old key kept alive by a rotation overlap keeps working until revoked. Nothing is lost; rolling forward again picks everything up.
+
 ---
 
 ## Part C - What each key unlocks (feature map)

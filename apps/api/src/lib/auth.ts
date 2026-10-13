@@ -411,7 +411,9 @@ export async function authenticate(header: string | undefined): Promise<AuthCont
   if (looksLikeApiKey(token)) {
     return ask(async () => {
       const key = await db.query.apiKeys.findFirst({ where: eq(apiKeys.keyHash, sha256(token)) });
-      if (!key || key.revokedAt) return null;
+      // An expired key gets the same answer as an unknown or revoked one: the caller learns
+      // only that this credential does not work, not that it once did.
+      if (!key || !apiKeyUsable(key)) return null;
       const org = await db.query.organizations.findFirst({ where: eq(organizations.id, key.orgId) });
       if (!org) return null;
       void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, key.id)).catch(() => {});
@@ -498,7 +500,58 @@ export function scopeAllows(auth: AuthContext, method: string): boolean {
   return apiKeyScope(auth.apiKey) === "full" || READ_METHODS.has(method.toUpperCase());
 }
 
+/**
+ * A new API key: 32 random bytes (256 bits) after the prefix, 43 base64url characters.
+ *
+ * Keys used to carry 24 bytes. Those keep working - a key is found by the hash of the whole
+ * string, whatever its length - and nothing between the request and that lookup caps the
+ * length of a key. The visible prefix is still the first 12 characters.
+ */
 export function generateApiKey() {
-  const raw = `px_live_${randomToken(24)}`;
+  const raw = `px_live_${randomToken(32)}`;
   return { raw, prefix: raw.slice(0, 12), hash: sha256(raw) };
+}
+
+// ── API key lifecycle ──
+
+/** Bounds for `expiresInDays` when a key is created or rotated: a day to two years. */
+export const API_KEY_MIN_DAYS = 1;
+export const API_KEY_MAX_DAYS = 730;
+/** A key that expires within this many days is listed as "expiring", so it can be rotated in time. */
+export const API_KEY_EXPIRING_DAYS = 7;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export type ApiKeyStatus = "active" | "expiring" | "expired" | "revoked";
+
+/** Does this key still work: not revoked, and either no expiry or one still ahead? */
+export function apiKeyUsable(key: Pick<ApiKey, "revokedAt" | "expiresAt">, nowMs: number = Date.now()): boolean {
+  if (key.revokedAt) return false;
+  return !key.expiresAt || key.expiresAt.getTime() > nowMs;
+}
+
+/** What the settings page shows for a key. Revoked wins over expired: it was a deliberate act. */
+export function apiKeyStatus(key: Pick<ApiKey, "revokedAt" | "expiresAt">, nowMs: number = Date.now()): ApiKeyStatus {
+  if (key.revokedAt) return "revoked";
+  if (!key.expiresAt) return "active";
+  const left = key.expiresAt.getTime() - nowMs;
+  if (left <= 0) return "expired";
+  return left <= API_KEY_EXPIRING_DAYS * DAY_MS ? "expiring" : "active";
+}
+
+/** When a key made now with this policy expires; null for "never". */
+export function apiKeyExpiryFrom(expiresInDays: number | null | undefined, nowMs: number = Date.now()): Date | null {
+  return expiresInDays ? new Date(nowMs + expiresInDays * DAY_MS) : null;
+}
+
+/**
+ * The expiry of the key that replaces `old` in a rotation, when the caller did not choose one.
+ * A key that never expired is replaced by one that never expires; one that had an expiry is
+ * replaced by one with the same lifetime it was originally given, counted from now. The
+ * lifetime is kept within the bounds a new key could be given.
+ */
+export function rotatedExpiry(old: Pick<ApiKey, "createdAt" | "expiresAt">, nowMs: number = Date.now()): Date | null {
+  if (!old.expiresAt) return null;
+  const lifetime = old.expiresAt.getTime() - old.createdAt.getTime();
+  const bounded = Math.min(Math.max(lifetime, API_KEY_MIN_DAYS * DAY_MS), API_KEY_MAX_DAYS * DAY_MS);
+  return new Date(nowMs + bounded);
 }

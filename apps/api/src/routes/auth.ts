@@ -4,7 +4,8 @@ import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, apiKeys, desc, effectiveLimits, eq, getDb, isNull, limitsFor, oauthExchangeCodes, organizations, passwordResetTokens, sql, users } from "@prospex/db";
 import { env } from "../env.js";
-import { apiKeyScope, burnPasswordCheck, checkPassword, generateApiKey, hashPassword, hasUsablePassword, issueJwt, issueTwoFactorChallenge, passwordProblem, readTwoFactorChallenge, scopesFor, unusablePasswordHash } from "../lib/auth.js";
+import { API_KEY_MAX_DAYS, API_KEY_MIN_DAYS, apiKeyExpiryFrom, apiKeyScope, apiKeyStatus, apiKeyUsable, burnPasswordCheck, checkPassword, generateApiKey, hashPassword, hasUsablePassword, issueJwt, issueTwoFactorChallenge, passwordProblem, readTwoFactorChallenge, rotatedExpiry, scopesFor, unusablePasswordHash } from "../lib/auth.js";
+import { trackProduct } from "../lib/productEvents.js";
 import {
   challengeFor,
   exchangeCode,
@@ -144,11 +145,12 @@ authRoutes.post(
     const { org, user } = await db.transaction(async (tx) => {
       const [org] = await tx.insert(organizations).values({ name: orgName, slug, plan, planLimits: limitsFor(plan) }).returning();
       const [user] = await tx.insert(users).values({ orgId: org.id, email, passwordHash, name: body.name ?? "", role: "owner", lastLoginAt: new Date() }).returning();
-      await tx.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash });
+      await tx.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash, createdBy: user.id });
       return { org, user };
     });
     await emitEvent(org.id, "org.created", { orgId: org.id, email: user.email });
     await audit(c, "auth.signup", { orgId: org.id, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, data: { email: user.email, via: "password" } });
+    void trackProduct("signup", { orgId: org.id, userId: user.id, props: { method: "password" } });
     // The address that chose the password is known for the account from the start, so a
     // stranger's wrong guesses cannot lock the new owner out before their first sign-in.
     await recordAttempt(email, clientIp(c), true).catch(() => {});
@@ -240,6 +242,8 @@ authRoutes.post("/login", rateLimit({ perMinute: 20 }), rejectNul, zValidator("j
       // (address, IP, time; pruned after a day) and not in the audit log, which has no
       // workspace to show it to and would otherwise grow with every sprayed address.
       if (user) await audit(c, "auth.login", { orgId: user.orgId, actorType: "anonymous", actorUserId: null, targetType: "user", targetId: user.id, result: "failed", data: { email, reason } });
+      // Counted, not attributed: no workspace, no user and no address, only why it failed.
+      void trackProduct("login_failed", { props: { method: "password", reason } });
       throw new ApiError(401, "Invalid email or password", "invalid_credentials");
     }
     const needsCode = twoFactorEnabled(user);
@@ -265,6 +269,7 @@ authRoutes.post("/login", rateLimit({ perMinute: 20 }), rejectNul, zValidator("j
     await recordAttempt(email, ip, true);
     await audit(c, "auth.login", { orgId: user.orgId, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, result: "ok", data: { email, via: "password", ...(newAddress ? { newAddress: true } : {}) } });
     if (newAddress) void notifySecurity(user, "new_signin", { ip, method: "your password" });
+    void trackProduct("login_succeeded", { orgId: user.orgId, userId: user.id, props: { method: "password" } });
     return c.json(session);
   });
 });
@@ -316,6 +321,7 @@ authRoutes.post("/2fa/verify", rateLimit({ perMinute: 20, name: "2fa-verify" }),
     if (!method) {
       await recordAttempt(email, ip, false);
       await audit(c, "auth.2fa_failed", { orgId: user.orgId, actorType: "anonymous", actorUserId: null, targetType: "user", targetId: user.id, result: "failed", data: { email, during: "auth.login" } });
+      void trackProduct("login_failed", { props: { method: "password+2fa", reason: "wrong_code" } });
       throw new ApiError(401, "That code is not correct. Enter the current 6-digit code from your authenticator app, or a recovery code you have not used yet.", "invalid_2fa_code");
     }
     let session;
@@ -330,6 +336,7 @@ authRoutes.post("/2fa/verify", rateLimit({ perMinute: 20, name: "2fa-verify" }),
     await recordAttempt(email, ip, true);
     await audit(c, "auth.login", { orgId: user.orgId, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, result: "ok", data: { email, via: "password+2fa", secondFactor: method, ...(newAddress ? { newAddress: true } : {}) } });
     if (newAddress) void notifySecurity(user, "new_signin", { ip, method: "your password and a code" });
+    void trackProduct("login_succeeded", { orgId: user.orgId, userId: user.id, props: { method: "password+2fa" } });
     // A recovery code is a spare key: say how many are left, so the last one is not a surprise.
     const extra = method === "recovery" ? { usedRecoveryCode: true, recoveryCodesLeft: await recoveryCodesLeft(user.id).catch(() => 0) } : {};
     return c.json({ ...session, ...extra });
@@ -438,6 +445,7 @@ authRoutes.post("/verify/confirm", rateLimit({ perMinute: 20, name: "verify-conf
   const user = await confirmVerificationToken(c.req.valid("json").token);
   if (!user) throw new ApiError(400, "This confirmation link is invalid or has expired. Sign in and send a new one from the banner at the top of the app.", "invalid_verification_token");
   await audit(c, "auth.email_verified", { orgId: user.orgId, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, data: { email: user.email, via: "link" } });
+  void trackProduct("email_verified", { orgId: user.orgId, userId: user.id, props: { method: "link" } });
   return c.json({ ok: true });
 });
 
@@ -717,11 +725,12 @@ authRoutes.get("/google/callback", rateLimit({ perMinute: 30 }), async (c) => {
       .values({ orgId: org.id, email: identity.email, passwordHash: unusable, name: (identity.name || "").replace(/\u0000/g, ""), role: "owner", lastLoginAt: new Date(), googleSub: identity.sub, emailVerifiedAt: new Date() })
       .returning();
     const key = generateApiKey();
-    await db.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash });
+    await db.insert(apiKeys).values({ orgId: org.id, name: "Default", prefix: key.prefix, keyHash: key.hash, createdBy: user.id });
     await emitEvent(org.id, "org.created", { orgId: org.id, email: user.email, via: "google" });
     created = true;
     countSignup(clientIp(c));
     await audit(c, "auth.signup", { orgId: org.id, actorType: "user", actorUserId: user.id, targetType: "user", targetId: user.id, data: { email: user.email, via: "google" } });
+    void trackProduct("signup", { orgId: org.id, userId: user.id, props: { method: "google" } });
   } else {
     await db.update(users).set({ lastLoginAt: new Date(), ...(user.name ? {} : { name: (identity.name || "").replace(/\u0000/g, "") }) }).where(eq(users.id, user.id));
   }
@@ -795,6 +804,7 @@ authRoutes.post("/google/exchange", rateLimit({ perMinute: 30, name: "google-exc
   const newAddress = await isNewAddressFor(user.email, ip).catch(() => false);
   await recordAttempt(user.email, ip, true).catch(() => {});
   if (newAddress) void notifySecurity(user, "new_signin", { ip, method: "Google" });
+  void trackProduct("login_succeeded", { orgId: user.orgId, userId: user.id, props: { method: "google" } });
   return c.json(session);
 });
 
@@ -858,20 +868,46 @@ authRoutes.patch("/org", requireAuth, requireUser, requireRole("owner", "admin")
 });
 
 // ── API keys ──
+
+/** One key as the list (and create/rotate) describe it. Never the key itself or its hash. */
+function publicApiKey(k: typeof apiKeys.$inferSelect, nowMs = Date.now()) {
+  return {
+    id: k.id,
+    name: k.name,
+    prefix: k.prefix,
+    scope: apiKeyScope(k),
+    scopes: k.scopes,
+    lastUsedAt: k.lastUsedAt,
+    revokedAt: k.revokedAt,
+    createdAt: k.createdAt,
+    expiresAt: k.expiresAt ?? null,
+    rotatedFromId: k.rotatedFromId ?? null,
+    status: apiKeyStatus(k, nowMs),
+  };
+}
+
 authRoutes.get("/api-keys", requireAuth, requireUser, async (c) => {
   const { db } = getDb();
   const rows = await db.select().from(apiKeys).where(eq(apiKeys.orgId, c.get("auth").org.id)).orderBy(desc(apiKeys.createdAt));
   // `scope` is what the settings page shows ("full" or "read"); `scopes` is the stored list, kept for older clients.
-  return c.json({ apiKeys: rows.map((k) => ({ id: k.id, name: k.name, prefix: k.prefix, scope: apiKeyScope(k), scopes: k.scopes, lastUsedAt: k.lastUsedAt, revokedAt: k.revokedAt, createdAt: k.createdAt })) });
+  // `status` is "active", "expiring" (within 7 days), "expired" or "revoked".
+  const now = Date.now();
+  return c.json({ apiKeys: rows.map((k) => publicApiKey(k, now)) });
 });
+
+/** Days until a new key expires: 1 to 730, or left out (or null) for a key that never expires. */
+const expiresInDaysField = z.number().int().min(API_KEY_MIN_DAYS).max(API_KEY_MAX_DAYS).nullable().optional();
 
 /**
  * `scope`: "full" (the default, and what every key created before scopes existed is) or
  * "read". A read key may only make GET and HEAD requests; anything else is refused with
  * 403 `insufficient_scope` (see requireAuth). For a dashboard, a report script or an
  * integration that only ever reads, a leaked read key cannot change or delete anything.
+ *
+ * `expiresInDays` (1-730) makes a key that stops working on its own; without it the key
+ * works until it is revoked, as every key always has.
  */
-authRoutes.post("/api-keys", requireAuth, requireUser, requireRole("owner", "admin"), zValidator("json", z.object({ name: text(60, 1), scope: z.enum(["full", "read"]).default("full") })), async (c) => {
+authRoutes.post("/api-keys", requireAuth, requireUser, requireRole("owner", "admin"), zValidator("json", z.object({ name: text(60, 1), scope: z.enum(["full", "read"]).default("full"), expiresInDays: expiresInDaysField })), async (c) => {
   const { db } = getDb();
   const a = c.get("auth");
   const b = c.req.valid("json");
@@ -879,13 +915,112 @@ authRoutes.post("/api-keys", requireAuth, requireUser, requireRole("owner", "adm
   // ones it already revoked.
   await assertActiveApiKeyCap(db, a.org.id);
   const key = generateApiKey();
-  const [row] = await db.insert(apiKeys).values({ orgId: a.org.id, name: b.name, prefix: key.prefix, keyHash: key.hash, scopes: scopesFor(b.scope) }).returning();
+  const expiresAt = apiKeyExpiryFrom(b.expiresInDays);
+  const [row] = await db.insert(apiKeys).values({ orgId: a.org.id, name: b.name, prefix: key.prefix, keyHash: key.hash, scopes: scopesFor(b.scope), expiresAt, createdBy: a.user!.id }).returning();
   const scope = apiKeyScope(row);
   // The prefix identifies the key in the list; the key itself is never logged.
-  await audit(c, "apikey.created", { targetType: "api_key", targetId: row.id, data: { name: row.name, prefix: row.prefix, scope } });
+  await audit(c, "apikey.created", { targetType: "api_key", targetId: row.id, data: { name: row.name, prefix: row.prefix, scope, expiresAt: row.expiresAt ?? null } });
   void notifySecurity(a.user, "api_key_created", { ip: clientIp(c), keyName: row.name, keyPrefix: row.prefix, keyScope: scope });
-  return c.json({ id: row.id, name: row.name, prefix: row.prefix, scope, key: key.raw, note: "Store this key now; it is not shown again." }, 201);
+  void trackProduct("api_key_created", { orgId: a.org.id, userId: a.user!.id, props: { scope, kind: "created" } });
+  return c.json({ id: row.id, name: row.name, prefix: row.prefix, scope, expiresAt: row.expiresAt ?? null, key: key.raw, note: "Store this key now; it is not shown again." }, 201);
 });
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Replace a key with a new one that has the same name and access.
+ *
+ * `overlapMinutes` (0-1440, default 0) is how long the old key keeps working, so a deployment
+ * can switch over without a moment where neither works; 0 revokes it at once. An overlap never
+ * extends a key: if it was due to expire sooner, it still does.
+ *
+ * The new key's expiry is `expiresInDays` when given; otherwise it follows the old key's
+ * policy - never, if the old key never expired, or the same lifetime the old key was given,
+ * counted from now.
+ *
+ * Only a working key can be rotated (a revoked or expired one answers 409), and only once
+ * while its replacement is live, so a double-click does not leave two new keys behind. The
+ * new key is shown in this answer and never again, like a created one.
+ *
+ * Not refused at the workspace's key limit: the old key is retired by the same request, so the
+ * number of keys in use does not grow (beyond the overlap, which ends on its own).
+ */
+authRoutes.post(
+  "/api-keys/:id/rotate",
+  requireAuth,
+  requireUser,
+  requireRole("owner", "admin"),
+  rateLimit({ perMinute: 30, name: "api-key-rotate" }),
+  zValidator("json", z.object({ overlapMinutes: z.number().int().min(0).max(1440).default(0), expiresInDays: expiresInDaysField })),
+  async (c) => {
+    const { db } = getDb();
+    const a = c.get("auth");
+    const b = c.req.valid("json");
+    const id = c.req.param("id");
+    // A malformed id is simply a key that is not here, like another workspace's key.
+    if (!UUID_RE.test(id)) throw notFound("API key");
+    const fresh = generateApiKey();
+    const { old, row, worksUntil } = await db.transaction(async (tx) => {
+      // Locked for the rest of the transaction: two rotations of one key run one after the other.
+      const [old] = await tx.select().from(apiKeys).where(and(eq(apiKeys.id, id), eq(apiKeys.orgId, a.org.id))).for("update");
+      if (!old) throw notFound("API key");
+      const now = Date.now();
+      if (!apiKeyUsable(old, now)) throw new ApiError(409, "Only a key that still works can be rotated. Create a new key instead.", "api_key_not_active");
+      const [successor] = await tx
+        .select({ id: apiKeys.id })
+        .from(apiKeys)
+        .where(and(eq(apiKeys.orgId, a.org.id), eq(apiKeys.rotatedFromId, old.id), isNull(apiKeys.revokedAt)))
+        .limit(1);
+      if (successor) throw new ApiError(409, "This key has already been rotated. Use its replacement, or revoke the replacement first.", "api_key_already_rotated");
+      // A key rotated before with an overlap carries the overlap's end as its expiry, which
+      // says nothing about its policy. If an earlier (since revoked) replacement exists, it
+      // holds the policy the key was rotated under; follow that instead.
+      const [earlier] = await tx
+        .select({ createdAt: apiKeys.createdAt, expiresAt: apiKeys.expiresAt })
+        .from(apiKeys)
+        .where(and(eq(apiKeys.orgId, a.org.id), eq(apiKeys.rotatedFromId, old.id)))
+        .orderBy(desc(apiKeys.createdAt))
+        .limit(1);
+      const expiresAt = b.expiresInDays ? apiKeyExpiryFrom(b.expiresInDays, now) : rotatedExpiry(earlier ?? old, now);
+      const [row] = await tx
+        .insert(apiKeys)
+        .values({ orgId: a.org.id, name: old.name, prefix: fresh.prefix, keyHash: fresh.hash, scopes: old.scopes, expiresAt, rotatedFromId: old.id, createdBy: a.user!.id })
+        .returning();
+      let worksUntil: Date | null = null;
+      if (b.overlapMinutes === 0) {
+        await tx.update(apiKeys).set({ revokedAt: new Date(now) }).where(eq(apiKeys.id, old.id));
+      } else {
+        const overlapEnd = now + b.overlapMinutes * 60_000;
+        worksUntil = old.expiresAt && old.expiresAt.getTime() < overlapEnd ? old.expiresAt : new Date(overlapEnd);
+        await tx.update(apiKeys).set({ expiresAt: worksUntil }).where(eq(apiKeys.id, old.id));
+      }
+      return { old, row, worksUntil };
+    });
+    const scope = apiKeyScope(row);
+    // Prefixes only, as for a created key.
+    await audit(c, "apikey.rotated", {
+      targetType: "api_key",
+      targetId: row.id,
+      data: { name: row.name, prefix: row.prefix, previousId: old.id, previousPrefix: old.prefix, scope, overlapMinutes: b.overlapMinutes, expiresAt: row.expiresAt ?? null },
+    });
+    void notifySecurity(a.user, "api_key_created", { ip: clientIp(c), keyName: row.name, keyPrefix: row.prefix, keyScope: scope });
+    void trackProduct("api_key_created", { orgId: a.org.id, userId: a.user!.id, props: { scope, kind: "rotated" } });
+    return c.json(
+      {
+        id: row.id,
+        name: row.name,
+        prefix: row.prefix,
+        scope,
+        expiresAt: row.expiresAt ?? null,
+        rotatedFromId: old.id,
+        key: fresh.raw,
+        previous: { id: old.id, prefix: old.prefix, revoked: b.overlapMinutes === 0, worksUntil },
+        note: "Store this key now; it is not shown again.",
+      },
+      201,
+    );
+  },
+);
 
 authRoutes.delete("/api-keys/:id", requireAuth, requireUser, requireRole("owner", "admin"), async (c) => {
   const { db } = getDb();

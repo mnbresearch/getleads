@@ -380,6 +380,9 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "GET /v1/auth/google/start": pub(),
     "GET /v1/auth/google/callback": pub(),
     "POST /v1/auth/join": pub(),
+    "POST /v1/public/pv": pub("anonymous page-view counter, stores no identifier; covered by analytics.product.test.ts"),
+    "GET /v1/public/email-opt-out": pub("HMAC-signed unsubscribe link; covered by checkout.followup.test.ts"),
+    "POST /v1/public/email-opt-out": pub("RFC 8058 one-click, HMAC-signed; covered by checkout.followup.test.ts"),
     "POST /v1/auth/join/check": pub("answers only to the holder of an invite link, changes nothing, never says whether an email has an account; covered by fixes.final.test.ts"),
     "POST /v1/auth/google/exchange": pub("one-time code exchange; covered by security.auth.test.ts"),
     "POST /v1/auth/2fa/verify": pub("second step of a two-factor sign-in; covered by security.account.test.ts"),
@@ -418,6 +421,10 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "POST /v1/admin/orgs/:id/users/:userId/reset-2fa": { cls: "admin", cases: [X("reset A's two-factor", `/v1/admin/orgs/${a.org}/users/${a.owner}/reset-2fa`, {})] },
     "GET /v1/admin/audit-log": { cls: "admin", cases: [X("customer credential", "/v1/admin/audit-log")] },
     "GET /v1/admin/security/summary": { cls: "admin", cases: [X("customer credential", "/v1/admin/security/summary")] },
+    "GET /v1/admin/analytics/funnel": { cls: "admin", cases: [X("customer credential", "/v1/admin/analytics/funnel?days=30")] },
+    "GET /v1/admin/checkouts": { cls: "admin", cases: [X("customer credential", "/v1/admin/checkouts")] },
+    "POST /v1/admin/checkout-followup/preview": { cls: "admin", cases: [X("customer credential", "/v1/admin/checkout-followup/preview", {})] },
+    "POST /v1/admin/checkout-followup/test": { cls: "admin", cases: [X("customer credential", "/v1/admin/checkout-followup/test", {})] },
     "GET /v1/admin/suppressions": { cls: "admin", cases: [X("customer credential", "/v1/admin/suppressions")] },
     "POST /v1/admin/suppressions": { cls: "admin", cases: [X("customer credential", "/v1/admin/suppressions", { email: `blocked-${A.tag}@example.com` })] },
     "DELETE /v1/admin/suppressions/:id": { cls: "admin", cases: [X("customer credential", `/v1/admin/suppressions/${randomUUID()}`)] },
@@ -440,6 +447,7 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     "GET /v1/auth/api-keys": list("/v1/auth/api-keys"),
     "POST /v1/auth/api-keys": noref("mints a key for the caller's own org; role gate covered by security.auth.test.ts"),
     "DELETE /v1/auth/api-keys/:id": E("path :id", X("revoke A's key", `/v1/auth/api-keys/${a.apiKey}`)),
+    "POST /v1/auth/api-keys/:id/rotate": E("path :id", X("rotate A's key", `/v1/auth/api-keys/${a.apiKeyId}/rotate`, { overlapMinutes: 0 })),
 
     // ── workspace export / deletion (owner session only, re-confirmed; security.data.test.ts) ──
     // The export is the caller's own workspace and nothing else. B's owner really runs one

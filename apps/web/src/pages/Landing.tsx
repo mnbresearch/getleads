@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { HeroDemo } from "../components/HeroDemo";
@@ -11,6 +11,7 @@ import { DemoVideo } from "../components/DemoVideo";
 const HAS_DEMO_VIDEO = !!((import.meta.env.VITE_DEMO_VIDEO_ID as string | undefined) ?? "");
 import { FAQS } from "../content/faq";
 import { apiFetch } from "../lib/api";
+import { sendPageView, sendPageViewWhenSeen } from "../lib/pageview";
 
 /**
  * Landing page.
@@ -218,6 +219,9 @@ function PricingSection() {
    * where a stranger forms their first impression.
    */
   const [unreachable, setUnreachable] = useState(false);
+  // Counted once, when the section is actually on screen (lib/pageview.ts: no identifier).
+  const sectionRef = useRef<HTMLElement>(null);
+  useEffect(() => sendPageViewWhenSeen(sectionRef.current, "/pricing"), []);
   useEffect(() => {
     apiFetch<{ plans: Plan[] }>("GET", "/v1/billing/plans")
       .then((r) => setPlans(r.plans.filter((p) => p.id !== "pilot").sort((a, b) => PLAN_ORDER.indexOf(a.id) - PLAN_ORDER.indexOf(b.id))))
@@ -228,7 +232,7 @@ function PricingSection() {
   }, []);
 
   return (
-    <section id="pricing" className="pb-24 pt-8 scroll-mt-24">
+    <section id="pricing" ref={sectionRef} className="pb-24 pt-8 scroll-mt-24">
       <div className="mx-auto max-w-2xl text-center">
         <span className="badge border border-black/10 bg-black/5 text-ink-300">Pricing</span>
         <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Simple pricing, real leads</h2>
@@ -305,6 +309,7 @@ function PricingSection() {
 }
 
 export function LandingPage() {
+  useEffect(() => sendPageView("/"), []);
   return (
     <div className="min-h-screen overflow-x-hidden">
       <header className="sticky top-0 z-50 border-b border-black/5 bg-cream/80 backdrop-blur">

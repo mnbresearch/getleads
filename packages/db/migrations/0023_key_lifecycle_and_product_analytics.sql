@@ -17,7 +17,7 @@
 --    finished can be noticed and, if the operator turns it on, followed up once by email.
 --    `email_opt_outs` records a person's "don't send me these" per kind of email.
 --
--- Everything here is additive: three nullable columns and four new tables. The previous
+-- Everything here is additive: three nullable columns and three new tables. The previous
 -- release ignores all of it (it does not know about expiry, so an expired key works again
 -- after a rollback - see DEPLOY.md B14).
 
@@ -26,6 +26,8 @@ SET LOCAL lock_timeout = '15s';
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS expires_at timestamptz;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS rotated_from_id uuid REFERENCES api_keys(id) ON DELETE SET NULL;
 ALTER TABLE api_keys ADD COLUMN IF NOT EXISTS created_by uuid REFERENCES users(id) ON DELETE SET NULL;
+CREATE INDEX IF NOT EXISTS api_keys_rotated_from_idx ON api_keys (rotated_from_id) WHERE rotated_from_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS api_keys_created_by_idx ON api_keys (created_by) WHERE created_by IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS product_events (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -44,6 +46,8 @@ CREATE TABLE IF NOT EXISTS product_events (
 CREATE INDEX IF NOT EXISTS product_events_name_time_idx ON product_events (name, created_at);
 CREATE INDEX IF NOT EXISTS product_events_time_idx ON product_events (created_at);
 CREATE INDEX IF NOT EXISTS product_events_org_idx ON product_events (org_id, created_at) WHERE org_id IS NOT NULL;
+-- Deleting a user sets user_id to NULL here; without an index that scans the whole table.
+CREATE INDEX IF NOT EXISTS product_events_user_idx ON product_events (user_id) WHERE user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS checkout_sessions (
   id                   uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -61,7 +65,9 @@ CREATE TABLE IF NOT EXISTS checkout_sessions (
   followup_at          timestamptz
 );
 CREATE INDEX IF NOT EXISTS checkout_sessions_org_idx ON checkout_sessions (org_id, created_at);
-CREATE INDEX IF NOT EXISTS checkout_sessions_open_idx ON checkout_sessions (created_at) WHERE status = 'open' AND followup_status IS NULL;
+-- What the hourly follow-up reads: open or expired sessions not yet decided.
+CREATE INDEX IF NOT EXISTS checkout_sessions_due_idx ON checkout_sessions (created_at) WHERE followup_status IS NULL;
+CREATE INDEX IF NOT EXISTS checkout_sessions_user_idx ON checkout_sessions (user_id) WHERE user_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS email_opt_outs (
   user_id     uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,

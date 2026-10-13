@@ -42,6 +42,17 @@ export const RETENTION = {
   playCandidateDays: 180,
 } as const;
 
+/**
+ * The platform's own product analytics (migration 0023), kept apart from RETENTION because
+ * that object is mirrored line for line in the Privacy Policy. Page views in product_events
+ * carry no identifier; the rest carry workspace and user ids only. A checkout session is kept
+ * a little longer than the events, so a funnel window never points at a session already gone.
+ */
+export const PRODUCT_RETENTION = {
+  productEventDays: 395,
+  checkoutSessionDays: 400,
+} as const;
+
 const STATEMENT_MS = 120_000;
 const BATCH = 10_000;
 const MAX_BATCHES = 30;
@@ -142,6 +153,16 @@ export async function runRetention(db: Db): Promise<RetentionReport> {
   // ── Logs ──
   await step("deleted", "audit log", async (tx) => counted(await tx.execute(sql`DELETE FROM audit_log WHERE id IN (SELECT id FROM audit_log WHERE created_at < now() - ${days(RETENTION.auditLogDays)} LIMIT ${BATCH})`)), { repeat: true });
   await step("deleted", "upgrade requests", async (tx) => counted(await tx.execute(sql`DELETE FROM upgrade_requests WHERE status IN ('converted', 'dismissed') AND created_at < now() - ${days(RETENTION.closedUpgradeRequestDays)}`)));
+
+  // ── Product analytics ──
+  await step("deleted", "product events", async (tx) =>
+    counted(await tx.execute(sql`DELETE FROM product_events WHERE id IN (SELECT id FROM product_events WHERE created_at < now() - ${days(PRODUCT_RETENTION.productEventDays)} LIMIT ${BATCH})`)),
+    { repeat: true },
+  );
+  await step("deleted", "checkout sessions", async (tx) =>
+    counted(await tx.execute(sql`DELETE FROM checkout_sessions WHERE id IN (SELECT id FROM checkout_sessions WHERE created_at < now() - ${days(PRODUCT_RETENTION.checkoutSessionDays)} LIMIT ${BATCH})`)),
+    { repeat: true },
+  );
 
   // ── Plays ──
   // People a play found who were never approved are not kept indefinitely: a candidate is

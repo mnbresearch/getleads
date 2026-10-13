@@ -37,7 +37,7 @@ import { wireToolMeter } from "./lib/toolMeter.js";
 
 /** Query parameters whose VALUE is a credential (or stands in for one) and must never be logged. */
 const SECRET_QUERY_KEYS = new Set([
-  "token", "u", "code", "state", "key", "api_key", "apikey", "cv", "verifier", "access_token", "id_token", "refresh_token", "secret", "password", "signature", "sig", "authorization", "x-internal-token", "x-admin-token", "x-api-key",
+  "token", "u", "s", "code", "state", "key", "api_key", "apikey", "cv", "verifier", "access_token", "id_token", "refresh_token", "secret", "password", "signature", "sig", "authorization", "x-internal-token", "x-admin-token", "x-api-key",
 ]);
 /**
  * Query parameters whose VALUE can be a person's address or name: the look-ups and search

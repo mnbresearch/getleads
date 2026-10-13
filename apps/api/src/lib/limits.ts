@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { and, apiKeys, count, eq, getDb, isNull, jobOpenTotalCap, jobOpenTypeCap, openJobCount, sql, type Db } from "@prospex/db";
+import { and, apiKeys, count, eq, getDb, gt, isNull, or, jobOpenTotalCap, jobOpenTypeCap, openJobCount, sql, type Db } from "@prospex/db";
 import { ApiError } from "./errors.js";
 
 /**
@@ -317,7 +317,7 @@ export async function assertActiveApiKeyCap(db: Db, orgId: string): Promise<void
   const mine = reserve(key, 1);
   let n: number;
   try {
-    const [r] = await db.select({ n: count() }).from(apiKeys).where(and(eq(apiKeys.orgId, orgId), isNull(apiKeys.revokedAt)));
+    const [r] = await db.select({ n: count() }).from(apiKeys).where(and(eq(apiKeys.orgId, orgId), isNull(apiKeys.revokedAt), or(isNull(apiKeys.expiresAt), gt(apiKeys.expiresAt, new Date()))));
     n = Number(r.n);
   } catch (e) {
     release(key, mine);

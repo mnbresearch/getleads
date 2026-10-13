@@ -1,4 +1,5 @@
 import { and, autopilots, campaigns, companies, consume, drainJobs, enqueue, eq, events, getDb, icps, inArray, integrations, jobs, leads, lists, monitors, ne, organizations, plays, reapStaleJobs, remainingPremiumBudget, savedSearches, searches, signalSubscriptions, sql as dsql, type Db, type Job, type JobHandler, visibilityPrompts, visits, webhooks } from "@prospex/db";
+import { checkoutFollowupJob } from "./services/checkoutFollowup.js";
 import { buildIcpWithAi, clampLeadQuery, crawlCompanyWebsite, createAiProviderForPlan, fetchPublic, findEmail, parseHttpUrl, redact, runLeadPipelineDetailed, scoreLeadRules, verifyEmail, type CompanyProfile, type IcpCriteria } from "@prospex/core";
 import { env } from "./env.js";
 import { orgMemberEmail } from "./lib/members.js";
@@ -128,6 +129,8 @@ export const RECURRING_JOBS: Record<string, number> = {
   "autopilots.tick": 3600_000,
   // Hourly: starts the plays whose own interval (6 hours to 30 days) has come round.
   "plays.tick": 3600_000,
+  // Hourly: one reminder per abandoned checkout when CHECKOUT_FOLLOWUP is on (services/checkoutFollowup.ts).
+  "checkout.followup": 3600_000,
   // Daily. A job change is a slow event and each check costs a provider call, so scanning
   // more often would spend credits to learn the same thing.
   "jobchanges.tick": 24 * 3600_000,
@@ -1136,6 +1139,7 @@ export const handlers: Record<string, JobHandler> = {
   },
 
   /** Scheduler: hourly, start the plays that are due (active plays of active workspaces, at most 50 a tick). */
+  "checkout.followup": async (job, ctx) => withReschedule(ctx.db, job, "checkout.followup", () => checkoutFollowupJob()),
   "plays.tick": async (job, ctx) => {
     return withReschedule(ctx.db, job, "plays.tick", () => tickPlays());
   },

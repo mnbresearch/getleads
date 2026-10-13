@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, Navigate, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { apiFetch, auth, consumeReturnPath, sessionExpiredNotice, unreadableAnswer } from "../lib/api";
 import { googleStartUrl } from "../lib/googleSignIn";
+import { sendPageView } from "../lib/pageview";
 import { Logo, BRAND_NAME, BRAND_TAGLINE } from "../components/Logo";
 import { TwoFactorStep, twoFactorChallenge } from "../components/TwoFactorStep";
 
@@ -44,6 +45,11 @@ export function AuthPage({ mode }: { mode: "login" | "signup" }) {
   // Set once the password has been accepted for an account with two-factor on: the server
   // has not signed anyone in yet, and holds this sign-in open for a few minutes.
   const [challenge, setChallenge] = useState<string | null>(null);
+
+  // The sign-up page is a funnel step; sign-in is not (lib/pageview.ts: no identifier).
+  useEffect(() => {
+    if (mode === "signup") sendPageView("/signup");
+  }, [mode]);
 
   // The Google button only appears when the server actually has OAuth credentials. A button
   // that leads to "not configured" is worse than no button.

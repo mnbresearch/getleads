@@ -1,9 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link, NavLink, Route, Routes, useNavigate } from "react-router-dom";
-import { API_URL, apiFetch, auth, fmtDate, expectLists } from "../lib/api";
+import { apiFetch, auth, fmtDate, expectLists } from "../lib/api";
 import { limitLabel, metricLabel } from "../lib/metrics";
 import { rememberMe, useMe } from "../lib/me";
-import { EXTERNAL_REL } from "../lib/safeHref";
 import { DeleteButton, LoadError, Page, Spinner, useToast } from "../components/ui";
 import { plural, pluralWord } from "../lib/plural";
 import { integrationName } from "../lib/integrations";
@@ -12,6 +11,7 @@ import { AuditResult, auditEntryLabel, auditReason, auditWho, type AuditEntry } 
 import { TwoFactorCard } from "../components/TwoFactorCard";
 import { WorkspaceData } from "../components/WorkspaceData";
 import { WorkspacePrivacy } from "../components/WorkspacePrivacy";
+import { ApiKeysPanel } from "../components/settings/ApiKeys";
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
 function MembersNote({ what }: { what: string }) {
@@ -198,123 +198,11 @@ function Sessions() {
   );
 }
 
-/** What a listed key may do. Only an explicit "read" is read-only; anything else is the full key it always was. */
-function keyScope(k: { scope?: string | null; scopes?: string[] | null }): "read" | "full" {
-  if (k.scope === "read") return "read";
-  if (k.scope) return "full";
-  return Array.isArray(k.scopes) && k.scopes.length > 0 && !k.scopes.includes("*") && k.scopes.every((x) => x === "read") ? "read" : "full";
-}
-
+/** The API keys tab. The panel itself (create, rotate, revoke) is in components/settings/ApiKeys.tsx. */
 function ApiKeys() {
-  // `scope` (newer servers) or `scopes` (the stored list) says what a key may do; a key from
-  // before scopes existed has neither and is a full-access key.
-  const [keys, setKeys] = useState<{ id: string; name: string; prefix: string; lastUsedAt: string | null; revokedAt: string | null; createdAt: string; scope?: string | null; scopes?: string[] | null }[]>([]);
-  const [newName, setNewName] = useState("Agent");
-  const [newScope, setNewScope] = useState<"full" | "read">("full");
-  const [formOpen, setFormOpen] = useState(false);
-  const [freshScope, setFreshScope] = useState<"full" | "read" | null>(null);
-  const [fresh, setFresh] = useState<string | null>(null);
-  const { toast, Toast } = useToast();
-  // A second click created a second key and only ever displayed the second one. The first
-  // is shown once by the server and then unrecoverable, so a double-click silently minted a
-  // live credential nobody would ever see again.
-  const [creating, setCreating] = useState(false);
-  const [loadErr, setLoadErr] = useState<string | null>(null);
-  const [loaded, setLoaded] = useState(false);
   const { canManage } = useMe();
-  const load = () => apiFetch<{ apiKeys: typeof keys }>("GET", "/v1/auth/api-keys").then((r) => { setKeys(expectLists(r, "apiKeys").apiKeys); setLoadErr(null); setLoaded(true); }).catch((e) => setLoadErr((e as Error).message));
-  useEffect(() => { if (canManage) load(); }, [canManage]); // eslint-disable-line react-hooks/exhaustive-deps
-  const revoke = async (k: { id: string; name: string; prefix: string }) => {
-    if (!confirm(`Revoke the API key "${k.name}" (${k.prefix}…)?\n\nAnything using it - agents, scripts, the MCP server - stops working immediately. This cannot be undone.`)) return;
-    try {
-      await apiFetch("DELETE", `/v1/auth/api-keys/${k.id}`);
-      toast("Key revoked");
-      load();
-    } catch (e) { toast((e as Error).message, "err"); }
-  };
-  const create = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const name = newName.trim();
-    if (creating || !name) return;
-    setCreating(true);
-    try {
-      // "full" is what the server assumes when no scope is sent, so an older server that has
-      // never heard of scopes still gets a request it understands for the default choice.
-      const r = await apiFetch<{ key: string; scope?: unknown }>("POST", "/v1/auth/api-keys", newScope === "read" ? { name, scope: "read" } : { name });
-      // Asked for read-only and the server did not say it made one: it is an older server
-      // that ignored the choice, and the key in hand can do everything. Say so, loudly.
-      const made = r.scope === "read" || r.scope === "full" ? r.scope : newScope === "read" ? null : "full";
-      setFresh(r.key);
-      setFreshScope(made);
-      if (made === null) toast("This key was created, but the server could not confirm it is read-only. Treat it as a full-access key, or revoke it.", "err");
-      setFormOpen(false);
-      setNewName("Agent");
-      setNewScope("full");
-      load();
-    } catch (x) { toast((x as Error).message, "err"); } finally { setCreating(false); }
-  };
   if (!canManage) return <MembersNote what="API keys" />;
-  return (
-    <div className="space-y-4">
-      {Toast}
-      <div className="card p-5">
-        <div className="mb-2 flex flex-wrap items-center justify-between gap-2"><div className="font-medium">API keys</div>{!formOpen && <button className="btn-primary" disabled={creating} onClick={() => setFormOpen(true)}>Create key</button>}</div>
-        {formOpen && (
-          <form onSubmit={create} className="mb-3 space-y-3 rounded-lg border border-black/10 bg-black/[0.02] p-3" data-testid="apikey-form">
-            <div>
-              <label className="label" htmlFor="apikey-name">Key name</label>
-              <input id="apikey-name" className="input max-w-sm" autoFocus maxLength={80} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="What will use this key?" />
-            </div>
-            <fieldset>
-              <legend className="label">Access</legend>
-              <div className="flex flex-col gap-1 text-sm sm:flex-row sm:gap-5">
-                <label className="flex min-h-[40px] items-center gap-2"><input type="radio" name="apikey-scope" checked={newScope === "full"} onChange={() => setNewScope("full")} /> Full access</label>
-                <label className="flex min-h-[40px] items-center gap-2"><input type="radio" name="apikey-scope" checked={newScope === "read"} onChange={() => setNewScope("read")} /> Read-only</label>
-              </div>
-              <p className="text-xs text-ink-400">{newScope === "read" ? "Read-only: the key can look things up (leads, campaigns, analytics) but cannot create, change, send or delete anything." : "Full access: the key can do everything you can through the API - find and change leads, run campaigns, send email."}</p>
-            </fieldset>
-            <div className="flex flex-wrap gap-2">
-              <button className="btn-primary" disabled={creating || !newName.trim()}>{creating ? "Creating…" : "Create key"}</button>
-              <button type="button" className="btn-secondary" disabled={creating} onClick={() => setFormOpen(false)}>Cancel</button>
-            </div>
-          </form>
-        )}
-        {fresh && <div className="mb-3 rounded-lg bg-black p-3 text-xs text-emerald-400"><div className="mb-1 flex items-center justify-between gap-2 text-white/85"><span>{freshScope === "read" ? "Read-only key - copy now, shown once:" : freshScope === "full" ? "Full-access key - copy now, shown once:" : "Copy now - shown once:"}</span><button type="button" className="rounded bg-white/10 px-2 py-0.5 text-white hover:bg-white/20" onClick={() => copyText(fresh, toast)}>Copy</button></div><code className="break-all">{fresh}</code></div>}
-        {loadErr && !loaded && <LoadError message={loadErr} onRetry={load} />}
-        {/* On a phone the six-column table pushed "Revoke" off the side of the screen; there
-            each key is a card with everything, Revoke included, in view. */}
-        {loaded && keys.length > 0 && (
-          <ul className="divide-y divide-black/5 sm:hidden" data-testid="apikey-cards">
-            {keys.map((k) => (
-              <li key={k.id} className={`flex items-start justify-between gap-3 py-3 ${k.revokedAt ? "opacity-50" : ""}`}>
-                <div className="min-w-0 text-sm">
-                  <div className="font-medium text-ink-50 [overflow-wrap:anywhere]">{k.name}</div>
-                  <div className="mt-1 flex flex-wrap items-center gap-2">
-                    {keyScope(k) === "read" ? <span className="badge whitespace-nowrap bg-sky-50 text-sky-800">Read-only</span> : <span className="badge whitespace-nowrap bg-black/[0.05] text-ink-300">Full access</span>}
-                    <span className="font-mono text-xs text-ink-300">{k.prefix}…</span>
-                    {k.revokedAt && <span className="text-xs text-ink-400">Revoked</span>}
-                  </div>
-                  <div className="mt-1 text-xs text-ink-400">Last used {k.lastUsedAt ? fmtDate(k.lastUsedAt) : "never"} · created {fmtDate(k.createdAt)}</div>
-                </div>
-                {!k.revokedAt && <button className="inline-flex min-h-[40px] shrink-0 items-center px-2 text-sm text-red-600" onClick={() => revoke(k)}>Revoke</button>}
-              </li>
-            ))}
-          </ul>
-        )}
-        {loaded && <div className="hidden overflow-x-auto sm:block"><table className="w-full text-sm"><thead><tr><th className="th">Name</th><th className="th">Access</th><th className="th">Prefix</th><th className="th">Last used</th><th className="th">Created</th><th className="th"></th></tr></thead>
-          <tbody className="divide-y divide-slate-100">{keys.map((k) => <tr key={k.id} className={k.revokedAt ? "opacity-50" : ""}><td className="td">{k.name}</td><td className="td">{keyScope(k) === "read" ? <span className="badge whitespace-nowrap bg-sky-50 text-sky-800" title="Can look things up; cannot create, change, send or delete">Read-only</span> : <span className="badge whitespace-nowrap bg-black/[0.05] text-ink-300" title="Can do everything through the API">Full access</span>}</td><td className="td font-mono text-xs">{k.prefix}…</td><td className="td text-xs">{fmtDate(k.lastUsedAt)}</td><td className="td text-xs">{fmtDate(k.createdAt)}</td><td className="td text-right">{!k.revokedAt && <button className="text-red-600" onClick={() => revoke(k)}>Revoke</button>}</td></tr>)}</tbody></table></div>}
-        {loaded && keys.length === 0 && <div className="py-3 text-sm text-ink-400">No API keys yet.</div>}
-      </div>
-      <div className="card p-5 text-sm">
-        <div className="mb-2 font-medium">Use with AI agents</div>
-        <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-600" href={`${API_URL}/openapi.json`} target="_blank" rel={EXTERNAL_REL}>{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel={EXTERNAL_REL}>/docs</a>.</p>
-        {/* This used to print an `npx` command for a package name on the public registry that is
-            not ours - anyone could publish under it, and the command would have run their code
-            with the customer's API key in its environment. */}
-        <p className="mt-2 text-ink-300" data-testid="mcp-note">Scout has an MCP server for AI assistants (Claude Desktop, Cursor). It is not published to a public package registry. <a className="text-brand-600 hover:underline" href="mailto:contact@mnbresearch.com?subject=Scout%20MCP%20server">Ask support</a> for the package, or use the REST API and OpenAPI document with your API key.</p>
-      </div>
-    </div>
-  );
+  return <ApiKeysPanel />;
 }
 
 /**

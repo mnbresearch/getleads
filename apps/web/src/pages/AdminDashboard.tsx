@@ -5,6 +5,7 @@ import { adminFetch, adminLogout, endAdminSession, useAdminToken } from "../lib/
 import { expectLists, expectShape, fmtDate, fmtDay, fmtNum } from "../lib/api";
 import { plural } from "../lib/plural";
 import { SecurityTab } from "./AdminSecurity";
+import { GrowthTab } from "./AdminAnalytics";
 
 type PlanLimits = Record<string, number | boolean>;
 type OrgRow = {
@@ -1199,8 +1200,8 @@ function CreditsTab() {
   );
 }
 
-type Tab = "orgs" | "leads" | "tools" | "credits" | "plans" | "security";
-const TABS: readonly (readonly [Tab, string])[] = [["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"], ["security", "Security"]];
+type Tab = "orgs" | "leads" | "growth" | "tools" | "credits" | "plans" | "security";
+const TABS: readonly (readonly [Tab, string])[] = [["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["growth", "Growth"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"], ["security", "Security"]];
 
 export function AdminDashboardPage() {
   const token = useAdminToken();
@@ -1265,6 +1266,7 @@ export function AdminDashboardPage() {
         </nav>
         {tab === "orgs" && <OrgsTab plans={plans} plansLoading={plansLoading} selected={selectedOrg} onSelect={setSelectedOrg} />}
         {tab === "leads" && <LeadsTab plans={plans} onViewOrg={(id) => { setSelectedOrg(id); setTab("orgs"); }} />}
+        {tab === "growth" && <GrowthTab />}
         {tab === "tools" && <ToolsTab />}
         {tab === "credits" && <CreditsTab />}
         {tab === "plans" && <PlansTab plans={plans} loading={plansLoading} error={plansErr} onRetry={loadPlans} />}
