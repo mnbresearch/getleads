@@ -13,7 +13,7 @@ import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, experimentForStep, leadsWithUsableEmail, mailingAddressOf, markReplied, orgSenderDefaults, outreachReasonOf, reserveManualSend, unsubscribeFooter, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, leadsWithUsableEmail, mailingAddressOf, markReplied, orgSenderDefaults, outreachReasonOf, repliedContactsSql, reserveManualSend, unsubscribeFooter, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
@@ -24,7 +24,7 @@ import { ownerOrAdmin } from "../lib/roles.js";
 import { canonicalEmail } from "../services/leads.js";
 import { requireVerifiedEmail, workspaceEmailVerified } from "../lib/emailVerification.js";
 import { pendingDeletion } from "../services/accountDeletion.js";
-import { ingestInbound } from "../services/inbound.js";
+import { inboundRefusal, ingestInbound } from "../services/inbound.js";
 import { customFieldNames, unknownVariables, unknownVariablesMessage, TEMPLATE_VARIABLES } from "../services/templateVars.js";
 
 export const campaignRoutes = new Hono<Env>();
@@ -259,11 +259,15 @@ const campaignInput = z.object({ name: z.string().min(1).max(200), icpId: z.stri
 campaignRoutes.get("/", async (c) => {
   const { db } = getDb();
   const rows = await db
-    .select({ campaign: campaigns, contacts: sql<number>`(SELECT count(*)::int FROM campaign_contacts WHERE campaign_id = ${campaigns.id})` })
+    .select({ campaign: campaigns, contacts: sql<number>`(SELECT count(*)::int FROM campaign_contacts WHERE campaign_id = "campaigns"."id")`, repliedContacts: repliedContactsSql(sql.raw(`"campaigns"."id"`)) })
     .from(campaigns)
     .where(eq(campaigns.orgId, orgId(c)))
     .orderBy(desc(campaigns.createdAt));
-  return c.json({ campaigns: rows.map((r) => ({ ...r.campaign, contacts: r.contacts })) });
+  // (The outer row is named in full: a bare column renders unqualified here, and inside the
+  // subquery "id" was the contact's own id - the list showed 0 contacts for every campaign.)
+  // `repliedContacts`: contacts who replied, counted the same way as on the campaign page
+  // (services/campaigns.ts repliedContactsSql). `stats.replied` stays the running count of replies.
+  return c.json({ campaigns: rows.map((r) => ({ ...r.campaign, contacts: r.contacts, repliedContacts: r.repliedContacts })) });
 });
 
 campaignRoutes.post("/", zValidator("json", campaignInput), async (c) => {
@@ -658,6 +662,10 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().m
   if (!email) throw badRequest("`from` must be the sender's address: either a bare address (jane@example.com) or Name <jane@example.com>.");
   const { db } = getDb();
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
+  // Same rule as the public inbound address: a workspace scheduled for deletion takes no
+  // replies (sign-in already refuses a suspended one).
+  const refused = org ? await inboundRefusal(org) : null;
+  if (refused) throw new ApiError(403, refused.message, refused.code);
   return c.json(await ingestInbound(oid, org ?? c.get("auth").org, { email, text: b.text, subject: b.subject }, aiFor(c.get("auth"))));
 });
 
@@ -856,7 +864,26 @@ campaignRoutes.get("/:id/stats", async (c) => {
     .from(messages)
     .where(and(eq(messages.campaignId, cp.id), eq(messages.direction, "outbound")))
     .groupBy(messages.stepId, messages.variant);
-  return c.json({ messages: m, contacts: Object.fromEntries(byStatus.map((r) => [r.status, r.n])), variants: byVariant, rates: { open: m.sent ? +(m.opened / m.sent).toFixed(3) : 0, click: m.sent ? +(m.clicked / m.sent).toFixed(3) : 0, reply: m.sent ? +(m.replied / m.sent).toFixed(3) : 0 } });
+  // Contacts who replied (repliedContactsSql: by status or a reply to any message), out of the
+  // contacts this campaign has actually emailed - the "Replied" figure the page and the list
+  // both show. messages.replied / rates.reply stay as they were (per message).
+  const [rc] = await db
+    .select({
+      replied: repliedContactsSql(cp.id),
+      reached: sql<number>`(SELECT count(DISTINCT m2.lead_id)::int FROM messages m2 WHERE m2.campaign_id = ${cp.id} AND m2.direction = 'outbound' AND m2.sent_at IS NOT NULL)`,
+    })
+    .from(campaigns)
+    .where(eq(campaigns.id, cp.id));
+  const repliedContacts = rc?.replied ?? 0;
+  const reached = Math.max(rc?.reached ?? 0, repliedContacts);
+  return c.json({
+    messages: m,
+    contacts: Object.fromEntries(byStatus.map((r) => [r.status, r.n])),
+    repliedContacts,
+    contactsReached: reached,
+    variants: byVariant,
+    rates: { open: m.sent ? +(m.opened / m.sent).toFixed(3) : 0, click: m.sent ? +(m.clicked / m.sent).toFixed(3) : 0, reply: m.sent ? +(m.replied / m.sent).toFixed(3) : 0, replyContacts: reached ? +(repliedContacts / reached).toFixed(3) : 0 },
+  });
 });
 
 async function fullCampaign(oid: string, id: string) {

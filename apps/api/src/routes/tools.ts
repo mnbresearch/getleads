@@ -24,6 +24,7 @@ import { advanceContact } from "../services/campaigns.js";
 import { runAutopilot } from "../services/autopilot.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
+import { refundBlockedSearch } from "../lib/searchRefund.js";
 import { audit, enforceLoggedWindow } from "../lib/audit.js";
 import { emailField } from "../lib/fields.js";
 import { storedSearchQuerySchema } from "../lib/searchQuery.js";
@@ -198,6 +199,8 @@ toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", 
   await consume(db, oid, "searches", 1);
   if (!name && domain) name = (await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) }))?.name ?? domain.split(".")[0];
   const search = await findPeopleDetailed({ companyName: name!, titles: b.titles, limit: b.limit });
+  // No source could search: nothing delivered, nothing charged (lib/searchRefund.ts).
+  if (search.emptyNote) await refundBlockedSearch(db, oid);
   const people = search.people;
   const saved: string[] = [];
   let stopped: string | undefined;
@@ -228,6 +231,7 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
   const titles = [...new Set(b.personas.flatMap((p) => PERSONAS[p] ?? [p]))];
   const name = b.companyName ?? (domain ? ((await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) }))?.name ?? domain.split(".")[0]) : "");
   const search = await findPeopleDetailed({ companyName: name, titles, limit: b.limit });
+  if (search.emptyNote) await refundBlockedSearch(db, oid);
   const people = search.people;
   const out = [];
   /** Why something in this run did less than asked. Reported, not swallowed. */

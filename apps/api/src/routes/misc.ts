@@ -12,9 +12,8 @@ import { sealOrgJson } from "../lib/credentials.js";
 import { ApiError, badRequest, notFound } from "../lib/errors.js";
 import { orgId, rateLimit, requireAuth, requireUser, type Env } from "../middleware.js";
 import { INTEGRATION_PROVIDERS, integrationName, OWN_KEY_UNSUPPORTED, validateIntegrationConfig, verifyIntegrationCredentials } from "../services/integrations.js";
-import { INBOUND_PROVIDER, inboundStatus, ingestInbound, inboundAiFor, orgForInboundToken, removeInboundToken, rotateInboundToken, touchInboundToken } from "../services/inbound.js";
+import { countInboundPost, INBOUND_PROVIDER, inboundRefusal, inboundStatus, ingestInbound, inboundAiFor, orgForInboundToken, removeInboundToken, rotateInboundToken, touchInboundToken } from "../services/inbound.js";
 import { parseSender } from "./campaigns.js";
-import { enforceWindows } from "../lib/rateWindow.js";
 import { audit } from "../lib/audit.js";
 import { ownerOrAdmin } from "../lib/roles.js";
 import { newWebhookSecret, publicWebhook } from "../lib/webhookSecret.js";
@@ -360,8 +359,10 @@ miscRoutes.put("/integrations/:provider", requireAuth, ownerOrAdmin("integration
   const failed = check.checked && !check.ok && !check.unreachable;
   const status = failed ? "error" : "active";
   // Server-managed keys are never taken from the request.
-  const { lastError: _le, lastErrorAt: _lea, ...userSettings } = (b.settings ?? {}) as Record<string, unknown>;
-  const settings: Record<string, unknown> = { ...userSettings, autoSync: b.autoSync, ...(failed ? { lastError: check.error, lastErrorAt: new Date().toISOString() } : {}) };
+  // (credentialsRejected and the autoSync* keys are written by the sync code only.)
+  const { lastError: _le, lastErrorAt: _lea, credentialsRejected: _cr, autoSyncQueuedAt: _aq, autoSyncCursor: _ac, ...userSettings } = (b.settings ?? {}) as Record<string, unknown>;
+  // A provider that refused the credentials is not auto-synced until they are saved again.
+  const settings: Record<string, unknown> = { ...userSettings, autoSync: b.autoSync, ...(failed ? { lastError: check.error, lastErrorAt: new Date().toISOString(), credentialsRejected: true } : {}) };
   // Bound to this workspace: the stored blob does not open on another workspace's row.
   const configEncrypted = sealOrgJson(orgId(c), "integration", b.config);
   const [row] = await db
@@ -428,8 +429,10 @@ miscRoutes.delete("/inbound-address", requireAuth, ownerOrAdmin("inbound.removed
  *
  *  - Body: at most 256 KB (the limit for unauthenticated POSTs, app.ts), fields as the
  *    signed-in route (/v1/campaigns/inbound) accepts them.
- *  - Rate: 60 a minute per calling address, and 300 an hour per workspace address.
+ *  - Rate: 60 a minute per calling address, and 300 per clock hour per workspace address
+ *    (counted in the database, so it holds across instances).
  *  - An unknown token is a 401 that says nothing about whether any address exists.
+ *  - A suspended workspace, or one scheduled for deletion, is a 403 that says so.
  *  - Otherwise exactly the signed-in route's work: services/inbound.ts ingestInbound.
  */
 const inboundPublicLimiter = rateLimit({ perMinute: 60, name: "public-inbound" });
@@ -440,7 +443,12 @@ miscRoutes.post("/public/inbound/:token", inboundPublicLimiter, async (c) => {
   // The token is the credential: an unknown one is a 401, the same answer whether or not
   // any address exists.
   if (!org) throw new ApiError(401, "This inbound address is not valid. Make a new one under Settings > Integrations.", "invalid_token");
-  enforceWindows([{ key: `inbound:${org.id}`, limit: 300, message: "Too many replies posted to this address in the last hour. Try again later." }], 3600_000);
+  // A suspended workspace, or one scheduled for deletion, takes no replies (services/inbound.ts).
+  const refused = await inboundRefusal(org);
+  if (refused) throw new ApiError(403, refused.message, refused.code);
+  // The hourly allowance is counted in the database, so it holds across API instances.
+  const allowance = await countInboundPost(org.id);
+  if (!allowance.ok) throw new ApiError(429, "Too many replies posted to this address in the last hour. Try again later.", "rate_limited", { retryAfterSeconds: allowance.retryAfterSeconds });
   let raw: unknown;
   try {
     raw = await c.req.json();

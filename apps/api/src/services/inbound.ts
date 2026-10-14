@@ -204,6 +204,53 @@ export async function touchInboundToken(orgId: string): Promise<void> {
     .catch(() => {});
 }
 
+/**
+ * Why a workspace may not take replies through its inbound address right now, or null.
+ *
+ * The same rule as signing in (middleware.ts requireAuth): a deactivated or revoked workspace
+ * is refused. A workspace scheduled for deletion is refused too: its campaigns are paused and
+ * it is about to be removed, so storing new mail from its prospects would only add personal
+ * data the purge then has to delete.
+ */
+export async function inboundRefusal(org: Organization): Promise<{ code: string; message: string } | null> {
+  if (org.status === "deactivated" || org.status === "revoked") {
+    return { code: "account_suspended", message: "This workspace is suspended, so its inbound address does not take replies. Contact support to reactivate it." };
+  }
+  const { pendingDeletion } = await import("./accountDeletion.js");
+  if (await pendingDeletion(org.id)) {
+    return { code: "workspace_pending_deletion", message: "This workspace is scheduled for deletion, so its inbound address does not take replies. Cancel the deletion in Settings to receive replies again." };
+  }
+  return null;
+}
+
+/** Replies one workspace address takes per clock hour. */
+export const INBOUND_HOURLY_LIMIT = 300;
+
+/**
+ * Count one post against the workspace's hourly allowance and say whether it is within it.
+ *
+ * Kept in the database (the inbound row's settings: `rateHour`, `rateCount`) with one atomic
+ * UPDATE, so the limit holds however many API instances answer - the in-memory window it
+ * replaces counted per process. A fixed clock-hour window: cheap, and at most twice the limit
+ * across an hour boundary, which is fine for an abuse ceiling.
+ */
+export async function countInboundPost(orgId: string, limit = INBOUND_HOURLY_LIMIT): Promise<{ ok: boolean; retryAfterSeconds: number }> {
+  const { db } = getDb();
+  const now = new Date();
+  const hour = now.toISOString().slice(0, 13);
+  const r = await db.execute(sql`
+    UPDATE integrations SET settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object(
+      'rateHour', ${hour}::text,
+      'rateCount', CASE WHEN settings->>'rateHour' = ${hour} THEN coalesce((settings->>'rateCount')::int, 0) + 1 ELSE 1 END)
+    WHERE org_id = ${orgId} AND provider = ${INBOUND_PROVIDER}
+    RETURNING (settings->>'rateCount')::int AS n`);
+  const rows = ((r as unknown as { rows?: { n: number }[] }).rows ?? (r as unknown as { n: number }[])) as { n: number }[];
+  const n = Number(rows[0]?.n ?? 0);
+  const nextHour = new Date(now);
+  nextHour.setUTCMinutes(60, 0, 0);
+  return { ok: n <= limit, retryAfterSeconds: Math.max(1, Math.ceil((nextHour.getTime() - now.getTime()) / 1000)) };
+}
+
 /** The engine a workspace may use for its own replies (none when it switched AI off). */
 export const inboundAiFor = (org: Organization | null | undefined): AiProvider => aiForOrg(org);
 

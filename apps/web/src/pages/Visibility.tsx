@@ -369,14 +369,19 @@ function SuggestModal({ open, onClose, onSaved, toast }: { open: boolean; onClos
   const [note, setNote] = useState<string | undefined>();
   const [picked, setPicked] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
+  // Set when the API built nothing because it does not know what the workspace sells.
+  const [needsCategory, setNeedsCategory] = useState(false);
+  const [category, setCategory] = useState("");
 
   const fetchSet = async (ai: boolean) => {
     setBusy(true);
     try {
-      const r = await apiFetch<{ source: "ai" | "starter"; prompts: Suggestion[]; note?: string }>("POST", "/v1/visibility/prompts/suggest", { ai });
+      const cat = category.trim();
+      const r = await apiFetch<{ source: "ai" | "starter"; prompts: Suggestion[]; note?: string; needsCategory?: boolean }>("POST", "/v1/visibility/prompts/suggest", cat ? { ai, category: cat } : { ai });
       setItems(r.prompts);
       setSource(r.source);
       setNote(r.note);
+      setNeedsCategory(!!r.needsCategory);
       setPicked(Object.fromEntries(r.prompts.map((p) => [p.text, true])));
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
   };
@@ -412,6 +417,15 @@ function SuggestModal({ open, onClose, onSaved, toast }: { open: boolean; onClos
         </span>
       </div>
       {note && <div className="mt-2 rounded-lg border border-amber-200 bg-amber-50 p-2 text-xs text-amber-800">{note}</div>}
+      {(needsCategory || category) && (
+        <form className="mt-2 flex flex-wrap items-end gap-2" onSubmit={(e) => { e.preventDefault(); if (category.trim()) void fetchSet(false); }}>
+          <label className="min-w-0 flex-1 text-xs text-ink-400" htmlFor="vis-category">
+            What you sell
+            <input id="vis-category" className="input mt-1 w-full" maxLength={160} placeholder="e.g. CRM, lead generation platform" value={category} onChange={(e) => setCategory(e.target.value)} />
+          </label>
+          <button type="submit" className="btn-secondary" disabled={busy || !category.trim()}>Build questions</button>
+        </form>
+      )}
 
       {busy && items === null ? (
         <div className="py-8"><Spinner /></div>

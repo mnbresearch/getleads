@@ -18,12 +18,13 @@ const FIELDS: [keyof Icp["criteria"] & string, string, string][] = [
 
 interface ScoreResponse {
   counts?: { scored: number; assigned?: number; requested?: number; outOfScope?: number; scope?: string };
-  aiRerank?: { requested: number; done: number; skipped?: string };
+  aiRerank?: { requested: number; done: number; skipped?: string; note?: string };
   scored?: unknown[];
 }
 
 const RERANK_SKIP: Record<string, string> = {
-  no_ai_provider: "AI scoring isn't switched on for this workspace yet, so rule scores were used - contact support to turn it on",
+  // Only a fallback: the API's own note says whether it is the plan or the server.
+  no_ai_provider: "no AI engine is available for this workspace, so rule scores were used",
   // The workspace's own switch (Settings > Workspace), not a missing provider.
   ai_off: "AI assistance is turned off for this workspace, so rule scores were used. An owner or admin can turn it back on under Settings",
   ai_disabled: "AI assistance is turned off for this workspace, so rule scores were used. An owner or admin can turn it back on under Settings",
@@ -106,7 +107,7 @@ export function IcpPage() {
       const head = typeof r.counts?.requested === "number" ? `Scored ${n} of ${r.counts.requested} leads` : `Scored ${plural(n, "lead")}`;
       const extra = [
         r.counts?.outOfScope ? `${r.counts.outOfScope} outside this ICP's scope, not scored` : null,
-        r.aiRerank?.skipped ? `AI re-rank ${r.aiRerank.done ? `stopped after ${r.aiRerank.done}` : "skipped"}: ${RERANK_SKIP[r.aiRerank.skipped] ?? r.aiRerank.skipped}` : null,
+        r.aiRerank?.skipped ? `AI re-rank ${r.aiRerank.done ? `stopped after ${r.aiRerank.done}` : "skipped"}: ${r.aiRerank.note ?? RERANK_SKIP[r.aiRerank.skipped] ?? r.aiRerank.skipped}` : null,
       ].filter(Boolean).join(". ");
       toast(`${head} against "${icp.name}"${extra ? `. ${extra}` : ""}`, r.aiRerank?.skipped === "error" ? "err" : "ok");
       load();

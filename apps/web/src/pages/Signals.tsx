@@ -47,6 +47,39 @@ function describeSubRun(r: { parsed?: number; stored?: number; matched?: number;
   return `${parts.join(", ")}.${tail ? ` ${tail}` : ""}`;
 }
 
+type SubRunResult = Parameters<typeof describeSubRun>[0];
+type SubRunAnswer = SubRunResult & { jobId?: string; status?: string; error?: { message?: string } | string };
+interface JobState { status: string; progress: number; result: SubRunResult | null; error: string | null }
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Start a subscription run and wait for its result.
+ *
+ * The run is a job (it can take minutes): the server answers 202 with a job id and this
+ * polls the job until it is done, reporting progress on the way. A server that runs jobs
+ * inline answers with the finished result straight away, and an older server answers with
+ * the result itself (no job id): both are returned as they are.
+ */
+export async function runSubscriptionNow(id: string, onProgress: (pct: number) => void = () => {}, opts: { intervalMs?: number; timeoutMs?: number } = {}): Promise<SubRunResult> {
+  const first = await apiFetch<SubRunAnswer>("POST", `/v1/signals/subscriptions/${id}/run`);
+  if (!first.jobId || first.status === "done") return first;
+  const until = Date.now() + (opts.timeoutMs ?? 5 * 60_000);
+  while (Date.now() < until) {
+    await sleep(opts.intervalMs ?? 2000);
+    const j = await apiFetch<JobState>("GET", `/v1/search/jobs/${first.jobId}`);
+    onProgress(j.progress ?? 0);
+    if (j.status === "done") {
+      const r = (j.result ?? {}) as Omit<SubRunResult, "skipped"> & { skipped?: unknown };
+      // The worker answers `skipped: true` for a subscription deleted while its run waited.
+      if (r.skipped === true) return { ...r, skipped: "The subscription was deleted before its run started." };
+      return r as SubRunResult;
+    }
+    if (j.status === "failed") throw new Error(j.error ? `The run failed: ${j.error}` : "The run failed. Try again in a moment.");
+  }
+  throw new Error("The run is still going. Its result will show on the subscription when it finishes - refresh in a minute.");
+}
+
 /**
  * Why the last run created no leads, from the counts the server keeps per run. A subscription
  * that matched and created nothing used to look exactly like one that was working.
@@ -96,6 +129,9 @@ export function SignalsPage() {
   const [subsErr, setSubsErr] = useState<string | null>(null);
   const [monsErr, setMonsErr] = useState<string | null>(null);
   const [busyId, setBusyId] = useState<string | null>(null);
+  /** Progress of a subscription run in flight, and the last run's sentence, per subscription. */
+  const [runPct, setRunPct] = useState<Record<string, number>>({});
+  const [runNote, setRunNote] = useState<Record<string, { text: string; err?: boolean }>>({});
   const shownFor = useRef<string | null>(null);
   const feedSeq = useRef(0);
   const load = useCallback(() => {
@@ -169,7 +205,14 @@ export function SignalsPage() {
               <div className="flex items-start justify-between gap-2">
                 <div className="font-semibold">{s.name}{s.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}</div>
                 <div className="flex gap-2">
-                  <button className="btn-secondary py-1 text-xs" disabled={busyId === s.id} onClick={() => { setBusyId(s.id); apiFetch<Parameters<typeof describeSubRun>[0]>("POST", `/v1/signals/subscriptions/${s.id}/run`).then((r) => { toast(describeSubRun(r)); load(); }).catch((e) => toast((e as Error).message, "err")).finally(() => setBusyId(null)); }}>{busyId === s.id ? "Running…" : "Run now"}</button>
+                  <button className="btn-secondary py-1 text-xs" disabled={busyId === s.id} onClick={() => {
+                    setBusyId(s.id);
+                    setRunPct((p) => ({ ...p, [s.id]: 0 }));
+                    runSubscriptionNow(s.id, (pct) => setRunPct((p) => ({ ...p, [s.id]: pct })))
+                      .then((r) => { const text = describeSubRun(r); toast(text); setRunNote((n) => ({ ...n, [s.id]: { text } })); load(); })
+                      .catch((e) => { const text = (e as Error).message; toast(text, "err"); setRunNote((n) => ({ ...n, [s.id]: { text, err: true } })); })
+                      .finally(() => { setBusyId(null); setRunPct((p) => { const rest = { ...p }; delete rest[s.id]; return rest; }); });
+                  }}>{busyId === s.id ? (runPct[s.id] ? `Running… ${runPct[s.id]}%` : "Running…") : "Run now"}</button>
                   {/* A subscription that scans every six hours and auto-creates leads could
                       only be stopped by deleting it, which threw away its match history and
                       stats too. Pausing keeps both. */}
@@ -187,6 +230,9 @@ export function SignalsPage() {
               <div className="mt-2 text-xs text-ink-400">Keywords: {[...s.keywords, ...s.industries].join(", ") || "any"}{s.locations.length > 0 && <> · Locations: {s.locations.join(", ")}</>} · Targets: {s.targetTitles.join(", ")}</div>
               <div className="mt-1 text-xs text-ink-400">{s.autoCreateLeads ? "Auto-creates leads" : "Match only"} · matched {s.stats.matched ?? 0} · leads {s.stats.leadsCreated ?? 0} · last run {fmtDate(s.lastRunAt)}</div>
               {lastRunWhy(s) && <div className="mt-1 text-xs text-amber-700">{lastRunWhy(s)}</div>}
+              {/* The last "Run now" result stays on the card: a toast is gone before a long
+                  sentence (why no leads were created) can be read. */}
+              {runNote[s.id] && <div className={`mt-1 text-xs [overflow-wrap:anywhere] ${runNote[s.id].err ? "text-red-700" : "text-ink-300"}`} role="status">{runNote[s.id].text}</div>}
             </div>
           ))}
         </div>

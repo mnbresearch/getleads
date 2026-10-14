@@ -1,8 +1,7 @@
 import { Hono } from "hono";
-import { AI_NOT_SWITCHED_ON } from "../services/visibility.js";
 import { and, companies, consume, count, desc, eq, getDb, isNull, leads, or, signals } from "@prospex/db";
 import { generateAccountBrief, hasAi } from "@prospex/core";
-import { AI_OFF_UNAVAILABLE, aiDisabled, aiFor } from "../lib/ai.js";
+import { AI_OFF_UNAVAILABLE, aiDisabled, aiFor, aiMissingNote } from "../lib/ai.js";
 import { assertQuotaAvailable } from "../lib/quota.js";
 import { notFound } from "../lib/errors.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
@@ -41,7 +40,8 @@ companyRoutes.post("/:id/brief", async (c) => {
   // Switched off by the workspace itself: say that, and how to turn it back on - not
   // "contact support", which is for a server with no AI engine at all.
   if (aiDisabled(c.get("auth").org)) return c.json({ brief: null, cached: false, aiOff: true, error: AI_OFF_UNAVAILABLE, note: AI_OFF_UNAVAILABLE }, 200);
-  if (!hasAi(ai)) return c.json({ brief: null, cached: false, error: AI_NOT_SWITCHED_ON }, 200);
+  // No engine: say whether it is the plan or the server, never "switched on for this workspace".
+  if (!hasAi(ai)) return c.json({ brief: null, cached: false, error: aiMissingNote(c.get("auth").org, "the account brief can't be written") ?? "No AI engine is available for the account brief right now." }, 200);
   // Refuse before the AI call when the plan has no room; charge after it succeeds. Charging
   // only after meant an over-quota org got the brief (the paid part) and then a 402.
   await assertQuotaAvailable(db, oid, "aiMessages", 1);
@@ -72,7 +72,8 @@ companyRoutes.post("/:id/brief", async (c) => {
     },
     companySignals.map((s) => ({ type: s.type, title: s.title, summary: s.summary, occurredAt: s.occurredAt })),
   );
-  if (!brief) return c.json({ brief: null, cached: false, error: AI_NOT_SWITCHED_ON }, 200);
+  // The engine exists but gave nothing usable: that is a failed attempt, not a missing setting.
+  if (!brief) return c.json({ brief: null, cached: false, error: "The AI engine did not return a usable brief this time. Nothing was charged - try again in a minute." }, 200);
 
   await consume(db, oid, "aiMessages", 1);
   await db.update(companies).set({ aiBrief: brief, aiBriefAt: new Date() }).where(eq(companies.id, company.id));

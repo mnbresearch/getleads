@@ -1,5 +1,5 @@
 import { and, consume, desc, eq, getDb, icps, organizations, sql, type IcpCriteria, visibilityPrompts, visibilityRuns } from "@prospex/db";
-import { AI_OFF_UNAVAILABLE, aiDisabled } from "../lib/ai.js";
+import { AI_OFF_UNAVAILABLE, aiDisabled, aiMissingNote, aiMissingReason } from "../lib/ai.js";
 import {
   analyzeAnswer,
   availableAiProvidersForPlan,
@@ -25,8 +25,24 @@ import {
 } from "@prospex/core";
 import { ApiError, errorLine } from "../lib/errors.js";
 
-/** What a customer is told when the platform has no AI engine switched on. Names no server setting. */
+/**
+ * Legacy sentence, kept exported for anything that still imports it. It blamed the
+ * workspace ("isn't switched on for this workspace") even when the server had no AI engine
+ * at all, so nothing here uses it any more: see `visibilityAiMissing` and lib/ai.ts
+ * aiMissingNote, which say which of the three causes it is.
+ */
 export const AI_NOT_SWITCHED_ON = "AI drafting isn't switched on for this workspace yet. Contact support to enable it.";
+
+/**
+ * Why AI visibility cannot sample, for a plan. Sampling is not affected by the workspace's
+ * own AI switch (it only sends the tracked questions), so the cause is either the plan or
+ * the server having no engine at all.
+ */
+export function visibilityAiMissing(plan?: string | null): string {
+  const reason = aiMissingReason({ plan: plan ?? "free" });
+  if (reason === "plan") return "no AI engine this workspace's plan includes is connected. Upgrade the plan to use it.";
+  return "no AI engine is connected on our side. This is not a setting in your workspace - contact support if you need it.";
+}
 
 /**
  * No AI engine is configured on this server at all. A 503 with its own code rather than a
@@ -38,8 +54,8 @@ export const AI_NOT_SWITCHED_ON = "AI drafting isn't switched on for this worksp
  * Tools page.
  */
 export class AiNotConfiguredError extends ApiError {
-  constructor() {
-    super(503, `AI visibility can't be sampled: ${AI_NOT_SWITCHED_ON}`, "ai_not_configured");
+  constructor(plan?: string | null) {
+    super(503, `AI visibility can't be sampled: ${visibilityAiMissing(plan)}`, "ai_not_configured");
     // At most once every ten minutes: the hourly scheduler raises this once per prompt.
     if (Date.now() - lastAiNotConfiguredLogAt > 600_000) {
       lastAiNotConfiguredLogAt = Date.now();
@@ -100,7 +116,7 @@ export async function runVisibilityPrompt(
 ) {
   const cfg = await visibilityConfig(db, orgIdValue);
   const provider = opts.provider ?? availableAiProvidersForPlan(opts.plan ?? "free")[0];
-  if (!provider) throw new AiNotConfiguredError();
+  if (!provider) throw new AiNotConfiguredError(opts.plan);
 
   let answer = "";
   let error: string | null = null;
@@ -179,7 +195,7 @@ export async function sampleAcrossEngines(
   const all = availableAiProvidersForPlan(opts.plan ?? "free");
   const wanted = (prompt.engines ?? []).filter(Boolean);
   const providers = wanted.length ? all.filter((p) => wanted.includes(p.name)) : all;
-  if (all.length === 0) throw new AiNotConfiguredError();
+  if (all.length === 0) throw new AiNotConfiguredError(opts.plan);
   if (providers.length === 0) throw new ApiError(503, `None of this prompt's engines (${wanted.join(", ")}) is available on your plan right now. Choose another engine for this prompt, or contact support.`, "ai_not_configured");
 
   const samples = opts.samples ?? prompt.samplesPerRun ?? 3;
@@ -376,6 +392,8 @@ export async function knownBrands(db: ReturnType<typeof getDb>["db"], orgIdValue
  * looking at, and "the AI wrote this" is exactly the claim that has to stay true.
  */
 /** Said with the starter questions, so nobody mistakes them for questions written for their business. */
+/** Said when there is no category to build questions from (and no model wrote them). */
+export const NEEDS_CATEGORY_NOTE = "Add your product category (what you sell, for example \"CRM\" or \"lead generation platform\") and the starter questions will be built from it. Without it, any question would be a guess.";
 export const STARTER_NOTE = "Standard questions built from your category, competitors and ICP's titles and industries. Use Write with AI for questions tailored to your business.";
 
 export async function suggestPrompts(
@@ -390,6 +408,8 @@ export async function suggestPrompts(
   note?: string;
   /** True when AI was asked for and the workspace has AI assistance switched off. */
   aiOff?: boolean;
+  /** True when no questions were built because the product category is missing. */
+  needsCategory?: boolean;
 }> {
   const cfg = await visibilityConfig(db, orgIdValue);
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgIdValue) });
@@ -410,9 +430,14 @@ export async function suggestPrompts(
   // Each value is one bounded line before it reaches the prompt builder. They are the org's
   // own words, but they are free text (and an ICP may have been written by a model from
   // crawled pages), and a line break in any of them would forge a line of the brief.
+  // Without a category the starter templates used to be filled with "B2B software", which
+  // produced questions like "How do teams usually handle B2B software without dedicated
+  // software?". No category now means no starter questions, and a note asking for one; a
+  // model (when there is one) is told the category is missing and works from the ICP.
+  const givenCategory = oneLine(opts.category?.trim() || criteria.keywords?.[0]?.trim() || orgCategory?.trim() || "", 160) || null;
   const ctx: TemplateContext = {
     brand: oneLine(cfg.brand.name, 120),
-    category: oneLine(opts.category?.trim() || criteria.keywords?.[0] || orgCategory?.trim() || "B2B software", 160) || "B2B software",
+    category: givenCategory ?? "not given - infer it from the details below",
     competitors: cfg.competitors.map((c) => oneLine(c.name, 120)).filter(Boolean).slice(0, 20),
     audience: audience ? oneLine(audience, 300) : null,
     problem: icp?.description ? oneLine(icp.description, 600) : null,
@@ -432,10 +457,21 @@ export async function suggestPrompts(
    * employees"), which produced questions nobody would ask. Only a model can turn free text
    * into a question, so the description goes to the AI path and nowhere else.
    */
-  const starterCtx: TemplateContext = { ...ctx, problem: null };
-  const starter = validatePrompts(starterPack(starterCtx), starterCtx, existingTexts);
+  const starterCtx: TemplateContext = { ...ctx, category: givenCategory ?? "", problem: null };
+  const starter = validatePrompts(givenCategory ? starterPack(starterCtx) : [], starterCtx, existingTexts);
+  // Said instead of the starter questions when there is no category to build them from.
+  const withoutCategory = (why?: string) => ({
+    source: "starter" as const,
+    prompts: [] as PromptTemplate[],
+    rejected: starter.rejected,
+    coverage: intentCoverage([]),
+    needsCategory: true,
+    // The category request first, then why no model wrote them (when one was asked for).
+    note: `${NEEDS_CATEGORY_NOTE}${why ? ` ${why}` : ""}`,
+  });
 
   if (!opts.useAi) {
+    if (!givenCategory) return withoutCategory();
     return { source: "starter", prompts: starter.kept, rejected: starter.rejected, coverage: intentCoverage(starter.kept), note: STARTER_NOTE };
   }
 
@@ -444,16 +480,18 @@ export async function suggestPrompts(
   // reason and how to turn AI back on. (Sampling the engines is the feature itself and is
   // not affected by the switch - it sends only the questions the workspace tracks.)
   if (aiDisabled(org)) {
+    if (!givenCategory) return { ...withoutCategory(AI_OFF_UNAVAILABLE), aiOff: true };
     return { source: "starter", prompts: starter.kept, rejected: starter.rejected, coverage: intentCoverage(starter.kept), aiOff: true, note: `These are the standard starter questions, not ones written for your business: ${AI_OFF_UNAVAILABLE}` };
   }
   const provider = availableAiProvidersForPlan(opts.plan ?? "free")[0];
   if (!provider) {
+    if (!givenCategory) return withoutCategory(aiMissingNote({ plan: opts.plan ?? "free" }, "questions could not be written with AI") ?? `AI: ${visibilityAiMissing(opts.plan)}`);
     return {
       source: "starter",
       prompts: starter.kept,
       rejected: starter.rejected,
       coverage: intentCoverage(starter.kept),
-      note: `These are the standard starter questions, not ones written for your business: ${AI_NOT_SWITCHED_ON}`,
+      note: `These are the standard starter questions, not ones written for your business. ${aiMissingNote({ plan: opts.plan ?? "free" }, "they could not be written with AI") ?? `AI: ${visibilityAiMissing(opts.plan)}`}`,
     };
   }
 
@@ -481,6 +519,7 @@ export async function suggestPrompts(
   // and calling it a set. The starter pack is a worse set of questions than a good
   // generation and a much better one than a failed generation.
   if (checked.kept.length < 4) {
+    if (!givenCategory) return withoutCategory(failure ? `The model call failed (${failure}).` : `The model returned too few usable questions.`);
     return {
       source: "starter",
       prompts: starter.kept,

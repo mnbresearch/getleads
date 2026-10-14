@@ -148,10 +148,12 @@ suite("B1 fixes: discovery says when nothing could search", () => {
     expect(r.body.note).toBe(NO_SOURCE);
   });
 
-  it("POST /v1/automation/discover: blocked (502) with the sentence, never 'every configured source answered'", async () => {
+  it("POST /v1/automation/discover: blocked with the sentence, never 'every configured source answered'", async () => {
     const o = await signup("auto");
     const r = await req("POST", "/v1/automation/discover", o.token, { query: "VP Sales at B2B SaaS companies", count: 5 });
-    expect(r.status, r.text).toBe(502);
+    // 200 since round C1 (was 502): the body says "blocked"; the HTTP status no longer
+    // reports an honest "could not search" as a server failure.
+    expect(r.status, r.text).toBe(200);
     expect(r.body.status).toBe("blocked");
     expect(r.body.error).toMatchObject({ code: "providers_unavailable", message: NO_SOURCE });
     expect(r.text).not.toMatch(/Every configured source answered/);

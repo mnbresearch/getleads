@@ -21,7 +21,7 @@ export async function storeSignals(items: ParsedSignal[], orgId: string | null =
 }
 
 /** Run one subscription: scan → store → match → (optionally) create decision-maker leads. */
-export async function runSubscription(sub: SignalSubscription, log: (m: string) => void = () => {}) {
+export async function runSubscription(sub: SignalSubscription, log: (m: string) => void = () => {}, progress: (pct: number) => void = () => {}) {
   const { db } = getDb();
   // job_change is not something the news scanner can find: those signals are written by
   // the org's own job-change scan (services/jobChanges.ts). Asking the scanner for them
@@ -30,6 +30,7 @@ export async function runSubscription(sub: SignalSubscription, log: (m: string) 
   const parsed = scanTypes.length ? await scanSignals({ types: scanTypes, keywords: sub.keywords, industries: sub.industries, locations: sub.locations, days: 7, maxPerQuery: 25 }) : [];
   const stored = await storeSignals(parsed, null);
   log(`${parsed.length} parsed, ${stored.length} new`);
+  progress(30);
   // Match: any signal (new or existing in last 7 days) of the right type and keyword context not yet matched to this sub.
   //
   // Global signals (orgId null, from the news scan) or this org's own. Without the org
@@ -56,19 +57,24 @@ export async function runSubscription(sub: SignalSubscription, log: (m: string) 
   // The workspace's own company rows hold the only real location data a signal has. Read
   // once for every domain in this batch rather than per signal.
   const domains = [...new Set(recent.map((s) => s.companyDomain).filter((d): d is string => !!d))];
-  const companyPlace = new Map<string, string>();
+  const companyPlace = new Map<string, { where: string; hasCountry: boolean }>();
   if (places.length && domains.length) {
     const rows = await db.select({ domain: companies.domain, location: companies.location, country: companies.country }).from(companies).where(and(eq(companies.orgId, sub.orgId), inArray(companies.domain, domains)));
     for (const r of rows) {
       const where = [r.location, r.country].filter(Boolean).join(" ").toLowerCase();
-      if (where) companyPlace.set(r.domain, where);
+      if (where) companyPlace.set(r.domain, { where, hasCountry: !!(r.country ?? "").trim() });
     }
   }
   let matched = 0;
   let leadsCreated = 0;
   let skippedLocation = 0;
   const why: NoLeadReasons = { noTitles: 0, noPerson: 0, alreadyLeads: 0, searchFailed: 0, stopped: 0, failed: 0 };
+  /** The first reason a people search could not run, in the customer's words. */
+  let searchNote: string | undefined;
+  let done = 0;
   for (const s of recent) {
+    done++;
+    if (done % 10 === 0) progress(30 + Math.round((60 * done) / recent.length));
     const { headline, body } = ownText(s);
     // The org's own job changes are about people it already tracks; keyword filters are
     // written for news headlines and would drop most of them.
@@ -78,7 +84,8 @@ export async function runSubscription(sub: SignalSubscription, log: (m: string) 
     if (!ownJobChange && terms.length && !terms.some((k) => `${headline} ${body}`.includes(k))) continue;
     // Locations are a separate condition, not one more keyword. Mixed in with the keywords,
     // "India" matched every item published by "Investing.com India" whatever it was about.
-    if (!ownJobChange && places.length && !locationMatches(places, s.companyDomain ? companyPlace.get(s.companyDomain) : undefined, headline)) {
+    const known = s.companyDomain ? companyPlace.get(s.companyDomain) : undefined;
+    if (!ownJobChange && places.length && !locationMatches(places, known?.where, headline, { companyHasCountry: known?.hasCountry })) {
       skippedLocation++;
       continue;
     }
@@ -91,13 +98,14 @@ export async function runSubscription(sub: SignalSubscription, log: (m: string) 
         const r = await leadsFromSignalDetailed(sub, s.id, s.companyName, s.type);
         leadsCreated += r.created;
         if (!r.created) why[r.reason]++;
+        if (!r.created && r.reason === "searchFailed" && r.searchNote && !searchNote) searchNote = r.searchNote;
       } catch (e) {
         why.failed++;
         log(`lead creation failed for ${s.companyName}: ${(e as Error).message}`);
       }
     }
   }
-  const note = sub.autoCreateLeads && matched > 0 && leadsCreated === 0 ? noLeadsNote(matched, why) : undefined;
+  const note = sub.autoCreateLeads && matched > 0 && leadsCreated === 0 ? noLeadsNote(matched, why, searchNote) : undefined;
   const stats = {
     ...(sub.stats ?? {}),
     matched: (sub.stats?.matched ?? 0) + matched,
@@ -110,6 +118,7 @@ export async function runSubscription(sub: SignalSubscription, log: (m: string) 
     lastRunSearchFailed: why.searchFailed,
   };
   await db.update(signalSubscriptions).set({ lastRunAt: new Date(), stats }).where(eq(signalSubscriptions.id, sub.id));
+  progress(95);
   if (matched) await emitEvent(sub.orgId, "signals.matched", { subscriptionId: sub.id, matched, leadsCreated }, { type: "subscription", id: sub.id });
   return { parsed: parsed.length, stored: stored.length, matched, leadsCreated, skippedLocation, ...(note ? { note } : {}) };
 }
@@ -130,9 +139,13 @@ export function ownText(s: { title: string; summary?: string | null; source?: st
   let body = s.summary ?? "";
   const src = (s.source ?? "").trim();
   if (src) {
-    const re = new RegExp(src.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "gi");
-    headline = headline.replace(re, " ");
-    body = body.replace(re, " ");
+    // Only where a feed puts the publisher: a trailing " - Outlet" / " | Outlet" on the
+    // headline (and the outlet's name closing the summary). Removing every occurrence also
+    // removed the subject when the outlet shares a name with it ("Reuters" in a headline
+    // about Reuters, "Mint" in one about a mint).
+    const esc = src.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    headline = headline.replace(new RegExp(`\\s+[-|\u2013\u2014]\\s+${esc}\\s*$`, "i"), "");
+    body = body.replace(new RegExp(`(?:^|(?:\\s+[-|\u2013\u2014])?\\s+)${esc}\\s*$`, "i"), "");
   }
   // With no source recorded, the trailing " - Outlet" Google News adds is the publisher.
   else headline = headline.replace(/\s+[-|]\s+[^-|]{2,60}$/, "");
@@ -154,9 +167,15 @@ function hasWord(text: string, word: string): boolean {
  * Acme raises ..."), with the publisher already removed. The summary and the publisher name
  * are never read for this.
  */
-export function locationMatches(places: string[], companyWhere: string | undefined, headline: string): boolean {
+export function locationMatches(places: string[], companyWhere: string | undefined, headline: string, opts: { companyHasCountry?: boolean } = {}): boolean {
   if (!places.length) return true;
-  if (companyWhere) return places.some((p) => hasWord(companyWhere, p));
+  if (companyWhere) {
+    if (places.some((p) => hasWord(companyWhere, p))) return true;
+    // A company row with a city but no country ("Bengaluru, Karnataka") says nothing about
+    // a country filter ("India"): the headline may still say where the company is. Only a
+    // row that names its country can rule a place out on its own.
+    return opts.companyHasCountry === false && places.some((p) => hasWord(headline, p));
+  }
   return places.some((p) => hasWord(headline, p));
 }
 
@@ -171,14 +190,16 @@ export function locationMatches(places: string[], companyWhere: string | undefin
 export function plausibleLocation(loc: string | null | undefined, title?: string | null): string | undefined {
   const v = (loc ?? "").trim();
   if (!v || v.length > 80) return undefined;
-  if (/[|@·•]|\s(?:at|and)\s|https?:/i.test(v)) return undefined;
+  // " at " marks a headline ("Head of Sales at Acme"); " and " does not - it is part of
+  // real place names ("Trinidad and Tobago", "Jammu and Kashmir", "Bosnia and Herzegovina").
+  if (/[|@·•]|\sat\s|https?:/i.test(v)) return undefined;
   if (title && title.trim() && v.toLowerCase().includes(title.toLowerCase().trim())) return undefined;
   if (/\b(head|director|manager|founder|ceo|cto|cfo|coo|vp|president|engineer|developer|consultant|officer|lead|sales|marketing|executive|specialist|analyst)\b/i.test(v)) return undefined;
   if (v.split(/\s+/).length > 6) return undefined;
   return v;
 }
 
-function noLeadsNote(matched: number, why: NoLeadReasons): string {
+function noLeadsNote(matched: number, why: NoLeadReasons, searchNote?: string): string {
   const parts: string[] = [];
   if (why.noTitles) parts.push("the subscription has no target titles to look for");
   if (why.noPerson) parts.push(`nobody with the target titles was found at ${why.noPerson} ${why.noPerson === 1 ? "company" : "companies"}`);
@@ -187,7 +208,10 @@ function noLeadsNote(matched: number, why: NoLeadReasons): string {
   if (why.stopped) parts.push("the plan's lead limit was reached");
   if (why.failed) parts.push(`saving failed for ${why.failed} ${why.failed === 1 ? "company" : "companies"}`);
   const head = `${matched} ${matched === 1 ? "signal" : "signals"} matched but no leads were created`;
-  return parts.length ? `${head}: ${parts.join("; ")}.` : `${head}.`;
+  const text = parts.length ? `${head}: ${parts.join("; ")}.` : `${head}.`;
+  // Why the people search could not run, said once: "no search source is connected" is
+  // something the customer should hear in those words, not only as a count.
+  return why.searchFailed && searchNote ? `${text} ${searchNote}` : text;
 }
 
 /** Find decision makers at a signal's company and save them as leads (tagged with the signal). */
@@ -196,7 +220,7 @@ export async function leadsFromSignal(sub: SignalSubscription, signalId: string,
 }
 
 /** As leadsFromSignal, and when nobody was created, why. */
-export async function leadsFromSignalDetailed(sub: SignalSubscription, signalId: string, companyName: string, type: string): Promise<{ created: number; reason: NoLeadReason }> {
+export async function leadsFromSignalDetailed(sub: SignalSubscription, signalId: string, companyName: string, type: string): Promise<{ created: number; reason: NoLeadReason; searchNote?: string }> {
   const { db } = getDb();
   const domain = await resolveCompanyDomain(companyName).catch(() => null);
   if (domain) {
@@ -207,7 +231,9 @@ export async function leadsFromSignalDetailed(sub: SignalSubscription, signalId:
   // Detailed, so "the search could not run" is recorded as that and not as "nobody works there".
   const found = await findPeopleDetailed({ companyName, titles: sub.targetTitles, limit: 3 });
   const people = found.people;
-  const searchFailed = people.length === 0 && found.everySearchFailed;
+  // The rule every discovery path uses: nothing found because no source could really search
+  // (none answered, or only a keyless fallback did) is "could not search", not "nobody".
+  const searchFailed = people.length === 0 && (found.everySearchFailed || !!found.emptyNote);
   // The company's name and the providers' own words (which can echo the search) stay out of
   // the log unless an operator turned search debugging on; the signal id finds the company.
   if (searchFailed) console.warn(searchDebugOn() ? `[signals] subscription ${sub.id}: people search failed for ${companyName}: ${found.failureMessage ?? "every search failed"}` : `[signals] subscription ${sub.id}: people search failed for the company of signal ${signalId}`);
@@ -255,7 +281,7 @@ export async function leadsFromSignalDetailed(sub: SignalSubscription, signalId:
     if (cp) await enrollEligibleLeads(cp, ids);
   }
   const reason: NoLeadReason = stoppedBecause ? "stopped" : searchFailed ? "searchFailed" : people.length === 0 ? "noPerson" : "alreadyLeads";
-  return { created, reason };
+  return { created, reason, ...(reason === "searchFailed" && found.emptyNote ? { searchNote: found.emptyNote } : {}) };
 }
 
 /** Enrich a company row with fresh news signals + intent score (used by company.enrich job). */

@@ -67,6 +67,8 @@ export function redactRequestLine(path: string, rawQuery = ""): string {
   let p = path;
   p = p.replace(/^\/t\/([^/]+)\/.+$/s, (_m, kind: string) => `/t/${kind.slice(0, 8)}/${REDACTED}`);
   p = p.replace(/^\/v1\/public\/clients\/report\/.+$/s, `/v1/public/clients/report/${REDACTED}`);
+  // The per-workspace reply address: the token in the path is the credential.
+  p = p.replace(/^\/v1\/public\/inbound\/.+$/s, `/v1/public/inbound/${REDACTED}`);
   p = p.replace(/^\/px\/.+$/s, (m: string) => `/px/${REDACTED}${m.endsWith("/collect") ? "/collect" : m.endsWith(".js") ? ".js" : ""}`);
   // Anything else in a path is a route name or a UUID. Control characters could forge extra
   // log lines, so they never reach the log.

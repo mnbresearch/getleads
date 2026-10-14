@@ -152,7 +152,16 @@ export function pluralRole(role: string): string {
   return words.join(" ");
 }
 
+/**
+ * Categories too broad to build a problem question from. "How do teams usually handle B2B
+ * software without dedicated software?" is what the problem template made of them.
+ */
+const GENERIC_CATEGORY = /^(b2b|b2c|saas|b2b saas|software|b2b software|tech|technology|it|it services)$/i;
+
 export function starterPack(ctx: TemplateContext): PromptTemplate[] {
+  // No category, no questions: every template is built around it, and a stand-in such as
+  // "B2B software" produced questions no buyer would type. The caller asks for the category.
+  if (!(ctx.category ?? "").trim()) return [];
   const { base, product, withArticle } = categoryPhrase(ctx.category);
   const cat = base;
   const audience = (ctx.audience || "").trim();
@@ -213,16 +222,22 @@ export function starterPack(ctx: TemplateContext): PromptTemplate[] {
     });
   }
 
+  // "handle <X> without dedicated software" only reads when X is an activity ("lead
+  // generation"). When the category is already a product ("CRM", "lead generation
+  // platform") or too broad ("B2B"), ask about going without the product instead.
+  const productLike = isProduct || GENERIC_CATEGORY.test(cat);
   out.push({
     text: problem
       ? `How do teams usually solve ${problem}?`
-      : `How do teams usually handle ${cat} without dedicated software?`,
+      : productLike
+        ? `How do teams manage without ${withArticle}?`
+        : `How do teams usually handle ${cat} without dedicated software?`,
     topic: "problem",
     intent: "problem",
     rationale: "Problem-stage questions where your category may not even be mentioned yet.",
   });
   out.push({
-    text: problem ? `What tools help with ${problem}?` : `What tools help teams with ${cat}?`,
+    text: problem ? `What tools help with ${problem}?` : productLike ? `When does a team need ${withArticle}?` : `What tools help teams with ${cat}?`,
     topic: "problem",
     intent: "problem",
     rationale: "The moment a problem turns into a tool search.",

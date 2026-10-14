@@ -7,7 +7,7 @@ import { plural } from "../lib/plural";
 import { recipientLabel, recipientRemoved } from "../lib/recipient";
 
 interface Step { id?: string; delayDays: number; channel?: string; subjectTemplate: string; bodyTemplate: string; aiPersonalize: boolean; aiInstructions?: string | null; variants?: { subjectTemplate: string; bodyTemplate: string }[] }
-interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; steps?: Step[]; createdAt: string }
+interface Campaign { id: string; name: string; status: string; listId: string | null; icpId: string | null; emailAccountId: string | null; settings: Record<string, unknown>; stats: Record<string, number>; contacts: number; repliedContacts?: number; steps?: Step[]; createdAt: string }
 interface Account { id: string; provider: string; fromName: string; fromEmail: string; dailyLimit: number; status: string; sentToday: number }
 
 const DEFAULT_STEPS: Step[] = [
@@ -104,7 +104,7 @@ export function CampaignsPage() {
                   <td className="td tabular-nums">{c.contacts}</td>
                   <td className="td tabular-nums">{c.stats.sent ?? 0}</td>
                   <td className="td tabular-nums">{c.stats.opened ?? 0}</td>
-                  <td className="td tabular-nums">{c.stats.replied ?? 0}</td>
+                  <td className="td tabular-nums">{c.repliedContacts ?? c.stats.replied ?? 0}</td>
                   <td className="td text-xs text-ink-400">{fmtDate(c.createdAt)}</td>
                 </tr>
               ))}
@@ -465,7 +465,7 @@ export function CampaignDetail() {
   const { id } = useParams();
   const navigate = useNavigate();
   const [c, setC] = useState<Campaign | null>(null);
-  const [stats, setStats] = useState<{ messages: Record<string, number>; contacts: Record<string, number>; rates: Record<string, number>; variants?: { stepId: string | null; variant: number; sent: number; opened: number; replied: number }[] } | null>(null);
+  const [stats, setStats] = useState<{ messages: Record<string, number>; contacts: Record<string, number>; repliedContacts?: number; contactsReached?: number; rates: Record<string, number>; variants?: { stepId: string | null; variant: number; sent: number; opened: number; replied: number }[] } | null>(null);
   const [contacts, setContacts] = useState<{ id: string; status: string; currentStep: number; nextSendAt: string | null; lastError?: string | null; sendFailures?: number | null; lead: { id: string; fullName: string | null; email: string | null; emailStatus: string; title: string | null; company: { name: string | null } | null } }[]>([]);
   const [messages, setMessages] = useState<{ id: string; toEmail: string | null; recipientRemoved?: boolean; subject: string; status: string; sentAt: string | null; openedAt: string | null; repliedAt: string | null; bodyText: string; direction: string; intent?: string | null; draftReply?: { subject: string; body: string } | null }[]>([]);
   const [tab, setTab] = useState<"contacts" | "messages">("contacts");
@@ -567,8 +567,8 @@ export function CampaignDetail() {
       {refsErr && <div className="mb-4 rounded-lg border border-red-300 bg-red-50 p-3 text-sm text-red-800" role="alert">Could not load sender accounts, lists and ICPs ({refsErr}), so Edit and Enroll may show them as missing. <button className="underline" onClick={loadRefs}>Try again</button></div>}
       {stats && (
         <div className="mb-6 grid grid-cols-2 gap-3 md:grid-cols-6">
-          {[["Sent", stats.messages.sent], ["Opened", stats.messages.opened, stats.rates.open], ["Clicked", stats.messages.clicked, stats.rates.click], ["Replied", stats.messages.replied, stats.rates.reply], ["Bounced", stats.messages.bounced], ["Failed", stats.messages.failed]].map(([l, v, r]) => (
-            <div key={String(l)} className="card p-3"><div className="text-xs uppercase text-ink-400">{l}</div><div className="text-xl font-semibold">{v ?? 0}{r !== undefined && <span className="ml-1 text-xs font-normal text-ink-400">{Math.round(Number(r) * 100)}%</span>}</div></div>
+          {[["Sent", stats.messages.sent], ["Opened", stats.messages.opened, stats.rates.open], ["Clicked", stats.messages.clicked, stats.rates.click], ["Replied", stats.repliedContacts ?? stats.messages.replied, stats.repliedContacts !== undefined ? stats.rates.replyContacts : stats.rates.reply], ["Bounced", stats.messages.bounced], ["Failed", stats.messages.failed]].map(([l, v, r]) => (
+            <div key={String(l)} className="card p-3" title={l === "Replied" ? "Contacts who replied (including replies marked by hand or received at your inbound address), as a share of the contacts this campaign emailed. Same count as the campaign list." : undefined}><div className="text-xs uppercase text-ink-400">{l}</div><div className="text-xl font-semibold">{v ?? 0}{r !== undefined && <span className="ml-1 text-xs font-normal text-ink-400">{Math.round(Number(r) * 100)}%</span>}</div></div>
           ))}
         </div>
       )}

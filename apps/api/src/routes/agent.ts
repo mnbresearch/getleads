@@ -10,6 +10,7 @@ import { env } from "../env.js";
 import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { findExistingLead, pipelineLeadToInput, upsertLead } from "../services/leads.js";
 import { tryConsume } from "../lib/quota.js";
+import { refundBlockedSearch } from "../lib/searchRefund.js";
 
 /**
  * Agent-first endpoints: single calls that do a whole workflow, with plain JSON in/out.
@@ -43,7 +44,9 @@ agentRoutes.post(
     const ai = aiFor(c.get("auth"));
     const providerBudget = await remainingPremiumBudget(db, oid);
     // Detailed, so an agent (and the console) can tell "nobody matched" from "no source could answer".
-    const { leads: results, providerFailures, notes } = await runLeadPipelineDetailed({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: await verifyOptsFor(oid), country: b.country, maxProviderLeads: providerBudget });
+    const { leads: results, providerFailures, notes, searchBlocked } = await runLeadPipelineDetailed({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: await verifyOptsFor(oid), country: b.country, maxProviderLeads: providerBudget });
+    // Nothing could search, so nothing was delivered: the search unit is given back.
+    if (searchBlocked) await refundBlockedSearch(db, oid);
     const out = [];
     /** Set when a quota or a fault stopped part of this run. Reported, not swallowed. */
     let emailSkipped: string | null = null;

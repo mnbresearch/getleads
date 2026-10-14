@@ -1500,6 +1500,24 @@ export function isOutOfOffice(input: { intent?: string | null; subject?: string 
 /** How long an out-of-office reply pushes the next step back. */
 const OOO_DELAY_MS = 3 * 86_400_000;
 
+/**
+ * How many of a campaign's contacts replied - one number for the campaign list and the
+ * campaign page, so the two agree.
+ *
+ * The page counted outbound messages with a reply date, which misses a contact marked as
+ * replied by hand when nothing had been sent to them yet, or whose last message was not the
+ * one replied to; the list read the running counter, which counts every reply (two replies
+ * from one person are two). A contact counts here once, when its status is "replied" (by an
+ * ingested reply, the inbound address, or "Mark replied") or any message this campaign sent
+ * to its lead has a reply date (a reply that unsubscribed them, or one kept running by
+ * stopOnReply: false).
+ */
+export const repliedContactsSql = (campaignId: unknown) => sql<number>`(
+  SELECT count(*)::int FROM campaign_contacts rc
+  WHERE rc.campaign_id = ${campaignId}
+    AND (rc.status = 'replied' OR EXISTS (
+      SELECT 1 FROM messages rm WHERE rm.lead_id = rc.lead_id AND rm.campaign_id = rc.campaign_id AND rm.direction = 'outbound' AND rm.replied_at IS NOT NULL)))`;
+
 export async function markReplied(orgId: string, leadEmail: string, intent: string, inbound: { subject?: string | null; text?: string | null; headers?: Record<string, string | undefined> | null } = {}) {
   const { db } = getDb();
   // Whatever the classifier (a model) returned, only an intent from the enum is acted on or

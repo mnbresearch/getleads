@@ -1401,7 +1401,8 @@ suite("ingestion and route-level security", () => {
       const vis = await req("POST", `/v1/visibility/prompts/${prompt.id}/run`, O.token, {});
       expect(vis.status).toBe(503);
       expect(vis.body.error.code).toBe("ai_not_configured");
-      expect(vis.body.error.message).toBe("AI visibility can't be sampled: AI drafting isn't switched on for this workspace yet. Contact support to enable it.");
+      // Fix round C3: names the real cause (no engine on the server), not a workspace setting.
+      expect(vis.body.error.message).toBe("AI visibility can't be sampled: no AI engine is connected on our side. This is not a setting in your workspace - contact support if you need it.");
       said.visibility = vis.text;
 
       const l = await lead(O.orgId, { firstName: "Asha", lastName: "Rao" });

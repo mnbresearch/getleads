@@ -45,6 +45,13 @@ export interface WebSearchOutcome {
   nothingConfigured: boolean;
   /** Served from the in-process cache; only answers are cached, so this implies one answered. */
   cached?: boolean;
+  /**
+   * Some provider answered, but every answer that counted came from a keyless fallback
+   * scraper (DuckDuckGo, Bing HTML) while the keyed sources failed or were skipped. Those
+   * scrapers are blocked from most servers and often return an empty page instead of an
+   * error, so an empty answer like this is not evidence that nobody matched.
+   */
+  fallbackOnly?: boolean;
 }
 
 /** Scrapers need no key; their presence says nothing about whether search is configured. */
@@ -148,8 +155,14 @@ export async function webSearchDetailed(query: string, opts: WebSearchOptions = 
     }
   }
 
-  const answered = attempts.some((a) => a.ok);
+  // An answer counts only when it could have contained what was asked for. A scraper that
+  // ignored a `site:` query and had every result thrown away as off that site never searched
+  // the site: it is garbage, not "nobody there", and is treated like a provider that failed.
+  // (Decoy pages are already thrown as failures by the providers themselves.)
+  const usable = attempts.filter(usableAnswer);
+  const answered = usable.length > 0;
   const everyProviderFailed = !answered;
+  const fallbackOnly = answered && usable.every((a) => KEYLESS.has(a.provider));
 
   // Every provider tried and nothing came back. That is a fact about the system, not about the
   // query, and it is worth one line in the log whether or not anyone set a debug flag.
@@ -181,12 +194,19 @@ export async function webSearchDetailed(query: string, opts: WebSearchOptions = 
   const siteIgnored = !deduped.length && attempts.some((a) => a.ok && (a.offSite ?? 0) > 0);
   if (deduped.length) {
     cache.set(key, { at: Date.now(), expiresAt: Date.now() + CACHE_TTL, results: deduped });
-  } else if (answered && !siteIgnored) {
+  } else if (answered && !siteIgnored && !fallbackOnly) {
     cache.set(key, { at: Date.now(), expiresAt: Date.now() + EMPTY_CACHE_TTL, results: deduped });
   }
   // Otherwise: cache nothing. The next caller gets a real attempt rather than our bad day.
+  // That includes an empty answer from a keyless scraper alone: a cached entry carries no
+  // attempts, so the second identical search would read as a real "nobody matched".
 
-  return done({ results: deduped, attempts, everyProviderFailed, nothingConfigured });
+  return done({ results: deduped, attempts, everyProviderFailed, nothingConfigured, ...(fallbackOnly ? { fallbackOnly: true } : {}) });
+}
+
+/** A provider's answer that could have held what was asked for (see webSearchDetailed). */
+function usableAnswer(a: WebSearchAttempt): boolean {
+  return a.ok && !(a.count === 0 && (a.offSite ?? 0) > 0);
 }
 
 /**
@@ -258,11 +278,19 @@ export function summarizeWebSearchFailures(outcomes: WebSearchOutcome[]): string
   if (!outcomes.length) return null;
   if (outcomes.some((o) => !o.everyProviderFailed)) return null;
   const last = new Map<string, string>();
-  for (const o of outcomes) for (const a of o.attempts) if (!a.ok) last.set(a.provider, a.error ?? a.outcome ?? "failed");
+  for (const o of outcomes)
+    for (const a of o.attempts) {
+      if (!a.ok) last.set(a.provider, a.error ?? a.outcome ?? "failed");
+      else if (!usableAnswer(a)) last.set(a.provider, "ignored the site: operator, so its results were discarded");
+    }
   const detail = [...last].map(([p, e]) => `${p}: ${e}`).join("; ");
   // For the log: which fallbacks failed and how, without their messages (see searchDebugOn).
   const lastOutcome = new Map<string, string>();
-  for (const o of outcomes) for (const a of o.attempts) if (!a.ok) lastOutcome.set(a.provider, a.outcome ?? "failed");
+  for (const o of outcomes)
+    for (const a of o.attempts) {
+      if (!a.ok) lastOutcome.set(a.provider, a.outcome ?? "failed");
+      else if (!usableAnswer(a)) lastOutcome.set(a.provider, "off_site");
+    }
   const logDetail = searchDebugOn() ? detail.slice(0, 300) : [...lastOutcome].map(([p, e]) => `${p}: ${e}`).join("; ");
   const n = outcomes.length;
   if (outcomes.every((o) => o.nothingConfigured)) {
@@ -306,8 +334,20 @@ export function onlyFallbackSearch(outcomes: WebSearchOutcome[]): boolean {
 export function emptySearchNote(outcomes: WebSearchOutcome[], found: number): string | null {
   if (found > 0 || !outcomes.length) return null;
   if (onlyFallbackSearch(outcomes)) return NO_WEB_SEARCH_CONFIGURED;
-  if (outcomes.every((o) => o.everyProviderFailed)) return NO_SEARCH_ANSWERED;
+  // A keyed source is connected but none of them answered: each search either failed
+  // outright or was answered only by a keyless scraper (see `fallbackOnly`). Neither is a
+  // finding about the market.
+  if (outcomes.every(searchCouldNotLook)) return NO_SEARCH_ANSWERED;
   return null;
+}
+
+/**
+ * True when this one search did not really look: no provider gave a usable answer, or only a
+ * keyless fallback scraper did. The per-search half of emptySearchNote, for callers that
+ * count searches one by one.
+ */
+export function searchCouldNotLook(o: WebSearchOutcome): boolean {
+  return o.everyProviderFailed || o.fallbackOnly === true;
 }
 
 /** Testing seam: forget everything remembered so far. */
@@ -323,7 +363,12 @@ export function resetSearchCache() {
 const TRACKING_PARAM = /^(?:utm_[a-z0-9_]*|ref|ref_src|ref_url|fbclid|gclid|gclsrc|dclid|msclkid|yclid|igshid|mc_cid|mc_eid|trk|trkinfo|_hsenc|_hsmi|gh_src)$/i;
 
 /** What makes two result URLs the same page: host and path without case, the query without tracking parameters, no fragment. */
-export function resultKey(url: string): string {
+// No real result URL is anywhere near this long; a hostile page can hand back megabytes.
+// Keying on the first 8 KB keeps dedupe linear and fast without changing any real key.
+const RESULT_KEY_MAX = 8192;
+
+export function resultKey(rawUrl: string): string {
+  const url = rawUrl.length > RESULT_KEY_MAX ? rawUrl.slice(0, RESULT_KEY_MAX) : rawUrl;
   try {
     const u = new URL(url);
     const kept: string[] = [];

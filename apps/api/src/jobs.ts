@@ -10,7 +10,7 @@ import { webhookSecret } from "./lib/webhookSecret.js";
 import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead, verifierOf } from "./services/leads.js";
 import { AiNotConfiguredError, knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { enrollEligibleLeads, sendStep, tickCampaign } from "./services/campaigns.js";
-import { appsScriptOutputUrl, fetchAppsScriptOutput, orgDataKeys, recordIntegrationOutcome, syncLead } from "./services/integrations.js";
+import { appsScriptOutputUrl, fetchAppsScriptOutput, LEAD_NOT_FOUND, orgDataKeys, recordIntegrationOutcome, runAutoSyncBatch, syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
 import { aiForOrg } from "./lib/ai.js";
 import { RETENTION, runRetention } from "./lib/privacyRetention.js";
@@ -25,6 +25,7 @@ import { refreshCompanySignals, runSubscription } from "./services/signals.js";
 import { runMonitor } from "./services/monitors.js";
 import { runAutopilot } from "./services/autopilot.js";
 import { runPlay, tickPlays } from "./services/plays.js";
+import { refundBlockedSearch } from "./lib/searchRefund.js";
 import { blockedByProvidersNote, plural } from "./services/notes.js";
 import { sendMail } from "./lib/mailer.js";
 import { purgeDueWorkspaces } from "./services/accountDeletion.js";
@@ -372,7 +373,7 @@ export const handlers: Record<string, JobHandler> = {
     const listRow = job.payload.listId ? await db.query.lists.findFirst({ where: and(eq(lists.id, String(job.payload.listId)), eq(lists.orgId, orgId)) }) : null;
     try {
       const providerBudget = await remainingPremiumBudget(db, orgId);
-      const { leads: results, providerFailures } = await runLeadPipelineDetailed(query, {
+      const { leads: results, providerFailures, searchBlocked } = await runLeadPipelineDetailed(query, {
         ai: await aiFor(db, orgId),
         verify: verifyOpts(await orgDataKeys(orgId)),
         icp: (icp?.criteria as IcpCriteria | undefined) ?? undefined,
@@ -440,6 +441,11 @@ export const handlers: Record<string, JobHandler> = {
       // billing or credential problem on our side.
       const blockedByProviders = ids.length === 0 && providerFailures.length > 0;
       const providerNote = blockedByProviders ? blockedByProvidersNote(providerFailures, "This is not the same as nobody matching your criteria.") : null;
+      // The route charged one search before queueing this. A run in which no source could
+      // search delivered nothing, so that unit is given back - once: a retry only happens
+      // after a throw, and this is the last step before the job succeeds.
+      const refunded = searchBlocked === true && ids.length === 0;
+      if (refunded) await refundBlockedSearch(db, orgId);
 
       await db
         .update(searches)
@@ -463,7 +469,7 @@ export const handlers: Record<string, JobHandler> = {
       );
       // `note` repeats the reason an empty search was empty, so whoever polls the job (the
       // Search page, the API) can tell "no source could search" from "nobody matched".
-      return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated, clientClaim, ...(providerNote ? { note: providerNote } : {}) };
+      return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated, clientClaim, ...(providerNote ? { note: providerNote } : {}), ...(refunded ? { searchRefunded: true } : {}) };
     } catch (e) {
       // searches.error is shown to the customer: upstream text is masked before it is stored.
       await db.update(searches).set({ status: "failed", error: redact((e as Error).message, { max: 1000 }), completedAt: new Date() }).where(and(eq(searches.id, searchId), eq(searches.orgId, orgId)));
@@ -750,12 +756,20 @@ export const handlers: Record<string, JobHandler> = {
     const integ = await db.query.integrations.findFirst({ where: and(eq(integrations.id, String(job.payload.integrationId)), inArray(integrations.status, ["active", "error"])) });
     if (!integ) return { skipped: "integration missing/inactive" };
     if (foreign(job, integ.orgId)) return ORG_MISMATCH;
+    // Auto sync: one batch per connection for the lead events since its cursor
+    // (services/integrations.ts runAutoSyncBatch), not one job per lead.
+    if (job.payload.batch === true) return runAutoSyncBatch(integ, job.attempts >= job.maxAttempts);
     // The lead must be the integration org's own before its data is pushed to their CRM.
-    const syncLeadRow = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)), columns: { id: true, orgId: true } });
-    if (syncLeadRow && syncLeadRow.orgId !== integ.orgId) return ORG_MISMATCH;
-    const r = await syncLead(integ, String(job.payload.leadId));
+    const leadIdValue = String(job.payload.leadId);
+    const syncLeadRow = isUuid(leadIdValue) ? await db.query.leads.findFirst({ where: eq(leads.id, leadIdValue), columns: { id: true, orgId: true } }) : undefined;
+    // A lead deleted (or erased) since the job was queued: nothing to push and nothing a retry
+    // would change, so the job finishes as skipped instead of failing three times.
+    if (!syncLeadRow) return { skipped: LEAD_NOT_FOUND };
+    if (syncLeadRow.orgId !== integ.orgId) return ORG_MISMATCH;
+    const r = await syncLead(integ, leadIdValue);
+    if (!r.ok && r.error === LEAD_NOT_FOUND) return { skipped: LEAD_NOT_FOUND };
     // The outcome goes onto the connection (status, lastError) so Settings can show it.
-    if (r.error !== "lead not found") await recordIntegrationOutcome(integ.id, r.ok, r.ok ? undefined : redact(r.error ?? "sync failed", { max: 300 }));
+    await recordIntegrationOutcome(integ.id, r.ok, r.ok ? undefined : redact(r.error ?? "sync failed", { max: 300 }), { credentialsRejected: r.credentialsRejected });
     if (!r.ok) throw new Error(redact(r.error ?? "sync failed", { max: 500 }));
     return r;
   },
@@ -840,9 +854,11 @@ export const handlers: Record<string, JobHandler> = {
   /** Run one signal subscription. payload: { subscriptionId } */
   "signals.subscription": async (job, ctx) => {
     const sub = await ctx.db.query.signalSubscriptions.findFirst({ where: eq(signalSubscriptions.id, String(job.payload.subscriptionId)) });
-    if (!sub || !sub.active) return { skipped: true };
+    // `manual`: queued by "Run now" (POST /v1/signals/subscriptions/:id/run), which runs a
+    // paused subscription too, as the synchronous route always did.
+    if (!sub || (!sub.active && job.payload.manual !== true)) return { skipped: true };
     if (foreign(job, sub.orgId)) return ORG_MISMATCH;
-    return runSubscription(sub, ctx.log);
+    return runSubscription(sub, ctx.log, (pct) => void ctx.progress(pct).catch(() => {}));
   },
 
   /**
@@ -1078,7 +1094,11 @@ export const handlers: Record<string, JobHandler> = {
     }
     const providerBudget = await remainingPremiumBudget(db, ss.orgId);
     // Every option is built here, from server configuration and the org's plan.
-    const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, { ai: await aiFor(db, ss.orgId), verify: verifyOpts(await orgDataKeys(ss.orgId)), maxProviderLeads: providerBudget });
+    const { leads: results, providerFailures, searchBlocked } = await runLeadPipelineDetailed(input, { ai: await aiFor(db, ss.orgId), verify: verifyOpts(await orgDataKeys(ss.orgId)), maxProviderLeads: providerBudget });
+    // Charged on the first attempt above; a run in which no source could search delivered
+    // nothing, so that unit is given back (only when it was this attempt that charged).
+    const ssRefunded = searchBlocked === true && job.attempts <= 1;
+    if (ssRefunded) await refundBlockedSearch(db, ss.orgId);
     let fresh = 0;
     const names: string[] = [];
     const freshIds: string[] = [];
@@ -1131,7 +1151,7 @@ export const handlers: Record<string, JobHandler> = {
     const ssName = safeHeaderText(ss.name, 80, "your saved search");
     if (ss.alert && fresh > 0 && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `${plural(fresh, "new lead")} for "${ssName}"`, text: `Scout found ${plural(fresh, "new lead")} matching "${ssName}":\n\n${names.join("\n")}${stoppedBecause ? `\n\n${stoppedBecause}` : ""}\n\nOpen ${env.appUrl}/leads?tag=saved:${ss.id.slice(0, 8)}` });
     else if (ss.alert && blocked && alertTo) await sendMail(null, { from: env.mailFrom, to: alertTo, subject: `Could not check "${ssName}" today`, text: `${note}\n\nThe search will run again tomorrow.` });
-    return { results: results.length, fresh, providerFailures, note, clientClaim };
+    return { results: results.length, fresh, providerFailures, note, clientClaim, ...(ssRefunded ? { searchRefunded: true } : {}) };
   },
 
   /**

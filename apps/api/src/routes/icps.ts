@@ -1,12 +1,11 @@
 import { Hono, type Context } from "hono";
-import { AI_NOT_SWITCHED_ON } from "../services/visibility.js";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, clients, companies, consume, desc, inArray, enqueue, eq, getDb, icps, isNull, leads, or, sql } from "@prospex/db";
 import { assertOwned } from "../lib/ownership.js";
 import { scoreLeadRules, scoreLeadWithAi, hasAi, refineIcpWithAi, type IcpCriteria, type IcpChatMessage } from "@prospex/core";
 import { ApiError, notFound, requireSomeFields } from "../lib/errors.js";
-import { AI_OFF_UNAVAILABLE, aiDisabled, aiFor } from "../lib/ai.js";
+import { AI_OFF_UNAVAILABLE, aiDisabled, aiFor, aiMissingNote } from "../lib/ai.js";
 import { assertQuotaAvailable, tryConsume } from "../lib/quota.js";
 import { assertRowCap, guardJobCapacity } from "../lib/limits.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
@@ -145,7 +144,7 @@ icpRoutes.post("/:id/chat", zValidator("json", z.object({ message: z.string().mi
   // The workspace switched AI off itself: a 409 that says so and how to turn it back on.
   if (aiDisabled(c.get("auth").org)) throw new ApiError(409, AI_OFF_UNAVAILABLE, "ai_off");
   // 503, not 404: the ICP exists; the service it needs is not available.
-  if (!hasAi(ai)) throw new ApiError(503, `The ICP assistant is unavailable: ${AI_NOT_SWITCHED_ON}`, "ai_unavailable");
+  if (!hasAi(ai)) throw new ApiError(503, `The ICP assistant is unavailable. ${aiMissingNote(c.get("auth").org) ?? "No AI engine is available right now."}`, "ai_unavailable");
   // Checked before the call and charged after it worked. The charge used to come after with
   // its error swallowed, so an org past its AI quota chatted on for free.
   await assertQuotaAvailable(db, oid, "aiMessages", 1);
@@ -219,8 +218,12 @@ icpRoutes.post("/:id/score", zValidator("json", z.object({ leadIds: z.array(z.st
   scored.sort((a, b2) => b2.score - a.score);
   const ai = aiFor(c.get("auth"));
   // Each rerank is one AI call and is charged as one, before it is made. It used to be free.
-  const rerank = { requested: Math.min(b.aiRerankTop, scored.length), done: 0, skipped: undefined as string | undefined };
-  if (b.aiRerankTop > 0 && !hasAi(ai)) rerank.skipped = aiDisabled(c.get("auth").org) ? "ai_off" : "no_ai_provider";
+  const rerank = { requested: Math.min(b.aiRerankTop, scored.length), done: 0, skipped: undefined as string | undefined, note: undefined as string | undefined };
+  if (b.aiRerankTop > 0 && !hasAi(ai)) {
+    rerank.skipped = aiDisabled(c.get("auth").org) ? "ai_off" : "no_ai_provider";
+    // The sentence says which cause it is (workspace switch, plan, or no engine on the server).
+    rerank.note = aiMissingNote(c.get("auth").org, "rule scores were used");
+  }
   if (b.aiRerankTop > 0 && hasAi(ai)) {
     const summary = String((icp.aiProfile as { summary?: string } | null)?.summary ?? icp.description ?? icp.name);
     for (const s of scored.slice(0, b.aiRerankTop)) {

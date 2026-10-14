@@ -14,7 +14,7 @@ import { verifyEmail, type VerifyOptions } from "./email/verify.js";
 import { scoreLeadRules, type IcpCriteria } from "./icp/score.js";
 import { inferDepartment, inferSeniority } from "./util/names.js";
 import { pMap } from "./util/http.js";
-import { NO_WEB_SEARCH_CONFIGURED, onlyFallbackSearch, summarizeWebSearchFailures, type WebSearchOutcome } from "./search/index.js";
+import { emptySearchNote, summarizeWebSearchFailures, type WebSearchOutcome } from "./search/index.js";
 import { searchProvidersDetailed, peopleProviders, type ProviderPerson } from "./providers/people.js";
 
 export interface PipelineLead extends PersonCandidate {
@@ -115,6 +115,12 @@ export interface PipelineOutcome {
    * result can be explained; not a failure on its own.
    */
   notes: string[];
+  /**
+   * True when nothing came back because no source could search at all: no licensed data
+   * provider answered and no web search really looked (none connected, none answered, or
+   * only a keyless fallback scraper did). Callers that charged a search give it back.
+   */
+  searchBlocked?: boolean;
   /** Web searches fired and how many of them no provider answered. */
   webSearch: { searches: number; failed: number };
 }
@@ -245,8 +251,11 @@ export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: P
   // The keyless fallback scrapers often "answer" with an empty page when they are blocked,
   // which summarizeWebSearchFailures counts as an answer. With nothing else connected and
   // nobody found, that is still "no source could search", never "nobody matched".
-  if (!webFailure && people.length === 0 && !providerAnswered && onlyFallbackSearch(searchOutcomes)) webFailure = NO_WEB_SEARCH_CONFIGURED;
+  // The same rule every discovery path uses (emptySearchNote): also when a keyed source is
+  // connected but every search was answered only by a fallback scraper.
+  if (!webFailure && people.length === 0 && !providerAnswered) webFailure = emptySearchNote(searchOutcomes, 0);
   if (webFailure) providerFailures.push({ provider: "web_search", message: redact(webFailure, { max: 300 }) });
+  const searchBlocked = people.length === 0 && !providerAnswered && webFailure !== null;
   progress(40, `found ${people.length} people`);
 
   // 2) Company resolution + enrichment
@@ -322,7 +331,7 @@ export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: P
   }
   leads.sort((a, b) => (b.score ?? 0) - (a.score ?? 0));
   progress(100, "done");
-  return { leads, providerFailures, notes, webSearch: { searches: searchOutcomes.length, failed: searchOutcomes.filter((o) => o.everyProviderFailed).length } };
+  return { leads, providerFailures, notes, ...(searchBlocked && leads.length === 0 ? { searchBlocked: true } : {}), webSearch: { searches: searchOutcomes.length, failed: searchOutcomes.filter((o) => o.everyProviderFailed).length } };
 }
 
 /** Back-compatible shape: the leads alone, for callers that do not need the detail. */

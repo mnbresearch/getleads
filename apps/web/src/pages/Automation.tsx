@@ -36,7 +36,7 @@ export function AutomationPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("VP Sales at B2B SaaS companies in India");
-  const [runErr, setRunErr] = useState<{ message: string; quota: boolean; info?: boolean } | null>(null);
+  const [runErr, setRunErr] = useState<{ message: string; quota: boolean; info?: boolean; blocked?: boolean } | null>(null);
   const { toast, Toast } = useToast();
 
   const load = useCallback(() => {
@@ -55,7 +55,17 @@ export function AutomationPage() {
     setBusy(preview ? "preview" : "run");
     setRunErr(null);
     try {
-      const r = await apiFetch<{ found: number; created: number; duplicates: number; note?: string }>("POST", "/v1/automation/discover", { query, count: 25, preview });
+      const r = await apiFetch<{ status?: string; found: number; created: number; duplicates: number; note?: string; error?: { message?: string } | string }>("POST", "/v1/automation/discover", { query, count: 25, preview });
+      // No source could search. The server answers 200 with status "blocked" and the reason
+      // (it used to be a 502, which read as our server breaking): said as what it is, not as
+      // "found 0", and kept on screen.
+      if (r.status === "blocked") {
+        const message = r.note ?? (typeof r.error === "object" ? r.error?.message : r.error) ?? "No search source could answer, so nothing was looked for. This is not a result about your market.";
+        setRunErr({ message, quota: false, info: true, blocked: true });
+        toast(message, "err");
+        if (!preview) load();
+        return;
+      }
       // One toast: a second call replaced the first before anyone could read the counts.
       const summary = preview ? `Would store ${plural(r.found, "lead")}` : `Found ${r.found}, stored ${r.created} new, ${r.duplicates} already known`;
       toast(r.note ? `${summary}. ${r.note}` : summary);
@@ -63,7 +73,8 @@ export function AutomationPage() {
       if (r.found === 0 && r.note) setRunErr({ message: r.note, quota: false, info: true });
       load();
     } catch (e) {
-      // The 502 case carries the real explanation: every provider refused us. Showing the
+      // An older server answers "no source could search" with a 502 carrying the real
+      // explanation (newer ones answer 200 with status "blocked", handled above). Showing the
       // raw message matters here, because "no leads" and "nothing answered" look identical
       // in a lead list and only one of them is about the market.
       //
@@ -92,13 +103,13 @@ export function AutomationPage() {
             </div>
             {runErr && (
               <div className={`mt-3 rounded-lg border p-3 text-sm [overflow-wrap:anywhere] ${runErr.info ? "border-amber-300 bg-amber-50 text-amber-800" : "border-red-200 bg-red-50 text-red-700"}`} role={runErr.info ? "status" : "alert"}>
-                {runErr.quota ? <div className="font-medium">Search quota used up</div> : null}
+                {runErr.quota ? <div className="font-medium">Search quota used up</div> : runErr.blocked ? <div className="font-medium">Could not search</div> : null}
                 <div>{runErr.message}</div>
                 {runErr.quota && <Link className="mt-1 inline-block font-medium underline" to="/settings/billing">See plan &amp; usage</Link>}
               </div>
             )}
             <p className="mt-2 text-xs text-ink-400">
-              Preview reports what would be stored without storing it or spending lead quota. To run discovery on a schedule, set up <Link className="text-brand-600 hover:underline" to="/autopilot">Autopilot</Link>, which runs daily.
+              Preview reports what would be stored without storing it, adding it to the run history or spending quota. A run that could not search does not use up a search either. To run discovery on a schedule, set up <Link className="text-brand-600 hover:underline" to="/autopilot">Autopilot</Link>, which runs daily.
             </p>
           </div>
 

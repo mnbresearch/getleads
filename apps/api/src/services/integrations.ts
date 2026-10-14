@@ -22,7 +22,8 @@ import { CredentialUnreadableError, openOrgJson, rebindOnReadSoon } from "../lib
  */
 
 type Cfg = Record<string, string>;
-type SyncResult = { ok: boolean; externalId?: string; error?: string };
+/** `status` is the provider's HTTP status when it answered; 401/403 means the credentials were refused. */
+type SyncResult = { ok: boolean; externalId?: string; error?: string; status?: number; credentialsRejected?: boolean };
 
 /** How long a CRM or webhook gets to answer, and how much of its answer is read. */
 const TIMEOUT_MS = 15_000;
@@ -312,10 +313,10 @@ async function hubspot(cfg: Cfg, lead: Lead, company: { name?: string | null; do
     if (id) {
       const u = await fixedHostCall("HubSpot", `https://api.hubapi.com/crm/v3/objects/contacts/${id}`, { method: "PATCH", headers, body: JSON.stringify({ properties: props }) });
       if ("failed" in u) return { ok: false, externalId: id, error: u.failed };
-      return { ok: u.ok, externalId: id, error: u.ok ? undefined : `HubSpot HTTP ${u.status}` };
+      return { ok: u.ok, externalId: id, status: u.status, error: u.ok ? undefined : `HubSpot HTTP ${u.status}` };
     }
   }
-  return { ok: res.ok, externalId: typeof data.id === "string" ? data.id : undefined, error: res.ok ? undefined : crmMessage(data.message) ?? `HubSpot HTTP ${res.status}` };
+  return { ok: res.ok, status: res.status, externalId: typeof data.id === "string" ? data.id : undefined, error: res.ok ? undefined : crmMessage(data.message) ?? `HubSpot HTTP ${res.status}` };
 }
 
 async function pipedrive(cfg: Cfg, lead: Lead, company: { name?: string | null } | null): Promise<SyncResult> {
@@ -341,7 +342,7 @@ async function pipedrive(cfg: Cfg, lead: Lead, company: { name?: string | null }
   });
   if ("failed" in res) return { ok: false, error: res.failed };
   const data = (res.json ?? {}) as { data?: { id?: number }; error?: string };
-  return { ok: res.ok, externalId: data.data?.id ? String(data.data.id) : undefined, error: res.ok ? undefined : crmMessage(data.error) ?? `Pipedrive HTTP ${res.status}` };
+  return { ok: res.ok, status: res.status, externalId: data.data?.id ? String(data.data.id) : undefined, error: res.ok ? undefined : crmMessage(data.error) ?? `Pipedrive HTTP ${res.status}` };
 }
 
 async function zoho(cfg: Cfg, lead: Lead, company: { name?: string | null } | null): Promise<SyncResult> {
@@ -358,7 +359,7 @@ async function zoho(cfg: Cfg, lead: Lead, company: { name?: string | null } | nu
   if ("failed" in res) return { ok: false, error: res.failed };
   const data = (res.json ?? {}) as { data?: { details?: { id?: string }; message?: string }[]; message?: string };
   const row = Array.isArray(data.data) ? data.data[0] : undefined;
-  return { ok: res.ok, externalId: typeof row?.details?.id === "string" ? row.details.id : undefined, error: res.ok ? undefined : crmMessage(row?.message) ?? crmMessage(data.message) ?? `Zoho HTTP ${res.status}` };
+  return { ok: res.ok, status: res.status, externalId: typeof row?.details?.id === "string" ? row.details.id : undefined, error: res.ok ? undefined : crmMessage(row?.message) ?? crmMessage(data.message) ?? `Zoho HTTP ${res.status}` };
 }
 
 /** Generic JSON POST (Cortex, Zapier/Make webhooks, Google Apps Script, n8n...). */
@@ -370,7 +371,7 @@ async function webhook(cfg: Cfg, lead: Lead, company: unknown): Promise<SyncResu
     headers: cfg.authHeader ? { authorization: cfg.authHeader } : {},
     body: JSON.stringify({ source: "prospex", lead, company }),
   });
-  return { ok: r.ok, error: r.error };
+  return { ok: r.ok, status: r.status || undefined, error: r.error };
 }
 
 const providers: Record<string, (cfg: Cfg, lead: Lead, company: { name?: string | null; domain?: string | null } | null) => Promise<SyncResult>> = {
@@ -404,6 +405,9 @@ const PROVIDER_NAMES: Record<string, string> = {
 };
 export const integrationName = (provider: string): string => (Object.hasOwn(PROVIDER_NAMES, provider) ? PROVIDER_NAMES[provider] : provider);
 
+/** syncLead's error when the lead is gone (deleted, erased): nothing to retry. */
+export const LEAD_NOT_FOUND = "lead not found";
+
 export async function syncLead(integration: Integration, leadId: string): Promise<SyncResult> {
   const { db } = getDb();
   // Strict: a blob that cannot be decrypted (key rotated, row damaged) used to read as an
@@ -415,11 +419,11 @@ export async function syncLead(integration: Integration, leadId: string): Promis
     stored = openOrgJson<Cfg>(integration.orgId, "integration", integration.configEncrypted) ?? {};
     if (integration.configEncrypted) rebindOnReadSoon(integration.orgId, "integration", integration.id, integration.configEncrypted, JSON.stringify(stored));
   } catch (e) {
-    if (e instanceof CredentialUnreadableError) return { ok: false, error: "This connection's saved credentials could not be read. Reconnect it in Settings, Integrations." };
+    if (e instanceof CredentialUnreadableError) return { ok: false, credentialsRejected: true, error: "This connection's saved credentials could not be read. Reconnect it in Settings, Integrations." };
     throw e;
   }
   const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, leadId), eq(leads.orgId, integration.orgId)) });
-  if (!lead) return { ok: false, error: "lead not found" };
+  if (!lead) return { ok: false, error: LEAD_NOT_FOUND };
   const company = lead.companyId ? await db.query.companies.findFirst({ where: eq(companies.id, lead.companyId) }) : null;
   const fn = providers[integration.provider];
   if (!fn) return { ok: false, error: `unknown provider ${integration.provider}` };
@@ -439,6 +443,9 @@ export async function syncLead(integration: Integration, leadId: string): Promis
     await db.update(leads).set({ custom: { ...(lead.custom ?? {}), [`${integration.provider}_id`]: r.externalId ?? true } }).where(eq(leads.id, lead.id));
     await db.update(integrations).set({ lastSyncAt: new Date() }).where(eq(integrations.id, integration.id));
   }
+  // A 401/403 is the provider refusing the saved credentials, not a passing outage: auto sync
+  // stops trying this connection until it is saved again (queueAutoSync).
+  if (!r.ok && (r.status === 401 || r.status === 403)) r.credentialsRejected = true;
   return r;
 }
 
@@ -524,15 +531,19 @@ export async function verifyIntegrationCredentials(provider: string, cfg: Cfg): 
  * settings.lastError / lastErrorAt, and the next success puts it back to "active" and clears
  * them. Merged into settings in the database, so autoSync and the rest are kept.
  */
-export async function recordIntegrationOutcome(integrationId: string, ok: boolean, error?: string): Promise<void> {
+export async function recordIntegrationOutcome(integrationId: string, ok: boolean, error?: string, opts: { credentialsRejected?: boolean } = {}): Promise<void> {
   const { db } = getDb();
   if (ok) {
-    await db.execute(sql`UPDATE integrations SET status = 'active', settings = coalesce(settings, '{}'::jsonb) - 'lastError' - 'lastErrorAt' WHERE id = ${integrationId}`).catch(() => {});
+    await db.execute(sql`UPDATE integrations SET status = 'active', settings = coalesce(settings, '{}'::jsonb) - 'lastError' - 'lastErrorAt' - 'credentialsRejected' WHERE id = ${integrationId}`).catch(() => {});
     return;
   }
   const text = String(error ?? "sync failed").replace(/\s+/g, " ").slice(0, 300);
+  // `credentialsRejected` marks the provider refusing the credentials (as opposed to a network
+  // error or an outage): auto sync leaves such a connection alone until it is saved again.
   await db
-    .execute(sql`UPDATE integrations SET status = 'error', settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('lastError', ${text}::text, 'lastErrorAt', ${new Date().toISOString()}::text) WHERE id = ${integrationId}`)
+    .execute(
+      sql`UPDATE integrations SET status = 'error', settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('lastError', ${text}::text, 'lastErrorAt', ${new Date().toISOString()}::text, 'credentialsRejected', ${opts.credentialsRejected === true}::boolean) WHERE id = ${integrationId}`,
+    )
     .catch(() => {});
 }
 
@@ -577,43 +588,179 @@ export async function orgDataKeys(orgId: string | null | undefined): Promise<{ h
   }
 }
 
+
 /* ─────────────────────────────────── auto sync ─────────────────────────────────── */
 
 /**
- * `autoSync` was stored with every connection and documented, and nothing read it. A
- * connection saved with autoSync on now receives new leads and lead changes by itself: the
- * events below (emitted wherever leads are created or changed, lib/events.ts) queue the same
- * integration.sync job the manual "Push to CRM" uses.
+ * `autoSync`: a connection saved with it on receives new and changed leads by itself.
  *
- * - Only lead-sync providers (HubSpot, Pipedrive, Zoho, Cortex, webhook, Sheets).
- * - Pipedrive and Zoho have no update path (each sync creates a record), so they get a lead
- *   once - when it has not been pushed to them before; HubSpot and the webhook-style ones
- *   also get updates.
- * - A sync already waiting for the same lead and connection is not queued twice.
+ * The first version queued one integration.sync job per lead event and, before each, looked
+ * for a waiting duplicate by scanning the jobs table on its jsonb payload. A CSV import of a
+ * few thousand rows ran thousands of those scans inside the import request, ignored the
+ * workspace's open-job ceiling, and kept pushing to connections whose credentials the
+ * provider had already refused. Now:
+ *
+ * - A lead event only arms ONE batch job per connection (an atomic flag in the connection's
+ *   settings, `autoSyncQueuedAt`), delayed by a few seconds so a burst of events is one job.
+ *   The batch reads the lead events since the connection's cursor (`autoSyncCursor`) from the
+ *   events table (indexed on org and time) and pushes those leads; the cursor moves only when
+ *   a batch finishes, so anything not pushed (a full queue, an outage) is picked up later.
+ * - Within one process a workspace that just armed its batches does not touch the database
+ *   again for the same delay window, so an import pays for this once, not per row.
+ * - The open-job ceiling (lib/limits.ts guardJobCapacity) applies; a full queue just leaves
+ *   the batch for the next event.
+ * - A connection in status "error" because the provider refused its credentials is not
+ *   auto-synced until it is saved again; one in "error" after a network failure still is.
+ * - Only HubSpot updates a contact in place. Every other destination (Pipedrive, Zoho, Google
+ *   Sheets, Cortex, a generic webhook) creates a new record or row on each push, so each lead
+ *   is pushed to them once.
  */
-const AUTO_SYNC_EVENTS = new Set(["lead.created", "lead.updated", "lead.enriched", "lead.verified", "lead.status_changed"]);
-const CREATE_ONLY = new Set(["pipedrive", "zoho"]);
+const AUTO_SYNC_EVENTS = ["lead.created", "lead.updated", "lead.enriched", "lead.verified", "lead.status_changed"];
+const UPDATES_IN_PLACE = new Set(["hubspot"]);
+const AUTO_SYNC_BATCH = 100;
+/** A flag older than this belongs to a batch that died; it may be armed again. */
+const AUTO_SYNC_STALE_MINUTES = 30;
+const autoSyncDelayMs = () => {
+  const n = Number(process.env.AUTO_SYNC_DELAY_SECONDS ?? 15);
+  return Number.isFinite(n) && n >= 0 ? n * 1000 : 15_000;
+};
+const armedUntil = new Map<string, number>();
+
+const rowsOf = <T>(r: unknown): T[] => ((r as { rows?: T[] }).rows ?? (r as T[])) as T[];
+
+/** Whether lead pushes to this provider are once per lead (it cannot update a record in place). */
+export const syncOncePerLead = (provider: string) => !UPDATES_IN_PLACE.has(provider);
+
+/** Arm the batch job of a connection unless one is already waiting. Returns whether it queued one. */
+async function armAutoSync(orgId: string, integrationId: string): Promise<boolean> {
+  const { db } = getDb();
+  const claimed = rowsOf<{ id: string }>(
+    await db.execute(sql`
+      UPDATE integrations
+      SET settings = coalesce(settings, '{}'::jsonb)
+        || jsonb_build_object('autoSyncQueuedAt', now()::text)
+        || jsonb_build_object('autoSyncCursor', coalesce(settings->>'autoSyncCursor', (now() - interval '1 minute')::text))
+      WHERE id = ${integrationId} AND org_id = ${orgId}
+        AND (settings->>'autoSyncQueuedAt' IS NULL OR (settings->>'autoSyncQueuedAt')::timestamptz < now() - make_interval(mins => ${AUTO_SYNC_STALE_MINUTES}))
+      RETURNING id`),
+  );
+  if (!claimed.length) return false;
+  try {
+    const { guardJobCapacity } = await import("../lib/limits.js");
+    await guardJobCapacity(db, orgId, "integration.sync");
+    await enqueue(db, "integration.sync", { integrationId, auto: true, batch: true }, { orgId, maxAttempts: 3, runAt: new Date(Date.now() + autoSyncDelayMs()) });
+    return true;
+  } catch (e) {
+    // Queue full (or the insert failed): disarm, so the next lead event tries again. The
+    // cursor did not move, so nothing is lost.
+    await db.execute(sql`UPDATE integrations SET settings = settings - 'autoSyncQueuedAt' WHERE id = ${integrationId}`).catch(() => {});
+    if ((e as { code?: string })?.code === "queue_full") return false;
+    throw e;
+  }
+}
 
 export async function queueAutoSync(orgId: string, type: string, entity?: { type: string; id: string }): Promise<number> {
-  if (!AUTO_SYNC_EVENTS.has(type) || entity?.type !== "lead" || !entity.id) return 0;
+  if (!AUTO_SYNC_EVENTS.includes(type) || entity?.type !== "lead" || !entity.id) return 0;
+  const now = Date.now();
+  if ((armedUntil.get(orgId) ?? 0) > now) return 0;
   const { db } = getDb();
   const rows = await db
-    .select({ id: integrations.id, provider: integrations.provider })
+    .select({ id: integrations.id })
     .from(integrations)
-    .where(and(eq(integrations.orgId, orgId), inArray(integrations.provider, INTEGRATION_PROVIDERS), inArray(integrations.status, ["active", "error"]), sql`(${integrations.settings}->>'autoSync')::boolean IS TRUE`));
-  if (!rows.length) return 0;
-  const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, entity.id), eq(leads.orgId, orgId)), columns: { id: true, custom: true } });
-  if (!lead) return 0;
-  let n = 0;
-  for (const r of rows) {
-    if (CREATE_ONLY.has(r.provider) && (lead.custom as Record<string, unknown> | null)?.[`${r.provider}_id`]) continue;
-    const waiting = await db.execute(
-      sql`SELECT 1 FROM jobs WHERE org_id = ${orgId} AND type = 'integration.sync' AND status = 'queued' AND payload->>'integrationId' = ${r.id} AND payload->>'leadId' = ${lead.id} LIMIT 1`,
+    .where(
+      and(
+        eq(integrations.orgId, orgId),
+        inArray(integrations.provider, INTEGRATION_PROVIDERS),
+        sql`(${integrations.settings}->>'autoSync')::boolean IS TRUE`,
+        sql`(${integrations.status} = 'active' OR (${integrations.status} = 'error' AND (${integrations.settings}->>'credentialsRejected')::boolean IS NOT TRUE))`,
+      ),
     );
-    const waitingRows = (waiting as unknown as { rows?: unknown[] }).rows ?? (waiting as unknown as unknown[]);
-    if (waitingRows.length) continue;
-    await enqueue(db, "integration.sync", { integrationId: r.id, leadId: lead.id, auto: true }, { orgId, maxAttempts: 3 });
-    n++;
-  }
+  const delay = autoSyncDelayMs();
+  if (delay > 0) armedUntil.set(orgId, now + delay);
+  if (armedUntil.size > 10_000) armedUntil.clear();
+  let n = 0;
+  for (const r of rows) if (await armAutoSync(orgId, r.id)) n++;
   return n;
+}
+
+export type AutoSyncResult = { pushed: number; skipped: number; leads: number; more?: boolean; stopped?: string };
+
+/**
+ * One auto-sync batch for a connection (the integration.sync job with `batch: true`).
+ * `lastAttempt`: this run is the job's last try, so on failure the flag is released.
+ */
+export async function runAutoSyncBatch(integration: Integration, lastAttempt: boolean): Promise<AutoSyncResult> {
+  const { db } = getDb();
+  const settings = (integration.settings ?? {}) as Record<string, unknown>;
+  const disarm = () => db.execute(sql`UPDATE integrations SET settings = settings - 'autoSyncQueuedAt' WHERE id = ${integration.id}`);
+  if (settings.autoSync !== true) {
+    await disarm();
+    return { pushed: 0, skipped: 0, leads: 0, stopped: "auto sync is off" };
+  }
+  if (integration.status === "error" && settings.credentialsRejected === true) {
+    await disarm();
+    return { pushed: 0, skipped: 0, leads: 0, stopped: "credentials rejected" };
+  }
+  const cursor = typeof settings.autoSyncCursor === "string" ? settings.autoSyncCursor : new Date(Date.now() - 60_000).toISOString();
+  const [{ upto }] = rowsOf<{ upto: string }>(await db.execute(sql`SELECT now()::text AS upto`));
+  const changed = rowsOf<{ id: string; at: string }>(
+    await db.execute(sql`
+      SELECT entity_id::text AS id, max(created_at)::text AS at FROM events
+      WHERE org_id = ${integration.orgId} AND entity_type = 'lead' AND entity_id IS NOT NULL
+        AND type IN (${sql.join(AUTO_SYNC_EVENTS.map((t) => sql`${t}`), sql`, `)})
+        AND created_at > ${cursor}::timestamptz AND created_at <= ${upto}::timestamptz
+      GROUP BY entity_id ORDER BY max(created_at) ASC LIMIT ${AUTO_SYNC_BATCH}`),
+  );
+  const more = changed.length >= AUTO_SYNC_BATCH;
+  const nextCursor = more ? changed[changed.length - 1].at : upto;
+  const own = changed.length
+    ? await db.select({ id: leads.id, custom: leads.custom }).from(leads).where(and(eq(leads.orgId, integration.orgId), inArray(leads.id, changed.map((c) => c.id))))
+    : [];
+  const marker = `${integration.provider}_id`;
+  let pushed = 0;
+  let skipped = changed.length - own.length; // deleted since the event
+  try {
+    for (const l of own) {
+      if (syncOncePerLead(integration.provider) && (l.custom as Record<string, unknown> | null)?.[marker]) {
+        skipped++;
+        continue;
+      }
+      const r = await syncLead(integration, l.id);
+      if (r.ok) {
+        pushed++;
+        continue;
+      }
+      if (r.error === LEAD_NOT_FOUND) {
+        skipped++;
+        continue;
+      }
+      await recordIntegrationOutcome(integration.id, false, r.error, { credentialsRejected: r.credentialsRejected });
+      if (r.credentialsRejected) {
+        // No retry can fix refused credentials; the cursor stays where it is for when the
+        // connection is saved again.
+        await disarm();
+        return { pushed, skipped, leads: changed.length, stopped: "credentials rejected" };
+      }
+      throw new Error(r.error ?? "sync failed");
+    }
+  } catch (e) {
+    if (lastAttempt) await disarm().catch(() => {});
+    throw e;
+  }
+  if (pushed) await recordIntegrationOutcome(integration.id, true);
+  // Move the cursor and release the flag, then look for events that arrived meanwhile: an
+  // event seen while the flag was still set did not arm anything, so it is picked up here.
+  await db.execute(sql`UPDATE integrations SET settings = (coalesce(settings, '{}'::jsonb) - 'autoSyncQueuedAt') || jsonb_build_object('autoSyncCursor', ${nextCursor}::text) WHERE id = ${integration.id}`);
+  const pending = more
+    ? [1]
+    : rowsOf(
+        await db.execute(sql`SELECT 1 FROM events WHERE org_id = ${integration.orgId} AND entity_type = 'lead' AND type IN (${sql.join(AUTO_SYNC_EVENTS.map((t) => sql`${t}`), sql`, `)}) AND created_at > ${nextCursor}::timestamptz LIMIT 1`),
+      );
+  if (pending.length) await armAutoSync(integration.orgId, integration.id).catch(() => false);
+  return { pushed, skipped, leads: changed.length, ...(more ? { more: true } : {}) };
+}
+
+/** Forget the in-process "just armed" memory (tests). */
+export function resetAutoSyncMemo() {
+  armedUntil.clear();
 }

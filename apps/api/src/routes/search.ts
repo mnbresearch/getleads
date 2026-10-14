@@ -15,6 +15,7 @@ import { orgId, rateLimit, requireAuth, type Env } from "../middleware.js";
 import { companyDomainOrNull, upsertCompany } from "../services/leads.js";
 import { searchQuerySchema } from "../lib/searchQuery.js";
 import { handlers } from "../jobs.js";
+import { refundBlockedSearch } from "../lib/searchRefund.js";
 
 export const searchRoutes = new Hono<Env>();
 searchRoutes.use("*", requireAuth);
@@ -99,7 +100,9 @@ searchRoutes.post("/quick", rateLimit({ perMinute: 10 }), zValidator("json", sea
   await consume(db, oid, "searches", 1);
   const providerBudget = await remainingPremiumBudget(db, oid);
   // Detailed, so an empty answer can say whether anything could actually search.
-  const { leads: results, providerFailures } = await runLeadPipelineDetailed(body, { ai: aiFor(c.get("auth")), verify: await verifyOptsFor(oid), country: body.country, maxProviderLeads: providerBudget });
+  const { leads: results, providerFailures, searchBlocked } = await runLeadPipelineDetailed(body, { ai: aiFor(c.get("auth")), verify: await verifyOptsFor(oid), country: body.country, maxProviderLeads: providerBudget });
+  // No source could search: the call delivered nothing and says so, and is not charged.
+  if (searchBlocked) await refundBlockedSearch(db, oid);
   const emptyNote = results.length === 0 && providerFailures.length ? blockedByProvidersNote(providerFailures, "This is not the same as nobody matching.") : undefined;
   let saved: { leadId: string; created: boolean }[] | undefined;
   let skipped: string | undefined;
@@ -176,6 +179,8 @@ searchRoutes.post("/people", rateLimit({ perMinute: 30 }), zValidator("json", z.
     name = (await crawlCompanyWebsite(domain, { maxPages: 1 }).catch(() => null))?.name ?? domain.split(".")[0];
   }
   const found = await findPeopleDetailed({ companyName: name, titles: b.titles, locations: b.locations, limit: b.limit });
+  // A search that could not look is given back (see lib/searchRefund.ts).
+  if (found.emptyNote) await refundBlockedSearch(db, orgId(c));
   // `note` only when nothing came back because no source could search: an empty `people`
   // must never read as "nobody works there" when nobody was asked.
   return c.json({ people: found.people, ...(found.emptyNote ? { note: found.emptyNote } : {}) });
@@ -187,6 +192,7 @@ searchRoutes.post("/companies", rateLimit({ perMinute: 30 }), zValidator("json",
   const { db } = getDb();
   await consume(db, orgId(c), "searches", 1);
   const found = await findCompaniesDetailed(b);
+  if (found.emptyNote) await refundBlockedSearch(db, orgId(c));
   let companies = found.companies;
   if (b.resolveDomains) {
     companies = await pMap(companies, async (co) => (co.domain || !co.name ? co : { ...co, domain: (await resolveCompanyDomain(co.name).catch(() => null)) ?? "" }), 4);

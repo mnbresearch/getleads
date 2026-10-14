@@ -318,7 +318,9 @@ suite("fix round B3", () => {
       const made = await req("POST", "/v1/leads", A.token, { fullName: "Auto Sync", email: `auto-${u8()}@prospect.example` });
       expect(made.status).toBeLessThan(300);
       const leadId = made.body.lead?.id ?? made.body.id;
-      const jobs = async () => (await db.select().from(S.jobs).where(S.and(S.eq(S.jobs.orgId, A.orgId), S.eq(S.jobs.type, "integration.sync")))).filter((j: any) => j.payload.leadId === leadId);
+      // Updated in fix round C2: auto sync queues one batch job per connection (it pushes every
+      // lead changed since its cursor), not one job per lead.
+      const jobs = async () => (await db.select().from(S.jobs).where(S.and(S.eq(S.jobs.orgId, A.orgId), S.eq(S.jobs.type, "integration.sync")))).filter((j: any) => j.payload.batch === true);
       expect((await jobs()).length).toBe(1);
       // A second event while one is still waiting does not queue a duplicate.
       const { emitEvent } = await import("./lib/events.js");

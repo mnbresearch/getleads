@@ -9,6 +9,7 @@ import { enrollEligibleLeads } from "./campaigns.js";
 import { emitEvent } from "../lib/events.js";
 import { tryConsume } from "../lib/quota.js";
 import { blockedByProvidersNote } from "./notes.js";
+import { refundBlockedSearch } from "../lib/searchRefund.js";
 
 /**
  * Autopilot: an autonomous prospecting agent. Every day it finds N fresh leads for a saved query,
@@ -40,7 +41,7 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
   // every option in the second argument is built here.
   const stored = clampSearchQuery(ap.query);
   const input = clampLeadQuery({ ...stored, limit: Math.min(200, Math.max(1, ap.dailyLeads * 3)), findEmails: true });
-  const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, {
+  const { leads: results, providerFailures, searchBlocked } = await runLeadPipelineDetailed(input, {
     // The plan decides the engine: free workspaces never reach the paid model.
     ai: aiForOrg(org),
     verify: await verifyOptsFor(ap.orgId),
@@ -48,6 +49,8 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
     maxProviderLeads: providerBudget,
     onProgress: (p, m) => log(`${p}% ${m}`),
   });
+  // A run in which no source could search delivered nothing: its search unit is given back.
+  if (searchBlocked) await refundBlockedSearch(db, ap.orgId);
   const qualified = results.filter((r) => (r.score ?? 0) >= ap.minScore && (!ap.requireValidEmail || r.emailStatus === "valid" || r.emailStatus === "catch_all"));
   let saved = 0;
   const ids: string[] = [];

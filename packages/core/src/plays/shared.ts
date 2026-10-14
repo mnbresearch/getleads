@@ -650,7 +650,10 @@ export class PlayRun {
    * failed, so a run made of such searches says "could not search", not "found nobody".
    */
   readonly recordOutcome = (o: WebSearchOutcome, query?: string): void => {
-    const ignoredSite = typeof query === "string" && /(?:^|\s)site:\S/i.test(query) && !o.everyProviderFailed && !(o.results?.length > 0) && (o.attempts ?? []).some((a) => (a.offSite ?? 0) > 0);
+    // Read from the attempts, not from everyProviderFailed: the search layer now counts an
+    // answer whose results were all off the site as a failure itself, and this count is
+    // what tells the run's notes "the site was ignored" from "the search failed".
+    const ignoredSite = typeof query === "string" && /(?:^|\s)site:\S/i.test(query) && !(o.results?.length > 0) && (o.attempts ?? []).some((a) => a.ok && (a.offSite ?? 0) > 0);
     if (ignoredSite) this.sitesIgnored++;
     const seen = ignoredSite ? { ...o, everyProviderFailed: true } : o;
     this.outcomes.push(seen);

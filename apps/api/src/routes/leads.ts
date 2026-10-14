@@ -3,7 +3,7 @@ import { verifyOptsFor } from "../lib/verifyOpts.js";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, clients, companies, consume, desc, enqueue, eq, getDb, icps, ilike, inArray, isNull, leads, listLeads, lists, or, QuotaExceededError, signals, sql, suppressions } from "@prospex/db";
-import { verifyEmail, findEmail, computeLeadPriority, inferDepartment, inferSeniority } from "@prospex/core";
+import { verifyEmail, findEmail, computeLeadPriority, inferDepartment, inferSeniority, isVerifierVerdict } from "@prospex/core";
 import { env } from "../env.js";
 import { ApiError, badRequest, describeError, isClientDataError, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
@@ -755,8 +755,16 @@ leadRoutes.post("/:id/find-email", async (c) => {
     const same = current === found;
     const correction = !!current && !same && l.emailStatus === "invalid" && r.status === "valid";
     if (!current || same || correction) {
-      // Only stamp verifiedAt when something checked the mailbox; a pattern guess is not verified.
-      await db.update(leads).set({ email: found, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: r.verifiedBy ? new Date() : null, emailVerifiedBy: r.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id));
+      // Only an answer from a real check (a verifier service, or an SMTP probe that reached the
+      // mailbox) counts as a verification. A pattern guess or a blocked probe ("smtp-blocked")
+      // is not one, so it never stamps verifiedAt.
+      const checked = !!r.verifiedBy && (isVerifierVerdict({ verifiedBy: r.verifiedBy }) || r.verifiedBy === "smtp");
+      if (same && !checked) {
+        // The same address came back as an unchecked guess. Writing its status would turn a
+        // verified address into a guess, so the stored status and verification stay as they are.
+      } else {
+        await db.update(leads).set({ email: found, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: checked ? new Date() : null, emailVerifiedBy: checked ? r.verifiedBy! : null, updatedAt: new Date() }).where(eq(leads.id, l.id));
+      }
       outcome = correction
         ? { saved: true, replaced: true, previousEmail: l.email ?? undefined, note: `The stored address ${l.email} was checked and is invalid, so it was replaced with ${found}, which checked out valid.` }
         : { saved: true, replaced: false };

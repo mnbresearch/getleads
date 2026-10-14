@@ -716,7 +716,9 @@ suite("route surface", () => {
       if (body.status === "blocked") {
         // With no search provider connected at all (CI), the note says that instead.
         expect(body.note).toMatch(/not the same as nobody matching|no search source is connected/i);
-        expect(r.status).toBe(502);
+        // A run that could not search is an answer, not a gateway error: 200 with status "blocked"
+        // (it used to be 502, which put errors in the browser console for an expected outcome).
+        expect(r.status).toBe(200);
       } else {
         expect(body.note).toMatch(/nobody matched/i);
         expect(r.status).toBe(200);

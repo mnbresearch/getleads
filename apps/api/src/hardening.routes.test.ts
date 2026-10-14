@@ -777,12 +777,13 @@ suite("route hardening", () => {
       expect(r.status).toBe(503);
       expect(r.body.error.code).toBe("ai_not_configured");
       // In the customer's words: no server environment variable is named.
-      expect(r.body.error.message).toMatch(/AI drafting isn't switched on for this workspace yet/);
+      // Fix round C3: the server has no engine, so it says so rather than blaming the workspace.
+      expect(r.body.error.message).toMatch(/no AI engine is connected on our side/);
       expect(r.body.error.message).not.toMatch(/_API_KEY|SMTP_|\.env\b/);
       const { handlers } = await import("./jobs.js");
       const out = await handlers["visibility.run"]({ id: randomUUID(), type: "visibility.run", payload: { promptId: prompt.id }, attempts: 1, maxAttempts: 3 } as never, { db, log: () => {}, progress: async () => {} } as never);
       expect(out).toMatchObject({ skipped: true });
-      expect(String((out as any).note)).toMatch(/AI drafting isn't switched on/);
+      expect(String((out as any).note)).toMatch(/no AI engine is connected on our side/);
     });
 
     it("refuses to save an integration with an empty or whitespace token", async () => {

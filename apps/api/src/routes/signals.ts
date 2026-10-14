@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
-import { and, campaigns, desc, enqueue, eq, getDb, icps, inArray, monitorResults, monitors, or, remainingPremiumBudget, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
+import { and, campaigns, desc, enqueue, eq, getDb, getJob, icps, inArray, jobs, monitorResults, monitors, or, remainingPremiumBudget, runJobById, signalMatches, signalSubscriptions, signals, sql } from "@prospex/db";
 import { ApiError, notFound, requireSomeFields } from "../lib/errors.js";
 import { normalizeLinkedinPostUrl } from "@prospex/core";
 import { assertOwned } from "../lib/ownership.js";
@@ -11,6 +11,8 @@ import { assertRowCap, guardJobCapacity } from "../lib/limits.js";
 import { scanJobChanges } from "../services/jobChanges.js";
 import { runSubscription } from "../services/signals.js";
 import { runMonitor } from "../services/monitors.js";
+import { env } from "../env.js";
+import { handlers } from "../jobs.js";
 
 export const signalRoutes = new Hono<Env>();
 signalRoutes.use("*", requireAuth);
@@ -135,11 +137,49 @@ signalRoutes.delete("/subscriptions/:id", async (c) => {
   if (!gone.length) throw notFound("Subscription");
   return c.json({ ok: true });
 });
-signalRoutes.post("/subscriptions/:id/run", rateLimit({ perMinute: 6, name: "subscription-run" }), async (c) => {
+/**
+ * Run one subscription now.
+ *
+ * A run scans the news and then looks for decision makers at every matching company, which
+ * took up to two and a half minutes inside one request - long enough for proxies and
+ * browsers to give up on it. It is now a `signals.subscription` job: the answer is 202 with
+ * the job id, and GET /v1/search/jobs/:jobId shows its progress and, when done, the same
+ * result this route used to return (parsed, stored, matched, leadsCreated, note).
+ *
+ * `?wait=1` keeps the old synchronous answer for SDK callers that depend on it. When the
+ * server runs jobs inline (serverless), the job is run before answering and the result is
+ * returned with 200, as before, plus the job id.
+ *
+ * A second press while a run of the same subscription is still queued or running gets that
+ * run's job id back instead of queueing a duplicate.
+ */
+signalRoutes.post("/subscriptions/:id/run", rateLimit({ perMinute: 6, name: "subscription-run" }), zValidator("query", z.object({ wait: z.enum(["1", "true", "0", "false"]).optional() })), async (c) => {
   const { db } = getDb();
-  const sub = await db.query.signalSubscriptions.findFirst({ where: and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, orgId(c))) });
+  const oid = orgId(c);
+  const sub = await db.query.signalSubscriptions.findFirst({ where: and(eq(signalSubscriptions.id, c.req.param("id")), eq(signalSubscriptions.orgId, oid)) });
   if (!sub) throw notFound("Subscription");
-  return c.json(await runSubscription(sub));
+  const wait = c.req.valid("query").wait;
+  if (wait === "1" || wait === "true") return c.json(await runSubscription(sub));
+
+  // Bounded: this org's open jobs of this one type (the open-job caps keep that small).
+  const open = await db
+    .select({ id: jobs.id, status: jobs.status })
+    .from(jobs)
+    // A paused subscription's scheduled job skips it, so only a "Run now" job counts as one.
+    .where(and(eq(jobs.orgId, oid), eq(jobs.type, "signals.subscription"), inArray(jobs.status, ["queued", "running"]), sql`${jobs.payload}->>'subscriptionId' = ${sub.id}`, sub.active ? undefined : sql`${jobs.payload}->>'manual' = 'true'`))
+    .limit(1);
+  if (open[0]) return c.json({ jobId: open[0].id, status: open[0].status, subscriptionId: sub.id, poll: `/v1/search/jobs/${open[0].id}`, alreadyRunning: true }, 202);
+
+  await guardJobCapacity(db, oid, "signals.subscription");
+  // One attempt: a run that failed half-way is re-run by pressing the button, not silently.
+  const job = await enqueue(db, "signals.subscription", { subscriptionId: sub.id, manual: true }, { orgId: oid, priority: 2, maxAttempts: 1 });
+  if (env.jobMode === "inline") {
+    await runJobById(db, handlers, job.id);
+    const done = await getJob(db, job.id);
+    if (done?.status === "done") return c.json({ ...((done.result as Record<string, unknown> | null) ?? {}), jobId: job.id, status: "done" });
+    return c.json({ jobId: job.id, status: done?.status ?? "queued", subscriptionId: sub.id, poll: `/v1/search/jobs/${job.id}`, ...(done?.error ? { error: { code: "run_failed", message: done.error } } : {}) }, 202);
+  }
+  return c.json({ jobId: job.id, status: "queued", subscriptionId: sub.id, poll: `/v1/search/jobs/${job.id}` }, 202);
 });
 
 // ── Monitors ──

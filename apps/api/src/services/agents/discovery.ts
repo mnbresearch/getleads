@@ -7,6 +7,7 @@ import { tryConsume } from "../../lib/quota.js";
 import { emitEvent } from "../../lib/events.js";
 import { env } from "../../env.js";
 import { blockedByProvidersNote, listProviderFailures } from "../notes.js";
+import { refundBlockedSearch } from "../../lib/searchRefund.js";
 
 /**
  * The scheduled discovery agent.
@@ -44,7 +45,8 @@ export interface DiscoveryOptions {
 }
 
 export interface DiscoveryResult {
-  runId: string;
+  /** The agent_runs row; null for a preview, which records no run. */
+  runId: string | null;
   /** "quota": not run because the workspace's searches quota is spent (HTTP 402), distinct
    * from "blocked" (every data source refused us). */
   status: "completed" | "failed" | "blocked" | "quota";
@@ -75,12 +77,18 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
   const { db } = getDb();
   const limit = Math.min(opts.limit ?? 25, 200);
 
-  const [run] = await db
-    .insert(agentRuns)
-    .values({ orgId: orgIdValue, agentType: "discovery", status: "running", startedAt: new Date() })
-    .returning();
+  // A preview stores nothing, and that includes the run history: a row per Preview click
+  // filled "Agent runs" with runs that never ran.
+  const [run] = opts.preview
+    ? [null]
+    : await db
+        .insert(agentRuns)
+        .values({ orgId: orgIdValue, agentType: "discovery", status: "running", startedAt: new Date() })
+        .returning();
+  const runId = run?.id ?? null;
 
   const finish = async (patch: Partial<DiscoveryResult> & { status: DiscoveryResult["status"] }, rows: number, note?: string) => {
+    if (!run) return;
     await db
       .update(agentRuns)
       .set({ status: patch.status, rowsCreated: rows, error: patch.error ?? note ?? null, completedAt: new Date() })
@@ -103,11 +111,11 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
         // The run row keeps "blocked" (run history already shows it as "did not run"); the
         // result says "quota" so the route can answer 402 rather than "providers unavailable".
         await finish({ status: charge.reason === "quota" ? "blocked" : "failed", error: note }, 0);
-        return { runId: run.id, status: charge.reason === "quota" ? "quota" : "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error: charge.reason === "error" ? note : undefined, quotaStopped: charge.reason === "quota" ? charge.message : undefined, note };
+        return { runId, status: charge.reason === "quota" ? "quota" : "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error: charge.reason === "error" ? note : undefined, quotaStopped: charge.reason === "quota" ? charge.message : undefined, note };
       }
     }
 
-    const { leads: found, providerFailures } = await runLeadPipelineDetailed(
+    const { leads: found, providerFailures, searchBlocked } = await runLeadPipelineDetailed(
       { query, limit, findEmails: true },
       {
         // Plan-gated engine, and the paid-provider budget passed in so the provider call
@@ -122,14 +130,15 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
     // Nothing came back AND something refused us. That is a fact about our providers, not
     // about the customer's market, and it must never be filed as "no matches".
     if (found.length === 0 && providerFailures.length > 0) {
+      // Charged above; a run in which no source could search delivered nothing.
+      if (searchBlocked && !opts.preview) await refundBlockedSearch(db, orgIdValue);
       const note = blockedByProvidersNote(providerFailures, "This is not the same as nobody matching the query.");
       await finish({ status: "blocked", error: note }, 0);
-      return { runId: run.id, status: "blocked", query, found: 0, created: 0, duplicates: 0, providerFailures, note };
+      return { runId, status: "blocked", query, found: 0, created: 0, duplicates: 0, providerFailures, note };
     }
 
     if (opts.preview) {
-      await finish({ status: "completed" }, 0, `preview only: ${found.length} would have been stored`);
-      return { runId: run.id, status: "completed", query, found: found.length, created: 0, duplicates: 0, providerFailures, note: "preview only - nothing stored" };
+      return { runId, status: "completed", query, found: found.length, created: 0, duplicates: 0, providerFailures, note: "preview only - nothing stored" };
     }
 
     let created = 0;
@@ -137,7 +146,7 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
     let quotaStopped: string | undefined;
 
     for (const lead of found) {
-      const stored = await storeDiscoveredLead(db, orgIdValue, lead, { icpId: icp?.id ?? null, criteria, runId: run.id, query });
+      const stored = await storeDiscoveredLead(db, orgIdValue, lead, { icpId: icp?.id ?? null, criteria, runId: runId!, query });
       // Counted BEFORE the quota check. A lead that tripped the limit was still written -
       // charging happens after the row exists, so that a rediscovery costs nothing - and an
       // earlier version broke out without counting it. The run then reported one fewer
@@ -170,14 +179,14 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
     // the catch rewrote a run that had genuinely completed to `failed, rows_created: 0`
     // while its leads sat committed in the database. A notification failing is not the run
     // failing, and must not be able to say that it was.
-    await emitEvent(orgIdValue, "agent.discovery_completed", { runId: run.id, query, found: found.length, created, duplicates, quotaStopped }, { type: "agent_run", id: run.id }).catch(() => {});
+    await emitEvent(orgIdValue, "agent.discovery_completed", { runId, query, found: found.length, created, duplicates, quotaStopped }, { type: "agent_run", id: run!.id }).catch(() => {});
 
-    return { runId: run.id, status: "completed", query, found: found.length, created, duplicates, providerFailures, quotaStopped, note };
+    return { runId, status: "completed", query, found: found.length, created, duplicates, providerFailures, quotaStopped, note };
   } catch (e) {
     // Stored on the run and returned to the tenant: credentials and account ids are masked.
     const error = redact((e as Error).message ?? "unknown error", { max: 500 }) || "unknown error";
     await finish({ status: "failed", error }, 0);
-    return { runId: run.id, status: "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error };
+    return { runId, status: "failed", query, found: 0, created: 0, duplicates: 0, providerFailures: [], error };
   }
 }
 

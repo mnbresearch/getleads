@@ -1690,8 +1690,12 @@ export async function findPeopleForCandidate(candidate: PlayCandidate, play: Pla
   const people = (Array.isArray(r?.people) ? r.people : []).slice(0, input.limit).map((p) => inheritFrom(company, p));
   const where = candidate.companyName ?? candidate.companyDomain ?? "that company";
   if (!people.length) {
-    const blocked = r?.trace?.blocked === true;
-    return { added: [], blocked, found: 0, note: blocked ? customerText(r.trace.blockedReason, 300) || "The people search could not run this time, so this is not a finding that nobody works there. Try again later." : `Nobody with those titles was found at ${where}.` };
+    // The engine blocks the run when no source could really search (none answered, or only a
+    // keyless fallback did - core/plays/people.ts). A trace in which every search failed is
+    // the same fact even if an older engine did not say so, and is never "nobody was found".
+    const t = r?.trace;
+    const blocked = t?.blocked === true || (typeof t?.searches === "number" && t.searches > 0 && t.failedSearches >= t.searches);
+    return { added: [], blocked, found: 0, note: blocked ? customerText(t?.blockedReason, 300) || "The people search could not run this time, so this is not a finding that nobody works there. Try again later." : `Nobody with those titles was found at ${where}.` };
   }
   const icpRow = play.icpId ? await db.query.icps.findFirst({ where: and(eq(icps.id, play.icpId), eq(icps.orgId, play.orgId)) }) : null;
   const stored = await storeFindings(play, candidate.runId, people, (icpRow?.criteria as IcpCriteria | undefined) ?? null);

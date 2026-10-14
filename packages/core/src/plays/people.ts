@@ -12,6 +12,7 @@
 import { titleMatch } from "../icp/score.js";
 import { resolveCompanyDomainDetailed } from "../discovery/companies.js";
 import { findPeopleDetailed } from "../discovery/people.js";
+import { isNoWebSearchConfigured } from "../search/index.js";
 import type { PersonCandidate } from "../types.js";
 import { extractDomain, rootDomain } from "../util/domain.js";
 import { isPublicHost } from "../util/publicHost.js";
@@ -66,7 +67,7 @@ export async function findPeopleForFinding(finding: PlayFinding, cfg: { titles: 
       {
         ...(opts.searchOpts ?? {}),
         onOutcome: (o, q) => {
-          run.recordOutcome(o);
+          run.recordOutcome(o, q);
           try {
             outer?.(o, q);
           } catch {
@@ -77,6 +78,15 @@ export async function findPeopleForFinding(finding: PlayFinding, cfg: { titles: 
       ).catch(() => null),
     );
     found = res?.people ?? [];
+    // The rule every discovery path uses (emptySearchNote): nobody found because no source
+    // could really search - none answered, or only a keyless fallback scraper did, even
+    // with a keyed source connected - is not "nobody with those titles works there".
+    // Said in the plays' own words when nothing is connected, as the rest of this file does.
+    // When no search answered at all, finish() below already says so in the plays' words.
+    if (!found.length && res?.emptyNote && run.searchAnswered) {
+      if (isNoWebSearchConfigured(res.emptyNote)) run.blockNoSearchSource();
+      else run.block(res.emptyNote);
+    }
   }
 
   /** The person's job title, or "" when what the search put there is the company's name or nothing. */

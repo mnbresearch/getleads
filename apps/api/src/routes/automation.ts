@@ -60,9 +60,12 @@ automationRoutes.post("/discover", rateLimit({ perMinute: 6 }), zValidator("json
   const b = c.req.valid("json");
   const r = await runDiscoveryAgent(orgId(c), b.query, { limit: b.count, icpId: b.icpId, preview: b.preview });
 
-  // 502 when every source refused us. A run that found nothing because nothing answered is
-  // not a successful run that found nothing, and a caller polling this needs to know which.
-  return c.json(withErrorShape(r), discoveryStatus(r.status));
+  // A run that found nothing because nothing answered is not a run that found nothing, and
+  // a caller needs to know which - but the body says it (`status: "blocked"`, `note`, and
+  // `error.code: providers_unavailable`), not the HTTP status. A 502 here made every
+  // honest "no search source is connected" answer a red console error in the browser, as
+  // if our own server had broken. Quota (402) and a failed run (500) keep their codes.
+  return c.json(withErrorShape(r), r.status === "blocked" ? 200 : discoveryStatus(r.status));
 });
 
 /** Kept for the existing scheduled workflow, which posts to this path. */

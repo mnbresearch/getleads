@@ -68,7 +68,7 @@ async function main() {
 
   const timeouts = httpTimeouts();
   const server = serve({ fetch: app.fetch, port: env.port, serverOptions: timeouts }, (info) => {
-    console.log(`[api] Prospex API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop} trustedProxy=${env.trustedProxy} adminTokenAccess=${env.adminApiToken ? "on" : "off"}`);
+    console.log(`[api] Scout API on http://localhost:${info.port}  (docs: /docs)  jobMode=${env.jobMode} embeddedWorker=${!!stop} trustedProxy=${env.trustedProxy} adminTokenAccess=${env.adminApiToken ? "on" : "off"}`);
   });
 
   // Free Render instances sleep after 15 idle minutes; during the working-day window this

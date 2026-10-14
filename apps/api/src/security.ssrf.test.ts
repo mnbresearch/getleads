@@ -553,7 +553,8 @@ suite("security: SSRF (database-backed half)", () => {
     let calls = stubFetch(() => new Response("<html>INTERNAL-SERVICE-RESPONSE secret=abc</html>", { status: 502 }));
     let integ = await storedIntegration(org.id, "zoho", { accessToken: "zoho-token" });
     let r = await syncLead(integ, lead.id);
-    expect(r).toEqual({ ok: false, externalId: undefined, error: "Zoho HTTP 502" });
+    // `status` is carried so a 401/403 can mark the credentials as rejected (auto-sync pauses on those).
+    expect(r).toEqual({ ok: false, externalId: undefined, error: "Zoho HTTP 502", status: 502 });
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://www.zohoapis.in/crm/v2/Leads");
     expect(calls[0].init.redirect).toBe("manual");
@@ -574,7 +575,7 @@ suite("security: SSRF (database-backed half)", () => {
     integ = await storedIntegration(org.id, "zoho", { accessToken: "zoho-token", apiDomain: "https://www.zohoapis.com" });
     calls = stubFetch(() => new Response(JSON.stringify({ data: [{ code: "SUCCESS", details: { id: "zoho-1" } }] }), { status: 201 }));
     r = await syncLead(integ, lead.id);
-    expect(r).toEqual({ ok: true, externalId: "zoho-1", error: undefined });
+    expect(r).toEqual({ ok: true, externalId: "zoho-1", error: undefined, status: 201 });
     expect(calls[0].url).toBe("https://www.zohoapis.com/crm/v2/Leads");
     expect((await leadRow(lead.id)).custom).toMatchObject({ zoho_id: "zoho-1" });
     vi.unstubAllGlobals();
@@ -584,7 +585,7 @@ suite("security: SSRF (database-backed half)", () => {
     integ = await storedIntegration(org.id, "pipedrive", { apiToken: "pd tok&en", companyDomain: "acme" });
     calls = stubFetch(() => new Response(JSON.stringify({ data: { id: 7 } }), { status: 201 }));
     r = await syncLead(integ, lead.id);
-    expect(r).toEqual({ ok: true, externalId: "7", error: undefined });
+    expect(r).toMatchObject({ ok: true, externalId: "7", error: undefined });
     expect(calls.map((c) => c.url)).toEqual(["https://acme.pipedrive.com/v1/organizations?api_token=pd+tok%26en", "https://acme.pipedrive.com/v1/persons?api_token=pd+tok%26en"]);
     for (const c of calls) expect(new URL(c.url).hostname).toBe("acme.pipedrive.com");
   });

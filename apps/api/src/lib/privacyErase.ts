@@ -1,3 +1,5 @@
+import { createHmac, hkdfSync } from "node:crypto";
+import { env } from "../env.js";
 import { and, eq, events, getDb, globalSuppressions, inArray, invites, jobs, leads, messages, monitorResults, organizations, playCandidates, scrapedLeads, sql, upgradeRequests, users, withStatementTimeout, type Db } from "@prospex/db";
 import { ADDRESS_FINGERPRINT_PREFIX, addressFingerprint, onPlatformList, platformBase } from "./privacySuppression.js";
 
@@ -33,6 +35,24 @@ import { ADDRESS_FINGERPRINT_PREFIX, addressFingerprint, onPlatformList, platfor
 
 /** What a removed message's subject and body read as. */
 export const ERASED_TEXT = "(removed)";
+
+let erasedKey: Buffer | null = null;
+let erasedKeyFor = "";
+/**
+ * The keyed fingerprint an erased address is replaced with where nothing needs to match it
+ * again (upgrade requests). HMAC-SHA256 with a key derived from the server's encryption
+ * secret, which is not in the database, so a copy of the database cannot be used to confirm
+ * a guessed address. It keeps the `sha256:` prefix so every screen that hides fingerprints
+ * (shownAddress, scrubFingerprints) keeps hiding it; the `k1:` after it marks it as keyed.
+ */
+export function erasedAddressFingerprint(address: string): string {
+  const raw = env.encryptionKey || env.jwtSecret;
+  if (!erasedKey || erasedKeyFor !== raw) {
+    erasedKey = Buffer.from(hkdfSync("sha256", raw, Buffer.alloc(0), "scout:erased-address:v1", 32));
+    erasedKeyFor = raw;
+  }
+  return `${ADDRESS_FINGERPRINT_PREFIX}k1:${createHmac("sha256", erasedKey).update(address.trim().toLowerCase(), "utf8").digest("hex")}`;
+}
 
 /** SQL for an address turned into its fingerprint, leaving a fingerprint as it is. Mirrors addressFingerprint(). */
 const fingerprintSql = sql`CASE WHEN ${messages.toEmail} LIKE ${ADDRESS_FINGERPRINT_PREFIX + "%"} THEN ${messages.toEmail} ELSE ${ADDRESS_FINGERPRINT_PREFIX} || encode(sha256(convert_to(lower(btrim(${messages.toEmail})), 'UTF8')), 'hex') END`;
@@ -326,16 +346,20 @@ export async function eraseDataSubject(
   // Upgrade requests from the pricing page: kept as a row (the sales history still counts
   // it) with the name, mobile and message removed and the address turned into its
   // fingerprint, the same treatment a message gets.
-  const requests = await db
-    .update(upgradeRequests)
-    .set({
-      name: ERASED_TEXT,
-      mobile: ERASED_TEXT,
-      message: null,
-      email: sql`${ADDRESS_FINGERPRINT_PREFIX} || encode(sha256(convert_to(lower(btrim(${upgradeRequests.email})), 'UTF8')), 'hex')`,
-    })
-    .where(sameMailbox(sql`${upgradeRequests.email}`, base))
-    .returning({ orgId: upgradeRequests.orgId });
+  // The fingerprint is keyed (see erasedAddressFingerprint): a plain sha256 of an address
+  // can be reversed by hashing guesses, and nothing ever needs to match an erased request
+  // against a new address. Computed per row because each row may hold a different spelling
+  // of the same mailbox (plus-addressing, dots).
+  const matching = await db.select({ id: upgradeRequests.id, email: upgradeRequests.email }).from(upgradeRequests).where(sameMailbox(sql`${upgradeRequests.email}`, base));
+  const requests: { orgId: string | null }[] = [];
+  for (const row of matching) {
+    const [done] = await db
+      .update(upgradeRequests)
+      .set({ name: ERASED_TEXT, mobile: ERASED_TEXT, message: null, email: erasedAddressFingerprint(row.email) })
+      .where(eq(upgradeRequests.id, row.id))
+      .returning({ orgId: upgradeRequests.orgId });
+    if (done) requests.push(done);
+  }
   for (const o of requests) if (o.orgId) touched.add(o.orgId);
   // Team invitations to the address: deleted. A pending one stops working, which is what the
   // person asked for; an accepted one is only a record of how an account was created.

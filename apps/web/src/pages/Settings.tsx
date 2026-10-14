@@ -12,6 +12,7 @@ import { TwoFactorCard } from "../components/TwoFactorCard";
 import { WorkspaceData } from "../components/WorkspaceData";
 import { WorkspacePrivacy } from "../components/WorkspacePrivacy";
 import { ApiKeysPanel } from "../components/settings/ApiKeys";
+import { NotFoundPage } from "./NotFound";
 
 /** Shown in place of a manage-only panel when the viewer is a member. */
 function MembersNote({ what }: { what: string }) {
@@ -40,6 +41,8 @@ export function SettingsPage() {
         <Route path="/integrations" element={<Integrations />} />
         <Route path="/billing" element={<Billing />} />
         <Route path="/security" element={<SecurityLog />} />
+        {/* An unknown tab (/settings/whatever) used to render an empty body under the tab bar. */}
+        <Route path="*" element={<NotFoundPage inApp />} />
       </Routes>
     </Page>
   );
@@ -356,7 +359,7 @@ function Webhooks() {
       <div className="card p-5">
         <div className="mb-3 font-medium">Webhooks</div>
         <p className="mb-3 text-sm text-ink-300 [overflow-wrap:anywhere]">Events: <code>lead.created</code>, <code>lead.updated</code>, <code>lead.enriched</code>, <code>lead.verified</code>, <code>lead.replied</code>, <code>lead.unsubscribed</code>, <code>search.completed</code>, <code>message.sent</code>, <code>message.opened</code>, <code>message.clicked</code>, <code>campaign.started</code>, or <code>*</code>. Every delivery is signed in the <code>x-scout-signature</code> header (also sent as <code>x-prospex-signature</code>, so older receivers keep working) - see "Verifying deliveries" below.</p>
-        <div className="flex flex-wrap gap-2"><input className="input min-w-0 flex-1" placeholder="https://your-app.com/hooks/prospex" value={url} onChange={(e) => setUrl(e.target.value)} /><input className="input w-48" value={events} onChange={(e) => setEvents(e.target.value)} placeholder="* or lead.*,message.*" /><button className="btn-primary" disabled={!url} onClick={add}>Add</button></div>
+        <div className="flex flex-wrap gap-2"><input className="input min-w-0 flex-1" placeholder="https://your-app.example.com/webhooks/scout" value={url} onChange={(e) => setUrl(e.target.value)} /><input className="input w-48" value={events} onChange={(e) => setEvents(e.target.value)} placeholder="* or lead.*,message.*" /><button className="btn-primary" disabled={!url} onClick={add}>Add</button></div>
         {freshSecret && <SecretOnce fresh={freshSecret} onDone={() => setFreshSecret(null)} toast={toast} />}
         {loadErr && !loaded && <div className="mt-4"><LoadError message={loadErr} onRetry={load} /></div>}
         <ul className="mt-4 divide-y divide-slate-100 text-sm">{hooks.map((h) => {
@@ -424,7 +427,7 @@ const PROVIDER_FIELDS: Record<string, { label: string; fields: [string, string][
   ipinfo: { label: "IPinfo (your own token)", fields: [["token", "IPinfo access token"]], help: "Used to identify this workspace's website visitors, before Scout's shared token. ipinfo.io → Token." },
 };
 
-type Integ = { provider: string; status: string; lastSyncAt: string | null; settings: { autoSync?: boolean; lastError?: string; lastErrorAt?: string } };
+type Integ = { provider: string; status: string; lastSyncAt: string | null; settings: { autoSync?: boolean; lastError?: string; lastErrorAt?: string; credentialsRejected?: boolean } };
 
 function Integrations() {
   const [list, setList] = useState<Integ[]>([]);
@@ -489,7 +492,7 @@ function Integrations() {
                   {i.settings?.autoSync && <span className="badge bg-black/[0.05] text-ink-300">auto sync</span>}
                 </div>
                 <div className="text-xs text-ink-400">{i.provider === "whatsapp" ? "used for WhatsApp steps" : !PROVIDER_FIELDS[i.provider]?.sync ? "used for this workspace's lookups" : i.lastSyncAt ? `last sync ${fmtDate(i.lastSyncAt)}` : "nothing pushed yet"}</div>
-                {i.status === "error" && i.settings?.lastError && <div className="mt-1 text-xs text-red-700 [overflow-wrap:anywhere]">{i.settings.lastError}{i.settings.lastErrorAt ? ` (${fmtDate(i.settings.lastErrorAt)})` : ""}</div>}
+                {i.status === "error" && i.settings?.lastError && <div className="mt-1 text-xs text-red-700 [overflow-wrap:anywhere]">{i.settings.lastError}{i.settings.lastErrorAt ? ` (${fmtDate(i.settings.lastErrorAt)})` : ""}{i.settings.autoSync && i.settings.credentialsRejected ? " Auto sync is paused until the connection is saved again with working credentials." : ""}</div>}
               </div>
               <button className="shrink-0 text-red-600" onClick={() => disconnect(i.provider)}>Disconnect</button>
             </li>
@@ -610,11 +613,16 @@ function UpgradeButton({ planId, stripeEnabled }: { planId: string; stripeEnable
   );
 }
 
-/** What Stripe sent the customer back with: ?success=1 or ?canceled=1 on /settings/billing. */
-function CheckoutReturnNotice() {
+/**
+ * What Stripe sent the customer back with: ?success=1 or ?canceled=1 on /settings/billing.
+ * Only Stripe sends people here with those parameters, so when Stripe is not configured (or
+ * the plans have not loaded yet) they are ignored: a hand-typed ?success=1 must not say
+ * "Payment received" on a server that cannot take payments.
+ */
+function CheckoutReturnNotice({ stripeEnabled }: { stripeEnabled?: boolean }) {
   const [params, setParams] = useSearchParams();
   const outcome = params.get("success") === "1" ? "success" : params.get("canceled") === "1" ? "canceled" : null;
-  if (!outcome) return null;
+  if (!outcome || stripeEnabled !== true) return null;
   const dismiss = () => {
     const next = new URLSearchParams(params);
     next.delete("success");
@@ -644,13 +652,14 @@ function Billing() {
   }, []);
   useEffect(() => { loadBilling(); }, [loadBilling]);
   if (billErr) return <LoadError message={billErr} onRetry={loadBilling} />;
-  if (!u || !plans) return <div className="space-y-4"><CheckoutReturnNotice /><div className="card p-5"><Spinner label="Loading…" /></div></div>;
+  if (!u || !plans) return <div className="space-y-4"><div className="card p-5"><Spinner label="Loading…" /></div></div>;
   return (
     <div className="space-y-4">
-      <CheckoutReturnNotice />
+      <CheckoutReturnNotice stripeEnabled={plans.stripeEnabled} />
       <div className="card p-5"><div className="mb-3 font-medium">Current plan: <span className="capitalize">{u.plan}</span> · {u.period}</div>
         <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-5">{Object.entries(u.usage).map(([k, v]) => <div key={k} className="rounded-lg border border-black/10 p-3"><div className="text-xs text-ink-400">{metricLabel(k)}</div><div className="text-lg font-semibold">{v.used.toLocaleString()} <span className="text-xs font-normal text-ink-500">/ {limitLabel(k, v.limit)}</span></div></div>)}</div>
-        {plans.pilotMode && <p className="mt-3 text-sm text-emerald-600">Pilot mode: everything is free during the pilot. Limits reset monthly.</p>}
+        {/* Free only for a workspace actually on the pilot plan; a paying plan is not free because pilot mode is on. */}
+        {plans.pilotMode && u.plan === "pilot" && <p className="mt-3 text-sm text-emerald-600">Pilot mode: everything is free during the pilot. Limits reset monthly.</p>}
         {!plans.stripeEnabled && <p className="mt-3 text-xs text-ink-400">Upgrades are arranged by request: choose a plan and we will get in touch to set up billing.</p>}
       </div>
       <div className="grid gap-3 md:grid-cols-4">{/* "pilot" is an internal plan, hidden here exactly as on the landing page - unless it

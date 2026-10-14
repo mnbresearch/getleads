@@ -154,8 +154,10 @@ describe("an engine that ignores the site it was asked to search", () => {
     vi.stubGlobal("fetch", async () => page(BING([["https://www.somevendor.example/blog/alternative-to-acme", "The best alternative to Acme"], ["https://other.example/acme-alternative", "Acme alternative"]])));
     const o = await webSearchDetailed('site:reddit.com "alternative to Acme"', { providers: [bingHtmlProvider()] });
     expect(o.results).toEqual([]);
-    // The provider answered, as before: this is not reported as a failure here.
-    expect(o.everyProviderFailed).toBe(false);
+    // The attempt is still recorded as answered (with the count it threw away), but an
+    // answer whose every result was off the site never searched the site: since round C1
+    // the search counts it as a failure, so the no-source rule applies to it.
+    expect(o.everyProviderFailed).toBe(true);
     expect(o.attempts).toMatchObject([{ provider: "bing_html", ok: true, outcome: "ok", count: 0, offSite: 2 }]);
   });
 
