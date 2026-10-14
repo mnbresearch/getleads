@@ -35,6 +35,7 @@ import { ForgotPasswordPage } from "./pages/ForgotPassword";
 import { ResetPasswordPage } from "./pages/ResetPassword";
 import { VerifyEmailPage } from "./pages/VerifyEmail";
 import { PrivacyPage, TermsPage } from "./pages/Legal";
+import { NotFoundPage } from "./pages/NotFound";
 
 function Protected({ children }: { children: React.ReactNode }) {
   const token = useAuthToken();
@@ -43,6 +44,30 @@ function Protected({ children }: { children: React.ReactNode }) {
   // sign-in instead of landing on the overview.
   if (!token) rememberReturnPath(loc.pathname + loc.search);
   return token ? <>{children}</> : <Navigate to="/login" replace />;
+}
+
+/**
+ * The first path segment of every page that lives behind sign-in.
+ *
+ * Used to tell "a real page you need an account for" (redirect to sign-in, then come back)
+ * apart from "an address that does not exist" (say so). Before this, every unknown path
+ * was treated as the first kind, so a typo sent a signed-out visitor to a password prompt.
+ * Add the segment here when a new signed-in page is added below.
+ */
+const APP_SECTIONS = [
+  "plays", "clients", "leads", "search", "icps", "campaigns", "agent", "visitors", "signals",
+  "visibility", "tasks", "autopilot", "tools", "analytics", "automation", "settings",
+];
+
+function isAppPath(pathname: string): boolean {
+  const first = pathname.split("/").filter(Boolean)[0] ?? "";
+  return APP_SECTIONS.includes(first);
+}
+
+/** Unknown path: a 404 page, inside the app shell when signed in. */
+function NotFoundRoute() {
+  const token = useAuthToken();
+  return token ? <Shell><NotFoundPage inApp /></Shell> : <NotFoundPage />;
 }
 
 function Root() {
@@ -70,6 +95,7 @@ function Root() {
       <Route
         path="/*"
         element={
+          !isAppPath(loc.pathname) ? <NotFoundRoute /> :
           <Protected>
             <Shell>
               <Routes>
@@ -91,7 +117,7 @@ function Root() {
                 <Route path="/analytics" element={<AnalyticsPage />} />
                 <Route path="/automation" element={<AutomationPage />} />
                 <Route path="/settings/*" element={<SettingsPage />} />
-                <Route path="*" element={<Navigate to="/" replace />} />
+                <Route path="*" element={<NotFoundPage inApp />} />
               </Routes>
             </Shell>
           </Protected>

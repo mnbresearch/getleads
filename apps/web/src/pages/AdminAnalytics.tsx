@@ -29,7 +29,13 @@ type Funnel = {
   apiKeys: { active: number; usedInRange: number };
   abandonedCheckouts?: number;
   subscriptionsCancelled?: number;
+  /** Absent on an older server. `enabled` is false when Stripe is not configured. */
+  checkout?: { enabled: boolean };
+  upgradeRequests?: { requested: number; inRange: number; open: number };
 };
+/** What the checkout section needs to know from the funnel answer. */
+type CheckoutMeta = { enabled: boolean; upgradeRequests: { requested: number; inRange: number; open: number } | null };
+const NO_CHECKOUT_TEXT = "Online checkout is not set up - upgrades come in as requests";
 type Checkout = { id: string; orgId: string; orgName: string | null; plan: string; status: string; createdAt: string; completedAt: string | null; followupStatus: string | null; followupAt: string | null; ownerEmail: string | null };
 type FollowupInfo = { mode: "off" | "dry_run" | "on"; afterHours: number; mailer: boolean };
 type Preview = {
@@ -70,7 +76,7 @@ const outcomeText = (s: string | null) => {
   return { sent: "Sent", dry_run: "Dry run", failed: "Failed", "failed:no_mailer": "Failed (no mail provider)", sending: "Sending" }[s] ?? s;
 };
 
-function FunnelSection({ days }: { days: number }) {
+function FunnelSection({ days, onMeta }: { days: number; onMeta?: (m: CheckoutMeta) => void }) {
   const [data, setData] = useState<Funnel | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -81,12 +87,14 @@ function FunnelSection({ days }: { days: number }) {
     adminFetch<Funnel>("GET", `/v1/admin/analytics/funnel?days=${days}`)
       .then((r) => {
         if (mine !== seq.current) return;
-        setData(expectShape(expectLists(r, "steps", "daily", "referrers", "sources"), (x) => !!x.logins && !!x.apiKeys));
+        const ok = expectShape(expectLists(r, "steps", "daily", "referrers", "sources"), (x) => !!x.logins && !!x.apiKeys);
+        setData(ok);
         setErr(null);
+        if (ok.checkout) onMeta?.({ enabled: ok.checkout.enabled, upgradeRequests: ok.upgradeRequests ?? null });
       })
       .catch((e) => { if (mine === seq.current) setErr(errText(e, "The growth funnel")); })
       .finally(() => { if (mine === seq.current) setBusy(false); });
-  }, [days]);
+  }, [days, onMeta]);
   useEffect(() => { load(); }, [load]);
 
   if (err && !data) {
@@ -98,9 +106,29 @@ function FunnelSection({ days }: { days: number }) {
   }
   if (!data) return <div className="card p-5 text-sm text-ink-400" role="status">Loading the funnel…</div>;
 
-  const top = Math.max(1, ...data.steps.map((s) => s.count));
-  const empty = data.steps.every((s) => s.count === 0);
   const rateTo = (k: StepKey) => data.conversion.find((c) => c.to === k)?.rate ?? null;
+  // "Upgrade requested" sits after "Activated": it is where a customer who wants to pay ends
+  // up when there is no online checkout. It is an alternative to checkout, not a step before
+  // it, so both its percentage and Checkout started's are from Activated.
+  const checkoutOff = data.checkout?.enabled === false;
+  type Row = { key: string; label: string; count: number; rate: number | null; off?: boolean };
+  const rows: Row[] = [];
+  let prev: number | null = null;
+  const rateFrom = (n: number) => (prev === null ? null : prev > 0 ? n / prev : null);
+  for (const s of data.steps) {
+    if (s.key === "checkout_started" && data.upgradeRequests) {
+      const n = data.upgradeRequests.requested;
+      rows.push({ key: "upgrade_requested", label: "Upgrade requested", count: n, rate: rateFrom(n) });
+    }
+    if (checkoutOff && (s.key === "checkout_started" || s.key === "paid")) {
+      rows.push({ key: s.key, label: s.label, count: s.count, rate: null, off: true });
+      continue;
+    }
+    rows.push({ key: s.key, label: s.label, count: s.count, rate: s.key === "visits" ? null : rateTo(s.key) });
+    prev = s.count;
+  }
+  const top = Math.max(1, ...rows.map((s) => s.count));
+  const empty = rows.every((s) => s.count === 0);
   const dayMax = Math.max(1, ...data.daily.map((d) => d.visits + d.pricing_views));
 
   return (
@@ -115,21 +143,28 @@ function FunnelSection({ days }: { days: number }) {
           <p className="text-sm text-ink-400">No activity recorded in this period yet. Visits appear once the public site sends page views; sign-ups and checkouts as they happen.</p>
         ) : (
           <ol className="space-y-2" data-testid="growth-funnel">
-            {data.steps.map((s, i) => (
-              <li key={s.key} className="grid grid-cols-[minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm">
-                <span className="truncate text-ink-200">{s.label}</span>
-                <span className="h-5 rounded bg-black/5" aria-hidden>
-                  <span className="block h-5 rounded bg-brand-600/80" style={{ width: `${Math.max(s.count ? 2 : 0, (s.count / top) * 100)}%` }} />
-                </span>
-                <span className="w-28 text-right tabular-nums text-ink-50">
-                  <b>{fmtNum(s.count)}</b>
-                  {i > 0 && <span className="ml-2 text-xs text-ink-400">{pct(rateTo(s.key))}</span>}
-                </span>
-              </li>
-            ))}
+            {rows.map((s, i) =>
+              s.off ? (
+                <li key={s.key} className="grid grid-cols-[minmax(0,9rem)_1fr] items-center gap-3 text-sm" data-testid={`funnel-${s.key}`}>
+                  <span className="truncate text-ink-400">{s.label}</span>
+                  <span className="text-xs text-ink-400">Online checkout is not set up</span>
+                </li>
+              ) : (
+                <li key={s.key} className="grid grid-cols-[minmax(0,9rem)_1fr_auto] items-center gap-3 text-sm" data-testid={`funnel-${s.key}`}>
+                  <span className="truncate text-ink-200">{s.label}</span>
+                  <span className="h-5 rounded bg-black/5" aria-hidden>
+                    <span className="block h-5 rounded bg-brand-600/80" style={{ width: `${Math.max(s.count ? 2 : 0, (s.count / top) * 100)}%` }} />
+                  </span>
+                  <span className="w-28 text-right tabular-nums text-ink-50">
+                    <b>{fmtNum(s.count)}</b>
+                    {i > 0 && <span className="ml-2 text-xs text-ink-400">{pct(s.rate)}</span>}
+                  </span>
+                </li>
+              ),
+            )}
           </ol>
         )}
-        <p className="mt-3 text-xs text-ink-400">Percentages are from the step above. Visits and pricing views are counted views, not people.</p>
+        <p className="mt-3 text-xs text-ink-400">Percentages are from the step above (Upgrade requested and Checkout started are both from Activated). Visits and pricing views are counted views, not people.{checkoutOff ? ` ${NO_CHECKOUT_TEXT}.` : ""}</p>
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
@@ -195,7 +230,7 @@ function FunnelSection({ days }: { days: number }) {
   );
 }
 
-function CheckoutsSection() {
+function CheckoutsSection({ meta }: { meta: CheckoutMeta | null }) {
   const [status, setStatus] = useState<"" | "open" | "completed" | "expired" | "abandoned">("");
   const [rows, setRows] = useState<Checkout[] | null>(null);
   const [info, setInfo] = useState<FollowupInfo | null>(null);
@@ -237,6 +272,24 @@ function CheckoutsSection() {
       .catch((e) => setNote(errText(e, "The test email")))
       .finally(() => setBusy(""));
   };
+
+  // With no online checkout there is nothing to follow up and no checkout to list: say why,
+  // and show where upgrades come from instead, rather than a page of zeros.
+  if (meta && !meta.enabled) {
+    const ur = meta.upgradeRequests;
+    return (
+      <div className="card p-4" data-testid="checkouts-off">
+        <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Checkouts</div>
+        <p className="mt-1 text-sm text-ink-50">{NO_CHECKOUT_TEXT}.</p>
+        {ur && (
+          <p className="mt-1 text-sm text-ink-200" data-testid="upgrade-request-count">
+            Upgrade requests: <b className="tabular-nums">{fmtNum(ur.inRange)}</b> in this period, <b className="tabular-nums">{fmtNum(ur.open)}</b> still new. They are listed under Upgrade requests in the dashboard.
+          </p>
+        )}
+        <p className="mt-1 text-xs text-ink-400">Set STRIPE_SECRET_KEY and the STRIPE_PRICE_&lt;PLAN&gt; prices on the server to take payment online; checkout follow-up then applies.</p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-3">
@@ -327,6 +380,7 @@ function CheckoutsSection() {
 
 export function GrowthTab() {
   const [days, setDays] = useState<(typeof RANGES)[number]>(30);
+  const [meta, setMeta] = useState<CheckoutMeta | null>(null);
   return (
     <section aria-label="Growth" className="space-y-4" data-testid="growth-tab">
       <div className="flex flex-wrap items-center gap-2">
@@ -336,8 +390,8 @@ export function GrowthTab() {
           </button>
         ))}
       </div>
-      <FunnelSection days={days} />
-      <CheckoutsSection />
+      <FunnelSection days={days} onMeta={setMeta} />
+      <CheckoutsSection meta={meta} />
     </section>
   );
 }

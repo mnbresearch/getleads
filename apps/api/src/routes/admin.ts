@@ -526,18 +526,20 @@ adminRoutes.get("/security/summary", async (c) => {
 const countLimit = z.number().int().min(0).max(MAX_PLAN_LIMIT);
 /**
  * Plan limits that are part of every plan's definition but that NOTHING in the server reads
- * when deciding what a workspace may do: no route counts a workspace's campaigns against
- * `campaigns`, and no route checks `apiAccess` or `integrations` before serving the API or
- * connecting an integration. An override for one of them was accepted, stored and shown in
- * the console - and changed nothing (a customer set to `apiAccess: false` kept using the
- * API). An override that cannot take effect is refused, with the reason.
+ * when deciding what a workspace may do. Today that is only `apiAccess` (every plan includes
+ * the API). `campaigns` and `integrations` used to be in this list; they are enforced now
+ * (lib/limits.ts) and overridable. An override that cannot take effect is refused, with the
+ * reason.
  *
  * Enforced, and so overridable: the six monthly metrics (consume / remainingPremiumBudget in
  * packages/db usage.ts), `seats` (the invite and join routes) and `emailsPerDay`
  * (orgDailySendCeiling). When one of the three below gains real enforcement, give it its
  * value schema in OVERRIDES_SCHEMA and remove it from here.
  */
-const UNENFORCED_LIMITS = { campaigns: "The campaigns limit", apiAccess: "API access", integrations: "Integrations access" } as const;
+// Campaigns per plan and integrations access are enforced since the audit round
+// (lib/limits.ts), so an admin can now override them like the other limits. API access stays
+// unenforced: every plan includes it.
+const UNENFORCED_LIMITS = { apiAccess: "API access" } as const;
 const notEnforced = (what: string) =>
   z.unknown().superRefine((_v, ctx) => {
     ctx.addIssue({ code: z.ZodIssueCode.custom, message: `${what} is not enforced by the server yet, so it cannot be overridden.` });
@@ -559,9 +561,9 @@ const OVERRIDES_SCHEMA = z
     seats: countLimit,
     /** The workspace's daily sending ceiling, when it should differ from the computed one. */
     emailsPerDay: z.number().int().min(1).max(MAX_PLAN_LIMIT),
-    campaigns: notEnforced(UNENFORCED_LIMITS.campaigns),
+    campaigns: countLimit,
     apiAccess: notEnforced(UNENFORCED_LIMITS.apiAccess),
-    integrations: notEnforced(UNENFORCED_LIMITS.integrations),
+    integrations: z.boolean(),
   })
   .partial()
   .strict();
@@ -974,8 +976,23 @@ adminRoutes.post("/data-subject/erase", rateLimit({ perMinute: 10, name: "admin-
   const email = oneAddress(b.email);
   if (adminAddress(b.confirm) !== email) throw new ApiError(400, "The confirmation does not match the address. Type the same address again to confirm.", "confirm_mismatch");
   const r = await eraseDataSubject(email);
-  await adminAudit(c, "admin.data_subject_erased", null, { targetType: "data_subject", targetId: addressFingerprint(email), data: { workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, eventsDeleted: r.eventsDeleted } });
-  return c.json({ ok: true, workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, globallySuppressed: true });
+  await adminAudit(c, "admin.data_subject_erased", null, {
+    targetType: "data_subject",
+    targetId: addressFingerprint(email),
+    data: { workspaces: r.workspaces, leadsDeleted: r.leadsDeleted, messagesAnonymised: r.messagesAnonymised, eventsDeleted: r.eventsDeleted, upgradeRequestsAnonymised: r.upgradeRequestsAnonymised, invitesDeleted: r.invitesDeleted, accounts: r.accounts.length },
+  });
+  return c.json({
+    ok: true,
+    workspaces: r.workspaces,
+    leadsDeleted: r.leadsDeleted,
+    messagesAnonymised: r.messagesAnonymised,
+    upgradeRequestsAnonymised: r.upgradeRequestsAnonymised,
+    invitesDeleted: r.invitesDeleted,
+    // Accounts with this address are not deleted by an erasure; the note says who can.
+    accounts: r.accounts,
+    accountNote: r.accountNote,
+    globallySuppressed: true,
+  });
 });
 
 // ── Growth: the platform's own funnel and checkouts ──
@@ -985,7 +1002,27 @@ adminRoutes.post("/data-subject/erase", rateLimit({ perMinute: 10, name: "admin-
 // about it) and nobody else's.
 
 adminRoutes.get("/analytics/funnel", zValidator("query", z.object({ days: z.enum(["7", "30", "90"]).default("30") })), async (c) => {
-  return c.json(await productFunnel(Number(c.req.valid("query").days)));
+  const days = Number(c.req.valid("query").days);
+  const funnel = await productFunnel(days);
+  // Without Stripe nobody can reach a checkout, so "Checkout started 0 / Paid 0" said nothing
+  // true. Upgrades then arrive as requests: their count is reported next to the funnel (the
+  // `steps` list itself is unchanged), and `checkout.enabled` tells the page to describe the
+  // checkout steps as not set up instead of showing zeros.
+  const { db } = getDb();
+  const since = sql.raw(`(now() - interval '${funnel.range.days} days')`);
+  const [ur] = [
+    ...((await db.execute(sql`
+      SELECT (SELECT count(*)::int FROM product_events WHERE name = 'upgrade_requested' AND created_at >= ${since}) AS requested,
+             (SELECT count(*)::int FROM upgrade_requests WHERE created_at >= ${since}) AS in_range,
+             (SELECT count(*)::int FROM upgrade_requests WHERE status = 'new') AS open`)) as unknown as { requested: number; in_range: number; open: number }[]),
+  ];
+  return c.json({
+    ...funnel,
+    checkout: { enabled: !!env.stripe.secretKey },
+    // `requested`: the funnel step (product events in range). `inRange` / `open`: the stored
+    // requests themselves, which also counts any made before the step was recorded.
+    upgradeRequests: { requested: Number(ur?.requested ?? 0), inRange: Number(ur?.in_range ?? 0), open: Number(ur?.open ?? 0) },
+  });
 });
 
 const CHECKOUT_STATUSES = ["open", "completed", "expired", "abandoned"] as const;

@@ -9,6 +9,7 @@ import { sendMail } from "../lib/mailer.js";
 import { rateLimit, type Env } from "../middleware.js";
 import { emailField } from "../lib/fields.js";
 import { safeHeaderText } from "../lib/sanitize.js";
+import { trackProduct } from "../lib/productEvents.js";
 
 /** Public "I'm interested, upgrade me" lead capture from the pricing page. No Stripe: this
  * just records the lead and emails the admin so they can close the sale manually, then use
@@ -41,6 +42,9 @@ leadCaptureRoutes.post("/upgrade-requests", rateLimit({ perMinute: 5 }), zValida
     .insert(upgradeRequests)
     .values({ orgId: auth?.org.id ?? null, name: b.name, email: b.email, mobile: b.mobile, country: b.country, planId: b.planId, message: b.message })
     .returning();
+  // The growth funnel's "Upgrade requested" step: without Stripe this is the only sign of
+  // someone wanting to pay. Plan id only - the person's name and address stay in the request.
+  await trackProduct("upgrade_requested", { orgId: auth?.org.id ?? null, userId: auth?.user?.id ?? null, props: { plan: b.planId } });
 
   const plan = PLANS[b.planId];
   // Built from values that are known to exist, so the subject can never read "undefined".

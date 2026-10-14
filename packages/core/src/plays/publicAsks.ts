@@ -29,9 +29,22 @@ const ON: Record<AskSource, string> = { linkedin: "LinkedIn", reddit: "Reddit", 
 const THREAD: Record<AskSource, string> = { linkedin: "LinkedIn post", reddit: "Reddit thread", hackernews: "Hacker News thread", x: "Post on X", forums: "Forum thread" };
 
 const MAX_SEARCHES = 24;
+/** The posted-within window when a play does not set one (the play form shows 30). */
+export const DEFAULT_ASK_DAYS = 30;
 /** Calls to the Hacker News search API in one run. */
 const MAX_HN_CALLS = 8;
 const HN_API = "https://hn.algolia.com/api/v1/search_by_date";
+/** One item by id, on the same public API: used only to date a thread web search found. */
+const HN_ITEM_API = "https://hn.algolia.com/api/v1/items";
+/** Date look-ups for undated Hacker News threads in one run. */
+const MAX_HN_DATE_LOOKUPS = 6;
+
+/** The creation date of a Hacker News API item, when it has a believable one. */
+function itemDate(h: { created_at?: unknown; created_at_i?: unknown } | null): Date | null {
+  if (!h || typeof h !== "object") return null;
+  const d = typeof h.created_at === "string" ? new Date(h.created_at) : typeof h.created_at_i === "number" ? new Date(h.created_at_i * 1000) : null;
+  return d && Number.isFinite(d.getTime()) && d.getTime() <= Date.now() + 86_400_000 && d.getUTCFullYear() >= 2006 ? d : null;
+}
 const MAX_AI_BATCHES = 2;
 const AI_BATCH = 10;
 
@@ -388,14 +401,58 @@ const cleanThreadTitle = (title: string): string =>
     .replace(/\s*\|\s*\d[\d,.]*\+?\s*(?:comments?|replies|points)\s*$/i, "")
     .trim();
 
-function topicOverlap(text: string, topic: string): boolean {
-  const stop = new Set("with that this from your their have what when where which will would should could about into over under more most some than then them they were been being also just like need want tool tools software platform best good".split(" "));
-  const tokens = [...new Set(topic.toLowerCase().split(/[^a-z0-9+#]+/).filter((w) => w.length >= 4 && !stop.has(w)))];
-  if (!tokens.length) return text.toLowerCase().includes(topic.toLowerCase());
-  const hay = text.toLowerCase();
-  const hit = tokens.filter((w) => hay.includes(w) || (w.endsWith("s") && hay.includes(w.slice(0, -1)))).length;
-  return hit >= Math.max(1, Math.ceil(tokens.length * 0.6));
+const TOPIC_STOP = new Set("with without that this from your their have what when where which will would should could about into over under more most some than then them they were been being also just like need want tool tools software platform best good".split(" "));
+
+/** The words of a topic that carry its meaning: four letters or more, not filler. */
+function topicTokens(topic: string): string[] {
+  return [...new Set(topic.toLowerCase().split(/[^a-z0-9+#]+/).filter((w) => w.length >= 4 && !TOPIC_STOP.has(w)))];
 }
+
+/**
+ * Where a topic word stands in the text, as word positions. A whole word only, with a
+ * short ending allowed ("order" matches "orders", "ordering"; "management" matches
+ * "managements") - it used to be a substring test, so "order" matched "border" and
+ * "recorder", and an "order management" play took a photo-management thread.
+ */
+function tokenPositions(words: string[], token: string): number[] {
+  const stem = token.endsWith("s") && token.length > 4 ? token.slice(0, -1) : token;
+  const out: number[] = [];
+  words.forEach((w, i) => {
+    if (w.startsWith(stem) && w.length - stem.length <= 3) out.push(i);
+  });
+  return out;
+}
+
+/**
+ * Is the text about this topic?
+ *
+ * `strict` is for a category ("order management software"): every key word must be there,
+ * close together, as the phrase it is. "In order to ... photo management" names both words
+ * and is about neither. Otherwise (a problem in the customer's own words) most key words
+ * must be there, anywhere.
+ */
+function topicOverlap(text: string, topic: string, strict = false): boolean {
+  const tokens = topicTokens(topic);
+  if (!tokens.length) return text.toLowerCase().includes(topic.toLowerCase());
+  // "In order to" is a phrase about nothing: left in, it made any text read as about "orders".
+  const words = text.toLowerCase().replace(/\bin order (?:to|for|that)\b/g, " ").split(/[^a-z0-9+#]+/).filter(Boolean);
+  const positions = tokens.map((t) => tokenPositions(words, t));
+  if (!strict) {
+    // Up to three key words: all of them. "Automate order management" is not matched by a
+    // thread about automating photo management, which has two of the three. Longer
+    // descriptions may miss one word in four.
+    const hit = positions.filter((p) => p.length > 0).length;
+    return hit >= Math.max(1, tokens.length - Math.floor(tokens.length / 4));
+  }
+  if (positions.some((p) => !p.length)) return false;
+  if (tokens.length === 1) return true;
+  // Some placement of the key words within a span of a few words: the phrase, give or take a word.
+  const span = tokens.length + 1;
+  return positions[0].some((start) => positions.every((p) => p.some((i) => Math.abs(i - start) <= span)));
+}
+
+/** topicOverlap as each kind of subject needs it. */
+const onSubject = (text: string, subject: AskSubject): boolean => topicOverlap(text, subject.value, subject.kind === "category");
 
 function reasonFor(kind: "ask" | "complaint", person: boolean, source: AskSource, subject: AskSubject, leaving: boolean): string {
   const v = cleanLine(subject.value, 120);
@@ -480,7 +537,7 @@ const SENTENCES = /(?<=[.?!\u2026])\s+/;
 function sentencesAbout(body: string, subject: AskSubject): string {
   const parts = body.split(SENTENCES).filter(Boolean);
   const named = subject.kind === "competitor" ? new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu") : null;
-  const about = (t: string): boolean => (named ? named.test(t) : topicOverlap(t, subject.value));
+  const about = (t: string): boolean => (named ? named.test(t) : onSubject(t, subject));
   const keep = new Set<number>();
   parts.forEach((p, i) => {
     if (!about(p)) return;
@@ -515,7 +572,7 @@ function hnHit(raw: unknown, subject: AskSubject): { result: SearchResult; shown
   // A post that announces something by its own title is somebody selling, wherever in it the subject is named.
   if (ownTitle && LAUNCH_TITLE.test(ownTitle)) return null;
   const named = subject.kind === "competitor" ? new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu") : null;
-  const titleOnSubject = !!ownTitle && (named ? named.test(ownTitle) : topicOverlap(ownTitle, subject.value));
+  const titleOnSubject = !!ownTitle && (named ? named.test(ownTitle) : onSubject(ownTitle, subject));
   let title = "";
   let snippet: string;
   if (titleOnSubject) {
@@ -565,7 +622,10 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
   const category = cleanLine(cfg?.category, 120);
   const chosen = (Array.isArray(cfg?.sources) ? cfg.sources : []).filter((s): s is AskSource => ALL_SOURCES.includes(s as AskSource));
   const sources = chosen.length ? [...new Set(chosen)] : ALL_SOURCES;
-  const days = typeof cfg?.days === "number" && Number.isFinite(cfg.days) ? clampInt(cfg.days, 30, 1, 3650) : null;
+  // With no number of days set, the window is the 30 days the play form shows as its
+  // default. It used to be "no window at all", so a six-year-old "Ask HN" came back from a
+  // play whose form said "Posted in the last 30 days".
+  const days = typeof cfg?.days === "number" && Number.isFinite(cfg.days) ? clampInt(cfg.days, DEFAULT_ASK_DAYS, 1, 3650) : DEFAULT_ASK_DAYS;
   const subjects: AskSubject[] = [
     ...competitors.map((value): AskSubject => ({ kind: "competitor", value })),
     ...problems.map((value): AskSubject => ({ kind: "problem", value })),
@@ -593,7 +653,7 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
     // The competitor's own community or site is its page, not a public ask.
     if (competitors.some((c) => normCompanyName(c).length >= 3 && rootDomain(host).split(".")[0].replace(/[^a-z0-9]/g, "") === normCompanyName(c))) return;
     // The result must be about what was searched for: a degraded search returns anything.
-    if (subject.kind === "competitor" ? !new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu").test(text) : !topicOverlap(text, subject.value)) return;
+    if (subject.kind === "competitor" ? !new RegExp(`(?<![\\p{L}\\p{N}])${escapeRegExp(subject.value)}(?![\\p{L}\\p{N}])`, "iu").test(text) : !onSubject(text, subject)) return;
     const verdict = classifyAsk(r.title, snippet, subject.kind === "competitor" ? subject.value : undefined);
     if (!verdict) return;
     // One product among several named side by side is an example, not what the post is about - unless it is the one being left.
@@ -647,6 +707,28 @@ export async function findPublicAsks(cfg: { competitors?: string[]; problems?: s
   }
   if (queries.length > asked && !run.expired && run.canSearch && byUrl.size < limit * 2) {
     run.note(`${asked} of ${queries.length} searches were run, to keep this run within its search allowance.`);
+  }
+  /*
+   * A Hacker News thread found by web search carries no date of its own, and was kept as
+   * "undated" whatever the window. Its date is one call away on the same public API, so it
+   * is looked up and the window is applied to it like any other (a few lookups per run).
+   */
+  if (cutoff !== null) {
+    let lookups = 0;
+    for (const [key, c] of byUrl) {
+      if (lookups >= MAX_HN_DATE_LOOKUPS || run.expired) break;
+      if (c.when || c.place.source !== "hackernews") continue;
+      const id = new URL(c.url).searchParams.get("id");
+      if (!id || !/^\d{1,12}$/.test(id)) continue;
+      lookups++;
+      const item = await run.fetchApi<{ created_at?: unknown; created_at_i?: unknown }>(`${HN_ITEM_API}/${id}`);
+      const when = itemDate(item);
+      if (!when) continue;
+      if (when.getTime() < cutoff) {
+        byUrl.delete(key);
+        tooOldSeen.add(key);
+      } else c.when = when;
+    }
   }
   const tooOld = tooOldSeen.size;
   if (tooOld > 0) run.note(`${tooOld} conversation${tooOld === 1 ? "" : "s"} older than ${days} days ${tooOld === 1 ? "was" : "were"} left out.`);

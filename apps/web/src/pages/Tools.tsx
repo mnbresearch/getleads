@@ -102,13 +102,16 @@ export function ToolsPage() {
       if (tool === "decision") {
         const v = input.trim();
         const isDomain = looksLikeDomain(v);
-        const d = await apiFetch<{ people: Row[]; skipped?: string; saveStopped?: string }>("POST", "/v1/tools/decision-makers", { companyDomain: isDomain ? v : undefined, companyName: isDomain ? undefined : v, personas: extra ? extra.split(",").map((s) => s.trim()).filter(Boolean) : undefined });
+        const d = await apiFetch<{ people: Row[]; skipped?: string; saveStopped?: string; note?: string }>("POST", "/v1/tools/decision-makers", { companyDomain: isDomain ? v : undefined, companyName: isDomain ? undefined : v, personas: extra ? extra.split(",").map((s) => s.trim()).filter(Boolean) : undefined });
+        // Why an empty list is empty, when no search source could answer.
+        if (d.note) note.push(d.note);
         if (d.skipped) note.push(d.skipped);
         if (d.saveStopped) note.push(d.saveStopped);
         r = d.people;
       }
       if (tool === "colleagues") {
-        const d = await apiFetch<{ people: Row[]; stopped?: string }>("POST", "/v1/tools/colleagues", { companyDomain: input.trim(), titles: extra ? extra.split(",").map((s) => s.trim()).filter(Boolean) : undefined, save: true });
+        const d = await apiFetch<{ people: Row[]; stopped?: string; note?: string }>("POST", "/v1/tools/colleagues", { companyDomain: input.trim(), titles: extra ? extra.split(",").map((s) => s.trim()).filter(Boolean) : undefined, save: true });
+        if (d.note) note.push(d.note);
         if (d.stopped) note.push(d.stopped);
         r = d.people;
       }
@@ -168,7 +171,7 @@ export function ToolsPage() {
               <table className="w-full text-sm"><thead><tr>{columnsOf(out).map((k) => <th key={k} className="th whitespace-nowrap">{columnLabel(k)}</th>)}</tr></thead>
                 <tbody className="divide-y divide-slate-100">{out.map((r, i) => <tr key={i}>{columnsOf(out).map((k) => <td key={k} className="td text-xs [overflow-wrap:anywhere]">{(k === "emailStatus" || k === "status") && typeof r[k] === "string" && r[k] ? <EmailStatusBadge status={r[k] as string} /> : (k === "linkedinUrl" || k === "url") && typeof r[k] === "string" && r[k] ? <ExtLink className="text-brand-600 hover:underline" href={r[k]} fallback={r[k] as string}>{r[k] as string}</ExtLink> : cellText(k, r[k])}</td>)}</tr>)}</tbody></table>
               {/* Any reason the server gave is in the notices above; no guessed cause here. */}
-              {out.length === 0 && <div className="py-4 text-sm text-ink-400">No results found for this request.</div>}
+              {out.length === 0 && notices.length === 0 && <div className="py-4 text-sm text-ink-400">No results found for this request.</div>}
             </div>
           ) : tool === "intel" ? <CompanyIntelView data={out} /> : tool === "health" ? <DomainHealthView data={out} /> : <pre className="max-h-96 max-w-full overflow-auto rounded-lg bg-black p-3 text-xs text-emerald-800">{JSON.stringify(out, null, 2)}</pre>)}
         </div>

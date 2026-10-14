@@ -3,6 +3,12 @@ import { apiFetch, expectLists } from "../lib/api";
 import { CLIENT_COLORS, type TargetProgress } from "../lib/clients";
 import { Modal } from "./ui";
 
+/** Spoken names for the colour swatches; a hex code read aloud tells a screen-reader user nothing. */
+const CLIENT_COLOR_NAMES: Record<string, string> = {
+  "#c15f37": "terracotta", "#2f6f5e": "green", "#3d5a99": "blue", "#8a4f9e": "purple",
+  "#b8862b": "ochre", "#4b7f99": "teal", "#9e4f5c": "rose", "#5c6b3a": "olive",
+};
+
 export function ClientDot({ color, size = 10 }: { color: string | null; size?: number }) {
   return <span className="inline-block shrink-0 rounded-full" style={{ width: size, height: size, background: color ?? "#a8987f" }} aria-hidden />;
 }
@@ -163,7 +169,8 @@ export function ClientFormModal({
                 onClick={() => set("color", c)}
                 className={`h-7 w-7 rounded-full ring-offset-2 transition ${f.color === c ? "ring-2 ring-ink-300" : "hover:scale-110"}`}
                 style={{ background: c }}
-                aria-label={`Colour ${c}`}
+                aria-label={`Colour: ${CLIENT_COLOR_NAMES[c] ?? c}`}
+                title={CLIENT_COLOR_NAMES[c] ?? c}
                 aria-pressed={f.color === c}
               />
             ))}

@@ -1,9 +1,11 @@
 import { Hono } from "hono";
+import { verifyOptsFor } from "../lib/verifyOpts.js";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, consume, consumeLead, desc, runJobById, enqueue, eq, getDb, getJob, icps, jobs, listLeads, lists, QuotaExceededError, remainingPremiumBudget, searches } from "@prospex/db";
 import { assertOwned } from "../lib/ownership.js";
-import { crawlCompanyWebsite, findCompanies, findEmail, findPeople, hasAi, resolveCompanyDomain, runLeadPipeline, verifyEmail, parseQuery, pMap } from "@prospex/core";
+import { crawlCompanyWebsite, findCompaniesDetailed, findEmail, findPeopleDetailed, hasAi, resolveCompanyDomain, runLeadPipelineDetailed, verifyEmail, parseQuery, pMap } from "@prospex/core";
+import { blockedByProvidersNote } from "../services/notes.js";
 import { AI_OFF_NOTE, aiDisabled, aiFor, NO_AI } from "../lib/ai.js";
 import { tryConsume } from "../lib/quota.js";
 import { env } from "../env.js";
@@ -96,7 +98,9 @@ searchRoutes.post("/quick", rateLimit({ perMinute: 10 }), zValidator("json", sea
   }
   await consume(db, oid, "searches", 1);
   const providerBudget = await remainingPremiumBudget(db, oid);
-  const results = await runLeadPipeline(body, { ai: aiFor(c.get("auth")), verify: verifyOpts(), country: body.country, maxProviderLeads: providerBudget });
+  // Detailed, so an empty answer can say whether anything could actually search.
+  const { leads: results, providerFailures } = await runLeadPipelineDetailed(body, { ai: aiFor(c.get("auth")), verify: await verifyOptsFor(oid), country: body.country, maxProviderLeads: providerBudget });
+  const emptyNote = results.length === 0 && providerFailures.length ? blockedByProvidersNote(providerFailures, "This is not the same as nobody matching.") : undefined;
   let saved: { leadId: string; created: boolean }[] | undefined;
   let skipped: string | undefined;
   let stopped: string | undefined;
@@ -134,7 +138,10 @@ searchRoutes.post("/quick", rateLimit({ perMinute: 10 }), zValidator("json", sea
     saved,
     skipped,
     stopped,
-    note: !body.save && (body.listId || body.clientId) ? "listId and clientId apply only with save: true; nothing was saved." : undefined,
+    // The sources note wins: it explains the empty `results`, which matters more than the
+    // save hint (and the save hint is moot with nothing to save).
+    note: emptyNote ?? (!body.save && (body.listId || body.clientId) ? "listId and clientId apply only with save: true; nothing was saved." : undefined),
+    providerFailures: providerFailures.length ? providerFailures : undefined,
   });
 });
 
@@ -168,8 +175,10 @@ searchRoutes.post("/people", rateLimit({ perMinute: 30 }), zValidator("json", z.
     if (!domain) throw badRequest("companyDomain is not a public company domain (for example acme.com)");
     name = (await crawlCompanyWebsite(domain, { maxPages: 1 }).catch(() => null))?.name ?? domain.split(".")[0];
   }
-  const people = await findPeople({ companyName: name, titles: b.titles, locations: b.locations, limit: b.limit });
-  return c.json({ people });
+  const found = await findPeopleDetailed({ companyName: name, titles: b.titles, locations: b.locations, limit: b.limit });
+  // `note` only when nothing came back because no source could search: an empty `people`
+  // must never read as "nobody works there" when nobody was asked.
+  return c.json({ people: found.people, ...(found.emptyNote ? { note: found.emptyNote } : {}) });
 });
 
 /** Find companies matching a description. */
@@ -177,11 +186,12 @@ searchRoutes.post("/companies", rateLimit({ perMinute: 30 }), zValidator("json",
   const b = c.req.valid("json");
   const { db } = getDb();
   await consume(db, orgId(c), "searches", 1);
-  let companies = await findCompanies(b);
+  const found = await findCompaniesDetailed(b);
+  let companies = found.companies;
   if (b.resolveDomains) {
     companies = await pMap(companies, async (co) => (co.domain || !co.name ? co : { ...co, domain: (await resolveCompanyDomain(co.name).catch(() => null)) ?? "" }), 4);
   }
-  return c.json({ companies });
+  return c.json({ companies, ...(found.emptyNote ? { note: found.emptyNote } : {}) });
 });
 
 /** Enrich a company by domain (crawl website: description, emails, tech, people, socials). Persists. */
@@ -202,7 +212,8 @@ searchRoutes.post("/verify", rateLimit({ perMinute: 60 }), zValidator("json", z.
   if (!list.length) throw badRequest("email or emails required");
   const { db } = getDb();
   await consume(db, orgId(c), "verifications", list.length);
-  const results = await pMap(list, (e) => verifyEmail(e, verifyOpts()), 5);
+  const vo = await verifyOptsFor(orgId(c));
+  const results = await pMap(list, (e) => verifyEmail(e, vo), 5);
   return c.json(b.emails ? { results } : results[0]);
 });
 
@@ -213,7 +224,7 @@ searchRoutes.post("/find-email", rateLimit({ perMinute: 60 }), zValidator("json"
   if (!domain) throw badRequest("Invalid domain");
   const { db } = getDb();
   await consume(db, orgId(c), "verifications", 1);
-  const r = await findEmail({ firstName: b.firstName, lastName: b.lastName, domain }, verifyOpts());
+  const r = await findEmail({ firstName: b.firstName, lastName: b.lastName, domain }, await verifyOptsFor(orgId(c)));
   // The platform's do-not-contact list applies to this tool exactly as it does to "find
   // email" on a lead (routes/leads.ts): an address on it is not handed out, and the look-up
   // is not charged. Other candidates that are on the list are left out of the answer too.

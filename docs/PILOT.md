@@ -1,7 +1,7 @@
 # 100-customer pilot playbook
 
 ## Goal
-Validate that Prospex finds usable, verified B2B leads and that AI-personalized outreach gets replies, at zero infrastructure cost, before charging.
+Validate that Scout finds usable, verified B2B leads and that AI-personalized outreach gets replies, at zero infrastructure cost, before charging.
 
 ## Limits per pilot org (packages/db/src/plans.ts → `pilot`)
 1,000 leads, 300 searches, 2,000 verifications, 1,000 AI messages, 1,500 emails per month, 5 campaigns, 3 seats. Every number is enforced in `usage` and returns HTTP 402 `quota_exceeded` when hit. Change with the admin endpoint without redeploying.
@@ -34,7 +34,7 @@ Shared-resource budget for 100 orgs on free tiers:
 - Deliverability is the customer's domain reputation: warm up, keep daily limits ≤ 50 per sender, always keep the unsubscribe footer on.
 
 ## Pricing after pilot (already in plans.ts + Stripe checkout)
-Free/Pilot: web-discovery leads only (no paid-provider credits, so they cost nothing to run). Paid tiers add a capped sub-quota of paid-provider (Apollo/Hunter/PDL) leads on top: Starter $99 (1,500 leads, 150 provider-sourced) · Growth $329 (6,000 leads, 500 provider-sourced) · Scale $1,099 (20,000 leads, 1,500 provider-sourced) · Enterprise $2,999 (60,000 leads, 5,000 provider-sourced, usually custom-quoted). All run >=80% gross margin against real provider costs - full math in [PRICING.md](PRICING.md). Set `STRIPE_*` env vars (one `STRIPE_PRICE_<PLAN>` per tier) and `PILOT_MODE=false` to switch signups to the free plan with upgrade buttons.
+Free/Pilot: web-discovery leads only (no paid-provider credits, so they cost nothing to run). Paid tiers add a capped sub-quota of paid-provider (Apollo/Hunter/PDL) leads on top: Starter $109 (1,500 leads, 150 provider-sourced) · Growth $359 (6,000 leads, 500 provider-sourced) · Scale $1,199 (20,000 leads, 1,500 provider-sourced) · Enterprise from $3,199 (60,000 leads, 5,000 provider-sourced, usually custom-quoted). All run >=80% gross margin against real provider costs - full math in [PRICING.md](PRICING.md). Set `PILOT_MODE=false` to switch signups to the free plan with upgrade buttons. Without Stripe, an upgrade is a request you apply by hand in the admin dashboard; set the `STRIPE_*` env vars (one `STRIPE_PRICE_<PLAN>` per tier) to take payment online instead. Prices here must match `packages/db/src/plans.ts`.
 
 ## Integrating with Cortex
 Settings → CRM integrations → Cortex: paste a Cortex ingest URL. Every synced lead POSTs `{source:"prospex", lead, company}`. For the reverse direction, Cortex workflows call `POST /v1/agent/prospect` or use the MCP server; webhooks (`lead.created`, `lead.replied`, ...) push events back with HMAC signatures.

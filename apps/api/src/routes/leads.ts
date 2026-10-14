@@ -1,8 +1,9 @@
 import { Hono } from "hono";
+import { verifyOptsFor } from "../lib/verifyOpts.js";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, clients, companies, consume, desc, enqueue, eq, getDb, icps, ilike, inArray, isNull, leads, listLeads, lists, or, QuotaExceededError, signals, sql, suppressions } from "@prospex/db";
-import { verifyEmail, findEmail, computeLeadPriority } from "@prospex/core";
+import { verifyEmail, findEmail, computeLeadPriority, inferDepartment, inferSeniority } from "@prospex/core";
 import { env } from "../env.js";
 import { ApiError, badRequest, describeError, isClientDataError, notFound, requireSomeFields } from "../lib/errors.js";
 import { assertOwned } from "../lib/ownership.js";
@@ -246,8 +247,34 @@ leadRoutes.get("/export.csv", zValidator("query", listQuery), async (c) => {
   const rows = await boundedRead(db, (tx) => tx.select({ lead: leads, company: companies }).from(leads).leftJoin(companies, and(eq(leads.companyId, companies.id), eq(companies.orgId, oid))).where(where).orderBy(desc(leads.score)).limit(5000));
   const cols = ["first_name", "last_name", "title", "email", "email_status", "email_confidence", "linkedin_url", "phone", "location", "company", "company_domain", "industry", "company_size", "score", "tags", "created_at"];
   const esc = csvCell;
-  const lines = [cols.join(",")];
-  for (const { lead: l, company: co } of rows) lines.push([l.firstName, l.lastName, l.title, l.email, l.emailStatus, l.emailConfidence, l.linkedinUrl, l.phone, l.location, co?.name, co?.domain, co?.industry, co?.size, l.score, l.tags.join(";"), l.createdAt.toISOString()].map(esc).join(","));
+  /**
+   * Extra columns, appended after the original ones so a spreadsheet or script that reads
+   * columns by position keeps working: the pipeline stage, the client and the lists a lead
+   * is on (by name), then one column per custom field. Those were all in the app and missing
+   * from the only bulk way out of it.
+   */
+  const ids = rows.map((r) => r.lead.id);
+  const clientRows = await db.select({ id: clients.id, name: clients.name }).from(clients).where(eq(clients.orgId, oid));
+  const clientName = new Map(clientRows.map((r) => [r.id, r.name]));
+  const listsOf = new Map<string, string[]>();
+  for (let i = 0; i < ids.length; i += 1000) {
+    const chunk = ids.slice(i, i + 1000);
+    const memberships = await db.select({ leadId: listLeads.leadId, name: lists.name }).from(listLeads).innerJoin(lists, and(eq(lists.id, listLeads.listId), eq(lists.orgId, oid))).where(inArray(listLeads.leadId, chunk));
+    for (const m of memberships) listsOf.set(m.leadId, [...(listsOf.get(m.leadId) ?? []), m.name]);
+  }
+  // Custom field names across the exported rows, in a stable order, bounded so one odd
+  // import with hundreds of stray columns cannot make the file unopenable.
+  const customKeys = [...new Set(rows.flatMap((r) => Object.keys(r.lead.custom ?? {})))].sort().slice(0, CSV_MAX_COLUMNS);
+  const customCell = (v: unknown) => (v === undefined || v === null ? "" : typeof v === "string" ? v : typeof v === "number" || typeof v === "boolean" ? String(v) : JSON.stringify(v));
+  // The original header stays byte-for-byte as it was; only the new names, which may come
+  // from a customer's own column names, are quoted.
+  const extraCols = ["stage", "client", "lists", ...customKeys.map((k) => `custom_${k}`)];
+  const lines = [[cols.join(","), ...extraCols.map((h) => (/^[a-z_]+$/.test(h) ? h : esc(h)))].join(",")];
+  for (const { lead: l, company: co } of rows) {
+    const base = [l.firstName, l.lastName, l.title, l.email, l.emailStatus, l.emailConfidence, l.linkedinUrl, l.phone, l.location, co?.name, co?.domain, co?.industry, co?.size, l.score, l.tags.join(";"), l.createdAt.toISOString()];
+    const extra = [l.status, l.clientId ? clientName.get(l.clientId) ?? "" : "", (listsOf.get(l.id) ?? []).join(";"), ...customKeys.map((k) => customCell((l.custom ?? {})[k]))];
+    lines.push([...base, ...extra].map(esc).join(","));
+  }
   // An export is the bulk exit for contact data, so every one is on the audit trail: who,
   // from where, how many rows, and which filters selected them.
   const { limit: _l, offset: _o, sort: _s, order: _or, ...applied } = filters;
@@ -644,10 +671,17 @@ leadRoutes.patch("/:id", zValidator("json", leadPatch), async (c) => {
    * (and anything else that says "verified") now requires.
    */
   const handSetStatus = !emailChanged && b.emailStatus !== undefined && b.emailStatus !== existing.emailStatus ? { verifiedAt: null, emailVerifiedBy: null } : {};
+  /**
+   * Seniority and department are derived from the title when a lead is created. A corrected
+   * title left the old ones in place, so "Intern" promoted to "VP Sales" still filtered as
+   * entry-level. They are worked out again here with the same rules creation uses; a cleared
+   * title clears them.
+   */
+  const titleDerived = b.title !== undefined ? { seniority: inferSeniority(b.title ?? undefined) ?? null, department: inferDepartment(b.title ?? undefined) ?? null } : {};
 
   const [row] = await db
     .update(leads)
-    .set({ ...b, ...companyPatch, ...handSetStatus, ...resetVerification, ...(email !== undefined ? { email } : {}), updatedAt: new Date() })
+    .set({ ...b, ...titleDerived, ...companyPatch, ...handSetStatus, ...resetVerification, ...(email !== undefined ? { email } : {}), updatedAt: new Date() })
     .where(eq(leads.id, existing.id))
     .returning();
   return c.json(row);
@@ -679,7 +713,7 @@ leadRoutes.post("/:id/verify", async (c) => {
   if (!l) throw notFound("Lead");
   if (!l.email) throw badRequest("Lead has no email");
   await consume(db, oid, "verifications", 1);
-  const v = await verifyEmail(l.email, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
+  const v = await verifyEmail(l.email, await verifyOptsFor(l.orgId));
   // Same rule as the lead.verify job: verifiedAt and emailVerifiedBy are stamped only when a
   // real verifier or the SMTP probe answered. A DNS/syntax-only result still updates the
   // status, but stamping it read as "verified" in the UI for an address nobody checked.
@@ -698,20 +732,43 @@ leadRoutes.post("/:id/find-email", async (c) => {
   const domain = co?.domain ?? (c.req.query("domain") ? companyDomainOrNull(c.req.query("domain")!) : null);
   if (!domain || !l.firstName || !l.lastName) throw badRequest("Need first name, last name and a company domain");
   await consume(db, oid, "verifications", 1);
-  const r = await findEmail({ firstName: l.firstName, lastName: l.lastName, domain, knownPattern: co?.emailPattern, knownEmails: (co?.raw as { emailsFound?: string[] })?.emailsFound }, { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
+  const r = await findEmail({ firstName: l.firstName, lastName: l.lastName, domain, knownPattern: co?.emailPattern, knownEmails: (co?.raw as { emailsFound?: string[] })?.emailsFound }, await verifyOptsFor(l.orgId));
   if (r.email && canonicalEmail(r.email) && (await onPlatformList(canonicalEmail(r.email), db))) {
     // Nothing is stored and nothing is charged for an address that may not be kept.
     await consume(db, oid, "verifications", -1, { allowOverage: true }).catch(() => {});
     throw new ApiError(409, PLATFORM_LISTED, "suppressed");
   }
-  if (r.email && canonicalEmail(r.email)) {
-    // Only stamp verifiedAt when something checked the mailbox; a pattern guess is not verified.
-    await db.update(leads).set({ email: canonicalEmail(r.email) ?? undefined, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: r.verifiedBy ? new Date() : null, emailVerifiedBy: r.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id));
+  const found = r.email ? canonicalEmail(r.email) : null;
+  const current = l.email ? l.email.trim().toLowerCase() : null;
+  /**
+   * What happens to the lead's own address.
+   *
+   * The finder often answers with a pattern guess. Writing that over an address the lead
+   * already had replaced a known (often hand-entered or imported) email with a guess, and
+   * the old one was gone. So a found address only fills an empty one, or confirms the same
+   * one. The single exception is an address already checked and found invalid being
+   * replaced by one that checked out valid - that is a correction, and the answer says so.
+   * Otherwise the found address comes back as a suggestion and nothing is written.
+   */
+  let outcome: { saved: boolean; replaced: boolean; suggestion?: string; previousEmail?: string; note?: string } = { saved: false, replaced: false };
+  if (found) {
+    const same = current === found;
+    const correction = !!current && !same && l.emailStatus === "invalid" && r.status === "valid";
+    if (!current || same || correction) {
+      // Only stamp verifiedAt when something checked the mailbox; a pattern guess is not verified.
+      await db.update(leads).set({ email: found, emailStatus: r.status, emailConfidence: r.confidence, verifiedAt: r.verifiedBy ? new Date() : null, emailVerifiedBy: r.verifiedBy ?? null, updatedAt: new Date() }).where(eq(leads.id, l.id));
+      outcome = correction
+        ? { saved: true, replaced: true, previousEmail: l.email ?? undefined, note: `The stored address ${l.email} was checked and is invalid, so it was replaced with ${found}, which checked out valid.` }
+        : { saved: true, replaced: false };
+    } else {
+      outcome = { saved: false, replaced: false, suggestion: found, note: `This lead already has ${l.email}, so it was kept. ${found} (${r.status}) was found too - use it only if you know it is better.` };
+    }
     if (co && r.pattern && !co.emailPattern) await db.update(companies).set({ emailPattern: r.pattern }).where(eq(companies.id, co.id));
   }
   // Runner-up candidates that are on the platform's list are not handed out either.
   const listedCandidates = r.candidates?.length ? await platformListed(r.candidates.map((x) => x.email), db) : new Set<string>();
-  return c.json(listedCandidates.size ? { ...r, candidates: r.candidates.filter((x) => !listedCandidates.has(x.email.trim().toLowerCase())) } : r);
+  const body = listedCandidates.size ? { ...r, candidates: r.candidates.filter((x) => !listedCandidates.has(x.email.trim().toLowerCase())) } : r;
+  return c.json({ ...body, ...outcome });
 });
 
 // ── helpers ──

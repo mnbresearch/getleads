@@ -187,7 +187,7 @@ function AuditSection({ onViewOrg, refreshKey = 0 }: { onViewOrg: (orgId: string
   const [more, setMore] = useState(false);
   const [moreBusy, setMoreBusy] = useState(false);
   const [moreErr, setMoreErr] = useState<string | null>(null);
-  const [orgs, setOrgs] = useState<{ id: string; name: string }[] | null>(null);
+  const [orgs, setOrgs] = useState<{ id: string; name: string; slug?: string; ownerEmail?: string | null }[] | null>(null);
   const [orgsErr, setOrgsErr] = useState(false);
   // Only the newest request may write: a slow answer for the previous filters must not
   // replace the rows for the current ones.
@@ -227,8 +227,8 @@ function AuditSection({ onViewOrg, refreshKey = 0 }: { onViewOrg: (orgId: string
 
   useEffect(() => {
     let live = true;
-    adminFetch<{ orgs: { id: string; name: string }[] }>("GET", "/v1/admin/orgs")
-      .then((r) => { if (live) setOrgs(expectLists(r, "orgs").orgs.map((o) => ({ id: o.id, name: o.name }))); })
+    adminFetch<{ orgs: { id: string; name: string; slug?: string; ownerEmail?: string | null }[] }>("GET", "/v1/admin/orgs")
+      .then((r) => { if (live) setOrgs(expectLists(r, "orgs").orgs.map((o) => ({ id: o.id, name: o.name, slug: o.slug, ownerEmail: o.ownerEmail ?? null }))); })
       .catch(() => { if (live) setOrgsErr(true); });
     return () => { live = false; };
   }, []);
@@ -257,7 +257,14 @@ function AuditSection({ onViewOrg, refreshKey = 0 }: { onViewOrg: (orgId: string
 
   const orgOptions = useMemo(() => {
     const m = new Map<string, string>();
-    for (const o of orgs ?? []) m.set(o.id, o.name);
+    // Workspace names are not unique ("Acme" twice was two identical options): a name shared
+    // by more than one workspace is followed by its slug and owner, which tell them apart.
+    const seen = new Map<string, number>();
+    for (const o of orgs ?? []) seen.set(o.name, (seen.get(o.name) ?? 0) + 1);
+    for (const o of orgs ?? []) {
+      const extra = [o.slug, o.ownerEmail].filter(Boolean).join(", ");
+      m.set(o.id, (seen.get(o.name) ?? 0) > 1 && extra ? `${o.name} (${extra})` : o.name);
+    }
     for (const e of entries ?? []) if (e.orgId && !m.has(e.orgId)) m.set(e.orgId, e.orgName || e.orgId);
     if (filters.orgId && !m.has(filters.orgId)) m.set(filters.orgId, filters.orgId);
     return [...m.entries()].sort((a, b) => a[1].localeCompare(b[1]));

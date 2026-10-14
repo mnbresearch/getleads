@@ -16,6 +16,9 @@ export function ForgotPasswordPage() {
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Set when the server says it cannot send email at all (a server-wide fact, the same for
+  // every address), so the page does not promise a link that can never arrive.
+  const [noMail, setNoMail] = useState<string | null>(null);
   // "Continue with Google" is only suggested when the sign-in page really has that button.
   const googleEnabled = useGoogleEnabled();
   const submit = async (e: React.FormEvent) => {
@@ -24,7 +27,8 @@ export function ForgotPasswordPage() {
     setBusy(true);
     setErr(null);
     try {
-      await apiFetch("POST", "/v1/auth/password/forgot", { email: email.trim() });
+      const r = await apiFetch<{ ok: boolean; emailUnavailable?: boolean; message?: string } | null>("POST", "/v1/auth/password/forgot", { email: email.trim() });
+      setNoMail(r?.emailUnavailable ? r.message || "This server cannot send email right now, so no reset link was sent." : null);
       setSent(true);
     } catch (e2) {
       // A network or server failure is not "sent": say so, so they can try again.
@@ -38,7 +42,16 @@ export function ForgotPasswordPage() {
       <div className="mb-6 flex items-center justify-center">
         <Logo size={34} textClassName="text-2xl" />
       </div>
-      {sent ? (
+      {sent && noMail ? (
+        <div className="card space-y-3 p-6" role="status" data-testid="forgot-no-mail">
+          <h1 className="text-lg font-semibold">Email is not available</h1>
+          <p className="text-sm text-ink-300">{noMail}</p>
+          <div className="flex gap-2">
+            <button className="btn-secondary flex-1 justify-center" onClick={() => { setSent(false); setNoMail(null); }}>Try again</button>
+            <Link className="btn-primary flex-1 justify-center" to="/login">Back to sign in</Link>
+          </div>
+        </div>
+      ) : sent ? (
         <div className="card space-y-3 p-6" role="status">
           <h1 className="text-lg font-semibold">Check your email</h1>
           <p className="text-sm text-ink-300">

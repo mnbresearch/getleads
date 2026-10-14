@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useId, useRef, useState, type ReactNode } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
 export function Page({ title, actions, children, subtitle }: { title: string; subtitle?: string; actions?: ReactNode; children: ReactNode }) {
@@ -53,20 +53,120 @@ export function ScoreBar({ score }: { score?: number | null }) {
   );
 }
 
+/** Open modals, innermost last, so Escape and the focus trap act on the top one only. */
+const modalStack: symbol[] = [];
+
+const FOCUSABLE =
+  'a[href], area[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+
+/**
+ * A dialog.
+ *
+ * What it does and why:
+ * - role="dialog", aria-modal and aria-labelledby pointing at the title, so a screen reader
+ *   announces it as a dialog with a name instead of as loose text at the end of the page.
+ * - Focus moves into the dialog on open, Tab and Shift+Tab stay inside it, and focus goes
+ *   back to whatever opened it on close. Before, Tab walked off into the page behind.
+ * - Escape closes it, as before, but only the top dialog when two are stacked.
+ * - A click on the backdrop no longer throws away what was typed. Once anything inside has
+ *   been edited, a backdrop click or Escape asks before discarding; an untouched dialog
+ *   still closes on a backdrop click. The close button always closes, because that is an
+ *   explicit choice rather than a stray click.
+ */
 export function Modal({ open, onClose, title, children, wide }: { open: boolean; onClose: () => void; title: string; children: ReactNode; wide?: boolean }) {
+  const titleId = useId();
+  const panelRef = useRef<HTMLDivElement>(null);
+  const dirtyRef = useRef(false);
+  // Latest onClose without re-running the open/close effect when a parent passes a new
+  // inline function on every render (most callers do).
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  // Where the press started: a text selection dragged out of the panel and released on the
+  // backdrop is not a click on the backdrop.
+  const downOnBackdrop = useRef(false);
+
+  const requestClose = (soft: boolean) => {
+    if (soft && dirtyRef.current && !confirm("Discard what you have entered?")) return;
+    onCloseRef.current();
+  };
+
   useEffect(() => {
     if (!open) return;
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const me = Symbol("modal");
+    modalStack.push(me);
+    dirtyRef.current = false;
+    const opener = document.activeElement as HTMLElement | null;
+    const panel = panelRef.current;
+    // Focus the first field (or button) so keyboard users start inside the dialog.
+    const first = panel?.querySelector<HTMLElement>("input:not([disabled]):not([type=hidden]), select:not([disabled]), textarea:not([disabled])")
+      ?? panel?.querySelector<HTMLElement>(FOCUSABLE);
+    (first ?? panel)?.focus();
+
+    const onKey = (e: KeyboardEvent) => {
+      if (modalStack[modalStack.length - 1] !== me) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        requestClose(true);
+        return;
+      }
+      if (e.key !== "Tab" || !panel) return;
+      const items = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE)).filter((el) => el.offsetParent !== null || el === document.activeElement);
+      if (!items.length) {
+        e.preventDefault();
+        panel.focus();
+        return;
+      }
+      const firstEl = items[0];
+      const lastEl = items[items.length - 1];
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey && (active === firstEl || !panel.contains(active))) {
+        e.preventDefault();
+        lastEl.focus();
+      } else if (!e.shiftKey && (active === lastEl || !panel.contains(active))) {
+        e.preventDefault();
+        firstEl.focus();
+      }
+    };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
-  }, [open, onClose]);
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      const i = modalStack.indexOf(me);
+      if (i >= 0) modalStack.splice(i, 1);
+      if (opener && typeof opener.focus === "function" && document.contains(opener)) opener.focus();
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
   if (!open) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-16" onClick={onClose}>
-      <div className={`card w-full min-w-0 ${wide ? "max-w-3xl" : "max-w-lg"} p-5`} onClick={(e) => e.stopPropagation()}>
+    <div
+      className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/60 p-4 pt-16"
+      onMouseDown={(e) => {
+        downOnBackdrop.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        if (e.target !== e.currentTarget || !downOnBackdrop.current) return;
+        requestClose(true);
+      }}
+      data-testid="modal-backdrop"
+    >
+      <div
+        ref={panelRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby={titleId}
+        tabIndex={-1}
+        className={`card w-full min-w-0 ${wide ? "max-w-3xl" : "max-w-lg"} p-5 focus:outline-none`}
+        onInput={() => {
+          dirtyRef.current = true;
+        }}
+        onChange={() => {
+          dirtyRef.current = true;
+        }}
+      >
         <div className="mb-4 flex items-center justify-between gap-3">
-          <h2 className="min-w-0 text-lg font-semibold [overflow-wrap:anywhere]">{title}</h2>
-          <button onClick={onClose} className="text-ink-500 hover:text-ink-100" aria-label="Close">✕</button>
+          <h2 id={titleId} className="min-w-0 text-lg font-semibold [overflow-wrap:anywhere]">{title}</h2>
+          <button type="button" onClick={() => requestClose(false)} className="text-ink-500 hover:text-ink-100" aria-label="Close">✕</button>
         </div>
         {children}
       </div>

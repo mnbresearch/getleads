@@ -1,5 +1,5 @@
 import { fetchPublic, isPublicHost, parseHttpUrl, readCapped } from "@prospex/core";
-import { and, companies, eq, getDb, integrations, leads, type Integration, type Lead } from "@prospex/db";
+import { and, companies, enqueue, eq, getDb, inArray, integrations, leads, sql, type Integration, type Lead } from "@prospex/db";
 import { CredentialUnreadableError, openOrgJson, rebindOnReadSoon } from "../lib/credentials.js";
 
 /**
@@ -440,4 +440,180 @@ export async function syncLead(integration: Integration, leadId: string): Promis
     await db.update(integrations).set({ lastSyncAt: new Date() }).where(eq(integrations.id, integration.id));
   }
   return r;
+}
+
+/* ─────────────────────────────── connection checks ─────────────────────────────── */
+
+/**
+ * Check a connection's credentials with one cheap, read-only call before it is saved.
+ *
+ * A wrong token used to be stored as "active", and every sync after that failed with
+ * nothing pointing at why. Where a provider has a harmless "who am I" style endpoint, it is
+ * called once: a 401/403 means the credentials are wrong and the connection is saved with
+ * status "error" and the reason. A provider that cannot be reached is not held against the
+ * customer (saved as active, with a note). Webhook-style destinations (cortex, webhook,
+ * sheets) are not called: any request to them would create data on the customer's side.
+ *
+ * Switched off with INTEGRATION_VERIFY=false, and off by default under NODE_ENV=test (set
+ * INTEGRATION_VERIFY=true there to exercise it), so test runs never reach a real provider.
+ */
+export type CredentialCheck = { checked: false } | { checked: true; ok: true } | { checked: true; ok: false; error: string; unreachable?: boolean };
+
+export function integrationVerifyEnabled(): boolean {
+  const v = process.env.INTEGRATION_VERIFY;
+  if (v !== undefined) return v !== "false" && v !== "0";
+  return process.env.NODE_ENV !== "test";
+}
+
+/** The key of a data provider's config, whichever name it was saved under. */
+export function dataKeyOf(cfg: Record<string, unknown> | null | undefined): string | undefined {
+  for (const k of ["apiKey", "token", "key", "accessToken"]) {
+    const v = cfg?.[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  return undefined;
+}
+
+export async function verifyIntegrationCredentials(provider: string, cfg: Cfg): Promise<CredentialCheck> {
+  if (!integrationVerifyEnabled()) return { checked: false };
+  const name = integrationName(provider);
+  const judge = (res: Answer): CredentialCheck => {
+    if ("failed" in res) return { checked: true, ok: false, unreachable: true, error: `Could not reach ${name} to check these credentials (${res.failed}).` };
+    if (res.status === 401 || res.status === 403) return { checked: true, ok: false, error: `${name} rejected these credentials (HTTP ${res.status}). Check that the token is correct, active and has the needed permissions.` };
+    if (res.status === 429 || res.status >= 500) return { checked: true, ok: false, unreachable: true, error: `${name} did not confirm these credentials right now (HTTP ${res.status}).` };
+    if (!res.ok) return { checked: true, ok: false, error: `${name} did not accept these credentials (HTTP ${res.status}).` };
+    return { checked: true, ok: true };
+  };
+  try {
+    if (provider === "hubspot") {
+      return judge(await fixedHostCall("HubSpot", "https://api.hubapi.com/crm/v3/objects/contacts?limit=1", { method: "GET", headers: { authorization: `Bearer ${cfg.accessToken ?? ""}` } }));
+    }
+    if (provider === "pipedrive") {
+      const host = `${cfg.companyDomain || "api"}.pipedrive.com`;
+      const u = new URL(`https://${host}/v1/users/me`);
+      u.searchParams.set("api_token", cfg.apiToken ?? "");
+      return judge(await tenantHostCall("Pipedrive", u, host, { method: "GET", headers: {} }));
+    }
+    if (provider === "zoho") {
+      const base = new URL(cfg.apiDomain || ZOHO_DEFAULT_API_DOMAIN);
+      if (!ZOHO_API_HOSTS.has(base.hostname)) return { checked: false };
+      const u = new URL("/crm/v2/users?type=CurrentUser", `https://${base.hostname}`);
+      return judge(await tenantHostCall("Zoho", u, base.hostname, { method: "GET", headers: { authorization: `Zoho-oauthtoken ${cfg.accessToken ?? ""}` } }));
+    }
+    if (provider === "hunter") {
+      const u = new URL("https://api.hunter.io/v2/account");
+      u.searchParams.set("api_key", dataKeyOf(cfg) ?? "");
+      return judge(await fixedHostCall("Hunter", u.toString(), { method: "GET", headers: {} }));
+    }
+    if (provider === "ipinfo") {
+      const u = new URL("https://ipinfo.io/8.8.8.8/json");
+      u.searchParams.set("token", dataKeyOf(cfg) ?? "");
+      return judge(await fixedHostCall("IPinfo", u.toString(), { method: "GET", headers: {} }));
+    }
+  } catch {
+    return { checked: true, ok: false, unreachable: true, error: `Could not check these credentials with ${name} right now.` };
+  }
+  return { checked: false };
+}
+
+/**
+ * Record how a sync went on the integration row, so Settings can show it.
+ *
+ * A failed integration.sync used to change nothing the customer could see: the connection
+ * stayed "active" while every push failed. Now a failure sets status "error" with
+ * settings.lastError / lastErrorAt, and the next success puts it back to "active" and clears
+ * them. Merged into settings in the database, so autoSync and the rest are kept.
+ */
+export async function recordIntegrationOutcome(integrationId: string, ok: boolean, error?: string): Promise<void> {
+  const { db } = getDb();
+  if (ok) {
+    await db.execute(sql`UPDATE integrations SET status = 'active', settings = coalesce(settings, '{}'::jsonb) - 'lastError' - 'lastErrorAt' WHERE id = ${integrationId}`).catch(() => {});
+    return;
+  }
+  const text = String(error ?? "sync failed").replace(/\s+/g, " ").slice(0, 300);
+  await db
+    .execute(sql`UPDATE integrations SET status = 'error', settings = coalesce(settings, '{}'::jsonb) || jsonb_build_object('lastError', ${text}::text, 'lastErrorAt', ${new Date().toISOString()}::text) WHERE id = ${integrationId}`)
+    .catch(() => {});
+}
+
+/* ─────────────────────────── a workspace's own data-provider keys ─────────────────────────── */
+
+/**
+ * The data-provider keys a workspace saved under Settings > Integrations, for its own lookups.
+ *
+ * They were stored and never read. Hunter (email finding and verification) and IPinfo
+ * (website-visitor lookups) are now used wherever the work runs with the workspace known:
+ * the workspace's own key first, the platform's key as the fallback. Apollo and People Data
+ * Labs are searched through a shared provider chain that has no per-workspace key, so saving
+ * those is refused with a message (see OWN_KEY_UNSUPPORTED) rather than accepted and ignored.
+ */
+export const OWN_KEY_PROVIDERS = ["hunter", "ipinfo"] as const;
+export const OWN_KEY_UNSUPPORTED: Record<string, string> = {
+  apollo: "Your own Apollo key can't be used yet: Apollo searches run through Scout's shared provider connection, so a workspace key would be saved and never used. Nothing was saved.",
+  pdl: "Your own People Data Labs key can't be used yet: People Data Labs lookups run through Scout's shared provider connection, so a workspace key would be saved and never used. Nothing was saved.",
+};
+
+export async function orgDataKeys(orgId: string | null | undefined): Promise<{ hunterApiKey?: string; ipinfoToken?: string }> {
+  if (!orgId) return {};
+  try {
+    const { db } = getDb();
+    const rows = await db.select().from(integrations).where(and(eq(integrations.orgId, orgId), inArray(integrations.provider, [...OWN_KEY_PROVIDERS])));
+    const out: { hunterApiKey?: string; ipinfoToken?: string } = {};
+    for (const r of rows) {
+      let cfg: Record<string, unknown> | null = null;
+      try {
+        cfg = openOrgJson<Record<string, unknown>>(r.orgId, "integration", r.configEncrypted);
+      } catch {
+        continue; // unreadable: fall back to the platform key rather than fail the lookup
+      }
+      const key = dataKeyOf(cfg);
+      if (!key) continue;
+      if (r.provider === "hunter") out.hunterApiKey = key;
+      if (r.provider === "ipinfo") out.ipinfoToken = key;
+    }
+    return out;
+  } catch {
+    return {};
+  }
+}
+
+/* ─────────────────────────────────── auto sync ─────────────────────────────────── */
+
+/**
+ * `autoSync` was stored with every connection and documented, and nothing read it. A
+ * connection saved with autoSync on now receives new leads and lead changes by itself: the
+ * events below (emitted wherever leads are created or changed, lib/events.ts) queue the same
+ * integration.sync job the manual "Push to CRM" uses.
+ *
+ * - Only lead-sync providers (HubSpot, Pipedrive, Zoho, Cortex, webhook, Sheets).
+ * - Pipedrive and Zoho have no update path (each sync creates a record), so they get a lead
+ *   once - when it has not been pushed to them before; HubSpot and the webhook-style ones
+ *   also get updates.
+ * - A sync already waiting for the same lead and connection is not queued twice.
+ */
+const AUTO_SYNC_EVENTS = new Set(["lead.created", "lead.updated", "lead.enriched", "lead.verified", "lead.status_changed"]);
+const CREATE_ONLY = new Set(["pipedrive", "zoho"]);
+
+export async function queueAutoSync(orgId: string, type: string, entity?: { type: string; id: string }): Promise<number> {
+  if (!AUTO_SYNC_EVENTS.has(type) || entity?.type !== "lead" || !entity.id) return 0;
+  const { db } = getDb();
+  const rows = await db
+    .select({ id: integrations.id, provider: integrations.provider })
+    .from(integrations)
+    .where(and(eq(integrations.orgId, orgId), inArray(integrations.provider, INTEGRATION_PROVIDERS), inArray(integrations.status, ["active", "error"]), sql`(${integrations.settings}->>'autoSync')::boolean IS TRUE`));
+  if (!rows.length) return 0;
+  const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, entity.id), eq(leads.orgId, orgId)), columns: { id: true, custom: true } });
+  if (!lead) return 0;
+  let n = 0;
+  for (const r of rows) {
+    if (CREATE_ONLY.has(r.provider) && (lead.custom as Record<string, unknown> | null)?.[`${r.provider}_id`]) continue;
+    const waiting = await db.execute(
+      sql`SELECT 1 FROM jobs WHERE org_id = ${orgId} AND type = 'integration.sync' AND status = 'queued' AND payload->>'integrationId' = ${r.id} AND payload->>'leadId' = ${lead.id} LIMIT 1`,
+    );
+    const waitingRows = (waiting as unknown as { rows?: unknown[] }).rows ?? (waiting as unknown as unknown[]);
+    if (waitingRows.length) continue;
+    await enqueue(db, "integration.sync", { integrationId: r.id, leadId: lead.id, auto: true }, { orgId, maxAttempts: 3 });
+    n++;
+  }
+  return n;
 }

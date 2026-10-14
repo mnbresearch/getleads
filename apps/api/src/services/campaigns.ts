@@ -923,7 +923,7 @@ function singlePhone(raw: string | null | undefined): string | null {
 }
 
 /** Workspace-level sender defaults (Settings - Defaults for AI-drafted emails). */
-function orgSenderDefaults(org: Organization | null | undefined) {
+export function orgSenderDefaults(org: Organization | null | undefined) {
   const o = (org?.settings ?? {}) as Record<string, unknown>;
   const str = (v: unknown) => (typeof v === "string" && v.trim() ? v : undefined);
   return { senderName: str(o.senderName), senderCompany: str(o.senderCompany), valueProp: str(o.valueProp), senderTitle: str(o.senderTitle), tone: str(o.tone) };

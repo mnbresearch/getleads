@@ -110,7 +110,8 @@ export const EXPORT_TABLES: TableSpec[] = [
   { key: "visibilityPrompts", table: S.visibilityPrompts },
   { key: "visibilityRuns", table: S.visibilityRuns },
   { key: "webhooks", table: S.webhooks },
-  { key: "integrations", table: S.integrations },
+  // The inbound-reply address keeps its token's hash in settings (services/inbound.ts): a link token, so not exported.
+  { key: "integrations", table: S.integrations, derive: (r) => (r.settings && typeof r.settings === "object" && "tokenHash" in (r.settings as object) ? { settings: Object.fromEntries(Object.entries(r.settings as Record<string, unknown>).filter(([k]) => k !== "tokenHash")) } : {}) },
   { key: "scrapedLeads", table: S.scrapedLeads },
   { key: "agentRuns", table: S.agentRuns, keep: ["tokensUsed"] },
   { key: "universities", table: S.universities },

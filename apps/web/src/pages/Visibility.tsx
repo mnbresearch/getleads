@@ -214,6 +214,15 @@ export function VisibilityPage() {
             }
           />
         ) : (
+          <>
+          {/* Daily sampling runs on the background worker's schedule, not the moment a
+              question is added. Without saying so, a fresh question sat on "never run" and
+              looked broken. */}
+          {prompts.some((p) => !p.lastRunAt) && (
+            <p className="mb-2 rounded-lg bg-black/[0.04] px-3 py-2 text-xs text-ink-300" data-testid="sampling-hint">
+              Questions are sampled on a daily schedule while the background worker is running, so a new question shows no answers until then. Press Sample now on a question to get its first result straight away.
+            </p>
+          )}
           <ul className="divide-y divide-slate-100 text-sm">
             {prompts.map((p) => (
               <li key={p.id} className="flex flex-wrap items-center justify-between gap-2 py-2">
@@ -222,7 +231,7 @@ export function VisibilityPage() {
                     {p.text}
                     {p.active === false && <span className="badge ml-2 bg-black/[0.05] text-ink-300">paused</span>}
                   </div>
-                  <div className="text-xs text-ink-400">{plural(p.samplesPerRun, "sample")}/day{p.topic ? ` · ${p.topic}` : ""}{p.lastRunAt ? ` · last ${new Date(p.lastRunAt).toLocaleDateString()}` : " · never run"}</div>
+                  <div className="text-xs text-ink-400">{plural(p.samplesPerRun, "sample")}/day{p.topic ? ` · ${p.topic}` : ""}{p.lastRunAt ? ` · last ${new Date(p.lastRunAt).toLocaleDateString()}` : " · not sampled yet"}</div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
                   {/* "Suggest more" installs up to ten of these in one click, so every one of
@@ -253,6 +262,7 @@ export function VisibilityPage() {
               </li>
             ))}
           </ul>
+          </>
         )}
       </div>
 

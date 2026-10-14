@@ -9,5 +9,11 @@ export async function emitEvent(orgId: string, type: string, data: Record<string
     if (!h.events.includes("*") && !h.events.includes(type) && !h.events.some((e) => e.endsWith(".*") && type.startsWith(e.slice(0, -1)))) continue;
     await enqueue(db, "webhook.deliver", { webhookId: h.id, eventId: ev.id }, { orgId, maxAttempts: 5 });
   }
+  // Connections saved with autoSync on get new and changed leads pushed by themselves
+  // (services/integrations.ts queueAutoSync). Never allowed to fail the event itself.
+  if (entity?.type === "lead") {
+    const { queueAutoSync } = await import("../services/integrations.js");
+    await queueAutoSync(orgId, type, entity).catch((e) => console.warn(`[integrations] auto sync not queued: ${(e as Error)?.name ?? "error"}`));
+  }
   return ev;
 }

@@ -3,7 +3,7 @@ import { apiFetch, expectLists } from "../lib/api";
 import { DeleteButton, Empty, LoadError, Modal, Page, Spinner, TagInput, useToast } from "../components/ui";
 import { plural } from "../lib/plural";
 
-interface Icp { id: string; name: string; description: string | null; criteria: Record<string, string[] | undefined>; seedDomains: string[]; aiProfile: { summary?: string; searchQueries?: string[] } | null; chatHistory: { role: "user" | "assistant"; content: string }[]; leadCount: number; createdAt: string; clientId?: string | null }
+interface Icp { id: string; name: string; description: string | null; criteria: Record<string, string[] | undefined>; seedDomains: string[]; aiProfile: { summary?: string; searchQueries?: string[]; status?: string; note?: string } | null; chatHistory: { role: "user" | "assistant"; content: string }[]; leadCount: number; createdAt: string; clientId?: string | null }
 
 const FIELDS: [keyof Icp["criteria"] & string, string, string][] = [
   ["titles", "Job titles", "Head of Sales, CTO…"],
@@ -30,6 +30,16 @@ const RERANK_SKIP: Record<string, string> = {
   quota: "your plan has no AI messages left this month",
   error: "usage could not be recorded, so it was not run",
 };
+
+type BuildOutcome = { aiBuild?: "queued" | "skipped"; note?: string; aiAvailable?: boolean };
+
+/** The save toast, in the server's terms: AI building only when an AI build was actually queued. */
+export function saveMessage(edited: boolean, r: BuildOutcome | null): string {
+  const head = edited ? "Saved" : "ICP created";
+  if (r?.aiBuild === "skipped") return `${head}. ${r.note ?? "AI not available - using your criteria as written."}`;
+  if (r?.aiBuild === "queued") return `${head} - AI is building the lookalike profile`;
+  return head;
+}
 
 export function IcpPage() {
   const [icps, setIcps] = useState<Icp[]>([]);
@@ -63,6 +73,9 @@ export function IcpPage() {
       // `?? undefined`: an ICP with no description comes back as null, and sending null back
       // failed validation on an optional (not nullable) field, so the edit could not be saved.
       const body = { name: edit.name, description: edit.description ?? undefined, criteria: edit.criteria ?? {}, seedDomains: edit.seedDomains ?? undefined, buildWithAi: true };
+      // The server says whether an AI build was queued or skipped (and why); the toast
+      // repeats that instead of promising an AI profile on a workspace that has no AI.
+      let outcome: BuildOutcome | null = null;
       if (edit.id) {
         await apiFetch("PATCH", `/v1/icps/${edit.id}`, body);
         // PATCH accepts buildWithAi and then ignores it - only POST enqueues the build job.
@@ -70,10 +83,10 @@ export function IcpPage() {
         // "AI profile building..." forever, blaming a missing server key for a route that
         // was never called. Ask for the rebuild explicitly.
         if (edit.description || edit.seedDomains?.length) {
-          await apiFetch("POST", `/v1/icps/${edit.id}/build`, {}).catch(() => {});
+          outcome = await apiFetch<BuildOutcome>("POST", `/v1/icps/${edit.id}/build`, {}).catch(() => null);
         }
-      } else await apiFetch("POST", "/v1/icps", body);
-      toast(edit.id ? "Saved - rebuilding the lookalike profile" : "ICP created - AI is building the lookalike profile");
+      } else outcome = await apiFetch<BuildOutcome>("POST", "/v1/icps", body);
+      toast(saveMessage(!!edit.id, outcome));
       setEdit(null);
       load();
     } catch (e) { toast((e as Error).message, "err"); } finally { setBusy(false); }
@@ -125,7 +138,8 @@ export function IcpPage() {
                 ))}
                 {i.seedDomains.length > 0 && <div className="flex flex-wrap items-baseline gap-1"><span className="w-28 shrink-0 text-ink-400">Seed customers</span>{i.seedDomains.map((v) => <span key={v} className="badge bg-brand-50 text-brand-700">{v}</span>)}</div>}
               </div>
-              {!i.aiProfile && (i.description || i.seedDomains.length > 0) && <div className="mt-3 text-xs text-amber-600">AI profile building… (if AI isn't switched on for this workspace yet, your manual criteria are used as-is - contact support to turn it on)</div>}
+              {i.aiProfile?.status === "skipped" && i.aiProfile.note && <div className="mt-3 text-xs text-amber-700">{i.aiProfile.note}</div>}
+              {!i.aiProfile && (i.description || i.seedDomains.length > 0) && <div className="mt-3 text-xs text-amber-600">AI profile building…</div>}
             </div>
           ))}
         </div>

@@ -38,21 +38,21 @@ const problems = [
     fix: "Scout researches the account first and drafts from what it actually found, then learns which angles earn replies.",
   },
   {
-    pain: "They read your email, then ask ChatGPT about you.",
+    pain: "They read your email, then ask an AI assistant about you.",
     why: "Whatever the AI says next is now part of your funnel, and almost nobody can tell you what it said.",
-    fix: "Scout asks AI models like Gemini, Claude and Llama the questions your buyers ask, and shows you the answer, the rivals named, and where you are missing.",
+    fix: "Scout asks AI models the questions your buyers ask - Gemini and Llama today, more engines as they are connected - and shows you the answer, the rivals named, and where you are missing.",
   },
 ];
 
 const features = [
-  { icon: "⌕", title: "Real-time B2B discovery", desc: "Search live company and people data by industry, size, tech stack and intent, instead of buying a list that is already stale." },
+  { icon: "⌕", title: "Real-time B2B discovery", desc: "Search live company and people data by title, industry, location, company size and keywords, instead of buying a list that is already stale." },
   { icon: "◎", title: "ICP that learns from replies", desc: "Feed in your best accounts, then let outcomes reshape the profile as real replies come in." },
   { icon: "✉", title: "Outreach written from research", desc: "Drafts built on what Scout found about the account, sequenced and A/B tested with a statistical winner, not a hunch." },
   { icon: "◉", title: "Website visitor identification", desc: "Turn anonymous traffic into named companies and route hot visitors straight into the pipeline." },
   { icon: "◈", title: "Intent signals", desc: "Funding, hiring, leadership changes and news, watched continuously so timing stops being luck." },
-  { icon: "◐", title: "AI visibility across engines", desc: "Track how AI models like Gemini, Claude and Llama describe you when a buyer researches you, per model, with the raw answers kept." },
-  { icon: "⚑", title: "Deliverability that defends you", desc: "Warm-up, per-mailbox health scoring and an automatic stop before a bad run damages your domain." },
-  { icon: "⚡", title: "Built for AI agents", desc: "A first-class MCP server and REST API, so your agents can prospect, enrich and send with the same tools your reps use." },
+  { icon: "◐", title: "AI visibility across engines", desc: "Track how AI models describe you when a buyer researches you - Gemini and Llama today, more engines as they are connected - per model, with the raw answers kept." },
+  { icon: "⚑", title: "Deliverability that defends you", desc: "A gradual volume ramp for new senders, per-mailbox health scoring and an automatic stop before a bad run damages your domain." },
+  { icon: "⚡", title: "Built for AI agents", desc: "A full REST API (and an MCP server available on request), so your agents can prospect, enrich and send with the same tools your reps use." },
 ];
 
 /**
@@ -92,7 +92,7 @@ const aeoSteps = [
   {
     n: "03",
     title: "Each answer is read, not keyword-matched",
-    desc: "Scout parses who was named, in what position, and which sources were cited. Aliases resolve to one brand, overlapping names are not double counted, and a refusal is told apart from an answer that simply left you out.",
+    desc: "Scout parses who was named, in what position, and which links the answer mentioned. Aliases resolve to one brand, overlapping names are not double counted, and a refusal is told apart from an answer that simply left you out.",
   },
   {
     n: "04",
@@ -106,7 +106,7 @@ const aeoScope = {
   does: [
     "Tells you whether AI engines name you for the questions your buyers ask, with a number you can defend.",
     "Names the rivals who own the answers you are absent from, including ones you never thought to track.",
-    "Shows which sources each engine cites, so you know which pages and publications the answer is actually built from.",
+    "Records any links or publications an answer mentions. The models answer from what they learned, not a live web search, so treat these as hints about what shaped the answer rather than a citation trail.",
     "Ranks the gaps by winnability, so effort goes where a slot demonstrably exists.",
     "Keeps every raw answer verbatim, so any number traces back to the text it came from and history can be recomputed.",
   ],
@@ -170,8 +170,8 @@ const playCards = [
 ];
 
 const steps = [
-  { n: "01", title: "Describe who you're after", desc: "Titles, industries, company size, tech stack, or plain language. Scout turns it into a live search." },
-  { n: "02", title: "Scout finds, verifies and ranks", desc: "Every result is enriched, checked and scored against your ICP before it ever reaches your list." },
+  { n: "01", title: "Describe who you're after", desc: "Titles, industries, locations, company size, keywords, or plain language. Scout turns it into a live search." },
+  { n: "02", title: "Scout finds, verifies and ranks", desc: "Results are enriched, checked against what Scout can verify, and scored against your ICP as they reach your list." },
   { n: "03", title: "Reach out, and watch both sides", desc: "Send from the app or hand the tools to your agent, then see what the AI engines tell buyers who go looking." },
 ];
 
@@ -236,7 +236,7 @@ function PricingSection() {
       <div className="mx-auto max-w-2xl text-center">
         <span className="badge border border-black/10 bg-black/5 text-ink-300">Pricing</span>
         <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Simple pricing, real leads</h2>
-        <p className="mt-3 text-ink-300">Every plan sources what it can for free first — you only pay for verified, provider-backed leads. Paid plans are set up with you, so your provider budget matches the volume you actually send.</p>
+        <p className="mt-3 text-ink-300">Every plan sources what it can for free first - you only pay for verified, provider-backed leads. Paid plans are set up with you, so your provider budget matches the volume you actually send.</p>
       </div>
 
       {plans === null ? (
@@ -296,41 +296,84 @@ function PricingSection() {
                   to={p.priceUsd === 0 ? "/signup" : `/upgrade?plan=${p.id}`}
                   className={`mt-6 justify-center ${featured ? "btn-primary" : "btn-secondary"}`}
                 >
-                  {custom ? "Talk to us" : p.priceUsd === 0 ? "Start free" : "Yes, I'm interested — upgrade me"}
+                  {custom ? "Talk to us" : p.priceUsd === 0 ? "Start free" : "Yes, I'm interested - upgrade me"}
                 </Link>
               </div>
             );
           })}
         </div>
       )}
-      <p className="mt-8 text-center text-xs text-ink-500">Prices in USD, billed monthly. Every paid plan is priced for real provider costs at real usage — no surprise overages.</p>
+      <p className="mt-8 text-center text-xs text-ink-500">Prices in USD per month. Paid plans are set up with you on request, and every one is priced for real provider costs at real usage - no surprise overages.</p>
     </section>
   );
 }
 
+/** Section links in the header, shared by the desktop row and the mobile menu. */
+const NAV_LINKS: { href: string; label: string; demoOnly?: boolean }[] = [
+  { href: "#demo", label: "Watch", demoOnly: true },
+  { href: "#plays", label: "Plays" },
+  { href: "#problems", label: "Why Scout" },
+  { href: "#ai", label: "The AI layer" },
+  { href: "#visibility", label: "AI visibility" },
+  { href: "#how-aeo", label: "AEO / GEO" },
+  { href: "#compare", label: "Compare" },
+  { href: "#faq", label: "FAQ" },
+  { href: "#pricing", label: "Pricing" },
+];
+
 export function LandingPage() {
   useEffect(() => sendPageView("/"), []);
+  // Below the sm breakpoint the section links did not render at all, so a phone visitor
+  // had no way to jump to pricing or the FAQ short of scrolling the whole page.
+  const [menuOpen, setMenuOpen] = useState(false);
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setMenuOpen(false);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
+  const links = NAV_LINKS.filter((l) => !l.demoOnly || HAS_DEMO_VIDEO);
   return (
     <div className="min-h-screen overflow-x-hidden">
       <header className="sticky top-0 z-50 border-b border-black/5 bg-cream/80 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-4">
+        <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-4 sm:px-6">
           <Logo size={28} textClassName="text-lg" />
           <nav className="hidden items-center gap-6 text-sm text-ink-300 sm:flex">
-            {HAS_DEMO_VIDEO && <a href="#demo" className="hover:text-ink-50">Watch</a>}
-            <a href="#plays" className="hover:text-ink-50">Plays</a>
-            <a href="#problems" className="hover:text-ink-50">Why Scout</a>
-            <a href="#ai" className="hover:text-ink-50">The AI layer</a>
-            <a href="#visibility" className="hover:text-ink-50">AI visibility</a>
-            <a href="#how-aeo" className="hover:text-ink-50">AEO / GEO</a>
-            <a href="#compare" className="hover:text-ink-50">Compare</a>
-            <a href="#faq" className="hover:text-ink-50">FAQ</a>
-            <a href="#pricing" className="hover:text-ink-50">Pricing</a>
+            {links.map((l) => (
+              <a key={l.href} href={l.href} className="hover:text-ink-50">{l.label}</a>
+            ))}
           </nav>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <Link to="/login" className="btn-secondary">Sign in</Link>
             <Link to="/signup" className="btn-primary">Get started</Link>
+            <button
+              type="button"
+              className="grid h-9 w-9 place-items-center rounded-lg border border-black/10 bg-black/[0.03] text-ink-100 sm:hidden"
+              aria-label={menuOpen ? "Close menu" : "Open menu"}
+              aria-expanded={menuOpen}
+              aria-controls="landing-mobile-menu"
+              onClick={() => setMenuOpen((v) => !v)}
+              data-testid="landing-menu-button"
+            >
+              <span aria-hidden className="text-lg leading-none">{menuOpen ? "\u2715" : "\u2630"}</span>
+            </button>
           </div>
         </div>
+        {menuOpen && (
+          <nav id="landing-mobile-menu" aria-label="Sections" className="border-t border-black/5 bg-cream px-4 pb-4 pt-2 sm:hidden">
+            <ul className="grid grid-cols-2 gap-1 text-sm text-ink-200">
+              {links.map((l) => (
+                <li key={l.href}>
+                  <a href={l.href} className="block rounded-lg px-3 py-2 hover:bg-black/[0.04] hover:text-ink-50" onClick={() => setMenuOpen(false)}>
+                    {l.label}
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </nav>
+        )}
       </header>
 
       <main className="mx-auto max-w-6xl px-6">
@@ -451,7 +494,7 @@ export function LandingPage() {
                   and know nothing about who you contacted. Scout is the only place both sit on one schema.
                 </p>
                 <ul className="mt-6 space-y-3 text-sm text-ink-200">
-                  <li className="flex gap-2"><span className="text-brand-600">✓</span> Track the questions your buyers actually ask, across every engine you have configured.</li>
+                  <li className="flex gap-2"><span className="text-brand-600">✓</span> Track the questions your buyers actually ask, per engine - Gemini and Llama today, more as they are connected.</li>
                   <li className="flex gap-2"><span className="text-brand-600">✓</span> See which rivals own the answer, and which questions are winnable.</li>
                   <li className="flex gap-2"><span className="text-brand-600">✓</span> Raw answers stored verbatim, so a number can always be traced back to the text it came from.</li>
                 </ul>
@@ -694,7 +737,7 @@ export function LandingPage() {
         <section className="card relative mb-24 flex flex-col items-center gap-4 overflow-hidden p-10 text-center sm:p-16">
           <div className="pointer-events-none absolute inset-0 bg-brand-gradient opacity-[0.06]" aria-hidden />
           <h2 className="relative text-2xl font-semibold text-ink-50 sm:text-3xl">Give your agents a pipeline of their own</h2>
-          <p className="relative max-w-lg text-sm text-ink-400">Connect over MCP or the REST API and let your AI agents search, enrich, and reach prospects with the same tools your reps use.</p>
+          <p className="relative max-w-lg text-sm text-ink-400">Connect through the REST API (an MCP server is available on request) and let your AI agents search, enrich, and reach prospects with the same tools your reps use.</p>
           <div className="relative flex flex-wrap items-center justify-center gap-3">
             <Link to="/signup" className="btn-primary px-6 py-3 text-base">Create your workspace</Link>
             <a href="#pricing" className="btn-secondary px-6 py-3 text-base">See pricing</a>

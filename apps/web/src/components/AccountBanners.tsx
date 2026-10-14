@@ -162,10 +162,10 @@ export function RecoveryCodeNotice() {
       <span className="min-w-0 flex-1 basis-64">
         You signed in with a recovery code, which cannot be used again.
         {n === null ? "" : n === 0 ? " That was your last one." : ` ${n} ${n === 1 ? "is" : "are"} left.`}
-        {" "}Make a new set under Settings &gt; Two-factor sign-in{n !== null && n <= 2 ? " now, while you still can" : ""}.
+        {" "}Make a new set under Settings &gt; Workspace, in the Two-factor sign-in card{n !== null && n <= 2 ? " now, while you still can" : ""}.
       </span>
       <span className="flex shrink-0 items-center gap-3">
-        <Link className={`${TAP} font-medium underline`} to="/settings" onClick={close}>Open Settings</Link>
+        <Link className={`${TAP} font-medium underline`} to="/settings#two-factor" onClick={close}>Open Settings</Link>
         <button type="button" className={`${TAP} justify-center px-2`} aria-label="Dismiss" onClick={close}>✕</button>
       </span>
     </div>

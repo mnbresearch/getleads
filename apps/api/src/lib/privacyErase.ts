@@ -1,4 +1,4 @@
-import { and, eq, events, getDb, globalSuppressions, inArray, jobs, leads, messages, monitorResults, organizations, playCandidates, scrapedLeads, sql, withStatementTimeout, type Db } from "@prospex/db";
+import { and, eq, events, getDb, globalSuppressions, inArray, invites, jobs, leads, messages, monitorResults, organizations, playCandidates, scrapedLeads, sql, upgradeRequests, users, withStatementTimeout, type Db } from "@prospex/db";
 import { ADDRESS_FINGERPRINT_PREFIX, addressFingerprint, onPlatformList, platformBase } from "./privacySuppression.js";
 
 /**
@@ -163,8 +163,26 @@ export interface DataSubjectWorkspace {
   anonymisedMessages: number;
   /** Play candidates carrying the address: people a play found who are waiting for review, were skipped, or were approved. */
   candidates: number;
+  /** Team invitations sent to the address (pending, accepted, expired or revoked). */
+  invites: number;
   suppressed: boolean;
 }
+
+/** A sign-in account registered with the address. Reported, never erased by this routine. */
+export interface DataSubjectAccount {
+  userId: string;
+  orgId: string;
+  orgName: string;
+  role: string;
+}
+
+/**
+ * Why an account is listed but not erased: deleting a sign-in account (and with an owner, the
+ * workspace and everyone else's data in it) is the account holder's decision, not something
+ * an erasure of a contact's address should do as a side effect.
+ */
+export const ACCOUNT_NOT_ERASED_NOTE =
+  "This address also has a Scout sign-in account. Erasure does not delete accounts: the account holder deletes it themselves (a workspace owner under Settings > Workspace, delete workspace; a member is removed by their workspace owner under Settings > Team), or you can deactivate the workspace under Workspaces until that is done.";
 
 /**
  * "Is this the person's mailbox?" in SQL, for a lower-cased address column: the same rule
@@ -185,7 +203,17 @@ const sameMailbox = (column: ReturnType<typeof sql>, base: string) => sql`regexp
  * A person a play found, who is waiting in a review queue and was never made a lead, IS
  * held: the candidate carries their name and address (`candidates`).
  */
-export async function dataSubjectReport(email: string): Promise<{ email: string; globallySuppressed: boolean; held: boolean; workspaces: DataSubjectWorkspace[] }> {
+export async function dataSubjectReport(email: string): Promise<{
+  email: string;
+  globallySuppressed: boolean;
+  held: boolean;
+  workspaces: DataSubjectWorkspace[];
+  /** Upgrade requests (name, address, mobile, message) sent from the pricing page with this address. */
+  upgradeRequests: number;
+  /** Sign-in accounts with this address. Listed, not erased - see `accountNote`. */
+  accounts: DataSubjectAccount[];
+  accountNote: string | null;
+}> {
   const { db } = getDb();
   const e = email.trim().toLowerCase();
   const base = platformBase(e);
@@ -197,13 +225,14 @@ export async function dataSubjectReport(email: string): Promise<{ email: string;
          m AS (SELECT org_id, count(*)::int AS n FROM messages WHERE ${sameMailbox(sql`to_email`, base)} GROUP BY org_id),
          am AS (SELECT org_id, count(*)::int AS n FROM messages WHERE ${inArray(sql`to_email`, prints)} GROUP BY org_id),
          pc AS (SELECT org_id, count(*)::int AS n FROM play_candidates WHERE email IS NOT NULL AND ${sameMailbox(sql`email`, base)} GROUP BY org_id),
-         s AS (SELECT DISTINCT org_id FROM suppressions WHERE ${inArray(sql`email`, listKeys)})
-    SELECT o.id AS org_id, o.name AS org_name, coalesce(l.n, 0) AS leads, coalesce(cc.n, 0) AS campaign_contacts, coalesce(m.n, 0) AS messages, coalesce(am.n, 0) AS anonymised_messages, coalesce(pc.n, 0) AS candidates, (s.org_id IS NOT NULL) AS suppressed
+         s AS (SELECT DISTINCT org_id FROM suppressions WHERE ${inArray(sql`email`, listKeys)}),
+         iv AS (SELECT org_id, count(*)::int AS n FROM invites WHERE ${sameMailbox(sql`email`, base)} GROUP BY org_id)
+    SELECT o.id AS org_id, o.name AS org_name, coalesce(l.n, 0) AS leads, coalesce(cc.n, 0) AS campaign_contacts, coalesce(m.n, 0) AS messages, coalesce(am.n, 0) AS anonymised_messages, coalesce(pc.n, 0) AS candidates, coalesce(iv.n, 0) AS invites, (s.org_id IS NOT NULL) AS suppressed
     FROM organizations o
-    LEFT JOIN l ON l.org_id = o.id LEFT JOIN cc ON cc.org_id = o.id LEFT JOIN m ON m.org_id = o.id LEFT JOIN am ON am.org_id = o.id LEFT JOIN pc ON pc.org_id = o.id LEFT JOIN s ON s.org_id = o.id
-    WHERE l.org_id IS NOT NULL OR cc.org_id IS NOT NULL OR m.org_id IS NOT NULL OR am.org_id IS NOT NULL OR pc.org_id IS NOT NULL OR s.org_id IS NOT NULL
+    LEFT JOIN l ON l.org_id = o.id LEFT JOIN cc ON cc.org_id = o.id LEFT JOIN m ON m.org_id = o.id LEFT JOIN am ON am.org_id = o.id LEFT JOIN pc ON pc.org_id = o.id LEFT JOIN s ON s.org_id = o.id LEFT JOIN iv ON iv.org_id = o.id
+    WHERE l.org_id IS NOT NULL OR cc.org_id IS NOT NULL OR m.org_id IS NOT NULL OR am.org_id IS NOT NULL OR pc.org_id IS NOT NULL OR s.org_id IS NOT NULL OR iv.org_id IS NOT NULL
     ORDER BY o.name
-    LIMIT 1000`)) as unknown as { org_id: string; org_name: string; leads: number; campaign_contacts: number; messages: number; anonymised_messages: number; candidates: number; suppressed: boolean }[];
+    LIMIT 1000`)) as unknown as { org_id: string; org_name: string; leads: number; campaign_contacts: number; messages: number; anonymised_messages: number; candidates: number; invites: number; suppressed: boolean }[];
   const workspaces = [...rows].map((r) => ({
     orgId: String(r.org_id),
     orgName: String(r.org_name),
@@ -212,13 +241,33 @@ export async function dataSubjectReport(email: string): Promise<{ email: string;
     messages: Number(r.messages) || 0,
     anonymisedMessages: Number(r.anonymised_messages) || 0,
     candidates: Number(r.candidates) || 0,
+    invites: Number(r.invites) || 0,
     suppressed: r.suppressed === true,
   }));
+  // Upgrade requests are not always tied to a workspace (the pricing page is public), so they
+  // are counted on their own. An anonymised one holds a fingerprint and does not match.
+  const [ur] = await db.select({ n: sql<number>`count(*)::int` }).from(upgradeRequests).where(sameMailbox(sql`${upgradeRequests.email}`, base));
+  const upgradeRequestCount = Number(ur?.n ?? 0);
+  // Accounts are matched on the exact address: a sign-in account is one address, and
+  // jane+test@ is a different account from jane@, not a copy of it.
+  const accounts = (
+    await db
+      .select({ userId: users.id, orgId: users.orgId, orgName: organizations.name, role: users.role })
+      .from(users)
+      .innerJoin(organizations, eq(organizations.id, users.orgId))
+      .where(sql`lower(btrim(${users.email})) = ${e}`)
+      .limit(100)
+  ).map((a) => ({ userId: a.userId, orgId: a.orgId, orgName: String(a.orgName), role: a.role }));
   return {
     email: e,
     globallySuppressed: await onPlatformList(e, db),
-    held: workspaces.some((w) => w.leads > 0 || w.campaignContacts > 0 || w.messages > 0 || w.candidates > 0),
+    // What an erasure removes. A sign-in account is listed separately (`accounts`): erasure
+    // leaves it alone, so counting it here would make an erased person look "held" for ever.
+    held: workspaces.some((w) => w.leads > 0 || w.campaignContacts > 0 || w.messages > 0 || w.candidates > 0 || w.invites > 0) || upgradeRequestCount > 0,
     workspaces,
+    upgradeRequests: upgradeRequestCount,
+    accounts,
+    accountNote: accounts.length ? ACCOUNT_NOT_ERASED_NOTE : null,
   };
 }
 
@@ -229,7 +278,19 @@ export async function dataSubjectReport(email: string): Promise<{ email: string;
  * the rest of this is interrupted - and running it again finishes the job. Plus-tagged
  * variants of the address (see platformBase) are the same person and are erased with it.
  */
-export async function eraseDataSubject(email: string, note = "Erased at the person's request"): Promise<{ workspaces: number; leadsDeleted: number; messagesAnonymised: number; eventsDeleted: number }> {
+export async function eraseDataSubject(
+  email: string,
+  note = "Erased at the person's request",
+): Promise<{
+  workspaces: number;
+  leadsDeleted: number;
+  messagesAnonymised: number;
+  eventsDeleted: number;
+  upgradeRequestsAnonymised: number;
+  invitesDeleted: number;
+  accounts: DataSubjectAccount[];
+  accountNote: string | null;
+}> {
   const { db } = getDb();
   const e = email.trim().toLowerCase();
   const base = platformBase(e);
@@ -262,9 +323,45 @@ export async function eraseDataSubject(email: string, note = "Erased at the pers
   // forgotten, and the address is on the platform list so no play will store it again.
   const candidates = await db.delete(playCandidates).where(sameMailbox(sql`${playCandidates.email}`, base)).returning({ orgId: playCandidates.orgId });
   for (const o of candidates) touched.add(o.orgId);
+  // Upgrade requests from the pricing page: kept as a row (the sales history still counts
+  // it) with the name, mobile and message removed and the address turned into its
+  // fingerprint, the same treatment a message gets.
+  const requests = await db
+    .update(upgradeRequests)
+    .set({
+      name: ERASED_TEXT,
+      mobile: ERASED_TEXT,
+      message: null,
+      email: sql`${ADDRESS_FINGERPRINT_PREFIX} || encode(sha256(convert_to(lower(btrim(${upgradeRequests.email})), 'UTF8')), 'hex')`,
+    })
+    .where(sameMailbox(sql`${upgradeRequests.email}`, base))
+    .returning({ orgId: upgradeRequests.orgId });
+  for (const o of requests) if (o.orgId) touched.add(o.orgId);
+  // Team invitations to the address: deleted. A pending one stops working, which is what the
+  // person asked for; an accepted one is only a record of how an account was created.
+  const gone = await db.delete(invites).where(sameMailbox(sql`${invites.email}`, base)).returning({ orgId: invites.orgId });
+  for (const o of gone) touched.add(o.orgId);
+  // Sign-in accounts are reported, not removed (see ACCOUNT_NOT_ERASED_NOTE).
+  const accounts = (
+    await db
+      .select({ userId: users.id, orgId: users.orgId, orgName: organizations.name, role: users.role })
+      .from(users)
+      .innerJoin(organizations, eq(organizations.id, users.orgId))
+      .where(sql`lower(btrim(${users.email})) = ${e}`)
+      .limit(100)
+  ).map((a) => ({ userId: a.userId, orgId: a.orgId, orgName: String(a.orgName), role: a.role }));
   // The workspaces' own do-not-contact entries for this address stay: they are what keeps
   // it from being emailed, and they hold nothing but the address.
-  return { workspaces: touched.size, leadsDeleted, messagesAnonymised, eventsDeleted };
+  return {
+    workspaces: touched.size,
+    leadsDeleted,
+    messagesAnonymised,
+    eventsDeleted,
+    upgradeRequestsAnonymised: requests.length,
+    invitesDeleted: gone.length,
+    accounts,
+    accountNote: accounts.length ? ACCOUNT_NOT_ERASED_NOTE : null,
+  };
 }
 
 // ── The periodic sweep ──

@@ -373,8 +373,8 @@ function SuggestionTable({ title, rows, done, onAssign, contested }: { title: st
                     <span className="text-xs text-emerald-700">Assigned</span>
                   ) : contested && s.best && s.runnerUp ? (
                     <div className="flex justify-end gap-1">
-                      <button className="btn-secondary max-w-[8rem] py-1 text-xs" title={s.best.clientName} onClick={() => onAssign(s.leadId, s.best!.clientId)}><span className="truncate">{s.best.clientName}</span></button>
-                      <button className="btn-secondary max-w-[8rem] py-1 text-xs" title={s.runnerUp.clientName} onClick={() => onAssign(s.leadId, s.runnerUp!.clientId)}><span className="truncate">{s.runnerUp.clientName}</span></button>
+                      <button className="btn-secondary max-w-[8rem] py-1 text-xs" title={s.best.clientName} aria-label={`Assign to ${s.best.clientName}`} onClick={() => onAssign(s.leadId, s.best!.clientId)}><span className="truncate">{s.best.clientName}</span></button>
+                      <button className="btn-secondary max-w-[8rem] py-1 text-xs" title={s.runnerUp.clientName} aria-label={`Assign to ${s.runnerUp.clientName}`} onClick={() => onAssign(s.leadId, s.runnerUp!.clientId)}><span className="truncate">{s.runnerUp.clientName}</span></button>
                     </div>
                   ) : s.best ? (
                     <button className="btn-secondary py-1 text-xs" onClick={() => onAssign(s.leadId, s.best!.clientId)}>Assign</button>

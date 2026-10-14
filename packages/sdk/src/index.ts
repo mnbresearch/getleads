@@ -532,6 +532,33 @@ export interface PlayPerformance {
   note?: string;
 }
 
+/** Fields of a client workspace (POST /v1/clients, PATCH /v1/clients/:id). */
+export interface ClientInput {
+  name: string;
+  domain?: string | null;
+  industry?: string | null;
+  status?: "active" | "paused" | "archived";
+  /** A hex colour like #3d5a99. */
+  color?: string | null;
+  icpId?: string | null;
+  monthlyLeadTarget?: number | null;
+  notes?: string | null;
+  /** Owners and admins only: show the monthly target on the client report. */
+  reportShowTarget?: boolean;
+}
+
+/** A tracked AI-visibility question. */
+export interface VisibilityPrompt {
+  id: string;
+  text: string;
+  topic: string | null;
+  engines: string[];
+  samplesPerRun: number;
+  active: boolean;
+  createdAt: string;
+  [k: string]: unknown;
+}
+
 export class Prospex {
   private baseUrl: string;
   private headers: Record<string, string>;
@@ -756,6 +783,69 @@ export class Prospex {
     upload: (id: string, input: PlayUploadInput) => this.request<PlayUploadResult>("POST", `/v1/plays/${idSegment(id, "playId")}/upload`, input),
     /** Per play: found, approved, contacted, replied, replied positively. `days` 7 to 365, default 90. */
     performance: (days?: number) => this.request<PlayPerformance>("GET", "/v1/plays/performance", undefined, { days }),
+  };
+
+  /**
+   * Client workspaces, for agencies that prospect on behalf of several clients.
+   *
+   *   const c = await gl.clients.create({ name: "Acme Payments", domain: "acme.com", monthlyLeadTarget: 200 });
+   *   const detail = await gl.clients.get(c.id);
+   *   const { shareToken } = await gl.clients.createReportLink(c.id);   // the client opens <app>/r/<shareToken>
+   *
+   * A report link is a read-only view of that client's pipeline that anyone holding it can
+   * open without an account. Creating one again replaces the old link. Owners and admins only.
+   */
+  clients = {
+    /** Every client with its pipeline counts and pace. Archived clients only with includeArchived. */
+    list: (q: { includeArchived?: boolean } = {}) =>
+      this.request<{ clients: unknown[] } & Record<string, unknown>>("GET", "/v1/clients", undefined, q.includeArchived === undefined ? undefined : { includeArchived: String(q.includeArchived) }),
+    create: (input: ClientInput) => this.request<{ id: string; name: string } & Record<string, unknown>>("POST", "/v1/clients", input),
+    /** One client: its leads by stage, what needs attention, its pace and (for owners and admins) its report link. */
+    get: (id: string) => this.request<Record<string, unknown>>("GET", `/v1/clients/${idSegment(id, "clientId")}`),
+    update: (id: string, patch: Partial<ClientInput>) => this.request<Record<string, unknown>>("PATCH", `/v1/clients/${idSegment(id, "clientId")}`, patch),
+    /** Deletes the client. Its leads stay in the workspace and go back to the unassigned pool. */
+    delete: (id: string) => this.request<{ deleted: true; leadsReturnedToPool: number }>("DELETE", `/v1/clients/${idSegment(id, "clientId")}`),
+    /** Assign leads to the client (move: true takes them from another client too). */
+    assign: (id: string, leadIds: string[], opts: { move?: boolean } = {}) =>
+      this.request<Record<string, unknown>>("POST", `/v1/clients/${idSegment(id, "clientId")}/assign`, { leadIds, ...(opts.move === undefined ? {} : { move: opts.move }) }),
+    /**
+     * Create the client's read-only report link, or replace it (`rotated: true`: the previous
+     * link stopped working). The page lives at `<app address>/r/<shareToken>`.
+     */
+    createReportLink: (id: string) => this.request<{ shareToken: string; rotated: boolean }>("POST", `/v1/clients/${idSegment(id, "clientId")}/share`),
+    /** Turn the report link off; the link stops working. */
+    disableReportLink: (id: string) => this.request<{ sharing: false }>("DELETE", `/v1/clients/${idSegment(id, "clientId")}/share`),
+  };
+
+  /**
+   * AI visibility (AEO / GEO): how AI engines answer the questions your buyers ask.
+   *
+   *   await gl.visibility.addPrompt({ text: "What is the best lead generation tool for small sales teams?" });
+   *   await gl.visibility.sampleNow(promptId);          // asks every connected engine, several times
+   *   const overview = await gl.visibility.results(30);  // rates per engine with confidence intervals
+   *
+   * One answer is a sample, not a measurement: rates come with sample sizes and intervals, and
+   * refusals or errors are excluded instead of being counted as absence.
+   */
+  visibility = {
+    /** Your brand, aliases, domain and rivals. */
+    config: () => this.request<Record<string, unknown>>("GET", "/v1/visibility/config"),
+    /** Which engines are sampled for this workspace right now. */
+    engines: () => this.request<{ engines: unknown[] }>("GET", "/v1/visibility/engines"),
+    /** The tracked questions. */
+    prompts: () => this.request<{ prompts: VisibilityPrompt[] }>("GET", "/v1/visibility/prompts"),
+    /** Track a question. It should not name your brand: a question that names you guarantees you appear. */
+    addPrompt: (input: { text: string; topic?: string; engines?: string[]; samplesPerRun?: number }) => this.request<VisibilityPrompt>("POST", "/v1/visibility/prompts", input),
+    /** Suggested questions to track, written from your brand, rivals and ICP (ai: true uses one AI message). Saves nothing. */
+    suggest: (opts: { ai?: boolean; category?: string } = {}) => this.request<Record<string, unknown>>("POST", "/v1/visibility/prompts/suggest", opts),
+    /** Ask every connected engine this question now, `samples` times each (1-10; default the prompt's own). */
+    sampleNow: (promptId: string, opts: { samples?: number } = {}) =>
+      this.request<{ total: number; usable: number; note?: string } & Record<string, unknown>>("POST", `/v1/visibility/prompts/${idSegment(promptId, "promptId")}/run`, opts),
+    /** Mention rate and share of voice per engine, rivals, winnable gaps and the change test over the last `days` (7-90, default 30). */
+    results: (days?: number) => this.request<Record<string, unknown>>("GET", "/v1/visibility/overview", undefined, { days }),
+    /** The raw answers behind every number, newest first (limit 1-100, default 25). */
+    runs: (q: { promptId?: string; limit?: number } = {}) =>
+      this.request<{ runs: unknown[] }>("GET", "/v1/visibility/runs", undefined, { ...q, promptId: q.promptId === undefined ? undefined : idSegment(q.promptId, "promptId") }),
   };
 
   account = {

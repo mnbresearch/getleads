@@ -278,6 +278,38 @@ export function summarizeWebSearchFailures(outcomes: WebSearchOutcome[]): string
   return `Every web search provider failed across ${n} search${n === 1 ? "" : "es"}${detail ? `: ${detail}` : " (no provider was eligible)"}`;
 }
 
+/**
+ * What a customer is told when every search was tried and none of our sources answered,
+ * while at least one keyed source is connected (so "nothing is connected" would be untrue).
+ */
+export const NO_SEARCH_ANSWERED = "None of our search sources could answer this time, so nothing could be looked for. This is not a result about your market - try again later.";
+
+/**
+ * True when every search in a run went only to the keyless fallback scrapers.
+ *
+ * Those scrapers are blocked or rate-limited from most servers and often hand back an empty
+ * page instead of an error. An empty answer from them is not evidence that nobody matched,
+ * so a run that found nobody this way must not be reported as an empty market.
+ */
+export function onlyFallbackSearch(outcomes: WebSearchOutcome[]): boolean {
+  return outcomes.length > 0 && outcomes.every((o) => o.nothingConfigured);
+}
+
+/**
+ * The one plain sentence for a discovery call that found nobody because no source could
+ * really search, or null when the empty result is a genuine answer (or something was found).
+ *
+ * `summarizeWebSearchFailures` only speaks when no provider answered at all. That missed the
+ * common production case: no keyed source connected, the keyless scraper "answering" with an
+ * empty page. Every discovery path calls this instead, so they all say the same thing.
+ */
+export function emptySearchNote(outcomes: WebSearchOutcome[], found: number): string | null {
+  if (found > 0 || !outcomes.length) return null;
+  if (onlyFallbackSearch(outcomes)) return NO_WEB_SEARCH_CONFIGURED;
+  if (outcomes.every((o) => o.everyProviderFailed)) return NO_SEARCH_ANSWERED;
+  return null;
+}
+
 /** Testing seam: forget everything remembered so far. */
 export function resetSearchCache() {
   cache.clear();

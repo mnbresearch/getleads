@@ -151,7 +151,9 @@ export async function identifyVisit(visitId: string, ip: string, identify?: Reco
       name = ident.company;
     }
   }
-  const id = await identifyIp(ip, { ipinfoToken: process.env.IPINFO_TOKEN });
+  // The workspace's own IPinfo token (Settings > Integrations) first, then the platform's.
+  const { orgDataKeys } = await import("./integrations.js");
+  const id = await identifyIp(ip, { ipinfoToken: (await orgDataKeys(v.orgId)).ipinfoToken ?? process.env.IPINFO_TOKEN });
   if (!domain && !id.resolved) {
     // No lookup answered, so we know nothing about this visitor. Writing `isIsp: false,
     // companyDomain: null` would file it as "a person we could not place" - the same row a

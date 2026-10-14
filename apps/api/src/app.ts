@@ -236,16 +236,68 @@ function logHealthFailure(e: unknown) {
 }
 
 const LOCALHOST_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
+const VERCEL_HOST = /(^|\.)vercel\.app$/i;
+
+/** What the CORS decision depends on. Read from the environment by default; tests pass their own. */
+export interface CorsPolicyInput {
+  appUrl: string;
+  nodeEnv: string;
+  extraOrigins: string[];
+  /** The compiled CORS_ALLOW_REGEX (or the built-in Vercel default when it is unset). */
+  allowRegex: RegExp | null;
+  /** True when CORS_ALLOW_REGEX was set by the operator, so its pattern is used as given. */
+  allowRegexExplicit: boolean;
+}
+
+/** The origin part of APP_URL (scheme, host, port), or the raw value when it does not parse. */
+function originOf(url: string): string {
+  try {
+    return new URL(url).origin;
+  } catch {
+    return url;
+  }
+}
+
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname;
+  } catch {
+    return "";
+  }
+}
+
 /**
- * Which browser origins may call the API: the web app (APP_URL), anything listed in
- * CORS_EXTRA_ORIGINS, localhost (development against a deployed API), and whatever
- * CORS_ALLOW_REGEX matches - by default any https *.vercel.app origin, which keeps Vercel
- * preview deployments working ("none" turns the pattern off). The pattern is always matched
- * against the whole origin (see compileOriginRegex in env.ts). (*.netlify.app and *.pages.dev used to be reflected as well;
- * nothing of ours is hosted there. Add them through CORS_ALLOW_REGEX if that changes.)
+ * Which browser origins may call the API:
+ *  - the web app itself (APP_URL's origin) and anything listed in CORS_EXTRA_ORIGINS;
+ *  - localhost, but only outside production: it lets a developer run the web app against a
+ *    deployed API, and in production any page on the visitor's own machine has no business
+ *    calling it;
+ *  - whatever CORS_ALLOW_REGEX matches, when the operator set it;
+ *  - when CORS_ALLOW_REGEX is not set, *.vercel.app only if APP_URL itself is a vercel.app
+ *    host. Reflecting every *.vercel.app origin used to mean any stranger's Vercel project
+ *    could call this API from a browser; it is only needed when our own web app (and its
+ *    preview deployments) live there.
+ * The pattern is always matched against the whole origin (see compileOriginRegex in env.ts).
  */
+export function corsOriginAllowedFor(origin: string, p: CorsPolicyInput): boolean {
+  if (origin === p.appUrl || origin === originOf(p.appUrl) || p.extraOrigins.includes(origin)) return true;
+  if (p.nodeEnv !== "production" && LOCALHOST_ORIGIN.test(origin)) return true;
+  if (!p.allowRegex) return false;
+  if (p.allowRegexExplicit) return p.allowRegex.test(origin);
+  return VERCEL_HOST.test(hostOf(p.appUrl)) && p.allowRegex.test(origin);
+}
+
 export function corsOriginAllowed(origin: string): boolean {
-  return origin === env.appUrl || env.corsExtraOrigins.includes(origin) || LOCALHOST_ORIGIN.test(origin) || !!env.corsAllowRegex?.test(origin);
+  const raw = process.env.CORS_ALLOW_REGEX;
+  return corsOriginAllowedFor(origin, {
+    appUrl: env.appUrl,
+    nodeEnv: env.nodeEnv,
+    extraOrigins: env.corsExtraOrigins,
+    allowRegex: env.corsAllowRegex,
+    // An empty value means "off" (compileOriginRegex returns null for it), so only a real
+    // pattern counts as the operator choosing one.
+    allowRegexExplicit: raw !== undefined && raw.trim() !== "",
+  });
 }
 
 export interface AppOptions {

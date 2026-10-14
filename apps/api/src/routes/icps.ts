@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { AI_NOT_SWITCHED_ON } from "../services/visibility.js";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
@@ -11,6 +11,7 @@ import { assertQuotaAvailable, tryConsume } from "../lib/quota.js";
 import { assertRowCap, guardJobCapacity } from "../lib/limits.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
 import { scoreLeadsWithLearning } from "../services/insights.js";
+import { recordIcpBuildSkipped, skippedProfile } from "../services/icps.js";
 
 export const icpRoutes = new Hono<Env>();
 icpRoutes.use("*", requireAuth);
@@ -38,6 +39,18 @@ const criteria = z.object({
 // the edit form sends back what it read.
 const icpInput = z.object({ name: z.string().min(1).max(200), description: z.string().max(5000).nullish(), criteria: criteria.optional(), seedDomains: z.array(z.string()).max(10).nullish(), product: z.string().max(5000).optional(), buildWithAi: z.boolean().default(true), clientId: z.string().uuid().nullish() });
 
+/** Can an AI profile be built for this request's workspace right now, and if not, why. */
+function aiState(c: Context<Env>): "ok" | "ai_off" | "no_ai" {
+  if (aiDisabled(c.get("auth").org)) return "ai_off";
+  return hasAi(aiFor(c.get("auth"))) ? "ok" : "no_ai";
+}
+
+async function markSkipped(oid: string, icpId: string, reason: "ai_off" | "no_ai") {
+  const { db } = getDb();
+  await recordIcpBuildSkipped(db, oid, icpId, reason);
+  return db.query.icps.findFirst({ where: and(eq(icps.id, icpId), eq(icps.orgId, oid)) });
+}
+
 icpRoutes.get("/", async (c) => {
   const { db } = getDb();
   const rows = await db
@@ -60,10 +73,15 @@ icpRoutes.post("/", zValidator("json", icpInput), async (c) => {
   if (build) await guardJobCapacity(db, oid, "icp.build");
   const [row] = await db.insert(icps).values({ orgId: oid, name: b.name, description: b.description ?? null, criteria: b.criteria ?? {}, seedDomains: b.seedDomains ?? [], clientId: b.clientId ?? null }).returning();
   let jobId: string | null = null;
+  let icp = row;
+  const ai = aiState(c);
   if (build) {
     jobId = (await enqueue(db, "icp.build", { icpId: row.id, product: b.product }, { orgId: oid })).id;
+    // Said now, not left for the job to discover: with no AI the page would otherwise show
+    // "building..." until the job ran, and the toast would promise a profile that never comes.
+    if (ai !== "ok") icp = (await markSkipped(oid, row.id, ai)) ?? row;
   }
-  return c.json({ icp: row, jobId }, 201);
+  return c.json({ icp, jobId, aiAvailable: ai === "ok", ...(build ? { aiBuild: ai === "ok" ? "queued" : "skipped" } : {}), ...(build && ai !== "ok" ? { note: skippedProfile(ai).note } : {}) }, 201);
 });
 
 icpRoutes.get("/:id", async (c) => {
@@ -105,7 +123,11 @@ icpRoutes.post("/:id/build", async (c) => {
   if (!row) throw notFound("ICP");
   await guardJobCapacity(db, row.orgId, "icp.build");
   const job = await enqueue(db, "icp.build", { icpId: row.id }, { orgId: row.orgId });
-  return c.json({ jobId: job.id }, 202);
+  // The job still runs (it reads the seed customers' sites either way), but without AI the
+  // answer says plainly that no AI profile will come of it.
+  const ai = aiState(c);
+  if (ai !== "ok") await markSkipped(row.orgId, row.id, ai);
+  return c.json({ jobId: job.id, aiAvailable: ai === "ok", aiBuild: ai === "ok" ? "queued" : "skipped", ...(ai !== "ok" ? { note: skippedProfile(ai).note } : {}) }, 202);
 });
 
 /**

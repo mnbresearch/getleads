@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { verifyOptsFor } from "../lib/verifyOpts.js";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { QuotaExceededError, consume, consumeLead, getDb, remainingPremiumBudget } from "@prospex/db";
@@ -27,7 +28,9 @@ agentRoutes.post(
       limit: z.number().int().min(1).max(10).default(5),
       findEmails: z.boolean().default(true),
       generateEmails: z.boolean().default(false),
-      sender: z.object({ name: z.string(), company: z.string(), title: z.string().optional(), valueProp: z.string(), tone: z.enum(["friendly", "direct", "formal", "casual"]).optional() }).optional(),
+      // `signature` is accepted (the MCP tool and the generator both take it); zod used to
+      // strip it silently, so a caller's sign-off never reached the drafted email.
+      sender: z.object({ name: z.string(), company: z.string(), title: z.string().optional(), valueProp: z.string(), signature: z.string().max(2000).optional(), tone: z.enum(["friendly", "direct", "formal", "casual"]).optional() }).optional(),
       save: z.boolean().default(true),
       country: z.string().length(2).optional(),
     }),
@@ -40,7 +43,7 @@ agentRoutes.post(
     const ai = aiFor(c.get("auth"));
     const providerBudget = await remainingPremiumBudget(db, oid);
     // Detailed, so an agent (and the console) can tell "nobody matched" from "no source could answer".
-    const { leads: results, providerFailures, notes } = await runLeadPipelineDetailed({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey }, country: b.country, maxProviderLeads: providerBudget });
+    const { leads: results, providerFailures, notes } = await runLeadPipelineDetailed({ query: b.query, limit: b.limit, findEmails: b.findEmails }, { ai, verify: await verifyOptsFor(oid), country: b.country, maxProviderLeads: providerBudget });
     const out = [];
     /** Set when a quota or a fault stopped part of this run. Reported, not swallowed. */
     let emailSkipped: string | null = null;

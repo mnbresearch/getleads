@@ -3,12 +3,13 @@
  * LinkedIn URL → email, email → LinkedIn, colleagues, decision makers, batch enrich, domain health, saved searches, tasks, team, autopilot.
  */
 import { onPlatformList } from "../lib/privacySuppression.js";
+import { verifyOptsFor } from "../lib/verifyOpts.js";
 import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { effectiveLimits } from "@prospex/db";
 import { and, or, autopilots, campaignContacts, campaigns, clients, companies, consume, desc, enqueue, eq, getDb, icps, inArray, invites, leads, limitsFor, listLeads, lists, remainingPremiumBudget, savedSearches, sql, tasks, users, organizations, type Db, type Invite } from "@prospex/db";
-import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeople, pMap, redact, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
+import { checkDomainHealth, enrichWithProviders, extractDomain, findEmail, findLinkedinUrl, findPeopleDetailed, pMap, redact, resolveCompanyDomain, resolveLinkedinUrl, verifyEmail, detectHiring, companyNews } from "@prospex/core";
 import { env } from "../env.js";
 import { hashPassword, issueJwt, passwordProblem } from "../lib/auth.js";
 import { randomToken } from "../lib/crypto.js";
@@ -111,7 +112,7 @@ toolRoutes.post("/linkedin-to-email", rateLimit({ perMinute: 30 }), zValidator("
     let status = viaProvider?.emailStatus;
     let confidence = viaProvider?.email ? 0.9 : 0;
     if (!email && domain && p.firstName && p.lastName) {
-      const r = await findEmail({ firstName: p.firstName, lastName: p.lastName, domain }, verifyOpts());
+      const r = await findEmail({ firstName: p.firstName, lastName: p.lastName, domain }, await verifyOptsFor(orgId(c)));
       email = r.email;
       status = r.status;
       confidence = r.confidence;
@@ -196,7 +197,8 @@ toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", 
   if (!domain && !name) throw badRequest("leadId or companyDomain required");
   await consume(db, oid, "searches", 1);
   if (!name && domain) name = (await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) }))?.name ?? domain.split(".")[0];
-  const people = await findPeople({ companyName: name!, titles: b.titles, limit: b.limit });
+  const search = await findPeopleDetailed({ companyName: name!, titles: b.titles, limit: b.limit });
+  const people = search.people;
   const saved: string[] = [];
   let stopped: string | undefined;
   if (b.save) for (const p of people) {
@@ -211,7 +213,8 @@ toolRoutes.post("/colleagues", rateLimit({ perMinute: 30 }), zValidator("json", 
       break;
     }
   }
-  return c.json({ company: { name, domain }, people: shown(c, people), savedLeadIds: saved, stopped });
+  // `note` says why an empty list is empty when no source could search; absent otherwise.
+  return c.json({ company: { name, domain }, people: shown(c, people), savedLeadIds: saved, stopped, ...(search.emptyNote ? { note: search.emptyNote } : {}) });
 });
 
 /** Decision makers at a company by persona. */
@@ -224,7 +227,8 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
   await consume(db, oid, "searches", 1);
   const titles = [...new Set(b.personas.flatMap((p) => PERSONAS[p] ?? [p]))];
   const name = b.companyName ?? (domain ? ((await db.query.companies.findFirst({ where: and(eq(companies.orgId, oid), eq(companies.domain, domain)) }))?.name ?? domain.split(".")[0]) : "");
-  const people = await findPeople({ companyName: name, titles, limit: b.limit });
+  const search = await findPeopleDetailed({ companyName: name, titles, limit: b.limit });
+  const people = search.people;
   const out = [];
   /** Why something in this run did less than asked. Reported, not swallowed. */
   let skipped: string | null = null;
@@ -238,7 +242,7 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
       // connection silently skipping the lookup with no record anywhere.
       const charge = await tryConsume(db, oid, "verifications", 1);
       if (charge.ok) {
-        const r = await findEmail({ firstName: p.firstName, lastName: p.lastName, domain }, verifyOpts()).catch(() => null);
+        const r = await findEmail({ firstName: p.firstName, lastName: p.lastName, domain }, await verifyOptsFor(oid)).catch(() => null);
         if (r) { email = r.email; status = r.status; confidence = r.confidence; }
       } else if (!skipped) skipped = charge.reason === "quota" ? `Email lookup stopped: ${charge.message}` : `Email lookup stopped: could not record usage (${charge.message})`;
     }
@@ -264,7 +268,7 @@ toolRoutes.post("/decision-makers", rateLimit({ perMinute: 30 }), zValidator("js
   // first, the fact that SAVING also stopped was discarded - so people came back with no
   // leadId and no explanation anywhere, which is the exact silence this field exists to
   // break.
-  return c.json({ company: { name, domain }, people: shown(c, out), skipped: skipped ?? undefined, saveStopped: saveStopped ?? undefined });
+  return c.json({ company: { name, domain }, people: shown(c, out), skipped: skipped ?? undefined, saveStopped: saveStopped ?? undefined, ...(search.emptyNote ? { note: search.emptyNote } : {}) });
 });
 
 /** Company intelligence: hiring + recent news signals + firmographics, persisted. */
@@ -373,7 +377,8 @@ toolRoutes.post("/verify-batch", zValidator("json", z.object({ emails: z.array(z
   const { db } = getDb();
   const b = c.req.valid("json");
   await consume(db, oid, "verifications", b.emails.length);
-  const results = await pMap(b.emails, (e) => verifyEmail(e, verifyOpts()), 6);
+  const vo = await verifyOptsFor(orgId(c));
+  const results = await pMap(b.emails, (e) => verifyEmail(e, vo), 6);
   const summary = results.reduce<Record<string, number>>((acc, r) => ((acc[r.status] = (acc[r.status] ?? 0) + 1), acc), {});
   return c.json({ results: shown(c, results), summary });
 });

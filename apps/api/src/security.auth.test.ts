@@ -630,7 +630,9 @@ suite("security: auth, sessions, admin credential, crypto, limits", () => {
         return { acao: r.headers.get("access-control-allow-origin"), acac: r.headers.get("access-control-allow-credentials") };
       };
       expect(await pre("https://app.scout.test")).toEqual({ acao: "https://app.scout.test", acac: null });
-      expect(await pre("https://my-preview-abc123.vercel.app")).toEqual({ acao: "https://my-preview-abc123.vercel.app", acac: null });
+      // APP_URL is not a vercel.app host here, so a *.vercel.app origin is not reflected
+      // (it used to be, for every deployment - see corsOriginAllowedFor in app.ts).
+      expect(await pre("https://my-preview-abc123.vercel.app")).toEqual({ acao: "https://app.scout.test", acac: null });
       expect(await pre("http://localhost:5173")).toEqual({ acao: "http://localhost:5173", acac: null });
       // Not reflected any more.
       for (const o of ["https://evil.netlify.app", "https://evil.pages.dev", "https://evil.example", "http://evil.vercel.app", "https://evilvercel.app", "https://x.vercel.app.evil.example", "null"]) {

@@ -136,8 +136,12 @@ export async function findPeopleForFinding(finding: PlayFinding, cfg: { titles: 
   }
   if (elsewhere > 0) run.note(`${elsewhere} ${elsewhere === 1 ? "person" : "people"} found by search did not clearly work at ${companyName}, so ${elsewhere === 1 ? "that person was" : "they were"} left out.`);
   if (otherTitle > 0) run.note(`${otherTitle} ${otherTitle === 1 ? "person" : "people"} found at ${companyName} did not hold one of those job titles, so ${otherTitle === 1 ? "that person was" : "they were"} left out.`);
-  if (run.searchAnswered && !people.length) run.note(`No one matching those job titles was found at ${companyName}.`);
+  // Only the keyless fallbacks were there to ask and they returned nothing at all: that is
+  // not "nobody with those titles works there", so the run says it could not search.
+  if (!found.length && run.fallbackOnlyFoundNothing) run.blockNoSearchSource();
+  const examined = run.searchAnswered && !run.trace.blocked;
+  if (examined && !people.length) run.note(`No one matching those job titles was found at ${companyName}.`);
 
-  const trace = run.finish(run.searchAnswered, "The people search could not run, so nobody could be looked for.");
+  const trace = run.finish(examined, "The people search could not run, so nobody could be looked for.");
   return { people, trace };
 }

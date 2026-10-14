@@ -10,7 +10,7 @@ import { webhookSecret } from "./lib/webhookSecret.js";
 import { chargeNewLead, findExistingLead, pipelineLeadToInput, upsertCompany, upsertLead, verifierOf } from "./services/leads.js";
 import { AiNotConfiguredError, knownBrands, sampleAcrossEngines } from "./services/visibility.js";
 import { enrollEligibleLeads, sendStep, tickCampaign } from "./services/campaigns.js";
-import { appsScriptOutputUrl, fetchAppsScriptOutput, syncLead } from "./services/integrations.js";
+import { appsScriptOutputUrl, fetchAppsScriptOutput, orgDataKeys, recordIntegrationOutcome, syncLead } from "./services/integrations.js";
 import { emitEvent } from "./lib/events.js";
 import { aiForOrg } from "./lib/ai.js";
 import { RETENTION, runRetention } from "./lib/privacyRetention.js";
@@ -113,7 +113,8 @@ async function refundJobCharge(db: Db, job: Job, orgId: string, metric: "verific
   await consume(db, orgId, metric, -1, { allowOverage: true }).catch(() => {});
 }
 
-const verifyOpts = () => ({ smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
+// `own`: the workspace's own data-provider keys (Settings > Integrations), used before the platform's where the job knows its workspace.
+const verifyOpts = (own: { hunterApiKey?: string } = {}) => ({ smtp: env.smtpProbeEnabled, hunterApiKey: own.hunterApiKey ?? env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey });
 
 /**
  * The self-perpetuating schedulers, and how long each waits before its next run.
@@ -189,17 +190,19 @@ export async function withReschedule<T>(
 type FoundEmail = Awaited<ReturnType<typeof findEmail>> & { verifiedBy?: string | null };
 
 /** findEmail with addresses it must never return (known bad, or the one being replaced). */
-async function findEmailExcluding(input: Parameters<typeof findEmail>[0], exclude: string[]): Promise<FoundEmail> {
+async function findEmailExcluding(input: Parameters<typeof findEmail>[0], exclude: string[], own: { hunterApiKey?: string } = {}): Promise<FoundEmail> {
   const ex = new Set(exclude.map((e) => e.toLowerCase()));
   // `exclude` tells the core finder to skip those candidates (and not spend a verification
   // on them); the check below enforces it here too, so a bad address can never come back.
-  const opts: Parameters<typeof findEmail>[1] & { exclude?: string[] } = { ...verifyOpts(), exclude: [...ex] };
+  const opts: Parameters<typeof findEmail>[1] & { exclude?: string[] } = { ...verifyOpts(own), exclude: [...ex] };
   const r = (await findEmail(input, opts)) as FoundEmail;
   if (r.email && ex.has(r.email.toLowerCase())) return { ...r, email: undefined, status: "unknown", confidence: 0, verifiedBy: undefined };
   return r;
 }
 
 async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
+  // The workspace's own Hunter key, when it saved one, before the platform's.
+  const own = await orgDataKeys(lead.orgId);
   // Same org as the lead, not just the same id: a reference written across a workspace
   // boundary before the ownership checks existed must not be followed.
   let company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, lead.orgId)) }) : null;
@@ -230,7 +233,7 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
   if (!lead.email && company && lead.firstName && lead.lastName) {
     const c = await charge();
     if (!c.ok) return { skipped: "quota", detail: c.message };
-    const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, priorBad);
+    const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, priorBad, own);
     if (r.email) {
       // An address whose owner asked never to be contacted through Scout is not stored -
       // not even in the note about what the lookup found.
@@ -251,7 +254,7 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
   } else if (lead.email && lead.emailStatus === "unknown") {
     const c = await charge();
     if (!c.ok) return { skipped: "quota", detail: c.message };
-    const v = await verifyEmail(lead.email, verifyOpts());
+    const v = await verifyEmail(lead.email, verifyOpts(own));
     const by = verifierOf(v);
     Object.assign(patch, { emailStatus: v.status, emailConfidence: v.confidence, ...(by ? { verifiedAt: new Date(), emailVerifiedBy: by } : {}) });
   } else if (job.payload.replaceInvalid && lead.email && lead.emailStatus === "invalid" && company && lead.firstName && lead.lastName) {
@@ -262,7 +265,7 @@ async function enrichLead(db: Db, job: Job, lead: typeof leads.$inferSelect) {
     if (!c.ok) return { skipped: "quota", detail: c.message };
     // Every address already known bad, and the current one, are excluded - the finder
     // used to hand back an address from invalidEmails as the "replacement".
-    const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, [...priorBad, lead.email]);
+    const r = await findEmailExcluding({ firstName: lead.firstName, lastName: lead.lastName, domain: company.domain, knownPattern, knownEmails: (company.raw as { emailsFound?: string[] })?.emailsFound }, [...priorBad, lead.email], own);
     const listed = r.email ? await onPlatformList(r.email, db) : false;
     const usable = r.email && !listed && r.email.toLowerCase() !== lead.email.toLowerCase() && (r.status === "valid" || r.status === "catch_all" || r.status === "risky");
     const taken = usable ? await takenByOther(r.email!) : false;
@@ -371,7 +374,7 @@ export const handlers: Record<string, JobHandler> = {
       const providerBudget = await remainingPremiumBudget(db, orgId);
       const { leads: results, providerFailures } = await runLeadPipelineDetailed(query, {
         ai: await aiFor(db, orgId),
-        verify: verifyOpts(),
+        verify: verifyOpts(await orgDataKeys(orgId)),
         icp: (icp?.criteria as IcpCriteria | undefined) ?? undefined,
         maxProviderLeads: providerBudget,
         onProgress: (pct, msg) => {
@@ -458,7 +461,9 @@ export const handlers: Record<string, JobHandler> = {
         { searchId, results: ids.length, created, found: results.length, quotaTruncated: truncated, providerFailures },
         { type: "search", id: searchId },
       );
-      return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated, clientClaim };
+      // `note` repeats the reason an empty search was empty, so whoever polls the job (the
+      // Search page, the API) can tell "no source could search" from "nobody matched".
+      return { results: ids.length, created, leadIds: ids, found: results.length, quotaTruncated: truncated, clientClaim, ...(providerNote ? { note: providerNote } : {}) };
     } catch (e) {
       // searches.error is shown to the customer: upstream text is masked before it is stored.
       await db.update(searches).set({ status: "failed", error: redact((e as Error).message, { max: 1000 }), completedAt: new Date() }).where(and(eq(searches.id, searchId), eq(searches.orgId, orgId)));
@@ -493,7 +498,7 @@ export const handlers: Record<string, JobHandler> = {
     if (!charge.ok && charge.reason === "quota") return { skipped: "quota", detail: charge.message };
     if (!charge.ok) throw new Error(`could not record verification usage: ${charge.message}`);
     try {
-      const v = await verifyEmail(lead.email, verifyOpts());
+      const v = await verifyEmail(lead.email, verifyOpts(await orgDataKeys(lead.orgId)));
       const by = verifierOf(v);
       // verifiedAt means "a verifier answered". A "probe disabled" guess stamped it too,
       // and the UI then showed an unchecked address as verified.
@@ -523,8 +528,15 @@ export const handlers: Record<string, JobHandler> = {
         seeds.push({ domain: d, name: p.name, description: p.description });
       } else seeds.push({ domain: d });
     }
-    const profile = await buildIcpWithAi(await aiFor(db, icp.orgId), { description: icp.description ?? undefined, seedCompanies: seeds, product: String(job.payload.product ?? "") });
-    if (!profile) return { skipped: "no AI provider configured" };
+    const icpAi = await aiFor(db, icp.orgId);
+    const profile = await buildIcpWithAi(icpAi, { description: icp.description ?? undefined, seedCompanies: seeds, product: String(job.payload.product ?? "") });
+    if (!profile) {
+      // Written onto the ICP, so its page says what happened instead of "building..." for ever.
+      const { recordIcpBuildMissed } = await import("./services/icps.js");
+      const { hasAi } = await import("@prospex/core");
+      await recordIcpBuildMissed(db, icp.orgId, icp.id, hasAi(icpAi));
+      return { skipped: hasAi(icpAi) ? "the AI returned no profile" : "no AI provider configured" };
+    }
     const merged: IcpCriteria = {
       ...(icp.criteria as IcpCriteria),
       industries: (icp.criteria as IcpCriteria).industries?.length ? (icp.criteria as IcpCriteria).industries : profile.industries,
@@ -632,7 +644,9 @@ export const handlers: Record<string, JobHandler> = {
       const post = (url: string) =>
         fetchPublic(url, {
           method: "POST",
-          headers: { "content-type": "application/json", "x-prospex-signature": signature, "x-prospex-timestamp": ts, "x-prospex-event": ev.type },
+          // The same three values under the product's current name (x-scout-*) as well as the
+          // original x-prospex-* names, so receivers written for either keep working.
+          headers: { "content-type": "application/json", "x-prospex-signature": signature, "x-prospex-timestamp": ts, "x-prospex-event": ev.type, "x-scout-signature": signature, "x-scout-timestamp": ts, "x-scout-event": ev.type },
           body,
           timeoutMs: 10_000,
           maxRedirects: 0,
@@ -731,13 +745,17 @@ export const handlers: Record<string, JobHandler> = {
   /** Push a lead to a CRM integration. payload: { integrationId, leadId } */
   "integration.sync": async (job, ctx) => {
     const { db } = ctx;
-    const integ = await db.query.integrations.findFirst({ where: and(eq(integrations.id, String(job.payload.integrationId)), eq(integrations.status, "active")) });
+    // "error" is a connection whose last check or sync failed; it is still tried (a success
+    // puts it back to "active"). Anything else (a disabled row) is skipped.
+    const integ = await db.query.integrations.findFirst({ where: and(eq(integrations.id, String(job.payload.integrationId)), inArray(integrations.status, ["active", "error"])) });
     if (!integ) return { skipped: "integration missing/inactive" };
     if (foreign(job, integ.orgId)) return ORG_MISMATCH;
     // The lead must be the integration org's own before its data is pushed to their CRM.
     const syncLeadRow = await db.query.leads.findFirst({ where: eq(leads.id, String(job.payload.leadId)), columns: { id: true, orgId: true } });
     if (syncLeadRow && syncLeadRow.orgId !== integ.orgId) return ORG_MISMATCH;
     const r = await syncLead(integ, String(job.payload.leadId));
+    // The outcome goes onto the connection (status, lastError) so Settings can show it.
+    if (r.error !== "lead not found") await recordIntegrationOutcome(integ.id, r.ok, r.ok ? undefined : redact(r.error ?? "sync failed", { max: 300 }));
     if (!r.ok) throw new Error(redact(r.error ?? "sync failed", { max: 500 }));
     return r;
   },
@@ -1060,7 +1078,7 @@ export const handlers: Record<string, JobHandler> = {
     }
     const providerBudget = await remainingPremiumBudget(db, ss.orgId);
     // Every option is built here, from server configuration and the org's plan.
-    const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, { ai: await aiFor(db, ss.orgId), verify: verifyOpts(), maxProviderLeads: providerBudget });
+    const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, { ai: await aiFor(db, ss.orgId), verify: verifyOpts(await orgDataKeys(ss.orgId)), maxProviderLeads: providerBudget });
     let fresh = 0;
     const names: string[] = [];
     const freshIds: string[] = [];

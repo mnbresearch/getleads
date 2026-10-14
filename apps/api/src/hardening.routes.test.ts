@@ -95,6 +95,10 @@ suite("route hardening", () => {
     app = createApp();
     A = await signup("hard-a");
     B = await signup("hard-b");
+    // These workspaces are on the Free plan, which now enforces its campaign and integration
+    // limits (fix round B3). Many tests here create several campaigns and connect CRMs in one
+    // workspace, so both are lifted by override; every other Free quota stays as it was.
+    for (const o of [A, B]) await db.execute(S.sql`UPDATE organizations SET plan_limits = plan_limits || '{"campaigns": 1000, "integrations": true}'::jsonb WHERE id = ${o.orgId}`);
   }, 60_000);
 
   // ── 1. Tasks ──
@@ -819,7 +823,8 @@ suite("route hardening", () => {
       expect(r.body.subject).toBeTruthy();
       expect(r.body.body).toBeTruthy();
       expect(r.body.ai).toBe(false);
-      expect(r.body.note).toMatch(/AI drafting isn't switched on for this workspace yet, so this is a template/);
+      // Fix round B3: with no engine on the server the note says so, instead of blaming a workspace setting.
+      expect(r.body.note).toMatch(/AI drafting isn't available yet - no AI engine is connected on our side, so this is a template/);
       const after = (await db.select().from(S.usage).where(S.and(S.eq(S.usage.orgId, A.orgId), S.eq(S.usage.metric, "aiMessages"))))[0]?.count ?? 0;
       expect(after).toBe(before);
     });

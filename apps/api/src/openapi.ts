@@ -1,3 +1,5 @@
+import { TEMPLATE_VARIABLES } from "./services/templateVars.js";
+
 /** Hand-maintained OpenAPI 3.1 document. Served at /openapi.json and rendered at /docs. */
 export function openapi(apiUrl: string) {
   const sec = [{ bearerAuth: [] }, { apiKey: [] }];
@@ -165,7 +167,219 @@ export function openapi(apiUrl: string) {
   );
   const engagerRow = obj({ fullName: str, firstName: str, lastName: str, title: str, companyName: str, companyDomain: str, linkedinUrl: str, email: str, location: str, note: str });
 
-  return {
+  // ── Routes that exist in the app but were not documented ──
+  // Found by diffing the app's live route table against this document. Kept in one block so
+  // the next diff is easy to read; merged into `paths` below (method by method, so a path that
+  // already has some of its methods documented keeps them).
+  const pid = (name: string, description: string, schema: unknown = uuid) => ({ name, in: "path", required: true, schema, description });
+  const q = (name: string, schema: unknown, description?: string) => ({ name, in: "query", schema, ...(description ? { description } : {}) });
+  const okFlag = ok(obj({ ok: { ...bool, enum: [true] } }, ["ok"]));
+  const notFoundRes = res("404", "not_found", errorBody);
+  const created = (schema: unknown = { type: "object" }) => ({ "201": { description: "Created", ...j(schema) } });
+  const accepted = (schema: unknown = { type: "object" }) => ({ "202": { description: "Accepted: queued as a background job", ...j(schema) } });
+  const days365 = q("days", { ...int, minimum: 1, maximum: 365, default: 90 });
+  const clientInputSchema = obj({
+    name: { ...str, minLength: 1, maxLength: 120 },
+    domain: nullable({ ...str, maxLength: 253 }),
+    industry: nullable({ ...str, maxLength: 120 }),
+    status: { ...str, enum: ["active", "paused", "archived"] },
+    color: { ...nullable(str), description: "A hex colour like #3d5a99" },
+    icpId: { ...nullable(uuid), description: "Lets Scout route unassigned leads to this client" },
+    monthlyLeadTarget: { type: ["integer", "null"], minimum: 0, maximum: 1000000 },
+    notes: nullable({ ...str, maxLength: 5000 }),
+    reportShowTarget: { ...bool, description: "Show the monthly target on the client report. Owner or admin only (403 forbidden_role otherwise)" },
+  });
+  const attentionBucket = { ...str, enum: ["noEmail", "unverified", "badEmail", "readyButIdle"] };
+  const brandSpec = obj({ name: { ...str, minLength: 1, maxLength: 120 }, aliases: { ...arr({ ...str, maxLength: 120 }), maxItems: 20 }, domain: nullable({ ...str, maxLength: 200 }) }, ["name"]);
+  const visibilityPromptOut = obj({ id: uuid, text: str, topic: nullable(str), engines: arr(), samplesPerRun: int, active: bool, lastRunAt: nullable(dateTime), createdAt: dateTime }, ["id", "text", "engines", "samplesPerRun", "active", "createdAt"]);
+  const autopilotInput = obj({ name: { ...str, maxLength: 200 }, query: { ...searchBody, description: "Stored search query: the same fields and limits as POST /v1/search" }, icpId: nullable(uuid), listId: nullable(uuid), campaignId: nullable(uuid), dailyLeads: { ...int, minimum: 1, maximum: 200 }, minScore: { ...int, minimum: 0, maximum: 100 }, requireValidEmail: bool, autoEnroll: bool, active: bool, runHourUtc: { ...int, minimum: 0, maximum: 23 } });
+  const campaignStep = obj({ id: uuid, delayDays: { ...int, minimum: 0, maximum: 60, default: 0 }, channel: { ...str, enum: ["email", "linkedin_connect", "linkedin_message", "whatsapp", "call", "task"], default: "email" }, subjectTemplate: str, bodyTemplate: { ...str, minLength: 1, maxLength: 20000 }, aiPersonalize: { ...bool, default: true }, aiInstructions: nullable({ ...str, maxLength: 5000 }), variants: { type: "array", maxItems: 4, items: obj({ subjectTemplate: str, bodyTemplate: str }, ["subjectTemplate", "bodyTemplate"]) } }, ["bodyTemplate"]);
+  const campaignPatch = obj({ name: { ...str, minLength: 1, maxLength: 200 }, icpId: nullable(uuid), listId: nullable(uuid), emailAccountId: nullable(uuid), clientId: nullable(uuid), settings: { type: "object", description: "sendWindow, timezone, stopOnReply and the other campaign settings" }, steps: { type: "array", maxItems: 10, items: campaignStep, description: "Replaces the sequence. Steps keep their id when it is sent back" } });
+  const runInput = obj({ count: { ...int, minimum: 1, maximum: 200, default: 25 }, icpId: uuid, preview: { ...bool, default: false } });
+  /** The variables a step template may use, read from the list the API validates against. */
+  const templateNote = ` Templates may use ${TEMPLATE_VARIABLES.map((v) => `{{${v}}}`).join(", ")}, the workspace's own custom field names, and a fallback such as {{first_name | fallback:"there"}}. A newly saved step with any other variable is refused with 400 \`unknown_variables\` (details list \`unknown\` and \`allowed\`); steps saved before this check keep working.`;
+
+  const morePaths: Record<string, Record<string, unknown>> = {
+    // System and tracking. These are not called by integrations, but they exist and are public.
+    "/": { get: { tags: ["System"], security: [], summary: "Service banner: name, version and links to the docs", responses: ok() } },
+    "/health": { get: { tags: ["System"], security: [], summary: "Liveness and database check, for uptime monitors and the platform's health probe", responses: { ...ok(obj({ ok: bool, db: str, jobMode: str, time: dateTime })), ...res("503", "The database could not be reached", obj({ ok: bool, db: str, error: str })) } } },
+    "/docs": { get: { tags: ["System"], security: [], summary: "This document rendered with Swagger UI", responses: { "200": { description: "HTML" } } } },
+    "/openapi.json": { get: { tags: ["System"], security: [], summary: "This document", responses: ok() } },
+    "/internal/jobs/run": {
+      get: { tags: ["System"], security: [], summary: "Run due background jobs (serverless deployments with JOB_MODE=inline only). Needs the operator's x-internal-token header; refused without it", responses: { ...ok(), ...res("401", "unauthorized", errorBody) } },
+      post: { tags: ["System"], security: [], summary: "Same as GET, for schedulers that only POST", responses: { ...ok(), ...res("401", "unauthorized", errorBody) } },
+    },
+    "/px/{file}": { get: { tags: ["Visitors"], security: [], summary: "The website visitor pixel script, as `/px/<pixel key>.js` (also documented as /px/{key}.js)", parameters: [pid("file", "<pixel key>.js", str)], responses: { "200": { description: "JavaScript" }, ...notFoundRes } } },
+    "/px/{key}/collect": { post: { tags: ["Visitors"], security: [], summary: "Where the pixel reports a page view. Called by the script, not by integrations. Cookieless; answers 204", parameters: [pid("key", "The pixel key", str)], responses: { "204": { description: "Recorded (or ignored)" } } } },
+    "/t/o/{token}": { get: { tags: ["Tracking"], security: [], summary: "Open-tracking pixel embedded in sent email", parameters: [pid("token", "Opaque message token", str)], responses: { "200": { description: "A 1x1 GIF" } } } },
+    "/t/c/{token}": { get: { tags: ["Tracking"], security: [], summary: "Click-tracking redirect embedded in sent email", parameters: [pid("token", "Opaque link token", str)], responses: { "302": { description: "Redirect to the original link" }, ...notFoundRes } } },
+    "/t/u/{token}": {
+      get: { tags: ["Tracking"], security: [], summary: "Unsubscribe page linked from every sent email", parameters: [pid("token", "Opaque unsubscribe token", str)], responses: { "200": { description: "HTML" } } },
+      post: { tags: ["Tracking"], security: [], summary: "One-click unsubscribe (RFC 8058 List-Unsubscribe-Post) and the page's confirm button. The address is suppressed for that workspace", parameters: [pid("token", "Opaque unsubscribe token", str)], responses: { "200": { description: "Unsubscribed" } } },
+    },
+    "/v1/email-events/resend": { post: { tags: ["System"], security: [], summary: "Resend delivery webhook (bounces, complaints, deliveries), verified with RESEND_WEBHOOK_SECRET. Bounces and spam complaints go on the suppression list. It does not carry replies: see POST /v1/campaigns/inbound", responses: { ...ok(), ...res("401", "Signature missing or invalid", errorBody) } } },
+    "/v1/billing/webhook": { post: { tags: ["Billing"], security: [], summary: "Stripe webhook (checkout completed, subscription deleted, checkout expired), verified with STRIPE_WEBHOOK_SECRET. Only for Stripe", responses: { ...ok(), ...res("400", "Signature missing or invalid", errorBody) } } },
+    "/v1/auth/google/callback": { get: { tags: ["Auth"], security: [], summary: "Google sign-in redirect target (the browser lands here from Google). Redirects to the app with a one-time code", responses: { "302": { description: "Redirect to the app" } } } },
+
+    // Account, billing, upgrade requests
+    "/v1/auth/org": { patch: { tags: ["Account"], summary: "Rename the workspace or change its settings (owner or admin). `settings` is merged; at most 60 keys and 32 KB. Server-managed keys cannot be set here", requestBody: j(obj({ name: { ...str, minLength: 1, maxLength: 80 }, settings: { type: "object" } })), responses: { ...ok(), ...res("400", "validation_error", errorBody), ...res("403", "forbidden_role", errorBody) } } },
+    "/v1/auth/api-keys/{id}": { delete: { tags: ["Account"], summary: "Revoke an API key (owner or admin). It stops working at once", parameters: [idParam("The API key")], responses: { ...ok(obj({ ok: bool })), ...notFoundRes } } },
+    "/v1/auth/join": { post: { tags: ["Team"], security: [], summary: "Accept a team invite: create the account with the token from the invite link and sign in", requestBody: j(obj({ token: { ...str, maxLength: 200 }, password: { ...str, minLength: 8, maxLength: 200 }, name: { ...str, maxLength: 80 } }, ["token", "password"])), responses: { ...ok(obj({ token: str, user: obj({ id: uuid, email: str, name: str, role: str }) }, ["token", "user"])), ...res("400", "invalid_invite, invite_revoked, invite_expired, exists (an account with this address already exists) or weak_password", errorBody), ...res("403", "account_suspended", errorBody) } } },
+    "/v1/billing/plans": { get: { tags: ["Billing"], security: [], summary: "The plans with prices and limits. `stripeEnabled` is false when online checkout is not set up: upgrades then go through POST /v1/upgrade-requests. `checkoutPlans` lists the plans that can be bought online", responses: ok(obj({ plans: arr(obj({ id: str, name: str, priceUsd: num, limits: { type: "object" } }, ["id", "name", "priceUsd", "limits"])), stripeEnabled: bool, checkoutPlans: arr(), pilotMode: bool }, ["plans", "stripeEnabled"])) } },
+    "/v1/billing/checkout": { post: { tags: ["Billing"], summary: "Start a Stripe checkout for a plan (owner or admin) and get the URL to send the browser to. Refused when Stripe is not configured or the plan has no price", requestBody: j(obj({ plan: { ...str, maxLength: 100 } }, ["plan"])), responses: { ...ok(obj({ url: str }, ["url"])), ...res("400", "Stripe is not configured, the plan is unknown, or the plan cannot be bought online yet", errorBody) } } },
+    "/v1/upgrade-requests": { post: { tags: ["Billing"], security: [], summary: "Ask for an upgrade without online checkout (the /upgrade form). An admin follows up and changes the plan. Rate limited", requestBody: j(obj({ name: { ...str, minLength: 1, maxLength: 120 }, email: str, mobile: { ...str, minLength: 5, maxLength: 30 }, country: { ...str, minLength: 1, maxLength: 80 }, planId: str, message: { ...str, maxLength: 2000 } }, ["name", "email", "mobile", "country", "planId"])), responses: { ...created(obj({ ok: bool, id: uuid })), ...res("400", "validation_error", errorBody), ...res("429", "rate_limited", errorBody) } } },
+    "/v1/webhooks/{id}": { delete: { tags: ["Webhooks"], summary: "Delete a webhook (owner or admin)", parameters: [idParam("The webhook")], responses: { ...okFlag, ...notFoundRes } } },
+    "/v1/integrations/{provider}": { delete: { tags: ["Account"], summary: "Disconnect a CRM or data-provider integration (owner or admin); its stored credentials are deleted", parameters: [pid("provider", "hubspot, pipedrive, zoho, cortex, webhook, sheets, apollo, hunter, pdl, ipinfo", str)], responses: { ...okFlag, ...notFoundRes } } },
+
+    // Analytics
+    "/v1/analytics/funnel": { get: { tags: ["Analytics"], summary: "Lead funnel over the last `days`: found, with email, verified, contacted, opened, replied, positive, meetings", parameters: [days365], responses: ok() } },
+    "/v1/analytics/sources": { get: { tags: ["Analytics"], summary: "Results by lead source (search provider, play, import, signal) over the last `days`", parameters: [days365], responses: ok() } },
+    "/v1/analytics/attribution": { get: { tags: ["Analytics"], summary: "Which sources, ICPs and campaigns the replies and positive replies came from, over the last `days`", parameters: [days365], responses: ok() } },
+    "/v1/analytics/icp-learning": { get: { tags: ["Analytics"], summary: "What reply outcomes are teaching each ICP: titles, industries and sizes that over- or under-perform, with sample sizes", responses: ok() } },
+    "/v1/analytics/sending-health": { get: { tags: ["Analytics"], summary: "Per sender account: volume, bounce and complaint rates, warm-up stage and whether the circuit breaker has stopped it", responses: ok(obj({ accounts: arr({ type: "object" }) }, ["accounts"])) } },
+
+    // Leads and lists
+    "/v1/leads/bulk/delete": { post: { tags: ["Leads"], summary: "Delete up to 1,000 leads", requestBody: j(obj({ ids: { type: "array", minItems: 1, maxItems: 1000, items: uuid } }, ["ids"])), responses: ok(obj({ ok: bool, requested: int, deleted: int, notFound: int }, ["requested", "deleted", "notFound"])) } },
+    "/v1/leads/suppressions": { post: { tags: ["Leads"], summary: "Add addresses to this workspace's do-not-contact list (up to 5,000)", requestBody: j(obj({ emails: { type: "array", minItems: 1, maxItems: 5000, items: str }, reason: { ...str, maxLength: 200 } }, ["emails"])), responses: ok(obj({ ok: bool, added: int, alreadySuppressed: int })) } },
+    "/v1/leads/hot/list": { get: { tags: ["Leads"], summary: "The leads most worth acting on now, ranked by engagement, fit and recency", parameters: [q("limit", { ...int, minimum: 1, maximum: 200, default: 20 })], responses: ok(obj({ leads: arr({ type: "object" }) }, ["leads"])) } },
+    "/v1/leads/{id}/priority": { get: { tags: ["Leads"], summary: "Why a lead ranks where it does: the priority score and its parts", parameters: [idParam("The lead")], responses: { ...ok(obj({ leadId: uuid }, ["leadId"])), ...notFoundRes } } },
+    "/v1/leads/lists/{listId}": { delete: { tags: ["Lists"], summary: "Delete a list. The leads on it stay", parameters: [pid("listId", "The list")], responses: { ...okFlag, ...notFoundRes } } },
+    "/v1/leads/lists/{listId}/leads/{leadId}": { delete: { tags: ["Lists"], summary: "Remove one lead from a list. The lead stays in the workspace", parameters: [pid("listId", "The list"), pid("leadId", "The lead")], responses: { ...okFlag, ...notFoundRes } } },
+    "/v1/companies/{id}": { get: { tags: ["Enrichment"], summary: "A company with how many leads the workspace holds there", parameters: [idParam("The company")], responses: { ...ok(obj({ company: { type: "object" }, leadCount: int }, ["company", "leadCount"])), ...notFoundRes } } },
+    "/v1/companies/{id}/brief": { post: { tags: ["Enrichment"], summary: "An AI-written account brief for the company, cached. `?refresh=true` writes a new one. Without AI the answer is 200 with `brief: null` and an `error` sentence saying why", parameters: [idParam("The company"), q("refresh", { ...str, enum: ["true", "false"] })], responses: { ...ok(obj({ brief: { type: ["object", "string", "null"] }, cached: bool, generatedAt: nullable(dateTime), aiOff: bool, error: str, note: str })), ...notFoundRes } } },
+
+    // ICPs
+    "/v1/icps/{id}": {
+      get: { tags: ["ICP"], summary: "One ICP with its criteria, seed domains, AI profile and chat history", parameters: [idParam("The ICP")], responses: { ...ok(), ...notFoundRes } },
+      patch: { tags: ["ICP"], summary: "Change an ICP. Pass only what changes; null clears description, seedDomains or clientId", parameters: [idParam("The ICP")], requestBody: j(obj({ name: { ...str, minLength: 1, maxLength: 200 }, description: nullable({ ...str, maxLength: 5000 }), criteria: { type: "object" }, seedDomains: { type: ["array", "null"], maxItems: 10, items: str }, product: { ...str, maxLength: 5000 }, buildWithAi: bool, clientId: nullable(uuid) })), responses: { ...ok(), ...notFoundRes } },
+      delete: { tags: ["ICP"], summary: "Delete an ICP. Leads, campaigns and plays that used it are kept, without the link to it", parameters: [idParam("The ICP")], responses: { ...okFlag, ...notFoundRes } },
+    },
+    "/v1/icps/{id}/build": { post: { tags: ["ICP"], summary: "Rebuild the ICP's AI lookalike profile from its description and seed domains (background job). Without AI the job is skipped: `aiBuild: \"skipped\"` and a `note` say the criteria are used as written", parameters: [idParam("The ICP")], responses: { ...accepted(obj({ jobId: uuid, aiAvailable: bool, aiBuild: { ...str, enum: ["queued", "skipped"] }, note: str }, ["jobId", "aiAvailable", "aiBuild"])), ...notFoundRes } } },
+    "/v1/icps/{id}/chat": { post: { tags: ["ICP"], summary: "Refine an ICP by talking to the assistant. Answers with its reply and the updated criteria", parameters: [idParam("The ICP")], requestBody: j(obj({ message: { ...str, minLength: 1, maxLength: 2000 } }, ["message"])), responses: { ...ok(obj({ reply: str, criteria: { type: "object" }, chatHistory: arr({ type: "object" }) }, ["reply", "criteria"])), ...notFoundRes, ...res("409", "ai_off: AI assistance is switched off for the workspace", errorBody), ...res("503", "ai_unavailable: no AI provider is available", errorBody), ...res("502", "ai_no_response", errorBody) } } },
+
+    // Campaigns
+    "/v1/campaigns/{id}": {
+      get: { tags: ["Outreach"], summary: "One campaign with its steps, settings and counts", parameters: [idParam("The campaign")], responses: { ...ok(), ...notFoundRes } },
+      patch: { tags: ["Outreach"], summary: "Change a campaign: name, ICP, list, sender, client, settings or steps. Pass only what changes. Answers with the full campaign." + templateNote, parameters: [idParam("The campaign")], requestBody: j(campaignPatch), responses: { ...ok(), ...res("400", "validation_error or unknown_variables", errorBody), ...notFoundRes } },
+      delete: { tags: ["Outreach"], summary: "Delete a campaign with its steps and enrolments. The leads stay, and messages already sent are kept without the link to the campaign", parameters: [idParam("The campaign")], responses: { ...okFlag, ...notFoundRes } },
+    },
+    "/v1/campaigns/{id}/contacts": { get: { tags: ["Outreach"], summary: "The people enrolled in a campaign with their step, status and lead", parameters: [idParam("The campaign")], responses: { ...ok(obj({ contacts: arr({ type: "object" }) }, ["contacts"])), ...notFoundRes } } },
+    "/v1/campaigns/{id}/contacts/{contactId}/resume": { post: { tags: ["Outreach"], summary: "Resume a contact the sequence stopped (paused, bounced-and-fixed, replied). `resend: true` sends the current step again instead of moving on", parameters: [idParam("The campaign"), pid("contactId", "The campaign contact")], requestBody: j(obj({ resend: { ...bool, default: false } })), responses: { ...ok(), ...res("400", "Cannot resume this contact (the error says why)", errorBody), ...notFoundRes } } },
+    "/v1/campaigns/{id}/experiments": { get: { tags: ["Outreach"], summary: "A/B test results per step: sends, replies and rates per variant with confidence intervals, and the winner once the intervals separate", parameters: [idParam("The campaign")], responses: { ...ok(obj({ experiments: arr({ type: "object" }) }, ["experiments"])), ...notFoundRes } } },
+    "/v1/campaigns/messages/{id}/send-reply": { post: { tags: ["Outreach"], summary: "Send a reply to an inbound message, from the campaign's sender. Uses the stored AI draft unless `subject` and `body` are given. Refused (409 suppressed) when the person unsubscribed or is on a do-not-contact list", parameters: [idParam("The inbound message")], requestBody: j(obj({ subject: { ...str, minLength: 1 }, body: { ...str, minLength: 1 } })), responses: { ...ok(), ...res("400", "No draft, no matched lead, or the lead has no valid email", errorBody), ...notFoundRes, ...res("409", "suppressed", errorBody) } } },
+    "/v1/campaigns/email-accounts/{id}": { delete: { tags: ["Outreach"], summary: "Delete a sender account (owner or admin). Campaigns using it stop sending until given another sender", parameters: [idParam("The sender account")], responses: { ...okFlag, ...notFoundRes } } },
+
+    // Clients
+    "/v1/clients": {
+      get: { tags: ["Clients"], summary: "Every client with lead counts by stage, what needs attention and pace against its monthly target, plus workspace totals", parameters: [q("includeArchived", { ...str, enum: ["true", "false"] })], responses: ok(obj({ clients: arr({ type: "object" }), totals: { type: "object" } }, ["clients", "totals"])) },
+      post: { tags: ["Clients"], summary: "Add a client workspace", requestBody: j({ ...clientInputSchema, required: ["name"] }), responses: { ...created(), ...res("400", "validation_error", errorBody), ...res("403", "forbidden_role (reportShowTarget set by a member)", errorBody) } },
+    },
+    "/v1/clients/routing": { get: { tags: ["Clients"], summary: "Suggested client for each unassigned lead, with the runner-up, so the pool can be routed by ICP fit", parameters: [q("limit", { ...int, minimum: 1, maximum: 1000, default: 200 })], responses: ok() } },
+    "/v1/clients/routing/auto": { post: { tags: ["Clients"], summary: "Assign the unassigned leads whose best client is a clear fit. Rate limited", requestBody: j(obj({ limit: { ...int, minimum: 1, maximum: 1000, default: 500 }, leadIds: { type: "array", maxItems: 1000, items: uuid } })), responses: ok() } },
+    "/v1/clients/unassign": { post: { tags: ["Clients"], summary: "Return leads to the unassigned pool", requestBody: j(obj({ leadIds: { type: "array", minItems: 1, maxItems: 5000, items: uuid } }, ["leadIds"])), responses: ok(obj({ requested: int, returnedToPool: int, alreadyInPool: int, notFound: int })) } },
+    "/v1/clients/pool/act": { post: { tags: ["Clients"], summary: "Act on an attention bucket of the unassigned pool: enrich (find a missing or better address) or verify", requestBody: j(obj({ bucket: attentionBucket, action: { ...str, enum: ["enrich", "verify"] } }, ["bucket", "action"])), responses: ok() } },
+    "/v1/clients/{id}": {
+      get: { tags: ["Clients"], summary: "One client: leads by stage, attention buckets, pace this month and `sharing`. The report link token is included for owners, admins and API keys only", parameters: [idParam("The client")], responses: { ...ok(), ...notFoundRes } },
+      patch: { tags: ["Clients"], summary: "Change a client. Pass only what changes", parameters: [idParam("The client")], requestBody: j(clientInputSchema), responses: { ...ok(), ...res("403", "forbidden_role (reportShowTarget changed by a member)", errorBody), ...notFoundRes } },
+      delete: { tags: ["Clients"], summary: "Delete a client. Its leads stay and go back to the unassigned pool", parameters: [idParam("The client")], responses: { ...ok(obj({ deleted: bool, leadsReturnedToPool: int }, ["deleted", "leadsReturnedToPool"])), ...notFoundRes } },
+    },
+    "/v1/clients/{id}/assign": { post: { tags: ["Clients"], summary: "Assign leads to a client. `move: true` also takes leads that belong to another client", parameters: [idParam("The client")], requestBody: j(obj({ leadIds: { type: "array", minItems: 1, maxItems: 5000, items: uuid }, move: { ...bool, default: false } }, ["leadIds"])), responses: { ...ok(obj({ requested: int, assigned: int, alreadyThisClient: int, ownedByAnotherClient: int, notFound: int })), ...notFoundRes } } },
+    "/v1/clients/{id}/attention/{bucket}": { get: { tags: ["Clients"], summary: "The lead ids in one attention bucket of a client", parameters: [idParam("The client"), pid("bucket", "Which bucket", attentionBucket)], responses: { ...ok(obj({ leadIds: arr(uuid), total: int }, ["leadIds", "total"])), ...notFoundRes } } },
+    "/v1/clients/{id}/act": { post: { tags: ["Clients"], summary: "Act on a client's attention bucket: enrich, verify, or gather ready-but-idle leads into a list (`list`). Rate limited", parameters: [idParam("The client")], requestBody: j(obj({ bucket: attentionBucket, action: { ...str, enum: ["enrich", "verify", "list"] } }, ["bucket", "action"])), responses: { ...ok(), ...notFoundRes } } },
+    "/v1/clients/{id}/share": { delete: { tags: ["Clients"], summary: "Turn the client report link off (owner or admin). The link stops working", parameters: [idParam("The client")], responses: { ...ok(obj({ sharing: { ...bool, enum: [false] } }, ["sharing"])), ...notFoundRes } } },
+    "/v1/public/clients/report/{token}": { get: { tags: ["Public"], security: [], summary: "The read-only client report behind a share link. No account needed; rate limited. 404 when the link is off or replaced", parameters: [pid("token", "The share token from the report link", str)], responses: { ...ok(), ...notFoundRes } } },
+
+    // AI visibility
+    "/v1/visibility/config": {
+      get: { tags: ["Visibility"], summary: "Your brand (name, aliases, domain) and the rivals tracked alongside it", responses: ok() },
+      put: { tags: ["Visibility"], summary: "Set your brand and rivals. Aliases resolve to one brand when answers are read", requestBody: j(obj({ brand: brandSpec, competitors: { type: "array", maxItems: 25, items: brandSpec } }, ["brand"])), responses: { ...ok(), ...res("400", "validation_error", errorBody) } },
+    },
+    "/v1/visibility/prompts": {
+      get: { tags: ["Visibility"], summary: "The tracked questions, newest first", responses: ok(obj({ prompts: arr(visibilityPromptOut) }, ["prompts"])) },
+      post: { tags: ["Visibility"], summary: "Track a question buyers ask AI assistants. It should not name your brand. `samplesPerRun` is how many times each engine is asked per cycle", requestBody: j(obj({ text: { ...str, minLength: 5, maxLength: 500 }, topic: { ...str, maxLength: 80 }, engines: { type: "array", maxItems: 10, items: str, default: [], description: "Empty: every connected engine" }, samplesPerRun: { ...int, minimum: 1, maximum: 10, default: 3 } }, ["text"])), responses: { ...created(visibilityPromptOut), ...res("400", "validation_error", errorBody), ...res("409", "row_cap: the workspace holds the most prompts allowed", errorBody) } },
+    },
+    "/v1/visibility/prompts/bulk": { post: { tags: ["Visibility"], summary: "Track several questions at once (for example a suggested set). Questions already tracked are skipped and counted. 201 when any were created, 200 when all were skipped", requestBody: j(obj({ prompts: { type: "array", minItems: 1, items: obj({ text: { ...str, minLength: 5, maxLength: 500 }, topic: { ...str, maxLength: 80 } }, ["text"]) }, samplesPerRun: { ...int, minimum: 1, maximum: 10, default: 3 } }, ["prompts"])), responses: { ...created(obj({ created: arr(visibilityPromptOut), skipped: int }, ["created", "skipped"])), ...ok(obj({ created: arr(visibilityPromptOut), skipped: int }, ["created", "skipped"])) } } },
+    "/v1/visibility/prompts/suggest": { post: { tags: ["Visibility"], summary: "Suggested questions to track, written from your brand, rivals and ICP. `ai: true` has the model write them (one AI message); otherwise a built-in set. Every suggestion is validated, including that it does not name you. Saves nothing", requestBody: j(obj({ ai: { ...bool, default: false }, category: { ...str, maxLength: 120 } })), responses: ok() } },
+    "/v1/visibility/prompts/{id}": {
+      patch: { tags: ["Visibility"], summary: "Pause or resume a tracked question, or change its samples per run or topic", parameters: [idParam("The prompt")], requestBody: j(obj({ active: bool, samplesPerRun: { ...int, minimum: 1, maximum: 10 }, topic: nullable({ ...str, maxLength: 80 }) })), responses: { ...ok(visibilityPromptOut), ...notFoundRes } },
+      delete: { tags: ["Visibility"], summary: "Stop tracking a question. Its past answers are deleted with it", parameters: [idParam("The prompt")], responses: { ...okFlag, ...notFoundRes } },
+    },
+    "/v1/visibility/prompts/{id}/run": { post: { tags: ["Visibility"], summary: "Sample now: ask every connected engine this question `samples` times (default: the prompt's samplesPerRun). Uses AI quota per answer. Refusals and errors are excluded from the rates, and `note` says how many", parameters: [idParam("The prompt")], requestBody: j(obj({ samples: { ...int, minimum: 1, maximum: 10 } })), responses: { ...ok(obj({ total: int, usable: int, note: str })), ...notFoundRes } } },
+    "/v1/visibility/engines": { get: { tags: ["Visibility"], summary: "Which AI engines are sampled for this workspace right now (it depends on the server's AI keys and the plan)", responses: ok(obj({ engines: arr({ type: "object" }) }, ["engines"])) } },
+    "/v1/visibility/overview": { get: { tags: ["Visibility"], summary: "Mention rate and share of voice per engine with confidence intervals and sample sizes, rivals, winnable gaps and the change test. A rate is withheld below the sample size needed", parameters: [q("days", { ...int, minimum: 7, maximum: 90, default: 30 })], responses: ok() } },
+    "/v1/visibility/observations": { get: { tags: ["Visibility"], summary: "Per answer: which brands were named and in what position", parameters: [q("days", { ...int, minimum: 1, maximum: 90, default: 30 }), q("promptId", uuid)], responses: ok(obj({ observations: arr({ type: "object" }) }, ["observations"])) } },
+    "/v1/visibility/runs": { get: { tags: ["Visibility"], summary: "The raw answers behind every number, newest first", parameters: [q("promptId", uuid), q("limit", { ...int, minimum: 1, maximum: 100, default: 25 })], responses: ok(obj({ runs: arr({ type: "object" }) }, ["runs"])) } },
+
+    // Signals
+    "/v1/signals/types": { get: { tags: ["Signals"], summary: "The kinds of signal Scout recognises", responses: ok(obj({ types: arr() }, ["types"])) } },
+    "/v1/signals/job-changes": { get: { tags: ["Signals"], summary: "Contacts who changed jobs, found by job-change checks", parameters: [q("days", { ...int, minimum: 1, maximum: 365, default: 90 }), q("limit", { ...int, minimum: 1, maximum: 200, default: 50 })], responses: ok(obj({ changes: arr({ type: "object" }) }, ["changes"])) } },
+    "/v1/signals/job-changes/scan": { post: { tags: ["Signals"], summary: "Check well-scored contacts for job changes now. 502 with `blocked` when no source could be checked (not the same as finding no changes). Rate limited", requestBody: j(obj({ limit: { ...int, minimum: 1, maximum: 500, default: 50 }, minScore: { ...num, minimum: 0, maximum: 100, default: 70 }, staleDays: { ...int, minimum: 1, maximum: 365, default: 30 }, retryDays: { ...int, minimum: 1, maximum: 365, default: 3 } })), responses: { ...ok(), ...res("502", "blocked: no source could be checked", { type: "object" }) } } },
+    "/v1/signals/subscriptions/{id}": {
+      patch: { tags: ["Signals"], summary: "Change a signal subscription. Pass only what changes", parameters: [idParam("The subscription")], requestBody: j({ type: "object", description: "Any field of POST /v1/signals/subscriptions" }), responses: { ...ok(), ...notFoundRes } },
+      delete: { tags: ["Signals"], summary: "Delete a signal subscription. Leads it created stay", parameters: [idParam("The subscription")], responses: { ...okFlag, ...notFoundRes } },
+    },
+    "/v1/signals/monitors/{id}": {
+      patch: { tags: ["Signals"], summary: "Change a monitor (name, target, settings, interval of at least 30 minutes, active). Pass only what changes", parameters: [idParam("The monitor")], requestBody: j(obj({ name: { ...str, minLength: 1, maxLength: 200 }, target: { ...str, minLength: 1, maxLength: 2000 }, config: { type: "object" }, intervalMinutes: { ...int, minimum: 30, maximum: 10080 }, active: bool })), responses: { ...ok(), ...notFoundRes } },
+      delete: { tags: ["Signals"], summary: "Delete a monitor and its results", parameters: [idParam("The monitor")], responses: { ...okFlag, ...notFoundRes } },
+    },
+
+    // Tools, autopilot, team
+    "/v1/tools/saved-searches/{id}": { delete: { tags: ["Tools"], summary: "Delete a saved search", parameters: [idParam("The saved search")], responses: { ...okFlag, ...notFoundRes } } },
+    "/v1/tools/saved-searches/{id}/run": { post: { tags: ["Tools"], summary: "Run a saved search now (background job)", parameters: [idParam("The saved search")], responses: { ...accepted(obj({ jobId: uuid }, ["jobId"])), ...notFoundRes } } },
+    "/v1/tools/autopilots/{id}": {
+      patch: { tags: ["Autopilot"], summary: "Change an autopilot. Pass only what changes", parameters: [idParam("The autopilot")], requestBody: j(autopilotInput), responses: { ...ok(), ...notFoundRes } },
+      delete: { tags: ["Autopilot"], summary: "Delete an autopilot. Leads it found stay", parameters: [idParam("The autopilot")], responses: { ...okFlag, ...notFoundRes } },
+    },
+    "/v1/tools/invites/{id}": { delete: { tags: ["Team"], summary: "Revoke a pending invite (owner or admin). The link stops working and the seat is freed", parameters: [idParam("The invite")], responses: { ...okFlag, ...notFoundRes } } },
+    "/v1/tools/invites/{id}/resend": { post: { tags: ["Team"], summary: "Renew an invite for 14 days with a new link and email it again (owner or admin). The previous link stops working", parameters: [idParam("The invite")], responses: { ...ok(obj({ id: uuid, email: str, link: str, expiresAt: dateTime, emailed: bool, emailError: str })), ...notFoundRes } } },
+    "/v1/tools/team/{userId}": { delete: { tags: ["Team"], summary: "Remove a member from the workspace (owner only; not the owner, not yourself). Their leads and campaigns stay", parameters: [pid("userId", "The member's user id")], responses: { ...okFlag, ...res("400", "Cannot remove yourself", errorBody), ...res("403", "Only the owner can remove members", errorBody), ...notFoundRes } } },
+
+    // Visitors
+    "/v1/visitors/pixels/{id}": { delete: { tags: ["Visitors"], summary: "Delete a pixel. Its snippet stops recording", parameters: [idParam("The pixel")], responses: { ...okFlag, ...notFoundRes } } },
+    "/v1/visitors/{domain}": { patch: { tags: ["Visitors"], summary: "Set a visiting company's review status", parameters: [pid("domain", "The company's domain", str)], requestBody: j(obj({ status: { ...str, enum: ["new", "reviewed", "contacted", "ignored"] } }, ["status"])), responses: { ...okFlag, ...notFoundRes } } },
+    "/v1/visitors/{domain}/visits": { get: { tags: ["Visitors"], summary: "The page views behind one visiting company", parameters: [pid("domain", "The company's domain", str)], responses: { ...ok(obj({ visits: arr({ type: "object" }) }, ["visits"])), ...notFoundRes } } },
+
+    // Discovery agent (Automation page)
+    "/v1/automation/discover": { post: { tags: ["Automation"], summary: "Run the discovery agent once: find up to `count` people for the ICP from every available source. 402 when the monthly search allowance is spent, 502 `blocked` when no source could answer (not the same as finding nobody), 500 when the run failed. `preview` finds without saving", requestBody: j(runInput), responses: { ...ok(), ...res("402", "quota", errorBody), ...res("502", "blocked", errorBody), ...res("500", "failed", errorBody) } } },
+    "/v1/automation/linkedin-scrape": { post: { tags: ["Automation"], summary: "Run the discovery agent against public LinkedIn search results only (no sign-in). Same answers as /discover", requestBody: j(runInput), responses: { ...ok(), ...res("402", "quota", errorBody), ...res("502", "blocked", errorBody) } } },
+    "/v1/automation/leads": { get: { tags: ["Automation"], summary: "Leads the discovery agent found", parameters: [q("company", { ...str, maxLength: 200 }), q("runId", uuid), q("limit", { ...int, minimum: 1, maximum: 500, default: 50 }), q("offset", { ...int, minimum: 0, default: 0 })], responses: ok(obj({ data: arr({ type: "object" }), count: int }, ["data", "count"])) } },
+    "/v1/automation/runs": { get: { tags: ["Automation"], summary: "Recent discovery-agent runs with what each found and any note", parameters: [q("limit", { ...int, minimum: 1, maximum: 100, default: 25 })], responses: ok(obj({ runs: arr({ type: "object" }) }, ["runs"])) } },
+    "/v1/agent/capabilities": { get: { tags: ["Agents"], summary: "What this API offers an agent: the tools, the workflow and the limits", responses: ok() } },
+
+    // Replies and webhook deliveries
+    "/v1/inbound-address": {
+      get: { tags: ["Outreach"], summary: "Whether the workspace's secret inbound-reply address exists, when it was made and last used, and how many replies it has received (owner or admin). The token itself is never shown again", responses: ok(obj({ configured: bool, createdAt: nullable(dateTime), lastUsedAt: nullable(dateTime), received: int }, ["configured", "received"])) },
+      post: { tags: ["Outreach"], summary: "Create the workspace's secret inbound-reply address, or replace it (owner or admin). The old address stops working at once. `token` and `url` are in this answer only: copy them now", responses: created(obj({ token: str, url: str, createdAt: dateTime, configured: { ...bool, enum: [true] } }, ["token", "url", "configured"])) },
+      delete: { tags: ["Outreach"], summary: "Remove the inbound-reply address (owner or admin). Posts to it are refused from then on", responses: { ...okFlag, ...notFoundRes } },
+    },
+    "/v1/public/inbound/{token}": { post: { tags: ["Public"], security: [], summary: "Record a reply sent to a campaign, posted by a forwarding service (Zapier, Make, an email-to-webhook forwarder) as JSON. No sign-in: the token in the path is the credential. Same work as POST /v1/campaigns/inbound: the sequence stops on reply and the reply is classified and learned from. Body at most 256 KB; 60 requests a minute per caller and 300 an hour per address. An unknown token is 404", parameters: [pid("token", "The secret from the workspace's inbound address", str)], requestBody: j(obj({ from: { ...str, maxLength: 1000, description: "jane@example.com or Jane <jane@example.com>" }, subject: { ...str, maxLength: 1000 }, text: { ...str, maxLength: 200000, default: "" } }, ["from"])), responses: { ...ok(obj({ matched: bool, intent: str, confidence: num, skipped: str, note: str }, ["matched"])), ...res("400", "Not JSON, or `from` is not an address", errorBody), ...notFoundRes, ...res("429", "rate_limited", errorBody) } } },
+    "/v1/campaigns/{id}/contacts/{contactId}/replied": { post: { tags: ["Outreach"], summary: "Mark a contact as having replied, for a reply Scout did not see (a call, LinkedIn, a forwarded thread). The sequence stops as for a recorded reply, the reply counts in the campaign and its A/B results, and the lead is tagged `replied:<intent>`. `positive: true` records it as interested", parameters: [idParam("The campaign"), pid("contactId", "The campaign contact")], requestBody: j(obj({ positive: { ...bool, default: false }, intent: { ...str, enum: ["interested", "not_interested", "referral", "question", "other"] } })), responses: { ...ok(obj({ ok: bool, contactId: uuid, intent: str, status: { ...str, enum: ["replied"] } }, ["ok", "contactId", "intent", "status"])), ...res("400", "The contact's lead has no email address", errorBody), ...notFoundRes } } },
+    "/v1/webhooks/{id}/deliveries": { get: { tags: ["Webhooks"], summary: "The last 20 delivery attempts to one webhook (owner or admin): when, which event, the state, attempts, and whether it was delivered with the receiver's status code or the error", parameters: [idParam("The webhook")], responses: { ...ok(obj({ deliveries: arr(obj({ id: uuid, at: dateTime, createdAt: dateTime, event: nullable(str), state: str, attempts: int, maxAttempts: int, delivered: bool, pending: bool, status: int, error: str }, ["id", "at", "state", "attempts", "delivered"])) }, ["deliveries"])), ...notFoundRes } } },
+
+    // Admin
+    "/v1/admin/plans": { get: { tags: ["Admin"], security: adminSec, summary: "Every plan with its price and limits", responses: ok(obj({ plans: arr({ type: "object" }) }, ["plans"])) } },
+    "/v1/admin/balances": { get: { tags: ["Admin"], security: adminSec, summary: "Remaining credit at each configured data provider and verifier. Rate limited", responses: ok(obj({ balances: arr({ type: "object" }), checkedAt: dateTime }, ["balances", "checkedAt"])) } },
+    "/v1/admin/tools": { get: { tags: ["Admin"], security: adminSec, summary: "Which providers and tools are configured on the server and whether each answers", responses: ok() } },
+  };
+  /** Routes that answer 201 but were documented with 200. `alsoOk`: the route answers 200 in another case. */
+  const createdRoutes: [string, string, boolean][] = [
+    ["/v1/leads", "post", true],
+    ["/v1/leads/lists", "post", false],
+    ["/v1/icps", "post", false],
+    ["/v1/campaigns", "post", false],
+    ["/v1/campaigns/email-accounts", "post", false],
+    ["/v1/webhooks", "post", false],
+    ["/v1/signals/subscriptions", "post", false],
+    ["/v1/signals/monitors", "post", false],
+    ["/v1/tools/saved-searches", "post", false],
+    ["/v1/tools/tasks", "post", false],
+    ["/v1/tools/team/invite", "post", false],
+    ["/v1/tools/autopilots", "post", false],
+    ["/v1/visitors/pixels", "post", false],
+    ["/v1/admin/suppressions", "post", true],
+  ];
+
+  const doc = {
     openapi: "3.1.0",
     info: {
       title: "Scout API",
@@ -301,7 +515,7 @@ export function openapi(apiUrl: string) {
       "/v1/audit-log": { get: { tags: ["Account"], summary: "Security log for the workspace, newest first (owner/admin session only): sign-ins, password changes, API keys, admin changes. `ip` is null on rows made by the platform operator (actorType \"admin\")", security: [{ bearerAuth: [] }], parameters: [{ name: "limit", in: "query", schema: { type: "integer", default: 50, maximum: 200 } }, { name: "before", in: "query", schema: str, description: "nextBefore from the previous page" }], responses: ok(obj({ entries: arr(obj({ id: str, action: str, actorType: str, actorEmail: str, targetType: str, targetId: str, result: { ...str, enum: ["ok", "denied", "failed"] }, ip: str, createdAt: str, data: { type: "object" } })), hasMore: bool, nextBefore: str })) } },
       "/v1/tools/team/invites/{id}": { delete: { tags: ["Team"], summary: "Revoke a pending invite (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
       "/v1/tools/team/invites/{id}/resend": { post: { tags: ["Team"], summary: "Re-send a pending invite and renew its 14-day expiry (owner/admin)", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
-      "/v1/webhooks/{id}/test": { post: { tags: ["Webhooks"], summary: "Deliver a webhook.test event to this webhook only, regardless of its event filter", parameters: [{ name: "id", in: "path", required: true, schema: str }], responses: ok() } },
+      "/v1/webhooks/{id}/test": { post: { tags: ["Webhooks"], summary: "Deliver a webhook.test event to this webhook only, regardless of its event filter. With `?wait=1` the answer waits briefly for the delivery and says how it went (`delivered`, the receiver's `status`, or `error`; `pending` when it has not finished yet)", parameters: [{ name: "id", in: "path", required: true, schema: str }, { name: "wait", in: "query", schema: { ...str, enum: ["1", "true"] } }], responses: ok() } },
       "/v1/webhooks/{id}/rotate-secret": {
         post: {
           tags: ["Webhooks"],
@@ -606,7 +820,7 @@ export function openapi(apiUrl: string) {
       "/v1/icps/{id}/score": { post: { tags: ["ICP"], summary: "Score leads against ICP (rules + optional AI re-rank)", parameters: [{ name: "id", in: "path", required: true, schema: str }], requestBody: j(obj({ leadIds: arr(), assign: bool, aiRerankTop: { type: "integer", default: 0 } })), responses: ok() } },
       "/v1/campaigns": {
         get: { tags: ["Outreach"], summary: "List campaigns", responses: ok() },
-        post: { tags: ["Outreach"], summary: "Create campaign with sequence steps", requestBody: j(obj({ name: str, icpId: str, listId: str, emailAccountId: str, settings: { type: "object" }, steps: arr(obj({ delayDays: num, subjectTemplate: str, bodyTemplate: str, aiPersonalize: bool, aiInstructions: str })) }, ["name"])), responses: ok() },
+        post: { tags: ["Outreach"], summary: "Create campaign with sequence steps." + templateNote, requestBody: j(obj({ name: str, icpId: str, listId: str, emailAccountId: str, settings: { type: "object" }, steps: arr(obj({ delayDays: num, subjectTemplate: str, bodyTemplate: str, aiPersonalize: bool, aiInstructions: str })) }, ["name"])), responses: ok() },
       },
       "/v1/campaigns/generate": { post: { tags: ["Outreach"], summary: "Generate an AI-personalized email for a lead (no campaign needed)", requestBody: j(obj({ leadId: str, lead: { type: "object" }, sender: obj({ name: str, company: str, title: str, valueProp: str, signature: str, tone: str }, ["name", "company", "valueProp"]), instructions: str, stepNo: num, language: str }, ["sender"])), responses: ok(obj({ subject: str, body: str, personalized: bool })) } },
       "/v1/campaigns/inbound": { post: { tags: ["Outreach"], summary: "Ingest an inbound reply (stops sequence, classifies intent)", requestBody: j(obj({ from: str, text: str, subject: str }, ["from"])), responses: ok() } },
@@ -621,7 +835,7 @@ export function openapi(apiUrl: string) {
       "/v1/events": { get: { tags: ["Account"], summary: "Event log", responses: ok() } },
       "/v1/webhooks": { get: { tags: ["Account"], summary: "List webhooks", responses: ok() }, post: { tags: ["Account"], summary: "Create webhook (HMAC-signed; events: lead.created, lead.enriched, lead.verified, lead.replied, search.completed, message.sent/opened/clicked, campaign.started, *)", requestBody: j(obj({ url: str, events: arr() }, ["url"])), responses: ok() } },
       "/v1/integrations": { get: { tags: ["Account"], summary: "List CRM integrations", responses: ok() } },
-      "/v1/integrations/{provider}": { put: { tags: ["Account"], summary: "Configure CRM integration (hubspot | pipedrive | zoho | cortex | webhook | sheets)", parameters: [{ name: "provider", in: "path", required: true, schema: str }], requestBody: j(obj({ config: { type: "object" }, autoSync: bool }, ["config"])), responses: ok() } },
+      "/v1/integrations/{provider}": { put: { tags: ["Account"], summary: "Configure an integration: a CRM (hubspot | pipedrive | zoho | cortex | webhook | sheets) or the workspace's own data-provider key. Where the provider allows it, the credentials are checked with a test call: the answer then carries `verified`, and `verifyNote` with the reason when the check failed (the connection is then saved with status `error`). `autoSync` pushes new and updated leads with the sync job", parameters: [{ name: "provider", in: "path", required: true, schema: str }], requestBody: j(obj({ config: { type: "object" }, autoSync: bool }, ["config"])), responses: ok() } },
       "/v1/integrations/{provider}/sync": { post: { tags: ["Account"], summary: "Push leads to CRM", parameters: [{ name: "provider", in: "path", required: true, schema: str }], requestBody: j(obj({ leadIds: arr() }, ["leadIds"])), responses: { "202": { description: "Queued" } } } },
       "/px/{key}.js": { get: { tags: ["Visitors"], security: [], summary: "Website visitor pixel script (embed on your site)", parameters: [{ name: "key", in: "path", required: true, schema: str }], responses: { "200": { description: "JavaScript" } } } },
       "/v1/visitors/pixels": { get: { tags: ["Visitors"], summary: "List pixels + embed snippets", responses: ok() }, post: { tags: ["Visitors"], summary: "Create a pixel for a website", requestBody: j(obj({ name: str, allowedDomains: arr() }, ["name"])), responses: ok() } },
@@ -879,6 +1093,17 @@ export function openapi(apiUrl: string) {
       "/v1/agent/prospect": { post: { tags: ["Agents"], summary: "One-call agent workflow: describe who you want → verified leads + optional personalized emails", requestBody: j(obj({ query: str, limit: { type: "integer", default: 5, maximum: 10 }, generateEmails: bool, sender: { type: "object" }, save: bool }, ["query"])), responses: ok() } },
     },
   };
+
+  // Merge method by method: a path documented above keeps the methods it already has.
+  const paths = doc.paths as Record<string, Record<string, unknown>>;
+  for (const [p, ops] of Object.entries(morePaths)) paths[p] = { ...ops, ...(paths[p] ?? {}) };
+  for (const [p, method, alsoOk] of createdRoutes) {
+    const op = paths[p]?.[method] as { responses?: Record<string, unknown> } | undefined;
+    if (!op?.responses?.["200"]) continue;
+    const { "200": okRes, ...rest } = op.responses;
+    op.responses = { "201": { ...(okRes as object), description: "Created" }, ...(alsoOk ? { "200": okRes } : {}), ...rest };
+  }
+  return doc;
 }
 
 /**

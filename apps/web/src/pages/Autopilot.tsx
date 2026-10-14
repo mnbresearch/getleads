@@ -3,7 +3,7 @@ import { apiFetch, fmtDate, expectLists } from "../lib/api";
 import { Empty, LoadError, Modal, Page, Spinner, useToast } from "../components/ui";
 import { plural } from "../lib/plural";
 
-interface AP { id: string; name: string; query: { query?: string }; icpId: string | null; listId: string | null; campaignId: string | null; dailyLeads: number; minScore: number; requireValidEmail: boolean; autoEnroll: boolean; active: boolean; runHourUtc: number; lastRunAt: string | null; stats: Record<string, number> }
+interface AP { id: string; name: string; query: { query?: string }; icpId: string | null; listId: string | null; campaignId: string | null; dailyLeads: number; minScore: number; requireValidEmail: boolean; autoEnroll: boolean; active: boolean; runHourUtc: number; lastRunAt: string | null; stats: { runs?: number; found?: number; saved?: number; enrolled?: number; lastSaved?: number; lastNote?: string | null } }
 interface SS { id: string; name: string; query: Record<string, unknown>; alert: boolean; alertEmail: string | null; lastRunAt: string | null; lastNewCount: number }
 
 const QUERY_CHIPS: [string, string][] = [["titles", "Title"], ["industries", "Industry"], ["locations", "Location"], ["companySizes", "Company size"], ["keywords", "Keyword"], ["companyDomains", "Company"]];
@@ -87,6 +87,35 @@ export function AutopilotPage() {
       toast((e as Error).message, "err");
     }
   };
+  /**
+   * Run a saved search and say how it went. "Queued" alone left a run that found nothing
+   * because no search source could answer looking exactly like one where nothing new matched.
+   */
+  const runSaved = async (s: SS) => {
+    try {
+      const { jobId } = await apiFetch<{ jobId: string }>("POST", `/v1/tools/saved-searches/${s.id}/run`);
+      toast("Running - the result shows here when it finishes");
+      const started = Date.now();
+      const poll = async () => {
+        try {
+          const j = await apiFetch<{ status: string; error: string | null; result: { fresh?: number; note?: string | null; skipped?: string; detail?: string } | null }>("GET", `/v1/search/jobs/${jobId}`);
+          if (j.status === "done") {
+            const r = j.result ?? {};
+            toast(r.skipped ? r.detail ?? "Not run" : r.note ? `"${s.name}": ${r.note}` : `"${s.name}": ${plural(r.fresh ?? 0, "new lead")}`, r.note || r.skipped ? "err" : "ok");
+            load();
+            return;
+          }
+          if (j.status === "failed") { toast(j.error ?? "The run failed", "err"); return; }
+        } catch {
+          // A failed poll is retried on the next tick; the run itself is unaffected.
+        }
+        if (Date.now() - started < 180_000) timers.current.push(window.setTimeout(poll, 5_000));
+      };
+      timers.current.push(window.setTimeout(poll, 3_000));
+    } catch (e) {
+      toast((e as Error).message, "err");
+    }
+  };
   return (
     <Page title="Autopilot" subtitle="An autonomous prospecting agent: every day it finds fresh leads for your query, enriches and verifies them, scores against your ICP, and can enroll qualified ones into a campaign. Set it and check the pipeline." actions={<button className="btn-primary" onClick={() => setOpen(true)}>New autopilot</button>}>
       {Toast}
@@ -98,6 +127,8 @@ export function AutopilotPage() {
               <div className="flex items-start justify-between gap-2"><div><div className="font-semibold">{a.name}</div><div className="text-sm text-ink-300">{a.query?.query ? a.query.query : <QuerySummary query={a.query as Record<string, unknown>} />}</div></div><span className={`badge ${a.active ? "bg-emerald-50 text-emerald-700" : "bg-black/[0.05] text-ink-300"}`}>{a.active ? "active" : "paused"}</span></div>
               <div className="mt-2 text-xs text-ink-400">{a.dailyLeads}/day · score ≥ {a.minScore} · {a.requireValidEmail ? "verified email only" : "any email"} · {a.autoEnroll ? "auto-enrolls" : "saves only"} · runs {String(a.runHourUtc).padStart(2, "0")}:00 UTC</div>
               <div className="mt-2 grid grid-cols-4 gap-2 text-center text-xs">{[["runs", a.stats.runs], ["found", a.stats.found], ["saved", a.stats.saved], ["enrolled", a.stats.enrolled]].map(([l, v]) => <div key={String(l)} className="rounded-lg bg-cream p-2"><div className="text-ink-400">{l}</div><div className="text-base font-semibold">{v ?? 0}</div></div>)}</div>
+              {/* Why the last run saved what it did - above all, that no search source could answer, which is not "no matches". */}
+              {a.stats.lastNote && <div className="mt-2 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800 [overflow-wrap:anywhere]" role="status">Last run: {a.stats.lastNote}</div>}
               <div className="mt-2 flex items-center gap-2 text-xs"><span className="text-ink-500">last run {fmtDate(a.lastRunAt)}</span><button className="btn-secondary ml-auto py-1" disabled={running.has(a.id)} onClick={() => runNow(a)}>{running.has(a.id) ? "Running…" : "Run now"}</button><button className="btn-secondary py-1" onClick={() => setEditing(a)}>Edit</button><button className="btn-secondary py-1" onClick={() => apiFetch("PATCH", `/v1/tools/autopilots/${a.id}`, { active: !a.active }).then(load).catch((e) => toast((e as Error).message, "err"))}>{a.active ? "Pause" : "Resume"}</button><button className="text-red-600" onClick={() => { if (!confirm(`Delete the autopilot "${a.name}"? This cannot be undone.`)) return; apiFetch("DELETE", `/v1/tools/autopilots/${a.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>
             </div>
           ))}
@@ -106,7 +137,7 @@ export function AutopilotPage() {
       <div className="mt-8">
         <div className="mb-2 font-medium">Saved searches & alerts</div>
         {savedErr && !savedLoaded ? <LoadError message={savedErr} onRetry={load} /> : !savedLoaded ? <Spinner /> : saved.length === 0 ? <div className="text-sm text-ink-400">Save a search from the Find leads page to re-run it daily and get an email when new matches appear.</div> : (
-          <div className="card divide-y divide-slate-100">{saved.map((s) => <div key={s.id} className="flex flex-wrap items-center gap-3 p-3 text-sm"><div className="min-w-0 flex-1"><div className="font-medium [overflow-wrap:anywhere]">{s.name}</div><div className="text-xs text-ink-300"><QuerySummary query={s.query} /></div><div className="mt-0.5 text-xs text-ink-400">{s.alert ? `alerts → ${s.alertEmail ?? "your email"}` : "no alerts"} · last run {s.lastRunAt ? fmtDate(s.lastRunAt) : "never"} · {s.lastNewCount ?? 0} new</div></div><button className="btn-secondary py-1 text-xs" onClick={() => apiFetch("POST", `/v1/tools/saved-searches/${s.id}/run`).then(() => toast("Queued")).catch((e) => toast((e as Error).message, "err"))}>Run</button><button className="text-xs text-red-600" onClick={() => { if (!confirm(`Delete the saved search "${s.name}"?`)) return; apiFetch("DELETE", `/v1/tools/saved-searches/${s.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>)}</div>
+          <div className="card divide-y divide-slate-100">{saved.map((s) => <div key={s.id} className="flex flex-wrap items-center gap-3 p-3 text-sm"><div className="min-w-0 flex-1"><div className="font-medium [overflow-wrap:anywhere]">{s.name}</div><div className="text-xs text-ink-300"><QuerySummary query={s.query} /></div><div className="mt-0.5 text-xs text-ink-400">{s.alert ? `alerts → ${s.alertEmail ?? "your email"}` : "no alerts"} · last run {s.lastRunAt ? fmtDate(s.lastRunAt) : "never"} · {s.lastNewCount ?? 0} new</div></div><button className="btn-secondary py-1 text-xs" onClick={() => runSaved(s)}>Run</button><button className="text-xs text-red-600" onClick={() => { if (!confirm(`Delete the saved search "${s.name}"?`)) return; apiFetch("DELETE", `/v1/tools/saved-searches/${s.id}`).then(load).catch((e) => toast((e as Error).message, "err")); }}>Delete</button></div>)}</div>
         )}
       </div>
       <Modal open={open} onClose={() => setOpen(false)} title="New autopilot" wide>

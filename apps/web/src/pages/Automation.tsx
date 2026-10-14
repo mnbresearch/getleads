@@ -36,7 +36,7 @@ export function AutomationPage() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [query, setQuery] = useState("VP Sales at B2B SaaS companies in India");
-  const [runErr, setRunErr] = useState<{ message: string; quota: boolean } | null>(null);
+  const [runErr, setRunErr] = useState<{ message: string; quota: boolean; info?: boolean } | null>(null);
   const { toast, Toast } = useToast();
 
   const load = useCallback(() => {
@@ -59,6 +59,8 @@ export function AutomationPage() {
       // One toast: a second call replaced the first before anyone could read the counts.
       const summary = preview ? `Would store ${plural(r.found, "lead")}` : `Found ${r.found}, stored ${r.created} new, ${r.duplicates} already known`;
       toast(r.note ? `${summary}. ${r.note}` : summary);
+      // An empty run's explanation stays on screen: a toast is gone before it can be read.
+      if (r.found === 0 && r.note) setRunErr({ message: r.note, quota: false, info: true });
       load();
     } catch (e) {
       // The 502 case carries the real explanation: every provider refused us. Showing the
@@ -77,7 +79,7 @@ export function AutomationPage() {
   };
 
   return (
-    <Page title="Automation" subtitle="Scheduled discovery and job-change tracking. Every lead here came from a real source and can be traced back to the run that found it.">
+    <Page title="Automation" subtitle="Discovery on demand and job-change tracking. Every lead here came from a real source and can be traced back to the run that found it.">
       {Toast}
       {loading ? <Spinner label="Loading…" /> : err ? <LoadError message={err} onRetry={load} /> : (
         <div className="space-y-6">
@@ -89,7 +91,7 @@ export function AutomationPage() {
               <button className="btn-primary" disabled={!!busy || query.trim().length < 3} onClick={() => discover(false)}>{busy === "run" ? "Searching…" : "Run"}</button>
             </div>
             {runErr && (
-              <div className="mt-3 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700 [overflow-wrap:anywhere]" role="alert">
+              <div className={`mt-3 rounded-lg border p-3 text-sm [overflow-wrap:anywhere] ${runErr.info ? "border-amber-300 bg-amber-50 text-amber-800" : "border-red-200 bg-red-50 text-red-700"}`} role={runErr.info ? "status" : "alert"}>
                 {runErr.quota ? <div className="font-medium">Search quota used up</div> : null}
                 <div>{runErr.message}</div>
                 {runErr.quota && <Link className="mt-1 inline-block font-medium underline" to="/settings/billing">See plan &amp; usage</Link>}
@@ -140,7 +142,7 @@ export function AutomationPage() {
           <div className="card p-5">
             <div className="mb-3 font-medium">Agent runs</div>
             {runs.length === 0 ? (
-              <Empty title="No runs yet" hint="Run discovery above, or wait for the daily schedule." />
+              <Empty title="No runs yet" hint="Discovery runs when you press Run above. For a daily schedule, set up an Autopilot." />
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full min-w-[640px] text-sm">

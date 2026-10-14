@@ -2,11 +2,10 @@ import { Hono } from "hono";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
 import { and, asc, inArray, campaignContacts, campaigns, clients, companies, consume, desc, emailAccounts, enqueue, eq, getDb, icps, leads, listLeads, lists, messages, organizations, sequenceSteps, sql, suppressions, type EmailAccount } from "@prospex/db";
-import { generateOutreach, classifyReply, draftReplyToInbound, hasAi, assertPublicHost, isSsrfBlocked, redact } from "@prospex/core";
-import { AI_OFF_NOTE, aiDisabled, aiFor, NO_AI } from "../lib/ai.js";
+import { generateOutreach, hasAi, assertPublicHost, isSsrfBlocked, redact } from "@prospex/core";
+import { AI_OFF_NOTE, aiDisabled, aiFor, aiMissingNote, NO_AI } from "../lib/ai.js";
 import { contactBlock, shownAddress } from "../lib/privacySuppression.js";
-import { assertRowCap } from "../lib/limits.js";
-import { tryConsume } from "../lib/quota.js";
+import { assertPlanCampaigns, assertRowCap } from "../lib/limits.js";
 import { env } from "../env.js";
 import { randomToken } from "../lib/crypto.js";
 import { sealOrgJson } from "../lib/credentials.js";
@@ -14,7 +13,7 @@ import { ApiError, badRequest, notFound, requireSomeFields } from "../lib/errors
 import { assertOwned } from "../lib/ownership.js";
 import { testMailer, systemMailerConfig, allowedSmtpPorts } from "../lib/mailer.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { enrollLeads, experimentForStep, leadsWithUsableEmail, mailingAddressOf, markReplied, outreachReasonOf, reserveManualSend, unsubscribeFooter, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
+import { enrollLeads, experimentForStep, leadsWithUsableEmail, mailingAddressOf, markReplied, orgSenderDefaults, outreachReasonOf, reserveManualSend, unsubscribeFooter, resolveMailer, resumeContact, sendFailureCategory, tickCampaign, SEND_REJECTED } from "../services/campaigns.js";
 import { sendMail } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit } from "../lib/audit.js";
@@ -25,6 +24,8 @@ import { ownerOrAdmin } from "../lib/roles.js";
 import { canonicalEmail } from "../services/leads.js";
 import { requireVerifiedEmail, workspaceEmailVerified } from "../lib/emailVerification.js";
 import { pendingDeletion } from "../services/accountDeletion.js";
+import { ingestInbound } from "../services/inbound.js";
+import { customFieldNames, unknownVariables, unknownVariablesMessage, TEMPLATE_VARIABLES } from "../services/templateVars.js";
 
 export const campaignRoutes = new Hono<Env>();
 campaignRoutes.use("*", requireAuth);
@@ -276,6 +277,10 @@ campaignRoutes.post("/", zValidator("json", campaignInput), async (c) => {
   await assertOwned(icps, b.icpId, oid, "ICP", c);
   await assertOwned(lists, b.listId, oid, "List", c);
   await assertOwned(clients, b.clientId, oid, "Client", c);
+  // The plan's number of campaigns (Free includes one). Checked after the references, so a
+  // request naming another workspace's row is still answered (and audited) as such.
+  await assertPlanCampaigns(db, c.get("auth").org, campaigns);
+  if (b.steps?.length) await assertKnownVariables(oid, b.steps);
   const [row] = await db.insert(campaigns).values({ orgId: oid, name: b.name, icpId: b.icpId ?? null, listId: b.listId ?? null, emailAccountId: b.emailAccountId ?? null, clientId: b.clientId ?? null, settings: b.settings ?? {} }).returning();
   if (b.steps?.length) await db.insert(sequenceSteps).values(b.steps.map(({ id: _id, ...s }, i) => ({ campaignId: row.id, stepNo: i + 1, ...s })));
   return c.json(await fullCampaign(oid, row.id), 201);
@@ -298,6 +303,16 @@ campaignRoutes.patch("/:id", zValidator("json", campaignInput.partial()), async 
   await assertOwned(lists, b.listId, oid, "List", c);
   await assertOwned(clients, b.clientId, oid, "Client", c);
   requireSomeFields(b);
+  if (b.steps?.length) {
+    // Only steps whose text changed are checked: a step saved before this check existed
+    // keeps working when the campaign is edited for some other reason.
+    const stored = await db.select().from(sequenceSteps).where(eq(sequenceSteps.campaignId, existing.id)).orderBy(asc(sequenceSteps.stepNo));
+    const byId = new Map(stored.map((s) => [s.id, s]));
+    const sameText = (a: { subjectTemplate?: string | null; bodyTemplate?: string | null; variants?: unknown }, b2: { subjectTemplate?: string | null; bodyTemplate?: string | null; variants?: unknown } | undefined) =>
+      !!b2 && (a.subjectTemplate ?? "") === (b2.subjectTemplate ?? "") && (a.bodyTemplate ?? "") === (b2.bodyTemplate ?? "") && JSON.stringify(a.variants ?? []) === JSON.stringify(b2.variants ?? []);
+    const changed = b.steps.filter((st, i) => !sameText(st, (st.id ? byId.get(st.id) : undefined) ?? stored[i]));
+    if (changed.length) await assertKnownVariables(oid, changed);
+  }
   await db
     .update(campaigns)
     .set({ ...(b.name ? { name: b.name } : {}), ...(b.clientId !== undefined ? { clientId: b.clientId } : {}), ...(b.icpId !== undefined ? { icpId: b.icpId } : {}), ...(b.listId !== undefined ? { listId: b.listId } : {}), ...(b.emailAccountId !== undefined ? { emailAccountId: b.emailAccountId } : {}), ...(b.settings ? { settings: { ...existing.settings, ...b.settings } } : {}), updatedAt: new Date() })
@@ -305,6 +320,16 @@ campaignRoutes.patch("/:id", zValidator("json", campaignInput.partial()), async 
   if (b.steps) await syncSteps(existing.id, b.steps);
   return c.json(await fullCampaign(oid, existing.id));
 });
+
+/** 400 when a step uses template variables that would render as blank text (services/templateVars.ts). */
+async function assertKnownVariables(oid: string, steps: Parameters<typeof unknownVariables>[0]) {
+  const { db } = getDb();
+  let unknown = unknownVariables(steps, []);
+  if (!unknown.length) return;
+  // Only when something is unknown: is it one of the workspace's own custom fields?
+  unknown = unknownVariables(steps, await customFieldNames(db, oid));
+  if (unknown.length) throw new ApiError(400, unknownVariablesMessage(unknown), "unknown_variables", { unknown, allowed: [...TEMPLATE_VARIABLES] });
+}
 
 /**
  * Bring a campaign's steps in line with the edited list, keeping step identity.
@@ -525,6 +550,8 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
   if (!step) throw notFound("Step");
   const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, b.leadId), eq(leads.orgId, oid)) });
   if (!lead) throw notFound("Lead");
+  // A preview is where a blank {{firstName}} would be noticed, so it is refused the same way saving is.
+  await assertKnownVariables(oid, [step]);
   const company = lead.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, oid)) }) : null;
   const account = cp.emailAccountId ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, cp.emailAccountId), eq(emailAccounts.orgId, oid)) }) : null;
   const s = cp.settings as Record<string, unknown>;
@@ -535,9 +562,15 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
   // Charged only when a model will actually run, as /generate does: with no AI engine the
   // preview is the rendered template, and that used to cost an AI message all the same.
   if (step.aiPersonalize && !previewAiOff && hasAi(previewAi)) await consume(db, oid, "aiMessages", 1);
+  // Who signs off: the sender account's name, else the campaign's sender name, else the
+  // workspace's (Settings - Defaults for AI-drafted emails), else the person previewing. It
+  // used to be "Me" whenever the campaign had no sender attached yet.
+  const auth = c.get("auth");
+  const defaults = orgSenderDefaults(auth.org);
+  const senderName = account?.fromName || (typeof s.senderName === "string" && s.senderName.trim() ? s.senderName : "") || defaults.senderName || auth.user?.name?.trim() || "Me";
   const out = await generateOutreach(previewAi, {
     lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null },
-    sender: { name: account?.fromName ?? "Me", company: String(s.senderCompany ?? ""), title: s.senderTitle ? String(s.senderTitle) : undefined, valueProp: String(s.valueProp ?? step.aiInstructions ?? ""), signature: account?.signature ?? undefined, tone: s.tone as "friendly" | undefined },
+    sender: { name: senderName, company: String(s.senderCompany ?? ""), title: s.senderTitle ? String(s.senderTitle) : undefined, valueProp: String(s.valueProp ?? step.aiInstructions ?? ""), signature: account?.signature ?? undefined, tone: s.tone as "friendly" | undefined },
     subjectTemplate: step.subjectTemplate,
     bodyTemplate: step.bodyTemplate,
     instructions: step.aiInstructions ?? undefined,
@@ -545,7 +578,10 @@ campaignRoutes.post("/:id/preview", zValidator("json", z.object({ leadId: z.stri
     // The same "relevant because" a real send carries, so the preview is what goes out.
     ...(outreachReasonOf(lead) ? { reason: outreachReasonOf(lead) } : {}),
   });
-  return c.json(previewAiOff ? { ...out, aiOff: true, note: AI_OFF_NOTE } : out);
+  if (previewAiOff) return c.json({ ...out, aiOff: true, note: AI_OFF_NOTE });
+  // Personalisation was asked for but there is no engine: say why, in the right words.
+  const missing = step.aiPersonalize && !hasAi(previewAi) ? aiMissingNote(auth.org, "this preview is the template, not a personalised draft") : undefined;
+  return c.json(missing ? { ...out, note: missing } : out);
 });
 
 /** Standalone AI message generation (no campaign needed) - for agents. */
@@ -580,17 +616,10 @@ campaignRoutes.post("/generate", zValidator("json", z.object({
   return c.json({
     ...out,
     ai: personalised,
-    ...(personalised ? {} : { note: aiConfigured ? "The AI engine did not return a usable draft - this is a template, not a personalised draft." : aiDisabled(c.get("auth").org) ? "AI assistance is turned off for this workspace, so this is a template, not a personalised draft. An owner or admin can turn it back on under Settings." : "AI drafting isn't switched on for this workspace yet, so this is a template, not a personalised draft. Contact support to enable it." }),
+    // Three different causes, three different sentences (lib/ai.ts aiMissingNote).
+    ...(personalised ? {} : { note: aiConfigured ? "The AI engine did not return a usable draft - this is a template, not a personalised draft." : (aiMissingNote(c.get("auth").org, "this is a template, not a personalised draft") ?? "This is a template, not a personalised draft.") }),
   });
 });
-
-/** Positive-signal intents worth drafting an AI follow-up for. */
-const REPLY_WORTHY_INTENTS = new Set(["interested", "referral", "question"]);
-
-/** Every intent the classifier may return. Anything else is stored as "other". */
-const REPLY_INTENTS = ["interested", "not_interested", "out_of_office", "unsubscribe", "referral", "question", "bounce", "other"] as const;
-type ReplyIntent = (typeof REPLY_INTENTS)[number];
-const asIntent = (v: unknown): ReplyIntent => (typeof v === "string" && (REPLY_INTENTS as readonly string[]).includes(v) ? (v as ReplyIntent) : "other");
 
 /**
  * The sender's address out of a From value - strictly.
@@ -617,7 +646,11 @@ export function parseSender(from: string): string | null {
   return canonicalEmail(s);
 }
 
-/** Inbound reply ingestion (Resend inbound webhook, Gmail/Zapier forward, or manual). Stops sequences + classifies intent. */
+/**
+ * Inbound reply ingestion (a Gmail/Zapier/Make forward, or manual). Stops sequences and
+ * classifies intent. The same work as the workspace's secret inbound address
+ * (POST /v1/public/inbound/:token, routes/misc.ts) - see services/inbound.ts.
+ */
 campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().max(1000), text: z.string().max(200_000).default(""), subject: z.string().max(1000).optional() })), async (c) => {
   const oid = orgId(c);
   const b = c.req.valid("json");
@@ -625,96 +658,32 @@ campaignRoutes.post("/inbound", zValidator("json", z.object({ from: z.string().m
   if (!email) throw badRequest("`from` must be the sender's address: either a bare address (jane@example.com) or Name <jane@example.com>.");
   const { db } = getDb();
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, oid) });
-  /**
-   * Matched BEFORE any AI sees it.
-   *
-   * This endpoint is fed by mail forwarding, so it receives whatever lands in the mailbox -
-   * newsletters, colleagues, family. The text used to go to the AI classifier first and was
-   * only then compared with the workspace's leads, so mail from people who had nothing to do
-   * with any campaign was sent to a third party. Now the sender must be one of this
-   * workspace's leads before a model is asked anything; mail from anyone else is classified
-   * by the built-in rules (which is all it takes to honour an "unsubscribe") and goes no
-   * further. A workspace that has turned AI assistance off gets the rules for every reply.
-   */
-  const knownSender = await db.query.leads.findFirst({ where: and(eq(leads.orgId, oid), eq(leads.email, email)), columns: { id: true } });
-  const aiOff = aiDisabled(org ?? c.get("auth").org);
-  const ai = knownSender && !aiOff ? aiFor(c.get("auth")) : NO_AI;
-  // Classification is an AI call and is metered like one. Over quota it still runs - on the
-  // rule-based path - because marking the reply (which stops the sequence) must never depend
-  // on the AI budget. The response says which path was taken. Nothing is charged for a
-  // message no model will see.
-  const clsCharge: Awaited<ReturnType<typeof tryConsume>> = knownSender && !aiOff ? await tryConsume(db, oid, "aiMessages", 1) : { ok: true };
-  const replyText = `${b.subject ?? ""}\n${b.text}`;
-  /**
-   * Nor on the AI provider being up. A provider error (a 429, a timeout) used to escape
-   * from here as a 500: the reply was dropped, nothing was marked, and the sequence kept
-   * emailing someone who had just answered - or asked to be removed. Any failure falls
-   * back to the rule-based classifier, which needs nothing but the text.
-   */
-  let aiFailed = false;
-  const raw = await classifyReply(clsCharge.ok ? ai : NO_AI, replyText).catch(async (e) => {
-    aiFailed = true;
-    console.warn(`[campaigns] reply classification failed, using rules: ${(e as Error)?.name ?? "Error"}`);
-    return classifyReply(NO_AI, replyText).catch(() => ({ intent: "other", confidence: 0 }) as Awaited<ReturnType<typeof classifyReply>>);
-  });
-  // The intent is model output: it is written to messages.intent and into a lead tag
-  // (`replied:<intent>`), so it is held to the known set before it is stored anywhere.
-  const cls = { ...raw, intent: asIntent(raw?.intent), confidence: typeof raw?.confidence === "number" && Number.isFinite(raw.confidence) ? Math.min(1, Math.max(0, raw.confidence)) : 0 };
-  let aiSkipped: string | undefined = !knownSender ? undefined : aiOff ? "ai_off" : clsCharge.ok ? (aiFailed ? "ai_unavailable" : undefined) : clsCharge.reason === "quota" ? "quota" : "error";
-  // The message itself goes along so an out-of-office auto-reply is not taken for a real one.
-  const matched = await markReplied(oid, email, cls.intent, { subject: b.subject, text: b.text });
-  if (matched) {
-    const lead = await db.query.leads.findFirst({ where: and(eq(leads.orgId, oid), eq(leads.email, email)) });
-    const company = lead?.companyId ? await db.query.companies.findFirst({ where: and(eq(companies.id, lead.companyId), eq(companies.orgId, oid)) }) : null;
+  return c.json(await ingestInbound(oid, org ?? c.get("auth").org, { email, text: b.text, subject: b.subject }, aiFor(c.get("auth"))));
+});
 
-    // Reuse the sender identity from the most recent outbound message to this lead, if any.
-    const prevOutbound = lead
-      ? await db.query.messages.findFirst({ where: and(eq(messages.orgId, oid), eq(messages.leadId, lead.id), eq(messages.direction, "outbound")), orderBy: desc(messages.createdAt) })
-      : null;
-    // Both scoped to this workspace: the sender identity (name, signature) read here goes
-    // into the AI draft, and must never be another tenant's.
-    const campaign = prevOutbound?.campaignId ? await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, prevOutbound.campaignId), eq(campaigns.orgId, oid)) }) : null;
-    const account = campaign?.emailAccountId ? await db.query.emailAccounts.findFirst({ where: and(eq(emailAccounts.id, campaign.emailAccountId), eq(emailAccounts.orgId, oid)) }) : null;
-    const cs = (campaign?.settings ?? {}) as Record<string, unknown>;
-
-    let draftReply: { subject: string; body: string } | null = null;
-    // Charged before the call, so an org past its cap does not keep getting drafts for free
-    // (the old charge-after was wrapped in `.catch(() => {})`).
-    const draftCharge = lead && REPLY_WORTHY_INTENTS.has(cls.intent) && !aiSkipped ? await tryConsume(db, oid, "aiMessages", 1) : null;
-    if (draftCharge && !draftCharge.ok) aiSkipped = draftCharge.reason === "quota" ? "quota" : "error";
-    if (lead && draftCharge?.ok) {
-      const styleExamples = ((org?.settings as Record<string, unknown> | undefined)?.aiReplyStyleExamples as { subject: string; body: string }[] | undefined) ?? [];
-      draftReply = await draftReplyToInbound(ai, {
-        inboundText: b.text,
-        inboundSubject: b.subject,
-        intent: cls.intent,
-        lead: { ...lead, company: company ? { name: company.name, domain: company.domain, industry: company.industry, description: company.description } : null },
-        sender: {
-          name: account?.fromName ?? "Me",
-          company: String(cs.senderCompany ?? ""),
-          title: cs.senderTitle ? String(cs.senderTitle) : undefined,
-          valueProp: String(cs.valueProp ?? ""),
-          signature: account?.signature ?? undefined,
-          tone: (cs.tone as "friendly" | undefined) ?? "friendly",
-        },
-        styleExamples,
-      }).catch(() => null);
-    }
-
-    await db.insert(messages).values({
-      orgId: oid,
-      campaignId: campaign?.id,
-      leadId: lead?.id,
-      direction: "inbound",
-      toEmail: email,
-      subject: (b.subject ?? "(reply)").slice(0, 500),
-      bodyText: b.text.slice(0, 20000),
-      status: "received",
-      intent: cls.intent,
-      draftReply: draftReply ?? undefined,
-    });
-  }
-  return c.json({ matched, intent: cls.intent, confidence: cls.confidence, ...(aiSkipped ? { skipped: aiSkipped, note: aiSkipped === "quota" ? "AI quota reached: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_unavailable" ? "The AI engine did not answer: the reply was classified with rules only and no draft was written." : aiSkipped === "ai_off" ? "AI assistance is turned off for this workspace: the reply was classified with rules only and no draft was written." : "Could not record AI usage, so the AI steps were skipped." } : {}) });
+/**
+ * Mark a contact as having replied, by hand - for a reply that arrived somewhere Scout does
+ * not see (a phone call, LinkedIn, a forwarded thread). It does what an ingested reply does:
+ * the sequence stops (per the campaign's stop-on-reply setting), the reply is counted for the
+ * campaign and its A/B results, and the lead is tagged `replied:<intent>`. `positive: true`
+ * records it as interested; otherwise it is recorded as a reply with no stated intent.
+ */
+campaignRoutes.post("/:id/contacts/:contactId/replied", zValidator("json", z.object({ positive: z.boolean().default(false), intent: z.enum(["interested", "not_interested", "referral", "question", "other"]).optional() }).optional()), async (c) => {
+  const oid = orgId(c);
+  const { db } = getDb();
+  const campaign = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, c.req.param("id")), eq(campaigns.orgId, oid)) });
+  if (!campaign) throw notFound("Campaign");
+  const cc = await db.query.campaignContacts.findFirst({ where: and(eq(campaignContacts.id, c.req.param("contactId")), eq(campaignContacts.campaignId, campaign.id)) });
+  if (!cc) throw notFound("Contact");
+  const lead = await db.query.leads.findFirst({ where: and(eq(leads.id, cc.leadId), eq(leads.orgId, oid)) });
+  if (!lead?.email) throw badRequest("This contact's lead has no email address, so the reply cannot be recorded against it.");
+  const body = c.req.valid("json");
+  const intent = body?.intent ?? (body?.positive ? "interested" : "other");
+  await markReplied(oid, lead.email, intent);
+  // A contact already stopped (finished, failed) is not touched by markReplied; it is marked here so the list says "replied".
+  await db.update(campaignContacts).set({ status: "replied", nextSendAt: null, updatedAt: new Date() }).where(and(eq(campaignContacts.id, cc.id), sql`${campaignContacts.status} NOT IN ('replied','unsubscribed')`));
+  await audit(c, "campaign.contact_marked_replied", { targetType: "campaign", targetId: campaign.id, data: { contactId: cc.id, intent } });
+  return c.json({ ok: true, contactId: cc.id, intent, status: "replied" });
 });
 
 /** How long after a person wrote in an answer to them still counts as an answer (not held back by sender warm-up). */

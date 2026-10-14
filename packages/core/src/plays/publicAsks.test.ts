@@ -362,7 +362,8 @@ describe("findPublicAsks", () => {
   });
 
   it("leaves out conversations older than asked for, and says how many", async () => {
-    const all = await findPublicAsks({ competitors: ["Acme"], sources: ["reddit"] }, { searchOpts: { providers: [searchWith(answer)] } });
+    // Years, not the 30-day default: this pins how old threads are handled.
+    const all = await findPublicAsks({ competitors: ["Acme"], sources: ["reddit"], days: 3650 }, { searchOpts: { providers: [searchWith(answer)] } });
     expect(all.findings.some((f) => f.evidenceUrl!.includes("zzz999"))).toBe(true);
     resetSearchCache();
     const recent = await findPublicAsks({ competitors: ["Acme"], sources: ["reddit"], days: 90 }, { searchOpts: { providers: [searchWith(answer)] } });
@@ -385,7 +386,8 @@ describe("findPublicAsks", () => {
     const { trace } = await findPublicAsks({ competitors: ["Acme", "Rival", "Zeta", "Omega"], problems: ["onboarding contractors", "tracking equipment"], category: "employee onboarding software" }, { searchOpts: { providers: [search] }, limit: 200 });
     expect(search.queries).toHaveLength(24);
     // Twenty-four web searches, and eight questions to the Hacker News search (one per subject, then one more).
-    expect(net.calls.filter((c) => c.startsWith("https://hn.algolia.com/"))).toHaveLength(8);
+    // (Searches only: a thread web search found undated may also have its date looked up.)
+    expect(net.calls.filter((c) => c.startsWith("https://hn.algolia.com/api/v1/search_by_date"))).toHaveLength(8);
     expect(trace.searches).toBe(32);
     expect(trace.notes.some((n) => /^24 of \d+ searches were run/.test(n))).toBe(true);
     resetSearchCache();
@@ -462,7 +464,8 @@ describe("the Hacker News search", () => {
 
   it("is asked directly on its one public address, and dates every thread it returns", async () => {
     use(hn());
-    const { findings, trace } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [NO_WEB] } });
+    // Years, not the 30-day default: this pins how old threads are handled.
+    const { findings, trace } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"], days: 3650 }, { searchOpts: { providers: [NO_WEB] } });
     // Only that host, only the search endpoint, and what is asked is the subject.
     expect(net.hosts()).toEqual(["hn.algolia.com"]);
     expect(net.calls).toHaveLength(2);
@@ -473,8 +476,9 @@ describe("the Hacker News search", () => {
     expect([first.searchParams.get("tags"), first.searchParams.get("restrictSearchableAttributes")]).toEqual(["story", "title"]);
     const second = new URL(net.calls[1]);
     expect([second.searchParams.get("query"), second.searchParams.get("tags"), second.searchParams.get("restrictSearchableAttributes")]).toEqual(["Acme", "ask_hn", null]);
-    // No robots.txt is asked of an API, and no date limit is sent when none was asked for.
-    expect(net.calls.join(" ")).not.toMatch(/robots\.txt|numericFilters/);
+    // No robots.txt is asked of an API. A date limit is always sent now: the window asked for (here years).
+    expect(net.calls.join(" ")).not.toMatch(/robots\.txt/);
+    expect(first.searchParams.get("numericFilters")).toMatch(/^created_at_i>\d+$/);
 
     const by = new Map(findings.map((f) => [f.evidenceUrl!, f]));
     expect([...by.keys()].sort()).toEqual(["https://news.ycombinator.com/item?id=33244922", "https://news.ycombinator.com/item?id=46100001", "https://news.ycombinator.com/item?id=46100002"]);
@@ -516,7 +520,8 @@ describe("the Hacker News search", () => {
 
   it("an old thread, or one with no date, is kept with less confidence; with a number of days set, a thread known to be older is left out", async () => {
     use(hn());
-    const all = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [NO_WEB] } });
+    // Years, not the 30-day default: this pins how old threads are handled.
+    const all = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"], days: 3650 }, { searchOpts: { providers: [NO_WEB] } });
     const old = all.findings.find((f) => f.evidenceUrl!.endsWith("33244922"))!;
     expect(old).toMatchObject({ confidence: 0.35, signalAt: new Date(NOW - 1450 * 86_400_000) });
     // Nothing in the sentence claims it is recent.
@@ -546,7 +551,8 @@ describe("the Hacker News search", () => {
 
   it("answers when web search does not, and is not asked at all when Hacker News was not chosen", async () => {
     use(hn());
-    const down = await findPublicAsks({ competitors: ["Acme"] }, { searchOpts: { providers: [brokenSearch("duckduckgo"), brokenSearch("bing_html")] } });
+    // Years, not the 30-day default: this pins how old threads are handled.
+    const down = await findPublicAsks({ competitors: ["Acme"], days: 3650 }, { searchOpts: { providers: [brokenSearch("duckduckgo"), brokenSearch("bing_html")] } });
     expect(down.trace.blocked).toBe(false);
     expect(down.findings.length).toBe(3);
     expect(down.trace.notes.some((n) => / searches did not get an answer, so some results may be missing\.$/.test(n))).toBe(true);
@@ -652,7 +658,8 @@ describe("a Hacker News post that only mentions the subject is not about it", ()
 
   it("for a competitor: only where the product is named is somebody asking about it", async () => {
     use(serve(HITS));
-    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [searchWith(() => [])] } });
+    // Years, not the 30-day default: this pins how old threads are handled.
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"], days: 3650 }, { searchOpts: { providers: [searchWith(() => [])] } });
     const by = new Map(findings.map((f) => [f.evidenceUrl!.split("=")[1], f]));
     expect([...by.keys()].sort()).toEqual(["49000004", "49000005"]);
     expect(by.get("49000004")).toMatchObject({ relevantBecause: "Hacker News thread asking about Acme.", evidenceTitle: "Ask HN: CRM vs. Acme", evidenceQuote: "Has anyone here used Clarify?" });
@@ -746,7 +753,8 @@ describe("Hacker News: who is complaining, and who is studying a market", () => 
 
   it("keeps the asks and the complaint of somebody who has one, each once, with the recent ask on top", async () => {
     use(serve);
-    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"] }, { searchOpts: { providers: [searchWith(() => [])] } });
+    // Years, not the 30-day default: this pins how old threads are handled.
+    const { findings } = await findPublicAsks({ competitors: ["Acme"], sources: ["hackernews"], days: 3650 }, { searchOpts: { providers: [searchWith(() => [])] } });
     expect(findings.map((f) => [f.evidenceUrl!.split("=")[1], f.signalType, f.confidence])).toEqual([
       ["50000007", "public_ask", 0.75],
       ["50000006", "public_complaint", 0.7],

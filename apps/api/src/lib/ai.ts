@@ -1,4 +1,4 @@
-import { createAiProviderForPlan, type AiProvider } from "@prospex/core";
+import { createAiProvider, createAiProviderForPlan, hasAi, type AiProvider } from "@prospex/core";
 import type { AuthContext } from "./auth.js";
 
 /**
@@ -45,4 +45,43 @@ export function aiForOrg(org: { plan?: string | null; settings?: unknown } | nul
 /** The same, for a request: the org is already on the auth context, so this costs no query. */
 export function aiFor(auth: Pick<AuthContext, "org">): AiProvider {
   return aiForOrg(auth.org);
+}
+
+/**
+ * Why a workspace has no AI engine, when it has none. Three different causes used to share
+ * one sentence ("isn't switched on for this workspace yet. Contact support"), which was wrong
+ * twice over: a workspace that switched AI off itself was sent to support, and a server with
+ * no engine at all was described as a setting of the customer's workspace.
+ *
+ *  - "workspace_off": an owner or admin turned AI assistance off under Settings.
+ *  - "plan": the server has an engine, but only one this workspace's plan does not include.
+ *  - "platform": no AI engine is connected on the server at all - nothing the customer can change.
+ *
+ * null when the workspace does have an engine.
+ */
+export type AiMissingReason = "workspace_off" | "plan" | "platform";
+
+export function aiMissingReason(org: { plan?: string | null; settings?: unknown } | null | undefined): AiMissingReason | null {
+  if (aiDisabled(org)) return "workspace_off";
+  if (hasAi(createAiProviderForPlan(org?.plan ?? "free"))) return null;
+  // Any engine at all on the server (the paid one included)? Then it is the plan, not the platform.
+  return hasAi(createAiProvider()) ? "plan" : "platform";
+}
+
+/** Customer-facing sentences for each cause. They name no server setting. */
+export const AI_PLATFORM_MISSING = "AI drafting isn't available yet: no AI engine is connected on our side. This is not a setting in your workspace - contact support if you need it.";
+export const AI_PLAN_MISSING = "AI drafting isn't included in this workspace's plan. Upgrade the plan to use it.";
+
+/**
+ * One sentence saying why there was no AI, for a feature that falls back to something
+ * without it (a template, rules). `what` is the fallback, e.g. "this is a template, not a
+ * personalised draft". Undefined when the workspace has an engine.
+ */
+export function aiMissingNote(org: { plan?: string | null; settings?: unknown } | null | undefined, what?: string): string | undefined {
+  const reason = aiMissingReason(org);
+  if (!reason) return undefined;
+  const tail = what ? `, so ${what}.` : ".";
+  if (reason === "workspace_off") return `AI assistance is turned off for this workspace${tail} An owner or admin can turn it back on under Settings.`;
+  if (reason === "plan") return `AI drafting isn't included in this workspace's plan${tail} Upgrade the plan to use it.`;
+  return `AI drafting isn't available yet - no AI engine is connected on our side${tail} This is not a setting in your workspace; contact support if you need it.`;
 }

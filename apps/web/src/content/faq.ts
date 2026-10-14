@@ -44,10 +44,10 @@ export const FAQS: Faq[] = [
   },
   {
     q: "What are AEO and GEO?",
-    a: "Answer Engine Optimisation and Generative Engine Optimisation are the practice of being named by AI assistants when someone asks about your category. Scout measures it: it writes the questions a real buyer would type, asks each engine repeatedly on a schedule, and reports how often you appear, per engine, with the sample size.",
+    a: "Answer Engine Optimisation and Generative Engine Optimisation are the practice of being named by AI assistants when someone asks about your category. Scout measures it: it writes the questions a real buyer would type, asks each connected engine (Gemini and Llama today, more as they are connected) repeatedly on a schedule, and reports how often you appear, per engine, with the sample size.",
   },
   {
-    q: "Can you guarantee my brand will be recommended by ChatGPT or Gemini?",
+    q: "Can you guarantee my brand will be recommended by an AI assistant?",
     a: "No, and anyone who guarantees that is selling you variance. Ask any engine the same question twice and you get different brands in a different order. What Scout can tell you is which questions you are absent from, who currently owns those answers, and which gaps are realistically winnable.",
   },
   {
@@ -68,6 +68,6 @@ export const FAQS: Faq[] = [
   },
   {
     q: "Can AI agents use Scout directly?",
-    a: "Yes. Scout ships an MCP server and a REST API, so an agent can search, enrich, verify and send using the same tools a human rep uses, with the same quotas and the same safeguards.",
+    a: "Yes. Scout has a REST API with API keys, and an MCP server is available on request, so an agent can search, enrich, verify and send using the same tools a human rep uses, with the same quotas and the same safeguards.",
   },
 ];

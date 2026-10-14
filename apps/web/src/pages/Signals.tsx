@@ -47,6 +47,24 @@ function describeSubRun(r: { parsed?: number; stored?: number; matched?: number;
   return `${parts.join(", ")}.${tail ? ` ${tail}` : ""}`;
 }
 
+/**
+ * Why the last run created no leads, from the counts the server keeps per run. A subscription
+ * that matched and created nothing used to look exactly like one that was working.
+ */
+export function lastRunWhy(s: Pick<Sub, "autoCreateLeads" | "stats">): string | null {
+  const st = s.stats ?? {};
+  const matched = st.lastRunMatched ?? 0;
+  const parts: string[] = [];
+  if (s.autoCreateLeads && matched > 0 && (st.lastRunLeadsCreated ?? 0) === 0) {
+    if (st.lastRunNoPerson) parts.push(`nobody with the target titles found at ${plural(st.lastRunNoPerson, "company", "companies")}`);
+    if (st.lastRunAlreadyLeads) parts.push(`people at ${plural(st.lastRunAlreadyLeads, "company", "companies")} were already leads`);
+    if (st.lastRunSearchFailed) parts.push(`people search could not run for ${plural(st.lastRunSearchFailed, "company", "companies")}`);
+  }
+  const head = parts.length ? `Last run: ${plural(matched, "match", "matches")}, no leads - ${parts.join("; ")}.` : "";
+  const loc = st.lastRunSkippedLocation ? `${plural(st.lastRunSkippedLocation, "signal")} skipped as outside your locations.` : "";
+  return [head, loc].filter(Boolean).join(" ") || null;
+}
+
 /** Saved count from leadIds actually returned, plus whatever stopped the rest. */
 function dmSummary(r: { people: { leadId?: string }[]; skipped?: string; saveStopped?: string }): string {
   const saved = r.people.filter((p) => p.leadId).length;
@@ -166,8 +184,9 @@ export function SignalsPage() {
                 </div>
               </div>
               <div className="mt-2 flex flex-wrap gap-1">{s.types.map((t) => <TypeBadge key={t} t={t} />)}</div>
-              <div className="mt-2 text-xs text-ink-400">Keywords: {[...s.keywords, ...s.industries, ...s.locations].join(", ") || "any"} · Targets: {s.targetTitles.join(", ")}</div>
+              <div className="mt-2 text-xs text-ink-400">Keywords: {[...s.keywords, ...s.industries].join(", ") || "any"}{s.locations.length > 0 && <> · Locations: {s.locations.join(", ")}</>} · Targets: {s.targetTitles.join(", ")}</div>
               <div className="mt-1 text-xs text-ink-400">{s.autoCreateLeads ? "Auto-creates leads" : "Match only"} · matched {s.stats.matched ?? 0} · leads {s.stats.leadsCreated ?? 0} · last run {fmtDate(s.lastRunAt)}</div>
+              {lastRunWhy(s) && <div className="mt-1 text-xs text-amber-700">{lastRunWhy(s)}</div>}
             </div>
           ))}
         </div>

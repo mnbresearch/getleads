@@ -284,7 +284,7 @@ function CampaignModal({ open, onClose, accounts, lists, icps, onDone, toast, ex
         <div>
           <div className="mb-2 flex items-center justify-between"><div className="label mb-0">Sequence steps</div><button className="btn-secondary" onClick={() => setSteps([...steps, { delayDays: 3, subjectTemplate: "Re: ", bodyTemplate: "", aiPersonalize: true }])}>+ Step</button></div>
           <p className="mb-2 text-xs text-ink-400" data-testid="step-variables-help">
-            Variables: <code>{"{{first_name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{title}}"}</code>, <code>{"{{sender_name}}"}</code>. People approved from a play also have <code>{"{{relevant_because}}"}</code> - the one-sentence reason Scout found them. Leads from anywhere else do not, so give it a fallback: <code>{'{{relevant_because | fallback:"Your team came up in my research."}}'}</code>. With AI personalize on, the opening line can refer to the reason without you adding it.
+            Variables: <code>{"{{first_name}}"}</code>, <code>{"{{last_name}}"}</code>, <code>{"{{full_name}}"}</code>, <code>{"{{company}}"}</code>, <code>{"{{title}}"}</code>, <code>{"{{industry}}"}</code>, <code>{"{{location}}"}</code>, <code>{"{{company_domain}}"}</code>, <code>{"{{sender_name}}"}</code>, <code>{"{{sender_company}}"}</code>, and any custom field your leads have. A variable Scout does not know (like <code>{"{{firstName}}"}</code>) is refused when you save, because it would send as blank text - unless it has a fallback. People approved from a play also have <code>{"{{relevant_because}}"}</code> - the one-sentence reason Scout found them. Leads from anywhere else do not, so give it a fallback: <code>{'{{relevant_because | fallback:"Your team came up in my research."}}'}</code>. With AI personalize on, the opening line can refer to the reason without you adding it.
           </p>
           <div className="space-y-3">
             {steps.map((s, i) => (
@@ -472,7 +472,7 @@ export function CampaignDetail() {
   const [enrollOpen, setEnrollOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [actErr, setActErr] = useState<string | null>(null);
-  const [preview, setPreview] = useState<{ subject: string; body: string } | null>(null);
+  const [preview, setPreview] = useState<{ subject: string; body: string; note?: string } | null>(null);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [lists, setLists] = useState<{ id: string; name: string; count: number }[]>([]);
   const [icps, setIcps] = useState<{ id: string; name: string }[]>([]);
@@ -622,7 +622,28 @@ export function CampaignDetail() {
                           </button>
                         </>
                       )}
-                      <button className="text-brand-600 hover:underline" onClick={() => apiFetch<{ subject: string; body: string }>("POST", `/v1/campaigns/${c.id}/preview`, { leadId: x.lead.id, stepNo: Math.min((c.steps?.length ?? 1), x.currentStep + 1) }).then(setPreview).catch((e) => toast(e.message, "err"))}>Preview</button>
+                      {/* A reply that came in somewhere Scout does not see (a call, LinkedIn,
+                          another inbox): recorded by hand, so the sequence stops and the
+                          campaign's reply numbers include it. */}
+                      {x.status !== "replied" && x.status !== "unsubscribed" && (
+                        <>
+                          <button
+                            className="text-xs text-brand-600 hover:underline"
+                            title="They replied - stop the sequence for them and count the reply"
+                            onClick={() => apiFetch("POST", `/v1/campaigns/${c.id}/contacts/${x.id}/replied`, { positive: false }).then(() => { toast("Marked as replied"); load(); }).catch((e) => toast((e as Error).message, "err"))}
+                          >
+                            Mark replied
+                          </button>
+                          <button
+                            className="text-xs text-emerald-700 hover:underline"
+                            title="They replied and are interested"
+                            onClick={() => apiFetch("POST", `/v1/campaigns/${c.id}/contacts/${x.id}/replied`, { positive: true }).then(() => { toast("Marked as replied - interested"); load(); }).catch((e) => toast((e as Error).message, "err"))}
+                          >
+                            Interested
+                          </button>
+                        </>
+                      )}
+                      <button className="text-brand-600 hover:underline" onClick={() => apiFetch<{ subject: string; body: string; note?: string }>("POST", `/v1/campaigns/${c.id}/preview`, { leadId: x.lead.id, stepNo: Math.min((c.steps?.length ?? 1), x.currentStep + 1) }).then(setPreview).catch((e) => toast(e.message, "err"))}>Preview</button>
                     </div>
                   </td>
                 </tr>
@@ -654,7 +675,7 @@ export function CampaignDetail() {
           {messages.length === 0 && <div className="p-8 text-center text-sm text-ink-400">No messages yet.</div>}
         </div>
       )}
-      <Modal open={!!preview} onClose={() => setPreview(null)} title={preview?.subject ?? ""}><pre className="whitespace-pre-wrap font-sans text-sm">{preview?.body}</pre></Modal>
+      <Modal open={!!preview} onClose={() => setPreview(null)} title={preview?.subject ?? ""}>{preview?.note && <p className="mb-2 text-xs text-amber-700">{preview.note}</p>}<pre className="whitespace-pre-wrap font-sans text-sm">{preview?.body}</pre></Modal>
       <EnrollModal open={enrollOpen} onClose={() => setEnrollOpen(false)} campaign={c} lists={lists} listsLoaded={refsLoaded} onDone={() => { setEnrollOpen(false); load(); }} toast={toast} />
       <CampaignModal open={editOpen} onClose={() => setEditOpen(false)} accounts={accounts} lists={lists} icps={icps} refsErr={refsErr} existing={c} onDone={() => { setEditOpen(false); load(); }} toast={toast} />
     </Page>

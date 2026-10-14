@@ -189,7 +189,15 @@ interface SubjectWorkspace {
   anonymisedMessages?: number;
   /** People waiting in (or skipped from) a play's review queue who carry the address. Absent on an older server. */
   candidates?: number;
+  /** Team invitations sent to the address. Absent on an older server. */
+  invites?: number;
   suppressed?: boolean;
+}
+interface SubjectAccount {
+  userId: string;
+  orgId: string;
+  orgName?: string | null;
+  role?: string;
 }
 interface SubjectReport {
   email: string;
@@ -197,19 +205,28 @@ interface SubjectReport {
   /** Whether any workspace still holds the person's data. Absent on an older server. */
   held?: boolean;
   workspaces: SubjectWorkspace[];
+  /** Upgrade requests sent from the pricing page with this address. Absent on an older server. */
+  upgradeRequests?: number;
+  /** Sign-in accounts with this address: listed, never erased. Absent on an older server. */
+  accounts?: SubjectAccount[];
+  accountNote?: string | null;
 }
 interface EraseResult {
   ok?: boolean;
   workspaces?: number | unknown[];
   leadsDeleted?: number;
   messagesAnonymised?: number;
+  upgradeRequestsAnonymised?: number;
+  invitesDeleted?: number;
+  accounts?: SubjectAccount[];
+  accountNote?: string | null;
   globallySuppressed?: boolean;
 }
 
 const count = (n: unknown) => (typeof n === "number" ? fmtNum(n) : "-");
 const num = (n: unknown) => (typeof n === "number" && Number.isFinite(n) ? n : 0);
 /** A workspace still holds the person when it has a lead, a campaign contact, a message with their address, or has them in a play's review queue. */
-const holds = (w: SubjectWorkspace) => num(w.leads) > 0 || num(w.campaignContacts) > 0 || num(w.messages) > 0 || num(w.candidates) > 0;
+const holds = (w: SubjectWorkspace) => num(w.leads) > 0 || num(w.campaignContacts) > 0 || num(w.messages) > 0 || num(w.candidates) > 0 || num(w.invites) > 0;
 
 /**
  * What a lookup found, in the terms the request is asked in: is this person's data still
@@ -225,7 +242,9 @@ export function subjectSummary(r: SubjectReport): { held: boolean; holding: numb
   const held = typeof r.held === "boolean" ? r.held : holding > 0;
   const kept = r.workspaces.reduce((n, w) => n + num(w.anonymisedMessages), 0);
   const keptIn = r.workspaces.filter((w) => num(w.anonymisedMessages) > 0).length;
-  return { held, holding: held ? Math.max(holding, 1) : 0, kept, keptIn };
+  // Held only through upgrade requests (not tied to a workspace) is not "held by 1 workspace".
+  const outsideWorkspaces = num(r.upgradeRequests) > 0;
+  return { held, holding: held ? (outsideWorkspaces ? holding : Math.max(holding, 1)) : 0, kept, keptIn };
 }
 
 const records = (n: number) => `${fmtNum(n)} message ${n === 1 ? "record" : "records"}`;
@@ -286,6 +305,9 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
   const showKept = !!report && report.workspaces.some((w) => typeof w.anonymisedMessages === "number");
   // Plays hold a person before they are a lead. Shown only when the server reports it.
   const showCandidates = !!report && report.workspaces.some((w) => typeof w.candidates === "number");
+  const showInvites = !!report && report.workspaces.some((w) => num(w.invites) > 0);
+  const upgradeRequestCount = report ? num(report.upgradeRequests) : 0;
+  const accounts = report && Array.isArray(report.accounts) ? report.accounts : [];
   // Erased already: nothing held, and the address is on the platform list.
   const alreadyErased = !!report && !!summary && !summary.held && report.globallySuppressed === true;
   const totalLeads = report ? report.workspaces.reduce((n, w) => n + (typeof w.leads === "number" ? w.leads : 0), 0) : 0;
@@ -302,11 +324,16 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
       const spaces = typeof r.workspaces === "number" ? r.workspaces : Array.isArray(r.workspaces) ? r.workspaces.length : null;
       const leads = typeof r.leadsDeleted === "number" ? r.leadsDeleted : null;
       const kept = typeof r.messagesAnonymised === "number" ? r.messagesAnonymised : null;
+      const requests = num(r.upgradeRequestsAnonymised);
+      const invitesGone = num(r.invitesDeleted);
       setErased(
         [
           `The data held about ${report.email} is erased: ${leads === null ? "their lead records were" : `${fmtNum(leads)} lead ${leads === 1 ? "record was" : "records were"}`} removed${spaces === null ? "" : ` across ${fmtNum(spaces)} ${spaces === 1 ? "workspace" : "workspaces"}`}, along with the copies of their details in messages and activity.`,
           kept === null ? "" : kept === 0 ? "No message records are kept." : `${records(kept)} ${kept === 1 ? "is" : "are"} kept without content (${KEPT_MEANS}).`,
+          requests > 0 ? `${fmtNum(requests)} upgrade ${requests === 1 ? "request was" : "requests were"} anonymised (name, address, mobile and message removed).` : "",
+          invitesGone > 0 ? `${fmtNum(invitesGone)} team ${invitesGone === 1 ? "invitation was" : "invitations were"} deleted.` : "",
           "The address is now on the platform suppression list, so no workspace can email it again.",
+          Array.isArray(r.accounts) && r.accounts.length ? r.accountNote || "This address also has a sign-in account, which erasure does not delete." : "",
         ].filter(Boolean).join(" "),
       );
       setReport(null);
@@ -345,13 +372,29 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
             <div className="mt-1 text-ink-300" data-testid="subject-summary">
               {alreadyErased ? "This person's data has been erased: no workspace holds it." : found === 0 ? "No workspace holds this address." : `Held by ${fmtNum(found)} ${found === 1 ? "workspace" : "workspaces"}.`}{" "}
               {summary && summary.kept > 0 ? `${records(summary.kept)} ${summary.kept === 1 ? "is" : "are"} kept without content in ${fmtNum(summary.keptIn)} ${summary.keptIn === 1 ? "workspace" : "workspaces"} (${KEPT_MEANS}). ` : ""}
+              {upgradeRequestCount > 0 ? `${fmtNum(upgradeRequestCount)} upgrade ${upgradeRequestCount === 1 ? "request" : "requests"} from the pricing page ${upgradeRequestCount === 1 ? "carries" : "carry"} this address (name, mobile and message). ` : ""}
               {report.globallySuppressed === true ? "It is on the platform suppression list." : report.globallySuppressed === false ? "It is not on the platform suppression list." : ""}
             </div>
+            {accounts.length > 0 && (
+              <div className="mt-2 rounded-lg border border-amber-300 bg-amber-50 p-2 text-amber-900" data-testid="subject-accounts">
+                <div>
+                  Sign-in {accounts.length === 1 ? "account" : "accounts"}:{" "}
+                  {accounts.map((a, i) => (
+                    <span key={a.userId}>
+                      {i > 0 ? ", " : ""}
+                      <button className={`${LINK_BTN} text-left [overflow-wrap:anywhere]`} onClick={() => onViewOrg(a.orgId)}>{a.orgName || a.orgId}</button>
+                      {a.role ? ` (${a.role})` : ""}
+                    </span>
+                  ))}
+                </div>
+                {report.accountNote && <div className="mt-1 text-xs">{report.accountNote}</div>}
+              </div>
+            )}
           </div>
           {listed > 0 && (
             <div className="overflow-x-auto">
               <table className="w-full text-sm" data-testid="subject-table">
-                <thead><tr><th className="th">Workspace</th><th className="th text-right">Leads</th><th className="th text-right">In campaigns</th><th className="th text-right">Messages</th>{showCandidates && <th className="th text-right">Plays</th>}{showKept && <th className="th text-right">Kept without content</th>}<th className="th">Do-not-contact there</th></tr></thead>
+                <thead><tr><th className="th">Workspace</th><th className="th text-right">Leads</th><th className="th text-right">In campaigns</th><th className="th text-right">Messages</th>{showCandidates && <th className="th text-right">Plays</th>}{showInvites && <th className="th text-right">Team invites</th>}{showKept && <th className="th text-right">Kept without content</th>}<th className="th">Do-not-contact there</th></tr></thead>
                 <tbody className="divide-y divide-black/5">
                   {report.workspaces.map((w) => (
                     <tr key={w.orgId}>
@@ -360,6 +403,7 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
                       <td className="td text-right tabular-nums">{count(w.campaignContacts)}</td>
                       <td className="td text-right tabular-nums">{count(w.messages)}</td>
                       {showCandidates && <td className="td text-right tabular-nums" data-testid="subject-candidates" title={num(w.candidates) > 0 ? "Found by a play and not yet a lead. This still counts as holding the person's data." : undefined}>{num(w.candidates) > 0 ? `${fmtNum(num(w.candidates))} held by Plays (in review, skipped or approved)` : count(w.candidates)}</td>}
+                      {showInvites && <td className="td text-right tabular-nums">{count(w.invites)}</td>}
                       {showKept && <td className="td text-right tabular-nums">{count(w.anonymisedMessages)}</td>}
                       <td className="td">{w.suppressed === true ? "Yes" : w.suppressed === false ? "No" : "-"}</td>
                     </tr>
@@ -374,7 +418,7 @@ function DataSubjectSection({ onViewOrg, onErased, onLogged }: { onViewOrg: (org
           <form onSubmit={erase} className="space-y-3 border-t border-black/5 bg-red-50/40 p-4" data-testid="subject-erase">
             <div className="text-sm font-medium text-red-800">Erase this person everywhere</div>
             <p className="text-sm text-ink-200">
-              This removes {found === 0 ? "any record of" : totalLeads > 0 ? `the ${fmtNum(totalLeads)} lead ${totalLeads === 1 ? "record" : "records"} for` : "every record of"} <b className="[overflow-wrap:anywhere]">{report.email}</b> from every workspace, together with the copies of their details in messages{showCandidates ? ", activity and play review queues" : " and activity"}, and adds the address to the platform suppression list so nobody can email it again. The workspaces are not asked first. It cannot be undone.
+              This removes {found === 0 ? "any record of" : totalLeads > 0 ? `the ${fmtNum(totalLeads)} lead ${totalLeads === 1 ? "record" : "records"} for` : "every record of"} <b className="[overflow-wrap:anywhere]">{report.email}</b> from every workspace, together with the copies of their details in messages{showCandidates ? ", activity and play review queues" : " and activity"}{upgradeRequestCount > 0 || showInvites ? ", anonymises their upgrade requests and deletes team invitations to the address" : ""}, and adds the address to the platform suppression list so nobody can email it again. The workspaces are not asked first. It cannot be undone.
             </p>
             <div>
               <label className="label" htmlFor="subject-confirm">Type the address to confirm</label>

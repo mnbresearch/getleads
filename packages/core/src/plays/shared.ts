@@ -663,6 +663,21 @@ export class PlayRun {
     return this.outcomes.some((o) => !o.everyProviderFailed);
   }
 
+  /**
+   * True when every web search went only to the keyless fallback scrapers and none of them
+   * returned a single result. Those scrapers are blocked from most servers and often send an
+   * empty page rather than an error, so this is "could not search", not "found nobody".
+   */
+  get fallbackOnlyFoundNothing(): boolean {
+    const web = this.webOutcomes;
+    return web.length > 0 && web.every((o) => o.nothingConfigured) && !web.some((o) => (o.results?.length ?? 0) > 0);
+  }
+
+  /** Block the run because no search source is connected, with the sentence every play uses for it. */
+  blockNoSearchSource(): void {
+    this.block(NO_SEARCH_SOURCE);
+  }
+
   get searchesRun(): number {
     return this.outcomes.length;
   }

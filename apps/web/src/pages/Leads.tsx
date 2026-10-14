@@ -239,6 +239,21 @@ export function LeadsPage() {
         reloadLists();
       }
       if (action === "tag") { const t = prompt("Tag to add"); if (!t) return; await apiFetch("POST", "/v1/leads/bulk/tag", { ids, add: [t] }); toast("Tagged"); }
+      if (action === "untag") {
+        // The API always took `remove`; nothing in the app sent it, so a tag added by mistake
+        // could only be cleared by re-importing the leads.
+        const t = prompt("Tag to remove");
+        if (!t) return;
+        await apiFetch("POST", "/v1/leads/bulk/tag", { ids, remove: [t.trim()] });
+        toast(`Removed the tag "${t.trim()}" from ${plural(ids.length, "lead")}`);
+      }
+      if (action === "unlist" && q.listId) {
+        // One call per lead (the route is per lead), in sequence; a failure part-way says how
+        // far it got rather than leaving the screen to suggest nothing happened.
+        const r = await removeFromList(q.listId, ids);
+        toast(r.failure ? `Removed ${r.removed} of ${ids.length} from the list, then stopped: ${r.failure}` : `Removed ${plural(r.removed, "lead")} from the list. The leads themselves are kept.`, r.failure ? "err" : "ok");
+        reloadLists();
+      }
       if (action.startsWith("sync:")) {
         const provider = action.slice(5);
         const r = await apiFetch<{ queued: number }>("POST", `/v1/integrations/${provider}/sync`, { leadIds: ids });
@@ -389,6 +404,8 @@ export function LeadsPage() {
           <span className="font-medium text-brand-600">{sel.size} selected</span>
           <button className="btn-secondary" onClick={() => bulk("enrich")}>Enrich</button>
           <button className="btn-secondary" onClick={() => bulk("tag")}>Tag</button>
+          <button className="btn-secondary" onClick={() => bulk("untag")}>Remove tag</button>
+          {q.listId && <button className="btn-secondary" onClick={() => bulk("unlist")}>Remove from list</button>}
           <select className="input w-40" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Move to pipeline stage"><option value="">Move to stage…</option>{STAGES.map((s) => <option key={s} value={`stage:${s}`}>{s}</option>)}</select>
           {clients.length > 0 && (
             <select className="input w-44" onChange={(e) => { if (e.target.value) bulk(e.target.value); e.target.value = ""; }} aria-label="Assign to client"><option value="">Assign to client…</option>{clients.map((c) => <option key={c.id} value={`client:${c.id}`}>{c.name}</option>)}<option value="client:none">Return to pool</option></select>
@@ -456,7 +473,7 @@ export function LeadsPage() {
       )}
 
       <SuppressionsModal open={suppressOpen} onClose={() => setSuppressOpen(false)} toast={toast} />
-      <LeadDetail lead={detail} onClose={() => setDetail(null)} onChanged={load} toast={toast} />
+      <LeadDetail lead={detail} onClose={() => setDetail(null)} onChanged={() => { load(); reloadLists(); }} toast={toast} list={q.listId ? lists.find((l) => l.id === q.listId) ?? { id: q.listId, name: "this list" } : null} />
       <AddLeadModal open={addOpen} onClose={() => setAddOpen(false)} onDone={() => { setAddOpen(false); load(); }} toast={toast} />
       <ImportModal open={importOpen} onClose={() => setImportOpen(false)} onDone={() => { setImportOpen(false); load(); }} toast={toast} />
     </Page>
@@ -482,14 +499,16 @@ function nameAware<T extends { firstName: string; lastName: string; fullName: st
   return next;
 }
 
-function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; onClose: () => void; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void }) {
+function LeadDetail({ lead, onClose, onChanged, toast, list }: { lead: Lead | null; onClose: () => void; onChanged: () => void; toast: (m: string, k?: "ok" | "err") => void; list?: { id: string; name: string } | null }) {
   const [busy, setBusy] = useState<string | null>(null);
+  // A found address that was NOT saved because the lead already had one: offered, not applied.
+  const [suggested, setSuggested] = useState<{ email: string; status: string; note?: string } | null>(null);
   const [draft, setDraft] = useState<{ subject: string; body: string; ai?: boolean; note?: string } | null>(null);
   const [brief, setBrief] = useState<{ summary: string; whyNow: string; angles: string[] } | null>(null);
   // PATCH /v1/leads/:id has always existed and nothing called it, so a typo'd email or a
   // stale job title could never be corrected from the app - only re-imported over.
   const [editing, setEditing] = useState<null | { firstName: string; lastName: string; fullName: string; title: string; email: string; phone: string; linkedinUrl: string; location: string }>(null);
-  useEffect(() => { setDraft(null); setBrief(null); setEditing(null); }, [lead?.id]);
+  useEffect(() => { setDraft(null); setBrief(null); setEditing(null); setSuggested(null); }, [lead?.id]);
   if (!lead) return null;
   const act = async (name: string, fn: () => Promise<unknown>) => {
     setBusy(name);
@@ -519,7 +538,12 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
           {safeHref(lead.linkedinUrl) && <div><ExtLink className="text-brand-600 hover:underline" href={lead.linkedinUrl}>LinkedIn profile ↗</ExtLink></div>}
           <div><span className="text-ink-400">Location:</span> {lead.location ?? "-"}</div>
           <div><span className="text-ink-400">Source:</span> {lead.source}</div>
-          <div className="flex flex-wrap gap-1">{lead.tags.map((t) => <span key={t} className="badge bg-black/[0.05] text-ink-300">{t}</span>)}</div>
+          <div className="flex flex-wrap gap-1">{lead.tags.map((t) => (
+            <span key={t} className="badge bg-black/[0.05] text-ink-300">
+              {t}
+              <button className="ml-1" aria-label={`Remove tag ${t}`} disabled={!!busy} onClick={() => act("untag", () => apiFetch("POST", "/v1/leads/bulk/tag", { ids: [lead.id], remove: [t] }).then(() => toast(`Removed the tag "${t}"`)))}>×</button>
+            </span>
+          ))}</div>
           <div className="pt-2"><ScoreBar score={lead.score} /><ul className="mt-1 text-xs text-ink-400">{lead.scoreReasons.map((r, i) => <li key={i}>{r}</li>)}</ul></div>
         </div>
         <div className="min-w-0 space-y-2 text-sm">
@@ -614,9 +638,18 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
           else if (st === "invalid") toast("Address is invalid", "err");
           else toast(`Couldn't confirm (${st.replace("_", " ")})`);
         }))}>{busy === "verify" ? "…" : "Verify email"}</button>
-        <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<{ email?: string; status: string }>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => toast(r.email ? `Found ${r.email} (${r.status})` : "No email found", r.email ? "ok" : "err")))}>{busy === "find" ? "…" : "Find email"}</button>
+        <button className="btn-secondary" disabled={!!busy || !lead.company} onClick={() => act("find", () => apiFetch<FindEmailResult>("POST", `/v1/leads/${lead.id}/find-email`).then((r) => {
+          const said = findEmailMessage(r);
+          if (r.suggestion) setSuggested({ email: r.suggestion, status: r.status, note: r.note });
+          toast(said.text, said.kind);
+        }))}>{busy === "find" ? "…" : "Find email"}</button>
         <button className="btn-primary" disabled={!!busy} onClick={() => act("gen", async () => { const org = await apiFetch<{ org: { name: string; settings: Record<string, string> } }>("GET", "/v1/auth/me"); const r = await apiFetch<{ subject: string; body: string; ai?: boolean; note?: string }>("POST", "/v1/campaigns/generate", { leadId: lead.id, sender: { name: org.org.settings.senderName ?? "", company: org.org.settings.senderCompany ?? org.org.name, valueProp: org.org.settings.valueProp ?? "We help companies like yours grow faster." } }); setDraft(r); })}>{busy === "gen" ? "Writing…" : "Draft AI email"}</button>
-        {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null; note?: unknown; message?: unknown }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast(typeof r.note === "string" && r.note ? r.note : typeof r.message === "string" && r.message ? r.message : "A brief could not be written for this company right now. Try again later.", "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
+        {lead.company && <button className="btn-secondary" disabled={!!busy} onClick={() => act("brief", async () => { const r = await apiFetch<{ brief: { summary: string; whyNow: string; angles: string[] } | null; note?: unknown; message?: unknown; error?: unknown }>("POST", `/v1/companies/${lead.company!.id}/brief`); if (r.brief) setBrief(r.brief); else toast(briefFailureText(r), "err"); })}>{busy === "brief" ? "Thinking…" : "Company brief"}</button>}
+        {list && <button className="btn-secondary" disabled={!!busy} onClick={() => act("unlist", async () => {
+          const r = await removeFromList(list.id, [lead.id]);
+          if (r.failure) throw new Error(r.failure);
+          toast(`Removed from "${list.name}". The lead itself is kept.`);
+        })}>{busy === "unlist" ? "…" : "Remove from list"}</button>}
         <DeleteButton
           className="btn-danger ml-auto"
           what={lead.fullName ?? lead.email ?? "this lead"}
@@ -625,6 +658,20 @@ function LeadDetail({ lead, onClose, onChanged, toast }: { lead: Lead | null; on
           onError={(m) => toast(m, "err")}
         />
       </div>
+      {suggested && (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900 [overflow-wrap:anywhere]" data-testid="email-suggestion">
+          <div>{suggested.note ?? `This lead already has ${lead.email}, so it was kept. ${suggested.email} (${suggested.status}) was found too.`}</div>
+          <div className="mt-2 flex gap-2">
+            <button className="btn-primary" disabled={!!busy} onClick={() => act("use-email", async () => {
+              // A changed address is unverified until checked; the server resets that itself.
+              await apiFetch("PATCH", `/v1/leads/${lead.id}`, { email: suggested.email });
+              toast(`Now using ${suggested.email}. Verify it before sending.`);
+              setSuggested(null);
+            })}>Use this address</button>
+            <button className="btn-secondary" onClick={() => setSuggested(null)}>Keep the current one</button>
+          </div>
+        </div>
+      )}
       {brief && (
         <div className="mt-4 rounded-lg bg-cream p-3 text-sm">
           <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">Account brief</div>
@@ -811,4 +858,43 @@ function hiddenFilterChips(
   // The client filter has a select only when clients have loaded; otherwise show it here.
   if (q.clientId && !ctx.clients) out.push({ key: "clientId", label: q.clientId === "none" ? "Unassigned (pool)" : "Client: selected client" });
   return out;
+}
+
+/** What POST /v1/leads/:id/find-email answers. */
+export interface FindEmailResult { email?: string | null; status: string; saved?: boolean; replaced?: boolean; suggestion?: string; previousEmail?: string; note?: string }
+
+/**
+ * The toast for a find-email answer. The server no longer writes a found address over one
+ * the lead already has; it offers it instead, and this says which of the three happened.
+ */
+export function findEmailMessage(r: FindEmailResult): { text: string; kind: "ok" | "err" } {
+  if (!r.email) return { text: "No email found", kind: "err" };
+  if (r.replaced) return { text: r.note ?? `Replaced an invalid address with ${r.email} (${r.status})`, kind: "ok" };
+  if (r.suggestion) return { text: `Found ${r.suggestion} (${r.status}) - not saved, because this lead already has an address. Choose below.`, kind: "ok" };
+  return { text: `Found ${r.email} (${r.status})`, kind: "ok" };
+}
+
+/** The brief route's own words when no brief came back: `error` first (what it sends), then the older fields. */
+export function briefFailureText(r: { note?: unknown; message?: unknown; error?: unknown }): string {
+  for (const v of [r.error, r.note, r.message]) {
+    if (typeof v === "string" && v) return v;
+    if (v && typeof v === "object" && typeof (v as { message?: unknown }).message === "string" && (v as { message: string }).message) return (v as { message: string }).message;
+  }
+  return "A brief could not be written for this company right now. Try again later.";
+}
+
+/** Take leads off a list, one at a time, stopping at the first failure. A lead already off it counts as done. */
+async function removeFromList(listId: string, ids: string[]): Promise<{ removed: number; failure: string | null }> {
+  let removed = 0;
+  for (const id of ids) {
+    try {
+      await apiFetch("DELETE", `/v1/leads/lists/${listId}/leads/${id}`);
+      removed++;
+    } catch (e) {
+      const msg = (e as Error).message;
+      if (/lead on this list not found/i.test(msg)) { removed++; continue; }
+      return { removed, failure: msg };
+    }
+  }
+  return { removed, failure: null };
 }

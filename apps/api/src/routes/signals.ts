@@ -94,7 +94,9 @@ signalRoutes.post("/scan", rateLimit({ perMinute: 6, name: "signal-scan" }), zVa
 
 // ── Subscriptions ──
 const sigTerms = z.array(z.string().max(200)).max(50);
-const subInput = z.object({ name: z.string().min(1).max(200), types: z.array(z.enum(SIGNAL_TYPES)).min(1).max(SIGNAL_TYPES.length), keywords: sigTerms.default([]), industries: sigTerms.default([]), locations: sigTerms.default([]), icpId: z.string().uuid().nullish(), targetTitles: sigTerms.default(["CEO", "Founder", "Head of Sales", "Head of Marketing"]), autoCreateLeads: z.boolean().default(false), campaignId: z.string().uuid().nullish(), active: z.boolean().default(true) });
+/** Said when a subscription arrives without signal types, instead of zod's bare "Required". */
+const NO_TYPES = `Choose at least one signal type for this subscription (${SIGNAL_TYPES.join(", ")}). Nothing is saved without one.`;
+const subInput = z.object({ name: z.string().min(1).max(200), types: z.array(z.enum(SIGNAL_TYPES), { required_error: NO_TYPES, invalid_type_error: NO_TYPES }).min(1, NO_TYPES).max(SIGNAL_TYPES.length), keywords: sigTerms.default([]), industries: sigTerms.default([]), locations: sigTerms.default([]), icpId: z.string().uuid().nullish(), targetTitles: sigTerms.default(["CEO", "Founder", "Head of Sales", "Head of Marketing"]), autoCreateLeads: z.boolean().default(false), campaignId: z.string().uuid().nullish(), active: z.boolean().default(true) });
 
 signalRoutes.get("/subscriptions", async (c) => {
   const { db } = getDb();

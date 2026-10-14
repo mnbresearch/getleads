@@ -148,15 +148,27 @@ function toAttention(r: StatsRow | undefined): ClientAttention {
 }
 
 /** Progress against the monthly target, or null when the client has no target. */
-function targetProgress(c: Pick<Client, "monthlyLeadTarget">, stats: ClientStats) {
+export function targetProgress(c: Pick<Client, "monthlyLeadTarget"> & { createdAt?: Date | string | null }, stats: ClientStats, now: Date = new Date()) {
   if (!c.monthlyLeadTarget || c.monthlyLeadTarget <= 0) return null;
-  const now = new Date();
   const daysInMonth = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth() + 1, 0)).getUTCDate();
   const dayOfMonth = now.getUTCDate();
   // Where delivery should be by today if it ran evenly through the month. Without this a
   // client at 30% on the 5th and one at 30% on the 28th look identical, and only one of
   // them is a problem.
-  const expectedByNow = Math.round((c.monthlyLeadTarget * dayOfMonth) / daysInMonth);
+  let expectedByNow = Math.round((c.monthlyLeadTarget * dayOfMonth) / daysInMonth);
+  /**
+   * A client added this month is paced from the day it was added, not from the 1st. Paced
+   * from the 1st, a client created on the 14th read "Behind - 14 expected by today" on its
+   * first day, before anything could have been delivered for it. From its start day the
+   * pace begins at zero and reaches the full target on the last day of the month.
+   */
+  const created = c.createdAt ? new Date(c.createdAt) : null;
+  if (created && !Number.isNaN(created.getTime()) && created.getUTCFullYear() === now.getUTCFullYear() && created.getUTCMonth() === now.getUTCMonth() && created.getUTCDate() > 1) {
+    const startDay = created.getUTCDate();
+    const window = daysInMonth - startDay + 1;
+    const elapsed = Math.max(0, dayOfMonth - startDay);
+    expectedByNow = Math.round((c.monthlyLeadTarget * elapsed) / window);
+  }
   return {
     target: c.monthlyLeadTarget,
     delivered: stats.deliveredThisMonth,

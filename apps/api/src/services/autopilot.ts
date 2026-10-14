@@ -1,4 +1,5 @@
 import { and, autopilots, campaigns, eq, getDb, icps, listLeads, lists, organizations, remainingPremiumBudget, type Autopilot } from "@prospex/db";
+import { verifyOptsFor } from "../lib/verifyOpts.js";
 import { clampLeadQuery, runLeadPipelineDetailed, type IcpCriteria } from "@prospex/core";
 import { aiForOrg } from "../lib/ai.js";
 import { env } from "../env.js";
@@ -42,7 +43,7 @@ export async function runAutopilot(ap: Autopilot, log: (s: string) => void = () 
   const { leads: results, providerFailures } = await runLeadPipelineDetailed(input, {
     // The plan decides the engine: free workspaces never reach the paid model.
     ai: aiForOrg(org),
-    verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
+    verify: await verifyOptsFor(ap.orgId),
     icp: (icp?.criteria as IcpCriteria | undefined) ?? undefined,
     maxProviderLeads: providerBudget,
     onProgress: (p, m) => log(`${p}% ${m}`),

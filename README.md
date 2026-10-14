@@ -1,8 +1,8 @@
-# Prospex
+# Scout
 
-Open, zero-cost B2B lead generation infrastructure for sales teams and AI agents.
+B2B lead intelligence and AI-visibility measurement for sales teams and AI agents, by MNB Research. Formerly "Prospex": the npm workspace names (`@prospex/*`), the `px_live_` API key prefix and the `PROSPEX_*` MCP variables still carry the old name.
 
-Real-time discovery from the open web and LinkedIn, company enrichment, work-email finding and verification, AI lookalike ICP scoring, AI-personalized sequences with tracking, webhooks, CRM sync, a REST API, a TypeScript SDK, an MCP server and a dashboard. Runs entirely on free tiers for a ~100-customer pilot.
+Real-time discovery from the open web and public LinkedIn pages, company enrichment, work-email finding and verification, AI lookalike ICP scoring, AI-personalized sequences with tracking, webhooks, CRM sync, a REST API, a TypeScript SDK, an MCP server and a dashboard. A small pilot can run on free tiers of every provider; paid data providers and verifiers are optional add-ons.
 
 ```
 apps/
@@ -12,21 +12,30 @@ packages/
   core/       The engine: search providers, discovery, crawler, email find/verify, ICP scoring, AI outreach. No DB deps.
   db/         Drizzle schema, SQL migrations, Postgres-backed job queue (no Redis), usage metering, plans.
   sdk/        Zero-dependency TypeScript client.
-  mcp/        MCP server: 57 tools for Claude Desktop / Claude Code / Cursor / Cortex agents.
+  mcp/        MCP server for Claude Desktop / Claude Code / Cursor / Cortex agents (run from this repo; not published).
 docs/         Deployment, pilot playbook, architecture, Plays.
 scripts/      smoke.sh + smoke-v2.sh - end-to-end API tests.
 ```
 
-## 60-second local start
+## Local start
 
 ```bash
 cp .env.example .env            # only DATABASE_URL + JWT_SECRET are required
 docker compose up -d db         # or point DATABASE_URL at Supabase/Neon
 npm install
-npm run db:migrate && npm run db:seed   # prints demo login + API key
-npm run dev:api                  # http://localhost:8080  (docs at /docs), worker embedded in dev
-npm run dev:web                  # http://localhost:5173
+npm run db:migrate && npm run db:seed   # these two read .env themselves; seed prints a demo login + API key
+
+# The API does NOT read .env on its own, so pass it in. Run from apps/api so the path resolves:
+(cd apps/api && npx tsx watch --env-file=../../.env src/server.ts)   # http://localhost:8080 (docs at /docs); worker embedded in dev
+
+npm run dev:web                  # second terminal: http://localhost:5173 (talks to localhost:8080 by default)
 ```
+
+`npm run dev:api` on its own starts the API without any of your `.env` values, so it fails on
+the missing `DATABASE_URL`. Either use the line above, or export the variables into your shell
+first (`set -a; . ./.env; set +a; npm run dev:api`). For a built API the same applies:
+`node --env-file=.env apps/api/dist/server.js` (and `apps/api/dist/worker.js` for a separate
+worker). On a host such as Render or Fly the variables come from the dashboard, not a file.
 
 Login: `demo@prospex.local` / `demo1234`. The seed is for local development only: it refuses to
 run with `NODE_ENV=production` (the password above is public), unless forced with `--force`.
@@ -66,11 +75,11 @@ measured, limits and privacy.
 | Multichannel | Sequence steps for email (A/B variants), LinkedIn connect/message (tasks), calls, WhatsApp Cloud API; engagement scoring; pipeline statuses | Meta WhatsApp (1k conv/mo) |
 | Autopilot | Autonomous daily prospecting: query → enrich → verify → score → list → campaign | - |
 | Tools | LinkedIn↔email, colleagues, decision makers by persona, company intel, bulk verify, domain health (SPF/DKIM/DMARC), saved searches + alerts, team invites | - |
-| Agents | `POST /v1/agent/prospect` one-call workflow, OpenAPI 3.1 at `/openapi.json`, Swagger at `/docs`, SDK, MCP server (57 tools) | - |
+| Agents | `POST /v1/agent/prospect` one-call workflow, OpenAPI 3.1 at `/openapi.json`, Swagger at `/docs`, SDK, MCP server (run from this repo, see below) | - |
 
-## Deploy for free
+## Deploy
 
-See [DEPLOY.md](DEPLOY.md) - the compiled guide listing every account/key to provide and the exact procedure. Longer notes in [docs/DEPLOY.md](docs/DEPLOY.md). Summary: Neon (DB) + Render (API + worker) + Vercel (dashboard) + Groq (AI) + Google Programmable Search (search) + Resend (email). Total: $0/month for the pilot.
+See [DEPLOY.md](DEPLOY.md) - the compiled guide listing every account/key to provide and the exact procedure. Longer notes in [docs/DEPLOY.md](docs/DEPLOY.md). Summary: Neon (DB) + Render (API + worker) + Vercel (dashboard) + Groq and Gemini (AI) + Google Programmable Search (search) + Resend (email). Every one of those has a free tier that covers a small pilot; volume beyond it, paid data providers and verifiers cost money. Stripe is optional: without it, upgrades arrive as requests that an admin applies.
 
 ## Pilot playbook
 
@@ -102,6 +111,9 @@ npm install
 npm run build -w packages/sdk -w packages/mcp
 ```
 
+The MCP server is available on request for customers of the hosted product; everything it does
+is also available through the REST API. To run it yourself:
+
 ```json
 { "mcpServers": { "prospex": { "command": "node", "args": ["<path-to-repo>/packages/mcp/dist/server.js"],
   "env": { "PROSPEX_API_KEY": "px_live_...", "PROSPEX_API_URL": "https://your-api.onrender.com" } } } }
@@ -131,13 +143,19 @@ GET     /v1/visibility/runs              # raw answers behind every number
 GET     /v1/visibility/engines           # which engines "AI" actually covers right now
 ```
 
+Which engines are sampled depends on the AI keys the server has. The hosted product samples
+Gemini and Llama (through Groq) today; Claude and OpenAI-compatible engines are sampled when
+their keys are set. The models answer from what they learned, not from a live web search, so
+any link an answer mentions is recorded as a hint about what shaped it, not a citation trail.
+
 Every configured engine is sampled, not just the one the provider priority order would
 pick, because engines disagree about who they recommend. Each engine gets the same number
 of samples so the per-engine denominators stay balanced, results are reported per engine,
 and Scout says explicitly when a gap is engine-specific rather than general. A failing
 engine costs you that engine's data, not the whole cycle.
 
-Active prompts are sampled daily by the `visibility.tick` worker job.
+Active prompts are sampled daily by the `visibility.tick` worker job, which only runs while a
+worker is running. Use "Sample now" (`POST /v1/visibility/prompts/:id/run`) for a first result.
 
 ## Tests
 

@@ -1109,6 +1109,37 @@ function conversationTaskBody(c: PlayCandidate): string {
   return `${reason}\nThe link is too long to show here - open it from the play's approved conversations.`.slice(0, TASK_BODY_MAX);
 }
 
+/** How long one approval may spend finding the website of a company known only by name. */
+const NAME_RESOLVE_MS = 5_000;
+
+/**
+ * A website for a company a candidate names but gives no website for.
+ *
+ * Without one, the approved lead had no company at all: no company row, no companyId, and
+ * nothing on the Companies page - only the name in a custom field. The workspace's own
+ * company with that exact name is used first (no lookup, and it is the one the user already
+ * has); otherwise the name is looked up, briefly. A name that cannot be placed leaves the
+ * lead as before, with the name kept for templates.
+ */
+async function companyDomainForName(orgId: string, name: string | null | undefined): Promise<string | null> {
+  const n = (name ?? "").trim();
+  if (!n) return null;
+  const { db } = getDb();
+  const known = await db.select({ domain: companies.domain }).from(companies).where(and(eq(companies.orgId, orgId), sql`lower(btrim(${companies.name})) = ${n.toLowerCase()}`)).limit(2);
+  // Two companies of this workspace share the name: picking one would be a guess.
+  if (known.length === 1) return known[0].domain;
+  if (known.length > 1) return null;
+  try {
+    const { resolveCompanyDomain } = await import("@prospex/core");
+    let timer: NodeJS.Timeout | undefined;
+    const found = await Promise.race([resolveCompanyDomain(n).catch(() => null), new Promise<null>((r) => { timer = setTimeout(() => r(null), NAME_RESOLVE_MS); })]);
+    if (timer) clearTimeout(timer);
+    return found ? companyDomainOrNull(found) : null;
+  } catch {
+    return null;
+  }
+}
+
 async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string | null): Promise<Approval> {
   const { db } = getDb();
   const orgId = c.orgId;
@@ -1218,7 +1249,7 @@ async function approveClaimed(c: PlayCandidate, ctx: PlayContext, userId: string
         linkedinUrl: profile,
         location: cleanText(c.location, 300),
         companyName: cleanText(c.companyName, 200),
-        companyDomain: c.companyDomain ? companyDomainOrNull(c.companyDomain) : null,
+        companyDomain: (c.companyDomain ? companyDomainOrNull(c.companyDomain) : null) ?? (await companyDomainForName(orgId, cleanText(c.companyName, 200))),
         source,
         tags: marks.tags,
         icpId: ctx.icpId,

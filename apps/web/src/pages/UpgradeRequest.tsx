@@ -4,6 +4,7 @@ import { Logo, BRAND_NAME } from "../components/Logo";
 import { apiFetch, auth } from "../lib/api";
 
 type Plan = { id: string; name: string; priceUsd: number };
+const money = (n: number) => `$${Number(n).toLocaleString("en-US")}`;
 
 export function UpgradeRequestPage() {
   const [params] = useSearchParams();
@@ -15,11 +16,18 @@ export function UpgradeRequestPage() {
   const [done, setDone] = useState(false);
   const [plansErr, setPlansErr] = useState<string | null>(null);
   const [workspace, setWorkspace] = useState<string | null>(null);
+  // Plans the server can sell online right now (Stripe on and a price set for the plan).
+  const [checkoutPlans, setCheckoutPlans] = useState<string[]>([]);
+  const [payBusy, setPayBusy] = useState(false);
+  const [payErr, setPayErr] = useState<string | null>(null);
 
   const loadPlans = () => {
     setPlansErr(null);
-    apiFetch<{ plans: Plan[] }>("GET", "/v1/billing/plans")
-      .then((r) => setPlans(r.plans))
+    apiFetch<{ plans: Plan[]; stripeEnabled?: boolean; checkoutPlans?: string[] }>("GET", "/v1/billing/plans")
+      .then((r) => {
+        setPlans(r.plans);
+        setCheckoutPlans(r.stripeEnabled ? r.checkoutPlans ?? r.plans.map((p) => p.id) : []);
+      })
       // Said, not swallowed: the heading fell back to a generic "Upgrade your plan" with
       // nothing to tell the visitor which plan they were asking for, or that it failed.
       .catch((e) => { setPlans([]); setPlansErr((e as Error).message); });
@@ -39,6 +47,21 @@ export function UpgradeRequestPage() {
   }, []);
 
   const plan = plans?.find((p) => p.id === planId);
+  // Card payment is offered only to a signed-in visitor (checkout belongs to a workspace) and
+  // only for a plan the server can sell online; everyone else uses the request form below.
+  const canPayOnline = !!auth.token && checkoutPlans.includes(planId);
+  const payOnline = async () => {
+    setPayBusy(true);
+    setPayErr(null);
+    try {
+      const r = await apiFetch<{ url?: string | null }>("POST", "/v1/billing/checkout", { plan: planId });
+      if (!r?.url) throw new Error("Checkout could not be started. Send the request below instead.");
+      window.location.assign(r.url);
+    } catch (e) {
+      setPayErr((e as Error).message);
+      setPayBusy(false);
+    }
+  };
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -62,10 +85,10 @@ export function UpgradeRequestPage() {
         </div>
         <div className="card p-6 text-center">
           <div className="mx-auto grid h-12 w-12 place-items-center rounded-full bg-brand-50 text-2xl text-brand-600">✓</div>
-          <h1 className="mt-4 text-lg font-semibold text-ink-50">Got it — we're on it</h1>
+          <h1 className="mt-4 text-lg font-semibold text-ink-50">Got it - we're on it</h1>
           <p className="mt-2 text-sm text-ink-400">
             Someone from the {BRAND_NAME} team will reach out to {form.email || "you"} shortly to complete your upgrade to{" "}
-            {plan ? `${plan.name} ($${plan.priceUsd}/mo)` : "your selected plan"} and take payment.
+            {plan ? `${plan.name} (${money(plan.priceUsd)}/mo)` : "your selected plan"} and take payment.
           </p>
           <Link to="/" className="btn-secondary mt-5 justify-center">Back to {BRAND_NAME}</Link>
         </div>
@@ -82,7 +105,7 @@ export function UpgradeRequestPage() {
       <form onSubmit={submit} className="card space-y-3 p-6">
         <h1 className="text-lg font-semibold text-ink-50">
           {plan ? `Upgrade to ${plan.name}` : "Upgrade your plan"}
-          {plan && <span className="ml-2 text-sm font-normal text-ink-400">${plan.priceUsd}/mo</span>}
+          {plan && <span className="ml-2 text-sm font-normal text-ink-400">{money(plan.priceUsd)}/mo</span>}
         </h1>
         {plansErr && (
           <div className="rounded-lg border border-amber-300 bg-amber-50 p-2 text-sm text-amber-800" role="status">
@@ -90,16 +113,24 @@ export function UpgradeRequestPage() {
           </div>
         )}
         {workspace && <p className="text-xs text-ink-400">For workspace <span className="font-medium text-ink-200">{workspace}</span>.</p>}
+        {canPayOnline && (
+          <div className="rounded-lg border border-black/10 p-3 text-sm" data-testid="pay-online">
+            <p className="text-ink-300">Pay by card now and the plan switches as soon as the payment goes through.</p>
+            <button type="button" className="btn-primary mt-2 w-full justify-center" onClick={payOnline} disabled={payBusy}>{payBusy ? "Opening checkout…" : "Pay by card"}</button>
+            {payErr && <p className="mt-2 text-xs text-red-600" role="alert">{payErr}</p>}
+            <p className="mt-2 text-xs text-ink-400">Or send a request below and we will set it up with you.</p>
+          </div>
+        )}
         <p className="text-sm text-ink-400">
-          Leave your details and we'll reach out to set up billing and switch your plan on our side — no card needed here.
+          Leave your details and we'll reach out to set up billing and switch your plan on our side - no card needed here.
         </p>
-        <div><label className="label">Full name</label><input className="input" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
-        <div><label className="label">Email</label><input className="input" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
-        <div><label className="label">Mobile number</label><input className="input" type="tel" required value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} /></div>
-        <div><label className="label">Country</label><input className="input" required value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} /></div>
-        <div><label className="label">Anything else? (optional)</label><textarea className="input" rows={3} value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} /></div>
+        <div><label className="label" htmlFor="upgrade-name">Full name</label><input id="upgrade-name" autoComplete="name" className="input" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} /></div>
+        <div><label className="label" htmlFor="upgrade-email">Email</label><input id="upgrade-email" autoComplete="email" className="input" type="email" required value={form.email} onChange={(e) => setForm({ ...form, email: e.target.value })} /></div>
+        <div><label className="label" htmlFor="upgrade-mobile">Mobile number</label><input id="upgrade-mobile" autoComplete="tel" className="input" type="tel" required value={form.mobile} onChange={(e) => setForm({ ...form, mobile: e.target.value })} /></div>
+        <div><label className="label" htmlFor="upgrade-country">Country</label><input id="upgrade-country" autoComplete="country-name" className="input" required value={form.country} onChange={(e) => setForm({ ...form, country: e.target.value })} /></div>
+        <div><label className="label" htmlFor="upgrade-message">Anything else? (optional)</label><textarea id="upgrade-message" className="input" rows={3} value={form.message} onChange={(e) => setForm({ ...form, message: e.target.value })} /></div>
         {err && <div className="rounded-lg bg-red-50 p-2 text-sm text-red-600">{err}</div>}
-        <button className="btn-primary w-full justify-center" disabled={busy}>{busy ? "…" : "Yes, I'm interested — upgrade me"}</button>
+        <button className="btn-primary w-full justify-center" disabled={busy}>{busy ? "…" : "Yes, I'm interested - upgrade me"}</button>
         <div className="text-center text-sm text-ink-400">
           <Link className="text-brand-600" to="/">Back to {BRAND_NAME}</Link>
         </div>

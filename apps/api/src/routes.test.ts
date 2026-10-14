@@ -94,6 +94,12 @@ suite("route surface", () => {
     apiKey = body.apiKey ?? "";
     const me = await (await app.request("/v1/auth/me", { headers: { authorization: `Bearer ${token}` } })).json();
     orgId = me.org?.id ?? "";
+    // Campaigns per plan and integrations are enforced now; this suite creates several of
+    // each on a Free workspace, so lift those two limits for it (as an admin override would).
+    {
+      const P = await import("@prospex/db");
+      await P.getDb().db.execute(P.sql`UPDATE organizations SET plan_limits = plan_limits || '{"campaigns":1000,"integrations":true}'::jsonb WHERE id = ${orgId}`);
+    }
   });
 
   it("signs a new workspace up and issues a usable token", () => {
@@ -252,6 +258,8 @@ suite("route surface", () => {
         // The anonymous page-view counter (always 204, stores no identifier) and the signed
         // one-click unsubscribe. Tested in analytics.product and checkout.followup.
         String(r.path) !== "/v1/public/pv" &&
+        // The per-workspace reply address: the random token in the URL is the credential (fixes.b3.test.ts).
+        String(r.path) !== "/v1/public/inbound/:token" &&
         String(r.path) !== "/v1/public/email-opt-out",
     );
     expect(writes.length).toBeGreaterThan(10);

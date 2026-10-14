@@ -21,6 +21,8 @@ export const PRODUCT_EVENT_NAMES = [
   "activated",
   "pricing_viewed",
   "checkout_started",
+  // An upgrade asked for through the request form (the only way to upgrade without Stripe).
+  "upgrade_requested",
   "checkout_completed",
   "checkout_abandoned",
   "subscription_cancelled",

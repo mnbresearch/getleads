@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { and, apiKeys, count, eq, getDb, gt, isNull, or, jobOpenTotalCap, jobOpenTypeCap, openJobCount, sql, type Db } from "@prospex/db";
+import { and, apiKeys, count, effectiveLimits, eq, getDb, gt, isNull, or, jobOpenTotalCap, jobOpenTypeCap, openJobCount, PLANS, sql, type Db } from "@prospex/db";
 import { ApiError } from "./errors.js";
 
 /**
@@ -303,6 +303,63 @@ export async function guardJobCapacity(db: Db, orgId: string | null | undefined,
     release(totalKey, forTotal);
     throw e;
   }
+}
+
+/**
+ * Plan feature limits - what a tier INCLUDES, as opposed to the anti-abuse ceilings above.
+ *
+ * The plans advertise a number of campaigns and whether integrations are included, and the
+ * admin console refused to override them because nothing enforced them. They are enforced
+ * here, at the moment something new is created or connected, never retroactively: campaigns
+ * and connections a workspace already has keep working (and can still be edited), even when
+ * the workspace is over the plan's number. The answer is a 402 with code `plan_limit` that
+ * names the plan and says what to do.
+ */
+type PlanOrg = { id: string; plan?: string | null; planLimits?: unknown };
+
+const planName = (org: PlanOrg) => {
+  const id = org.plan ?? "free";
+  return (Object.hasOwn(PLANS, id) ? PLANS[id].name : id) || "current";
+};
+
+/** Refuse a new campaign when the workspace already has as many as its plan includes. */
+export async function assertPlanCampaigns(db: Db, org: PlanOrg, table: { orgId: unknown }): Promise<void> {
+  const limit = Number(effectiveLimits(org).campaigns);
+  if (!Number.isFinite(limit) || limit < 0) return;
+  const key = `plan:campaigns:${org.id}`;
+  const mine = reserve(key, 1);
+  let n: number;
+  try {
+    const [{ n: found }] = await db.select({ n: count() }).from(table as never).where(eq((table as { orgId: never }).orgId, org.id as never));
+    n = Number(found);
+  } catch (e) {
+    release(key, mine);
+    throw e;
+  }
+  mine.seen = n;
+  const expected = expectedRows(key, mine, n);
+  settled(key, mine);
+  if (expected + 1 > limit) {
+    release(key, mine);
+    const noun = limit === 1 ? "campaign" : "campaigns";
+    throw new ApiError(
+      402,
+      `The ${planName(org)} plan includes ${limit.toLocaleString("en-US")} ${noun}, and this workspace already has ${n.toLocaleString("en-US")}. Delete a campaign you no longer need, or upgrade the plan to add more. Existing campaigns keep working.`,
+      "plan_limit",
+      { limit, current: n, plan: org.plan ?? "free" },
+    );
+  }
+}
+
+/** Refuse connecting a new integration on a plan that does not include integrations. */
+export function assertPlanIntegrations(org: PlanOrg): void {
+  if (effectiveLimits(org).integrations !== false) return;
+  throw new ApiError(
+    402,
+    `Integrations are not included in the ${planName(org)} plan. Upgrade the plan to connect a CRM or data provider. Connections you already have keep working.`,
+    "plan_limit",
+    { plan: org.plan ?? "free" },
+  );
 }
 
 /** Convenience: current db handle plus a row-cap check. */

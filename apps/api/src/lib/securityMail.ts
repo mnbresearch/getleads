@@ -102,12 +102,12 @@ function compose(kind: SecurityMailKind, email: string, d: SecurityMailDetails):
       return {
         subject: "Two-factor sign-in was turned off for your Scout account",
         what: `Two-factor sign-in was turned off for your Scout account (${email}). Signing in now needs only your password.`,
-        notYou: `If you did not do this, ${reset}, then turn two-factor sign-in back on under Settings > Security. ${contact}`,
+        notYou: `If you did not do this, ${reset}, then turn two-factor sign-in back on under Settings > Workspace, in the Two-factor sign-in card. ${contact}`,
       };
     case "twofa_reset_by_support":
       return {
         subject: "Two-factor sign-in was reset on your Scout account",
-        what: `Our support team turned off two-factor sign-in for your Scout account (${email}), which is what we do when someone has lost both their authenticator and their recovery codes. Signing in now needs only your password. Your old recovery codes no longer work. You can turn two-factor sign-in on again under Settings > Security.`,
+        what: `Our support team turned off two-factor sign-in for your Scout account (${email}), which is what we do when someone has lost both their authenticator and their recovery codes. Signing in now needs only your password. Your old recovery codes no longer work. You can turn two-factor sign-in on again under Settings > Workspace, in the Two-factor sign-in card.`,
         notYou: `If you did not ask for this, ${reset} and write to ${SECURITY_CONTACT_EMAIL} at once.`,
       };
     case "api_key_created": {
@@ -124,7 +124,7 @@ function compose(kind: SecurityMailKind, email: string, d: SecurityMailDetails):
       return {
         subject: "New sign-in to your Scout account",
         what: `Your Scout account (${email}) was just signed in to${d.method ? ` with ${oneLine(d.method, 30)}` : ""} from an address we have not seen for this account before.`,
-        notYou: `If this was you, there is nothing to do. If it was not, ${reset} - that signs out every device - and consider turning on two-factor sign-in under Settings > Security. ${contact}`,
+        notYou: `If this was you, there is nothing to do. If it was not, ${reset} - that signs out every device - and consider turning on two-factor sign-in under Settings > Workspace, in the Two-factor sign-in card. ${contact}`,
       };
     case "admin_new_signin":
       return {

@@ -63,7 +63,7 @@ export async function findCompaniesDetailed(input: CompanySearchInput, searchOpt
       outer?.(o, q);
     },
   });
-  return { companies, ...traceFromOutcomes(outcomes) };
+  return { companies, ...traceFromOutcomes(outcomes, companies.length) };
 }
 
 export async function findCompanies(input: CompanySearchInput, searchOpts: WebSearchOptions = {}): Promise<CompanyCandidate[]> {

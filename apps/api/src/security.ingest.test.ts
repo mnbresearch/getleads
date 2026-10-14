@@ -1407,7 +1407,8 @@ suite("ingestion and route-level security", () => {
       const l = await lead(O.orgId, { firstName: "Asha", lastName: "Rao" });
       const draft = await req("POST", "/v1/campaigns/generate", O.token, { leadId: l.id, sender: { name: "Me", company: "Us", valueProp: "We help." } });
       expect(draft.status).toBe(200);
-      expect(draft.body.note).toBe("AI drafting isn't switched on for this workspace yet, so this is a template, not a personalised draft. Contact support to enable it.");
+      // Fix round B3: the cause is the server having no engine, not a setting of this workspace.
+      expect(draft.body.note).toBe("AI drafting isn't available yet - no AI engine is connected on our side, so this is a template, not a personalised draft. This is not a setting in your workspace; contact support if you need it.");
       said.draft = draft.text;
 
       const icp = await req("POST", "/v1/icps", O.token, { name: `ICP ${u8()}` });

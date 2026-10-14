@@ -76,7 +76,7 @@ const CONFIRM = " This contacts real people and cannot be undone: confirm with t
 server.tool(
   "prospect",
   "Find B2B decision makers matching a description (e.g. 'Heads of Marketing at D2C brands in Mumbai'). Discovers people, enriches companies, finds + verifies work emails, scores fit. Returns up to 10 leads in one call (5-40s). Optionally drafts a personalized email for each. Sends nothing.",
-  { query: z.string().max(2000), limit: z.number().int().min(1).max(10).default(5), findEmails: z.boolean().default(true), generateEmails: z.boolean().default(false), sender: sender.optional(), save: z.boolean().default(true), country: z.string().length(2).optional() },
+  { query: z.string().min(3).max(500), limit: z.number().int().min(1).max(10).default(5), findEmails: z.boolean().default(true), generateEmails: z.boolean().default(false), sender: sender.optional(), save: z.boolean().default(true), country: z.string().length(2).optional() },
   LOOKUP,
   (a) => wrap(() => gl.agent.prospect(a)),
 );
@@ -84,14 +84,14 @@ server.tool(
 server.tool(
   "search_leads_async",
   "Start a larger lead search (up to 200) that runs in the background. Returns searchId + jobId; use get_search_status to poll, then list_leads with tag search:<first 8 chars of searchId>.",
-  { query: z.string().max(2000).optional(), titles: words().optional(), industries: words().optional(), locations: words().optional(), companyDomains: z.array(domain).max(50).optional(), limit: z.number().int().min(1).max(200).default(25), findEmails: z.boolean().default(true), icpId: id.optional(), listId: id.optional() },
+  { query: z.string().max(500).optional(), titles: words(10).optional(), industries: words(10).optional(), locations: words(10).optional(), companyDomains: z.array(domain).max(50).optional(), limit: z.number().int().min(1).max(200).default(25), findEmails: z.boolean().default(true), icpId: id.optional(), listId: id.optional() },
   LOOKUP,
   (a) => wrap(() => gl.request("POST", "/v1/search", a)),
 );
 server.tool("get_search_status", "Status of an async search and its resulting lead ids.", { searchId: id }, READ, (a) => wrap(() => gl.search.status(a.searchId)));
 
 server.tool("find_people_at_company", "Find people (with titles) at a specific company.", { companyName: short().optional(), companyDomain: domain.optional(), titles: words().optional(), limit: z.number().int().min(1).max(50).default(10) }, LOOKUP, (a) => wrap(() => gl.search.people(a)));
-server.tool("find_companies", "Find companies matching a description / industry / location.", { query: z.string().max(2000).optional(), industries: words().optional(), locations: words().optional(), keywords: words().optional(), limit: z.number().int().min(1).max(50).default(20) }, LOOKUP, (a) => wrap(() => gl.search.companies(a)));
+server.tool("find_companies", "Find companies matching a description / industry / location.", { query: z.string().max(500).optional(), industries: words().optional(), locations: words().optional(), keywords: words().optional(), limit: z.number().int().min(1).max(50).default(20) }, LOOKUP, (a) => wrap(() => gl.search.companies(a)));
 server.tool("enrich_company", "Enrich a company by domain: description, industry hints, tech stack, public emails, team members, social links.", { domain }, LOOKUP, (a) => wrap(() => gl.enrich.company(a.domain)));
 server.tool("find_email", "Find a person's work email from first name, last name and company domain.", { firstName: short(), lastName: short(), domain }, LOOKUP, (a) => wrap(() => gl.enrich.findEmail(a)));
 server.tool("verify_email", "Verify one or more email addresses (syntax, disposable, MX, SMTP, catch-all).", { emails: z.array(email).min(1).max(50) }, LOOKUP, (a) => wrap(() => gl.enrich.verifyEmails(a.emails)));
@@ -102,11 +102,11 @@ server.tool("create_lead", "Create or upsert a lead (dedupes on email / LinkedIn
 server.tool("enrich_lead", "Queue full enrichment for a saved lead (company crawl, email find + verify, rescore).", { id }, LOOKUP, (a) => wrap(() => gl.enrich.lead(a.id)));
 server.tool("tag_leads", "Add/remove tags on leads.", { ids: z.array(id).min(1).max(1000), add: words(50, 100).optional(), remove: words(50, 100).optional() }, WRITE, (a) => wrap(() => gl.leads.tag(a.ids, a.add, a.remove)));
 
-server.tool("create_icp", "Create an Ideal Customer Profile; AI derives lookalike criteria from a description and/or seed customer domains.", { name: short(), description: z.string().max(5000).optional(), product: z.string().max(2000).optional(), seedDomains: z.array(domain).max(50).optional(), criteria: z.record(words(50)).optional() }, WRITE, (a) => wrap(() => gl.icps.create(a)));
+server.tool("create_icp", "Create an Ideal Customer Profile; AI derives lookalike criteria from a description and/or seed customer domains.", { name: short(), description: z.string().max(5000).optional(), product: z.string().max(2000).optional(), seedDomains: z.array(domain).max(10).optional(), criteria: z.record(words(50)).optional() }, WRITE, (a) => wrap(() => gl.icps.create(a)));
 server.tool("score_leads", "Score saved leads against an ICP (0-100 with reasons). assign=true writes scores to leads.", { icpId: id, leadIds: z.array(id).max(1000).optional(), assign: z.boolean().default(false), aiRerankTop: z.number().int().min(0).max(50).default(0) }, WRITE, (a) => wrap(() => gl.icps.score(a.icpId, a)));
 
 server.tool("generate_email", "Write an AI-personalized cold email for a lead (by id or inline details). Returns a draft; sends nothing.", { leadId: id.optional(), lead: z.record(z.unknown()).optional(), sender, instructions: z.string().max(2000).optional(), stepNo: z.number().int().min(1).default(1), language: short(40).optional() }, WRITE, (a) => wrap(() => gl.outreach.generate(a)));
-server.tool("create_campaign", "Create an email sequence campaign (a draft: nothing is sent until start_campaign). steps: [{delayDays, subjectTemplate, bodyTemplate, aiPersonalize, aiInstructions}]. Templates support {{first_name}}, {{company}}, {{title}}, {{sender_name}}.", { name: short(), emailAccountId: id.optional(), listId: id.optional(), icpId: id.optional(), settings: z.record(z.unknown()).optional(), steps: z.array(z.object({ delayDays: z.number().int().min(0).max(365).default(0), subjectTemplate: z.string().max(500), bodyTemplate: z.string().max(20000), aiPersonalize: z.boolean().default(true), aiInstructions: z.string().max(2000).optional() })).max(10) }, WRITE, (a) => wrap(() => gl.outreach.createCampaign(a)));
+server.tool("create_campaign", "Create an email sequence campaign (a draft: nothing is sent until start_campaign). steps: [{delayDays, subjectTemplate, bodyTemplate, aiPersonalize, aiInstructions}]. Templates support {{first_name}}, {{company}}, {{title}}, {{sender_name}}.", { name: short(), emailAccountId: id.optional(), listId: id.optional(), icpId: id.optional(), settings: z.record(z.unknown()).optional(), steps: z.array(z.object({ delayDays: z.number().int().min(0).max(60).default(0), subjectTemplate: z.string().max(500), bodyTemplate: z.string().max(20000), aiPersonalize: z.boolean().default(true), aiInstructions: z.string().max(2000).optional() })).max(10) }, WRITE, (a) => wrap(() => gl.outreach.createCampaign(a)));
 server.tool("enroll_in_campaign", `Enroll leads into a campaign. If the campaign is running they will start receiving its emails.${CONFIRM}`, { campaignId: id, leadIds: z.array(id).max(1000).optional(), fromList: z.boolean().default(false), minScore: z.number().optional() }, OUTREACH, (a) => wrap(() => gl.outreach.enroll(a.campaignId, a)));
 server.tool("start_campaign", `Start sending a campaign (respects daily limits + send window).${CONFIRM}`, { campaignId: id }, OUTREACH, (a) => wrap(() => gl.outreach.start(a.campaignId)));
 server.tool("pause_campaign", "Pause a campaign.", { campaignId: id }, { ...WRITE, idempotentHint: true }, (a) => wrap(() => gl.outreach.pause(a.campaignId)));
@@ -122,21 +122,21 @@ server.tool("analytics", "Workspace analytics overview.", {}, READ, () => wrap((
 server.tool("website_visitors", "Companies identified visiting the customer's website (via the Scout pixel), sorted by buying intent.", { days: z.number().int().min(1).max(365).default(30), status: short(40).optional(), limit: z.number().int().min(1).max(500).default(50) }, READ, (a) => wrap(() => gl.visitors.companies(a)));
 server.tool("visitor_decision_makers", "Find decision makers at a company that visited the website and save them as leads.", { domain, titles: words().optional(), limit: z.number().int().min(1).max(20).default(5), save: z.boolean().default(true) }, LOOKUP, (a) => wrap(() => gl.visitors.decisionMakers(a.domain, a)));
 server.tool("signals_feed", "Recent intent signals: funding rounds, acquisitions, hiring surges, leadership changes, expansions (from public news).", { type: short(40).optional(), q: short().optional(), days: z.number().int().min(1).max(365).default(14), limit: z.number().int().min(1).max(200).default(50) }, READ, (a) => wrap(() => gl.signals.feed(a)));
-server.tool("signals_scan", "Scan news now for fresh signals matching keywords/industries/locations.", { types: words(10, 40).default(["funding", "acquisition"]), keywords: words().optional(), industries: words().optional(), locations: words().optional(), days: z.number().int().min(1).max(90).default(7) }, LOOKUP, (a) => wrap(() => gl.signals.scan(a)));
+server.tool("signals_scan", "Scan news now for fresh signals matching keywords/industries/locations.", { types: words(10, 40).default(["funding", "acquisition"]), keywords: words().optional(), industries: words().optional(), locations: words().optional(), days: z.number().int().min(1).max(30).default(7) }, LOOKUP, (a) => wrap(() => gl.signals.scan(a)));
 server.tool("signals_subscribe", `Create a signal subscription that scans every 6h and can auto-create decision-maker leads at matching companies. With a campaignId, the leads it creates are enrolled in that campaign and emailed.${CONFIRM}`, { name: short(), types: words(10, 40), keywords: words().optional(), industries: words().optional(), locations: words().optional(), targetTitles: words().optional(), autoCreateLeads: z.boolean().default(true), icpId: id.optional(), campaignId: id.optional() }, OUTREACH, (a) => wrap(() => gl.signals.subscribe(a)));
-server.tool("create_monitor", "Monitor a LinkedIn post (engagers → leads), a competitor, a keyword, a company's news, or a company's job openings.", { type: z.enum(["linkedin_post", "keyword", "competitor", "company_news", "jobs"]), name: short(), target: z.string().max(2000), intervalMinutes: z.number().int().min(15).max(10080).default(360) }, LOOKUP, (a) => wrap(() => gl.signals.createMonitor(a)));
+server.tool("create_monitor", "Monitor a LinkedIn post (engagers → leads), a competitor, a keyword, a company's news, or a company's job openings.", { type: z.enum(["linkedin_post", "keyword", "competitor", "company_news", "jobs"]), name: short(), target: z.string().max(2000), intervalMinutes: z.number().int().min(30).max(10080).default(360) }, LOOKUP, (a) => wrap(() => gl.signals.createMonitor(a)));
 server.tool("run_monitor", "Run a monitor now and return how many new results were found.", { id }, LOOKUP, (a) => wrap(() => gl.signals.runMonitor(a.id)));
 server.tool("monitor_results", "Results collected by a monitor.", { id }, READ, (a) => wrap(() => gl.signals.monitorResults(a.id)));
 server.tool("linkedin_to_email", "Resolve LinkedIn profile URLs to name, title, company and a verified work email.", { urls: z.array(z.string().max(500)).min(1).max(25), save: z.boolean().default(false) }, LOOKUP, (a) => wrap(() => gl.tools.linkedinToEmail(a.urls, a.save)));
 server.tool("email_to_linkedin", "Find LinkedIn profiles for email addresses.", { emails: z.array(email).min(1).max(25) }, LOOKUP, (a) => wrap(() => gl.tools.emailToLinkedin(a.emails)));
-server.tool("colleagues", "Find other people at the same company as a lead (or at a domain).", { leadId: id.optional(), companyDomain: domain.optional(), titles: words().optional(), limit: z.number().int().min(1).max(50).default(10), save: z.boolean().default(false) }, LOOKUP, (a) => wrap(() => gl.tools.colleagues(a)));
-server.tool("decision_makers", "Find decision makers at a company by persona (CEO / Founder, Sales leader, CMO / Marketing, CTO / Engineering, CFO / Finance, COO / Operations, HR / People, Product, IT / Security, Procurement) with emails.", { companyDomain: domain.optional(), companyName: short().optional(), personas: words(10, 60).optional(), limit: z.number().int().min(1).max(30).default(6), findEmails: z.boolean().default(true), save: z.boolean().default(true) }, LOOKUP, (a) => wrap(() => gl.tools.decisionMakers(a)));
+server.tool("colleagues", "Find other people at the same company as a lead (or at a domain).", { leadId: id.optional(), companyDomain: domain.optional(), titles: words().optional(), limit: z.number().int().min(1).max(25).default(10), save: z.boolean().default(false) }, LOOKUP, (a) => wrap(() => gl.tools.colleagues(a)));
+server.tool("decision_makers", "Find decision makers at a company by persona (CEO / Founder, Sales leader, CMO / Marketing, CTO / Engineering, CFO / Finance, COO / Operations, HR / People, Product, IT / Security, Procurement) with emails.", { companyDomain: domain.optional(), companyName: short().optional(), personas: words(10, 60).optional(), limit: z.number().int().min(1).max(20).default(6), findEmails: z.boolean().default(true), save: z.boolean().default(true) }, LOOKUP, (a) => wrap(() => gl.tools.decisionMakers(a)));
 server.tool("company_intel", "Company intelligence: description, tech stack, open roles by function (hiring signal), recent funding/news, intent score.", { domain }, LOOKUP, (a) => wrap(() => gl.tools.companyIntel(a.domain)));
 server.tool("domain_health", "Check a sender domain's SPF, DKIM, DMARC and MX for deliverability, with recommendations.", { domain }, { readOnlyHint: true, openWorldHint: true }, (a) => wrap(() => gl.tools.domainHealth(a.domain)));
 server.tool("verify_batch", "Verify up to 500 emails and get a status summary.", { emails: z.array(email).min(1).max(500) }, LOOKUP, (a) => wrap(() => gl.tools.verifyBatch(a.emails)));
 server.tool("list_tasks", "Pending human tasks from multichannel sequences (LinkedIn connects/messages, calls, WhatsApp).", { status: short(40).default("pending") }, READ, (a) => wrap(() => gl.tools.tasks(a.status)));
 server.tool("complete_task", "Mark a task done/skipped; the contact's sequence advances to the next step (which may send that contact the next email of a running campaign).", { id, outcome: z.enum(["done", "skipped"]).default("done"), note: z.string().max(2000).optional() }, WRITE, (a) => wrap(() => gl.tools.completeTask(a.id, a.outcome, a.note)));
-server.tool("create_autopilot", `Create an autonomous daily prospecting agent: finds N fresh leads for a query every day, verifies, scores, saves to a list and optionally enrolls in a campaign. With autoEnroll and a campaignId, the people it finds are emailed without further review.${CONFIRM}`, { name: short(), query: z.string().max(2000), icpId: id.optional(), listId: id.optional(), campaignId: id.optional(), dailyLeads: z.number().int().min(1).max(100).default(10), minScore: z.number().int().min(0).max(100).default(60), requireValidEmail: z.boolean().default(true), autoEnroll: z.boolean().default(false), runHourUtc: z.number().int().min(0).max(23).default(3) }, OUTREACH, (a) => wrap(() => gl.tools.createAutopilot({ ...a, query: { query: a.query } })));
+server.tool("create_autopilot", `Create an autonomous daily prospecting agent: finds N fresh leads for a query every day, verifies, scores, saves to a list and optionally enrolls in a campaign. With autoEnroll and a campaignId, the people it finds are emailed without further review.${CONFIRM}`, { name: short(), query: z.string().max(500), icpId: id.optional(), listId: id.optional(), campaignId: id.optional(), dailyLeads: z.number().int().min(1).max(100).default(10), minScore: z.number().int().min(0).max(100).default(60), requireValidEmail: z.boolean().default(true), autoEnroll: z.boolean().default(false), runHourUtc: z.number().int().min(0).max(23).default(3) }, OUTREACH, (a) => wrap(() => gl.tools.createAutopilot({ ...a, query: { query: a.query } })));
 server.tool("run_autopilot", `Run an autopilot now (background job). An autopilot set to enroll automatically will email the people it finds.${CONFIRM}`, { id }, OUTREACH, (a) => wrap(() => gl.tools.runAutopilot(a.id)));
 server.tool("set_lead_status", "Move a lead through the pipeline: new | contacted | engaged | replied | qualified | customer | lost.", { id, status: short(40) }, WRITE, (a) => wrap(() => gl.tools.setLeadStatus(a.id, a.status)));
 
@@ -355,6 +355,79 @@ server.tool(
   { days: z.number().int().min(7).max(365).default(90) },
   READ,
   (a) => wrap(() => gl.plays.performance(a.days)),
+);
+
+// ── Clients: agencies prospecting for several clients ──
+const clientFields = {
+  domain: dom().optional(),
+  industry: short(120).optional(),
+  icpId: uid().optional(),
+  monthlyLeadTarget: z.number().int().min(0).max(1_000_000).optional(),
+  notes: z.string().max(5000).optional(),
+};
+server.tool(
+  "list_clients",
+  "The workspace's clients (for agencies prospecting on behalf of several companies), each with lead counts by stage, what needs attention (no email, unverified, bad email, ready but not contacted) and pace against the monthly lead target. includeArchived also lists archived clients.",
+  { includeArchived: z.boolean().default(false) },
+  READ,
+  (a) => wrap(() => gl.clients.list({ includeArchived: a.includeArchived })),
+);
+server.tool(
+  "create_client",
+  "Add a client workspace. Leads, searches and plays can then be run for it, and its leads are counted against its monthly target. An ICP lets Scout route unassigned leads to it. Contacts nobody.",
+  { name: z.string().min(1).max(120), ...clientFields },
+  WRITE,
+  (a) => wrap(() => gl.clients.create(a)),
+);
+server.tool(
+  "get_client",
+  "One client: its leads by stage, what needs attention, its pace this month and whether a report link is on.",
+  { id: uid() },
+  READ,
+  (a) => wrap(() => gl.clients.get(a.id)),
+);
+server.tool(
+  "client_report_link",
+  "Create the client's read-only report link, or replace it (rotated: true means the previous link stopped working). Anyone holding the link can see that client's pipeline without an account, at <the Scout app address>/r/<shareToken>. Owners and admins only. This publishes workspace data outside the workspace: confirm with the user before calling it.",
+  { id: uid() },
+  { readOnlyHint: false, destructiveHint: true, openWorldHint: false },
+  (a) => wrap(() => gl.clients.createReportLink(a.id)),
+);
+
+// ── AI visibility: what AI engines answer when buyers research the category ──
+server.tool(
+  "list_visibility_prompts",
+  "The questions tracked for AI visibility (AEO / GEO): what buyers ask AI assistants about the category. Each is asked of every connected engine on a schedule.",
+  {},
+  READ,
+  () => wrap(() => gl.visibility.prompts()),
+);
+server.tool(
+  "add_visibility_prompt",
+  "Track a question buyers ask AI assistants, such as 'What is the best payroll software for a 50-person company?'. It must not name the user's own brand: a question that names them guarantees they appear and measures nothing. samplesPerRun (1-10) is how many times each engine is asked per cycle. Contacts nobody.",
+  { text: z.string().min(5).max(500), topic: short(80).optional(), samplesPerRun: z.number().int().min(1).max(10).default(3) },
+  WRITE,
+  (a) => wrap(() => gl.visibility.addPrompt(a)),
+);
+server.tool(
+  "sample_visibility_now",
+  "Ask every connected AI engine a tracked question now, samples times each (default: the prompt's own setting). Uses AI quota for each answer. Returns how many answers were usable; refusals and errors are excluded from the rates rather than counted as absence. Use it for a first result instead of waiting for the daily schedule.",
+  { promptId: uid(), samples: z.number().int().min(1).max(10).optional() },
+  LOOKUP,
+  (a) => wrap(() => gl.visibility.sampleNow(a.promptId, { samples: a.samples })),
+);
+server.tool(
+  "visibility_results",
+  "AI-visibility results over the last N days (7-90): mention rate and share of voice per engine with confidence intervals and sample sizes, the rivals named, winnable gaps and whether a change is real. A rate is withheld until there are enough usable answers: say so to the user rather than reading a number into it. Pass includeAnswers to also get the latest raw answers behind the numbers.",
+  { days: z.number().int().min(7).max(90).default(30), includeAnswers: z.boolean().default(false), promptId: uid().optional() },
+  READ,
+  (a) =>
+    wrap(async () => {
+      const overview = await gl.visibility.results(a.days);
+      if (!a.includeAnswers) return overview;
+      const { runs } = await gl.visibility.runs({ promptId: a.promptId, limit: 25 });
+      return { overview, answers: runs };
+    }),
 );
 
 const transport = new StdioServerTransport();

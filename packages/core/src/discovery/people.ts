@@ -1,5 +1,5 @@
 import type { PersonCandidate, SearchResult } from "../types.js";
-import { summarizeWebSearchFailures, webSearch, type WebSearchOptions, type WebSearchOutcome } from "../search/index.js";
+import { emptySearchNote, summarizeWebSearchFailures, webSearch, type WebSearchOptions, type WebSearchOutcome } from "../search/index.js";
 import { normalizeLinkedinUrl } from "../util/domain.js";
 import { splitName } from "../util/names.js";
 
@@ -101,11 +101,16 @@ export interface DiscoverySearchTrace {
   everySearchFailed: boolean;
   /** One operator-readable sentence when everySearchFailed, else null. */
   failureMessage: string | null;
+  /**
+   * One customer sentence when nothing was found because no source could really search
+   * (none connected, or none answered), else null. Set only for an empty result.
+   */
+  emptyNote: string | null;
 }
 
-export function traceFromOutcomes(searches: WebSearchOutcome[]): DiscoverySearchTrace {
+export function traceFromOutcomes(searches: WebSearchOutcome[], found = 0): DiscoverySearchTrace {
   const failureMessage = summarizeWebSearchFailures(searches);
-  return { searches, failedSearches: searches.filter((o) => o.everyProviderFailed).length, everySearchFailed: failureMessage !== null, failureMessage };
+  return { searches, failedSearches: searches.filter((o) => o.everyProviderFailed).length, everySearchFailed: failureMessage !== null, failureMessage, emptyNote: emptySearchNote(searches, found) };
 }
 
 /** findPeople, plus what its web searches did. */
@@ -119,7 +124,7 @@ export async function findPeopleDetailed(input: PeopleSearchInput, searchOpts: W
       outer?.(o, q);
     },
   });
-  return { people, ...traceFromOutcomes(outcomes) };
+  return { people, ...traceFromOutcomes(outcomes, people.length) };
 }
 
 export async function findPeople(input: PeopleSearchInput, searchOpts: WebSearchOptions = {}): Promise<PersonCandidate[]> {

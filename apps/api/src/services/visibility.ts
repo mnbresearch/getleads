@@ -375,6 +375,9 @@ export async function knownBrands(db: ReturnType<typeof getDb>["db"], orgIdValue
  * questions and silently got the deterministic pack would be misled about what it is
  * looking at, and "the AI wrote this" is exactly the claim that has to stay true.
  */
+/** Said with the starter questions, so nobody mistakes them for questions written for their business. */
+export const STARTER_NOTE = "Standard questions built from your category, competitors and ICP's titles and industries. Use Write with AI for questions tailored to your business.";
+
 export async function suggestPrompts(
   db: ReturnType<typeof getDb>["db"],
   orgIdValue: string,
@@ -421,10 +424,19 @@ export async function suggestPrompts(
     .where(eq(visibilityPrompts.orgId, orgIdValue));
   const existingTexts = existing.map((r) => r.text);
 
-  const starter = validatePrompts(starterPack(ctx), ctx, existingTexts);
+  /**
+   * The starter questions are built from structured fields only: the category, the
+   * competitors and the audience (the ICP's first title and industry). The ICP's free-text
+   * description used to be dropped into "How do teams usually solve ___?", and a description
+   * is usually a sentence about the buyer ("B2B SaaS founders in India with 20-200
+   * employees"), which produced questions nobody would ask. Only a model can turn free text
+   * into a question, so the description goes to the AI path and nowhere else.
+   */
+  const starterCtx: TemplateContext = { ...ctx, problem: null };
+  const starter = validatePrompts(starterPack(starterCtx), starterCtx, existingTexts);
 
   if (!opts.useAi) {
-    return { source: "starter", prompts: starter.kept, rejected: starter.rejected, coverage: intentCoverage(starter.kept) };
+    return { source: "starter", prompts: starter.kept, rejected: starter.rejected, coverage: intentCoverage(starter.kept), note: STARTER_NOTE };
   }
 
   // "Write with AI" sends the workspace's own description of its buyer to a model. With the

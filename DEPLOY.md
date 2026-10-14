@@ -1,8 +1,10 @@
-# Prospex - Compiled Deployment Guide
+# Scout - Compiled Deployment Guide
+
+(Scout was called Prospex in earlier releases; package names, the `px_live_` key prefix and some variable names keep the old name.)
 
 This is the single document you need. Part A lists exactly what to give me (or paste into the env). Part B is the deploy procedure. Part C is the feature map so you know what each key unlocks.
 
-**Decision made: production path.** Paid plans (Starter/Growth/Scale/Enterprise) go live for real signups, on free-tier infrastructure and free-tier data-provider keys - no Apollo Professional / Hunter Growth prepayment. `render.yaml` is already configured for this (`PILOT_MODE=false`, `DEFAULT_PLAN=free`, Stripe env vars wired). The one item this path adds versus a pure pilot is Stripe (A7 below) - without it, paid tiers exist in the dashboard but the "Upgrade" button won't render. Everything else is unchanged: the code already guarantees you can't spend provider budget on a customer's behalf before their Stripe payment clears (checked in `apps/api/src/routes/misc.ts`'s webhook handler), and you top up a real data-provider only once a paying customer's usage needs more than the free-tier pool - see "Bootstrapping without prepaying" in [docs/PRICING.md](docs/PRICING.md).
+**Decision made: production path.** Paid plans (Starter/Growth/Scale/Enterprise) go live for real signups, on free-tier infrastructure and free-tier data-provider keys - no Apollo Professional / Hunter Growth prepayment. `render.yaml` is already configured for this (`PILOT_MODE=false`, `DEFAULT_PLAN=free`, Stripe env vars wired). Stripe (A7 below) is optional on this path. Without it, every "Upgrade" button opens a short request form; the request appears in the admin dashboard and you move the workspace to its new plan by hand. With it, Upgrade starts a Stripe checkout and the plan changes when payment clears. Everything else is unchanged: the code already guarantees you can't spend provider budget on a customer's behalf before their Stripe payment clears (checked in `apps/api/src/routes/misc.ts`'s webhook handler), and you top up a real data-provider only once a paying customer's usage needs more than the free-tier pool - see "Bootstrapping without prepaying" in [docs/PRICING.md](docs/PRICING.md).
 
 **One thing that changed since the pilot build:** Brave Search API killed its free tier in February 2026 - it's now metered from the first query above a $5/month credit. Google Programmable Search (100 free queries/day) is now the primary free search key; Brave is a small paid line item ($5-15/month) even on the pilot path.
 
@@ -58,10 +60,10 @@ For the production path, only Apollo and Hunter need the paid tier to start - PD
 
 | # | Provider | Free tier | Where | Send |
 |---|---|---|---|---|
-| 17 | Resend (recommended) | 3,000 emails/month, 100/day | resend.com → API Keys; Domains → add + verify your sending domain (DNS records) | `RESEND_API_KEY`, `MAIL_FROM` (e.g. `Prospex <hello@prospex.mnbresearch.com>`) |
+| 17 | Resend (recommended) | 3,000 emails/month, 100/day | resend.com → API Keys; Domains → add + verify your sending domain (DNS records) | `RESEND_API_KEY`, `MAIL_FROM` (e.g. `Scout <hello@scout.mnbresearch.com>`) |
 | 18 | Brevo SMTP (alternative) | 300 emails/day | brevo.com → SMTP & API | `SMTP_HOST=smtp-relay.brevo.com`, `SMTP_PORT=587`, `SMTP_USER`, `SMTP_PASS` |
 
-Inbound replies (so sequences stop on reply): in Resend → Webhooks, or via Zapier/Make Gmail trigger, POST `{from, subject, text}` to `https://<api>/v1/campaigns/inbound` with the customer's API key.
+Inbound replies (so sequences stop on reply and Scout learns from them): Resend's delivery webhook does not carry replies, so do not point it at a reply URL. Each workspace has its own secret inbound address instead, created in **Settings → Integrations** (shown once, regenerable): `POST https://<api>/v1/public/inbound/<token>` with a JSON body `{"from": "...", "subject": "...", "text": "..."}`. No API key is needed because the token is the credential; it is rate-limited and size-limited. Point anything that can forward a received email as JSON at it: a Zapier or Make "new email in Gmail/Outlook" trigger with a webhook action, or an email-forwarding service that POSTs JSON. The older authenticated route `POST /v1/campaigns/inbound` (same body, with the workspace's API key) still works. A reply can also be marked by hand on the campaign contact.
 
 ### A6. Channels (OPTIONAL)
 
@@ -69,15 +71,17 @@ Inbound replies (so sequences stop on reply): in Resend → Webhooks, or via Zap
 |---|---|---|---|---|
 | 19 | WhatsApp Cloud API | 1,000 service conversations/month | developers.facebook.com → Create app → WhatsApp → API setup → Phone number ID + permanent token; create and get approval for a template with one `{{1}}` body variable | Configured per customer in Settings → Integrations → WhatsApp (phoneNumberId, accessToken, templateName) |
 
-### A7. Billing - REQUIRED for the production path (this is what makes paid signups actually work)
+### A7. Billing - OPTIONAL (online checkout)
 
-Without Stripe configured, the dashboard still shows all plans but no "Upgrade" button renders - so this is the one item that turns "free demo" into "customers can actually pay you." No data-provider spend is needed to set this up; it only touches Stripe and your own database.
+Stripe is optional. Without it, the dashboard shows all plans and every "Upgrade" button opens a request form; requests land in the admin dashboard and you change the workspace's plan by hand once the customer has paid you some other way. Add Stripe when you want customers to pay online without you in the loop. No data-provider spend is needed to set this up; it only touches Stripe and your own database.
+
+Prices must match `packages/db/src/plans.ts` (the dashboard and landing page show those numbers):
 
 1. dashboard.stripe.com → Product catalog → New product, four times, each with one **recurring monthly** price:
-   - "Prospex Starter" - $99.00/month
-   - "Prospex Growth" - $329.00/month
-   - "Prospex Scale" - $1,099.00/month
-   - "Prospex Enterprise" - $2,999.00/month (usually custom-quoted in practice, but a real Stripe price still needs to exist for the checkout button to work)
+   - "Scout Starter" - $109.00/month
+   - "Scout Growth" - $359.00/month
+   - "Scout Scale" - $1,199.00/month
+   - "Scout Enterprise" - $3,199.00/month (shown as "from $3,199" and usually custom-quoted in practice, but a real Stripe price still needs to exist for the checkout button to work)
 2. Copy each price's ID (starts `price_...`) into `STRIPE_PRICE_STARTER`, `STRIPE_PRICE_GROWTH`, `STRIPE_PRICE_SCALE`, `STRIPE_PRICE_ENTERPRISE` respectively - these map 1:1 to the plan ids already in `packages/db/src/plans.ts`, no code change needed if the names match exactly.
 3. Developers → API keys → copy the **secret key** → `STRIPE_SECRET_KEY`.
 4. Developers → Webhooks → Add endpoint → `https://<your-api>/v1/billing/webhook` → select events `checkout.session.completed` and `customer.subscription.deleted` → copy the **signing secret** → `STRIPE_WEBHOOK_SECRET`.
@@ -107,7 +111,7 @@ You can start in Stripe **test mode** (test-mode keys, e.g. `sk_test_...`) to ve
 - Default plan for new signups: `pilot` (1,000 leads/mo, 300 searches, 2,000 verifications, 1,000 AI messages, 1,500 emails, 5 campaigns, 3 seats) or something else. Adjustable later per org via admin API without redeploy.
 - Region for the API: Render's Singapore region is closest to India for lowest latency.
 
-**Minimum to go live on the production path today: items 1, 2, 3, 4, 6, 9, 17, and A7 (Stripe).** Items 11/12/13 (free-tier data providers) are worth adding too since they feed the premium-lead sub-quota on paid plans, but aren't blocking - the platform runs on web-discovery leads alone without them. You don't need 11b/12b (paid Apollo/Hunter subscriptions) at all to start; add a paid data-provider key only once real customer volume needs it, bought as pay-as-you-go credits rather than a subscription until volume is consistent - see docs/PRICING.md.
+**Minimum to go live on the production path today: items 1, 2, 3, 4, 6, 9 and 17.** Add A7 (Stripe) only if you want online checkout; without it upgrades arrive as requests. Items 11/12/13 (free-tier data providers) are worth adding too since they feed the premium-lead sub-quota on paid plans, but aren't blocking - the platform runs on web-discovery leads alone without them. You don't need 11b/12b (paid Apollo/Hunter subscriptions) at all to start; add a paid data-provider key only once real customer volume needs it, bought as pay-as-you-go credits rather than a subscription until volume is consistent - see docs/PRICING.md.
 
 ---
 
@@ -116,7 +120,7 @@ You can start in Stripe **test mode** (test-mode keys, e.g. `sk_test_...`) to ve
 ### B1. Push the code
 ```bash
 unzip prospex.zip && cd prospex
-git init && git add -A && git commit -m "Prospex v2"
+git init && git add -A && git commit -m "Scout"
 git remote add origin git@github.com:<you>/prospex.git && git push -u origin main
 ```
 
@@ -125,7 +129,7 @@ Paste the Neon pooled connection string into `DATABASE_URL`. Migrations run auto
 
 ### B3. API + worker
 
-**Option 1 - Render (recommended, simplest genuinely-free option).** Dashboard → New → Blueprint → pick the repo; `render.yaml` is detected. Set the `sync: false` env vars from Part A. The single web service runs the API and the embedded worker (`EMBED_WORKER=true`). Add the health URL `https://<service>.onrender.com/health` to a free uptime monitor (UptimeRobot / cron-job.org, every 10 min) so the free instance does not sleep and the scheduler keeps running. Render blocks port 25: keep `SMTP_PROBE_ENABLED=false` (emails verify as `risky` = MX + pattern; add Hunter/Abstract keys for `valid`).
+**Option 1 - Render (recommended, simplest genuinely-free option).** Dashboard → New → Blueprint → pick the repo; `render.yaml` is detected. Set the `sync: false` env vars from Part A. The single web service runs the API and the embedded worker (`EMBED_WORKER=true`). You do not need an outside uptime monitor: the API keeps itself awake during the working day and sleeps outside it, on purpose, to stay inside the free Render and Neon hours (see B13). Pinging it every 10 minutes around the clock from UptimeRobot or cron-job.org would use up both free allowances before the month ends; only do that on paid plans. Render blocks port 25: keep `SMTP_PROBE_ENABLED=false` (emails verify as `risky` = MX + pattern; add Hunter/Abstract keys for `valid`).
 
 **Option 2 - Vercel serverless (API too).** Works, but background jobs need `JOB_MODE=inline` plus an external cron hitting `GET https://<api>/internal/jobs/run` every minute (cron-job.org) **with the request header `x-internal-token: <INTERNAL_TOKEN>`** (cron-job.org: edit the job → Advanced → Headers → add key `x-internal-token`). The token is not accepted in the URL (`?token=` answers 403): a secret in a URL ends up in every access log on the way. Also set `TRUSTED_PROXY=xff` there (see B3a). Prefer Render for the worker unless you specifically want everything on Vercel.
 
@@ -133,7 +137,7 @@ Paste the Neon pooled connection string into `DATABASE_URL`. Migrations run auto
 ```bash
 fly launch --no-deploy --copy-config
 fly secrets set DATABASE_URL=... JWT_SECRET=$(openssl rand -hex 32) ENCRYPTION_KEY=$(openssl rand -hex 32) INTERNAL_TOKEN=$(openssl rand -hex 24) ADMIN_API_TOKEN=$(openssl rand -hex 24) TRUSTED_PROXY=xff \
-  GROQ_API_KEY=... GOOGLE_CSE_API_KEY=... GOOGLE_CSE_CX=... RESEND_API_KEY=... MAIL_FROM="Prospex <hello@yourdomain>" \
+  GROQ_API_KEY=... GOOGLE_CSE_API_KEY=... GOOGLE_CSE_CX=... RESEND_API_KEY=... MAIL_FROM="Scout <hello@yourdomain>" \
   APP_URL=https://prospex.vercel.app API_URL=https://prospex-api.fly.dev SMTP_PROBE_ENABLED=true
 fly deploy
 ```
@@ -167,7 +171,7 @@ CNAME `prospex.<yourdomain>` → Vercel; `api.prospex.<yourdomain>` → Render. 
 6. Tools → Sender domain health → your sending domain → fix anything below 90 before campaigns.
 7. Campaigns → add sender → 3-step sequence (LinkedIn connect → email A/B → WhatsApp or email) → enroll → start.
 8. Run `API=https://<api> ./scripts/smoke.sh && ./scripts/smoke-v2.sh` for the full 40-check regression.
-9. Settings → Billing → click "Upgrade" on Starter with Stripe in **test mode** first → complete test checkout (card `4242 4242 4242 4242`, any future date/CVC) → confirm the org's plan flips to `starter` and the premium-leads quota shows 150 in Settings → Usage. Only then switch Stripe to live keys.
+9. (Only if Stripe is set up.) Settings → Billing → click "Upgrade" on Starter with Stripe in **test mode** first → complete test checkout (card `4242 4242 4242 4242`, any future date/CVC) → confirm the org's plan flips to `starter` and the premium-leads quota shows 150 in Settings → Usage. Only then switch Stripe to live keys.
 
 ### B7. Operating
 - Admin: `GET /v1/admin/orgs`, `PATCH /v1/admin/orgs/:id/plan {plan, overrides}` with header `x-admin-token: $ADMIN_API_TOKEN` (not `INTERNAL_TOKEN`, which only runs the job queue). `plan` must be a real plan id; `overrides` is a strict partial of the plan limits (whole numbers from 0, or true/false for the switches) and anything else is refused with a message naming the field. A workspace keeps its overrides when only its plan changes; send `"overrides": {}` to clear them. Every admin change is written to the security log of the workspace it touched (Settings → Security log; table `audit_log`), with the value before and after; a request that changes nothing answers `changed: false` and is not logged. Customers see what the operator changed in their security log, never the address it was changed from.
@@ -487,5 +491,5 @@ Migration `0023` adds three nullable columns to `api_keys` and three new tables 
 | Team seats + invites | Yes (invite link shown; email needs mail provider) | Resend |
 | Domain deliverability check (SPF/DKIM/DMARC/MX) | Yes | - |
 | Webhooks (HMAC), CRM sync (HubSpot, Pipedrive, Zoho, Cortex, generic, Sheets) | Yes | customer's CRM tokens |
-| REST API + OpenAPI + SDK + MCP (57 tools) | Yes | - |
-| Stripe billing | Off in pilot | Stripe keys |
+| REST API + OpenAPI + SDK + MCP (run from the repo, on request) | Yes | - |
+| Stripe billing (online checkout) | Off; upgrades arrive as requests | Stripe keys |

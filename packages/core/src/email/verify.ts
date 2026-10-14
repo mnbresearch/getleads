@@ -417,5 +417,15 @@ export async function verifyEmail(emailRaw: string, opts: VerifyOptions = {}): P
     return result(checks.roleAccount ? "risky" : "valid", checks.roleAccount ? 0.7 : 0.93, "SMTP accepted", mxHost, "smtp");
   }
   if (probe.result === "rejected") return result("invalid", 0.9, `SMTP rejected: ${probe.detail?.slice(0, 80)}`, mxHost, "smtp");
-  return result("risky", 0.5, `SMTP ${probe.result}: ${probe.detail?.slice(0, 80) ?? ""}`, mxHost, "smtp");
+  // A blocked or failed probe never reached the mailbox, so it is not a check: it must not
+  // carry verifiedBy "smtp", which downstream reads as "the server accepted this address"
+  // and stamps as verified. The marker says what happened instead.
+  return result("risky", 0.5, `SMTP ${probe.result}: ${probe.detail?.slice(0, 80) ?? ""}`, mxHost, probe.result === "blocked" ? "smtp-blocked" : "smtp-error");
+}
+
+/** verifiedBy markers for an SMTP probe that never reached the mailbox (port 25 blocked, or an error). */
+export const SMTP_NOT_CHECKED = ["smtp-blocked", "smtp-error"] as const;
+/** True when `verifiedBy` says a probe was attempted but did not check anything. */
+export function isUncheckedSmtp(verifiedBy: string | null | undefined): boolean {
+  return (SMTP_NOT_CHECKED as readonly string[]).includes(verifiedBy ?? "");
 }

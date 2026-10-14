@@ -14,7 +14,7 @@ import { verifyEmail, type VerifyOptions } from "./email/verify.js";
 import { scoreLeadRules, type IcpCriteria } from "./icp/score.js";
 import { inferDepartment, inferSeniority } from "./util/names.js";
 import { pMap } from "./util/http.js";
-import { summarizeWebSearchFailures, type WebSearchOutcome } from "./search/index.js";
+import { NO_WEB_SEARCH_CONFIGURED, onlyFallbackSearch, summarizeWebSearchFailures, type WebSearchOutcome } from "./search/index.js";
 import { searchProvidersDetailed, peopleProviders, type ProviderPerson } from "./providers/people.js";
 
 export interface PipelineLead extends PersonCandidate {
@@ -192,6 +192,8 @@ export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: P
   const providerBudget = opts.maxProviderLeads ?? Infinity;
   const providerFailures: { provider: string; message: string }[] = [];
   let providerRows: ProviderPerson[] = [];
+  /** A licensed data provider answered (even with nobody), so an empty run is a real answer. */
+  let providerAnswered = false;
   if (providerBudget > 0 && peopleProviders().length) {
     // A rejected key must not arrive here looking like an empty database. apolloProvider
     // classifies and throws precisely so the distinction survives; it is carried out of the
@@ -202,6 +204,7 @@ export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: P
       answered: [] as string[],
     }));
     providerRows = r.people.slice(0, providerBudget);
+    providerAnswered = r.answered.length > 0;
     // These messages are shown to the customer as the reason a search came back empty, and
     // they are built from upstream error text - so credentials and account ids are masked.
     providerFailures.push(...r.failures.map((f) => ({ provider: f.provider, message: redact(f.message, { max: 300 }) })));
@@ -238,7 +241,11 @@ export async function runLeadPipelineDetailed(rawQuery: LeadSearchQuery, opts: P
   // Web discovery where no search provider ever answered is an outage, not an empty market.
   // Carried in providerFailures because that is what callers already turn into a search
   // error when the run comes back empty.
-  const webFailure = summarizeWebSearchFailures(searchOutcomes);
+  let webFailure = summarizeWebSearchFailures(searchOutcomes);
+  // The keyless fallback scrapers often "answer" with an empty page when they are blocked,
+  // which summarizeWebSearchFailures counts as an answer. With nothing else connected and
+  // nobody found, that is still "no source could search", never "nobody matched".
+  if (!webFailure && people.length === 0 && !providerAnswered && onlyFallbackSearch(searchOutcomes)) webFailure = NO_WEB_SEARCH_CONFIGURED;
   if (webFailure) providerFailures.push({ provider: "web_search", message: redact(webFailure, { max: 300 }) });
   progress(40, `found ${people.length} people`);
 

@@ -57,7 +57,7 @@ type View =
   | { at: "off" };
 
 /**
- * Settings > "Two-factor sign-in": turn it on (QR code, then a code to prove the app
+ * Settings > Workspace, "Two-factor sign-in" card: turn it on (QR code, then a code to prove the app
  * works, then the recovery codes - once), make new recovery codes, turn it off.
  *
  * Not rendered at all when the server does not say whether it is on: that is an older

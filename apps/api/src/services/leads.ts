@@ -278,7 +278,8 @@ export async function upsertLead(orgId: string, rawInput: UpsertLeadInput, opts:
     tags: input.tags ?? undefined,
     custom: input.custom ?? undefined,
     raw: input.raw ?? undefined,
-    verifiedAt: !emailRejected && input.emailStatus && input.emailStatus !== "unknown" ? new Date() : undefined,
+    // An SMTP probe that was blocked (port 25) or errored checked nothing, so it is not a verification.
+    verifiedAt: !emailRejected && input.emailStatus && input.emailStatus !== "unknown" && !/^smtp-(?:blocked|error)$/.test(input.emailVerifiedBy ?? "") ? new Date() : undefined,
     updatedAt: new Date(),
   };
   const rejectedNote = emailRejected ? { emailRejected: { reason: emailRejected, ...(doNotContact ? { fingerprint } : { value: stripNul(offered).slice(0, 120) }), at: new Date().toISOString() } } : null;

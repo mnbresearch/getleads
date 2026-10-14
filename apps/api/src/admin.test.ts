@@ -291,8 +291,6 @@ suite("admin API", () => {
       const refused: [Record<string, unknown>, string][] = [
         [{ apiAccess: false }, "API access is not enforced by the server yet, so it cannot be overridden."],
         [{ apiAccess: true }, "API access is not enforced by the server yet, so it cannot be overridden."],
-        [{ integrations: true }, "Integrations access is not enforced by the server yet, so it cannot be overridden."],
-        [{ campaigns: 2 }, "The campaigns limit is not enforced by the server yet, so it cannot be overridden."],
       ];
       for (const [overrides, message] of refused) {
         const r = await admin("PATCH", `/orgs/${u.orgId}/plan`, { plan: "starter", overrides });

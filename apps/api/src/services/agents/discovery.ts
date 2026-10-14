@@ -1,4 +1,5 @@
 import { and, agentRuns, desc, eq, getDb, leads, organizations, remainingPremiumBudget, scrapedLeads, type Db } from "@prospex/db";
+import { verifyOptsFor } from "../../lib/verifyOpts.js";
 import { aiForOrg } from "../../lib/ai.js";
 import { redact, runLeadPipelineDetailed, scoreLeadRules, type IcpCriteria, type PipelineLead } from "@prospex/core";
 import { chargeNewLead, upsertLead } from "../leads.js";
@@ -113,7 +114,7 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
         // itself is capped. Without it a free workspace drew unlimited Apollo leads here.
         ai: aiForOrg(org ?? { plan: "free" }),
         icp: criteria,
-        verify: { smtp: env.smtpProbeEnabled, hunterApiKey: env.hunterApiKey, abstractApiKey: env.abstractEmailApiKey, reoonApiKey: env.reoonApiKey, millionVerifierApiKey: env.millionVerifierApiKey },
+        verify: await verifyOptsFor(orgIdValue),
         maxProviderLeads: await remainingPremiumBudget(db, orgIdValue),
       },
     );
@@ -158,7 +159,9 @@ export async function runDiscoveryAgent(orgIdValue: string, query: string, opts:
       : found.length === 0
         ? providerFailures.length
           ? `Nobody matched, and ${providerFailures.length === 1 ? "1 source" : `${providerFailures.length} sources`} could not answer: ${listProviderFailures(providerFailures)}.`
-          : "Every configured source answered, and nobody matched this query."
+          : // Reached only when no source failed outright and the pipeline did not flag a
+            // fallback-only run (that comes back "blocked" above), so this is a real answer.
+            "Our search sources answered, and nobody matched this query."
         : undefined;
 
     await finish({ status: "completed" }, created, note);

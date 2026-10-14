@@ -26,7 +26,7 @@ import { ApiError, badRequest, notFound, requireSomeFields, errorLine, redactMes
 import { mailingAddressOf } from "../services/campaigns.js";
 import { clientIp, rateLimit, requireAuth, requireRole, requireUser, type Env } from "../middleware.js";
 import { randomToken, safeEqual, sha256 } from "../lib/crypto.js";
-import { sendMail } from "../lib/mailer.js";
+import { sendMail, systemMailerConfig } from "../lib/mailer.js";
 import { emitEvent } from "../lib/events.js";
 import { audit, enforceLoggedWindow } from "../lib/audit.js";
 import { attemptQueue, clearLock, forgetOtherKnownAddresses, humanWait, ipKey, isNewAddressFor, lockedError, lockState, recordAttempt, serialised, shouldAuditLock } from "../lib/loginGuard.js";
@@ -505,8 +505,20 @@ authRoutes.post("/password/forgot", rateLimit({ perMinute: 5, name: "password-fo
       await audit(c, "auth.password_reset_requested", { orgId: user.orgId, actorType: "anonymous", actorUserId: null, targetType: "user", targetId: user.id, result: r.ok ? "ok" : "failed", data: { email, emailed: !!r.ok } });
     }
   }
+  // Whether this server can send email at all is a fact about the server, not about the
+  // address, so saying it gives nothing away: the answer is the same for a known and an
+  // unknown address. Without it the page promised "we've emailed a link" that could never
+  // arrive. (Outside production a missing provider prints the mail to the server log, which
+  // is how a developer gets the link, so it is not reported there.)
+  if (!resetMailPossible()) return c.json({ ok: true, emailUnavailable: true, message: RESET_MAIL_UNAVAILABLE });
   return c.json({ ok: true });
 });
+
+/** Said when the server has no way to send a reset email, whoever asked. */
+export const RESET_MAIL_UNAVAILABLE = "This server has no email provider set up, so password reset links cannot be emailed right now. Ask your workspace owner or Scout support to help you get back in.";
+function resetMailPossible(): boolean {
+  return !!systemMailerConfig() || env.nodeEnv !== "production";
+}
 
 /**
  * Set a new password from an emailed token, then sign in (same body as /login).
@@ -747,7 +759,7 @@ authRoutes.get("/google/callback", rateLimit({ perMinute: 30 }), async (c) => {
         `You just signed in to Scout with Google as ${user.email}.\n\n` +
         `An account with this address already existed, created with a password, and nobody had ever confirmed that its owner controls this mailbox. ` +
         `To make sure only you can use it, we:\n` +
-        `- turned off the old password (set a new one any time under Settings > Password),\n` +
+        `- turned off the old password (set a new one any time under Settings > Workspace),\n` +
         `- signed out every other session` +
         (resolved.claim.apiKeysRevoked > 0 ? `,\n- revoked ${resolved.claim.apiKeysRevoked} API key(s) (create new ones under Settings > API keys).\n` : `.\n`) +
         (resolved.claim.otherUsers > 0 ? `\nThis workspace has ${resolved.claim.otherUsers} other member(s); review them under Settings > Team if you do not recognise them.\n` : ``) +

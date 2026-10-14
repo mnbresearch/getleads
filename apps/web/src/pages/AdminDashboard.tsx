@@ -388,7 +388,7 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
         <div className="flex gap-2">
           <select className="input min-w-0" aria-label="Plan" value={plan} disabled={!plans?.length} onChange={(e) => setPlan(e.target.value)}>
             {!knownPlan && <option value={org.plan} disabled>{plans && plans.length > 0 ? `Unknown plan: ${org.plan}` : `${org.plan} (${plansLoading ? "loading plans…" : "plan list not loaded"})`}</option>}
-            {plans?.map((p) => <option key={p.id} value={p.id}>{p.name} (${p.priceUsd}/mo)</option>)}
+            {plans?.map((p) => <option key={p.id} value={p.id}>{p.name} (${Number(p.priceUsd).toLocaleString("en-US")}/mo)</option>)}
           </select>
           <button className="btn-secondary shrink-0" disabled={!canSavePlan} onClick={savePlan}>Save</button>
         </div>
@@ -1096,7 +1096,7 @@ function PlansTab({ plans, loading, error, onRetry }: { plans: Plan[] | null; lo
       {plans.map((p) => (
         <div key={p.id} className="card p-4">
           <div className="font-semibold text-ink-50">{p.name}</div>
-          <div className="text-2xl font-semibold text-ink-50">${p.priceUsd}<span className="text-sm font-normal text-ink-400">/mo</span></div>
+          <div className="text-2xl font-semibold text-ink-50">${Number(p.priceUsd).toLocaleString("en-US")}<span className="text-sm font-normal text-ink-400">/mo</span></div>
           <ul className="mt-2 space-y-0.5 text-xs text-ink-300">
             <li>{fmtNum(Number(p.limits.leadsPerMonth))} leads/mo</li>
             <li>{fmtNum(Number(p.limits.premiumLeadsPerMonth))} premium leads/mo</li>
