@@ -52,6 +52,9 @@ import { dataSubjectReport, eraseDataSubject } from "../lib/privacyErase.js";
 import { productFunnel } from "../lib/productEvents.js";
 import { systemMailerConfig } from "../lib/mailer.js";
 import { followupAfterHours, followupMode, runCheckoutFollowups, sendFollowupTest } from "../services/checkoutFollowup.js";
+import { deliverabilityReport, orgInsights, orgListExtras } from "../services/adminDeliverability.js";
+import { platformOverview } from "../services/adminOverview.js";
+import { retryFailedJob, systemReport } from "../services/adminSystem.js";
 
 export const adminRoutes = new Hono<Env>();
 
@@ -261,6 +264,8 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().max(200).o
     usageByOrg.set(row.orgId, list);
   }
 
+  // Last active, members and total leads (services/adminDeliverability.ts): grouped queries, additive fields.
+  const extras = await orgListExtras(orgIds);
   const orgs = allOrgs.map((o) => {
     const orgUsers = (usersByOrg.get(o.id) ?? []).slice().sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime());
     const orgUsage = usageByOrg.get(o.id) ?? [];
@@ -284,6 +289,9 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().max(200).o
       limits: effectiveLimits(o),
       // When this workspace's data is due to be deleted at its owner's request, or null.
       pendingDeletionAt: deletionByOrg.get(o.id) ?? null,
+      lastActiveAt: extras.get(o.id)?.lastActiveAt ?? null,
+      membersCount: extras.get(o.id)?.membersCount ?? orgUsers.length,
+      leadsTotal: extras.get(o.id)?.leadsTotal ?? null,
     };
   });
 
@@ -345,8 +353,13 @@ adminRoutes.get("/orgs/:id", async (c) => {
     users: orgUsers,
     usage: Object.fromEntries(usageRows.map((r) => [r.metric, r.count])),
     period,
+    // Counts, activity, email, integrations, senders and recent security events (additive).
+    ...(await orgInsights(org.id)),
   });
 });
+
+/** Deliverability and integration health across every workspace (services/adminDeliverability.ts). */
+adminRoutes.get("/deliverability", zValidator("query", z.object({ days: z.enum(["7", "30"]).default("7") })), async (c) => c.json(await deliverabilityReport(Number(c.req.valid("query").days))));
 
 /**
  * Turn a user's two-factor sign-in off, for support.
@@ -1078,4 +1091,26 @@ adminRoutes.post("/checkout-followup/test", rateLimit({ perMinute: 3, name: "adm
     return c.json({ sent: false, reason: r.reason, message }, 200);
   }
   return c.json({ sent: true, to: env.adminEmail });
+});
+
+// ── Overview and System (services/adminOverview.ts, services/adminSystem.ts) ──
+
+/** The platform at a glance, with the alerts an operator should act on first. Read-only. */
+adminRoutes.get("/overview", rateLimit({ perMinute: 30, name: "admin-overview" }), async (c) => c.json(await platformOverview()));
+
+/** Build, database, configuration checklist (set or not, never a value of a secret) and the job queue. Read-only. */
+adminRoutes.get("/system", rateLimit({ perMinute: 30, name: "admin-system" }), async (c) => c.json(await systemReport()));
+
+/** Requeue one failed job for one more attempt. Schedulers are refused (they re-run on their own). */
+adminRoutes.post("/jobs/:id/retry", rateLimit({ perMinute: 30, name: "admin-job-retry" }), async (c) => {
+  const id = c.req.param("id");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) throw badRequest("That is not a valid job id.");
+  const r = await retryFailedJob(id);
+  if (!r.ok) {
+    if (r.reason === "not_found") throw notFound("Job");
+    if (r.reason === "recurring") throw new ApiError(409, "This is a scheduler. It has already scheduled its next run, and retrying it would start a second copy that never stops.", "recurring_job");
+    throw new ApiError(409, `Only a failed job can be retried; this one is ${r.status ?? "not failed"}.`, "not_failed");
+  }
+  await adminAudit(c, "admin.job_retried", r.orgId, { targetType: "job", targetId: r.id, data: { type: r.type, previousError: r.previousError } });
+  return c.json({ ok: true, id: r.id, type: r.type, status: "queued", ...(r.note ? { note: r.note } : {}) });
 });

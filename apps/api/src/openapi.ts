@@ -571,6 +571,64 @@ export function openapi(apiUrl: string) {
       "/v1/admin/checkouts": { get: { tags: ["Admin"], security: adminSec, summary: "Online checkouts with their status (open, completed, expired, abandoned) and follow-up outcome", parameters: [{ name: "status", in: "query", schema: { ...str, enum: ["open", "completed", "expired", "abandoned"] } }, { name: "limit", in: "query", schema: { type: "integer", default: 100, maximum: 500 } }], responses: ok() } },
       "/v1/admin/checkout-followup/preview": { post: { tags: ["Admin"], security: adminSec, summary: "What the abandoned-checkout follow-up would do right now (dry run, writes nothing), with the email the first eligible checkout would get. The mode is the CHECKOUT_FOLLOWUP setting (off, dry_run, on)", responses: ok() } },
       "/v1/admin/checkout-followup/test": { post: { tags: ["Admin"], security: adminSec, summary: "Send the sample follow-up email to ADMIN_EMAIL (never to any other address)", responses: ok() } },
+      "/v1/admin/overview": {
+        get: {
+          tags: ["Admin"],
+          security: adminSec,
+          summary: "The whole platform at a glance: workspaces (by plan and status, new, active in 7 days, pending deletion), users, usage, outreach, plays, revenue and job/integration health, plus `alerts` ordered critical, warning, info - each with a `fix` sentence. Counts that could not be read in time are null and their group is named in `unavailable`. `usage30d.basis` says which counts are the last 30 days and which are this calendar month",
+          responses: ok(
+            obj(
+              {
+                generatedAt: dateTime,
+                workspaces: obj({ total: { type: ["integer", "null"] }, byPlan: { type: "object" }, byStatus: { type: "object" }, new7d: { type: ["integer", "null"] }, new30d: { type: ["integer", "null"] }, active7d: { type: ["integer", "null"], description: "A sign-in, a product event or a new lead in the last 7 days" }, pendingDeletion: { type: ["integer", "null"] } }),
+                users: obj({ total: { type: ["integer", "null"] }, new7d: { type: ["integer", "null"] }, new30d: { type: ["integer", "null"] }, twoFactorOn: { type: ["integer", "null"] } }),
+                usage30d: obj({ leads: { type: ["integer", "null"] }, searches: { type: ["integer", "null"] }, verifications: { type: ["integer", "null"] }, aiMessages: { type: ["integer", "null"] }, emailsSent: { type: ["integer", "null"] }, basis: { type: "object" }, period: str }),
+                outreach: obj({ campaignsActive: { type: ["integer", "null"] }, emailsSent7d: { type: ["integer", "null"] }, replies7d: { type: ["integer", "null"] }, bounces7d: { type: ["integer", "null"] }, complaints7d: { type: ["integer", "null"] } }),
+                plays: obj({ total: { type: ["integer", "null"] }, active: { type: ["integer", "null"] }, runs7d: { type: ["integer", "null"] }, candidatesPending: { type: ["integer", "null"] } }),
+                revenue: obj({ stripeEnabled: bool, paidWorkspaces: { type: ["integer", "null"] }, openUpgradeRequests: { type: ["integer", "null"] } }),
+                health: obj({ failedJobs24h: { type: ["integer", "null"] }, stuckJobs: { type: ["integer", "null"], description: "Running for more than 30 minutes" }, integrationsInError: { type: ["integer", "null"] }, webhooksFailing: { type: ["integer", "null"], description: "Disabled, or a failed delivery in the last 24 hours" }, queueOpen: { type: ["integer", "null"] }, oldestDueSeconds: { type: ["integer", "null"] } }),
+                alerts: arr(obj({ level: { ...str, enum: ["critical", "warning", "info"] }, id: str, title: str, detail: str, fix: str }, ["level", "id", "title", "detail", "fix"])),
+                unavailable: arr(),
+              },
+              ["workspaces", "users", "usage30d", "outreach", "plays", "revenue", "health", "alerts"],
+            ),
+          ),
+        },
+      },
+      "/v1/admin/system": {
+        get: {
+          tags: ["Admin"],
+          security: adminSec,
+          summary: "Build (commit, Node version, start time, job mode, embedded worker), database (migrations applied, size, ten largest tables by estimated rows and bytes), the configuration checklist (each setting: area, whether it is set and what it does; values only for non-secret mode switches, never a secret), keep-awake state, and the job queue: per-type counts, scheduler health and the 20 most recent failures (errors redacted, 200 characters)",
+          responses: ok(
+            obj(
+              {
+                serverTime: dateTime,
+                build: obj({ commit: { type: ["string", "null"] }, node: str, startedAt: dateTime, uptimeSeconds: { type: "integer" }, nodeEnv: str, jobMode: str, embeddedWorker: bool }),
+                database: obj({ migrationsApplied: { type: ["integer", "null"] }, latestMigration: { type: ["string", "null"] }, sizeBytes: { type: ["integer", "null"] }, largestTables: arr(obj({ name: str, estimatedRows: { type: ["integer", "null"] }, sizeBytes: { type: "integer" } })) }),
+                config: arr(obj({ key: str, label: str, area: { ...str, enum: ["search", "ai", "email", "billing", "security", "privacy", "runtime"] }, set: bool, effect: str, value: { type: ["string", "null"], description: "Only for non-secret mode switches" } }, ["key", "label", "area", "set", "effect"])),
+                keepAwake: obj({ configured: bool, window: { type: ["string", "null"] }, timeZone: { type: ["string", "null"] }, activeNow: bool, onRender: bool }),
+                jobs: obj({
+                  byType: arr(obj({ type: str, queued: { type: "integer" }, running: { type: "integer" }, failed24h: { type: "integer" }, done24h: { type: "integer" }, oldestQueuedSeconds: { type: ["integer", "null"] } })),
+                  recurring: arr(obj({ type: str, intervalSeconds: { type: "integer" }, lastFinishedAt: { type: ["string", "null"] }, lastStatus: { type: ["string", "null"] }, nextRunAt: { type: ["string", "null"] }, running: bool, healthy: bool, problem: { type: ["string", "null"] } })),
+                  recentFailures: arr(obj({ id: str, type: str, orgId: { type: ["string", "null"] }, orgName: { type: ["string", "null"] }, error: { type: ["string", "null"] }, failedAt: { type: ["string", "null"] }, attempts: { type: "integer" }, maxAttempts: { type: "integer" }, retryable: bool })),
+                }),
+                unavailable: arr(),
+              },
+              ["serverTime", "build", "database", "config", "jobs"],
+            ),
+          ),
+        },
+      },
+      "/v1/admin/jobs/{id}/retry": {
+        post: {
+          tags: ["Admin"],
+          security: adminSec,
+          summary: "Requeue one failed job for one more attempt (audit-logged as admin.job_retried). 409 `not_failed` for a job that is not failed, 409 `recurring_job` for a scheduler (it re-runs on its own), 404 for an unknown id",
+          parameters: [{ name: "id", in: "path", required: true, schema: str }],
+          responses: ok(obj({ ok: bool, id: str, type: str, status: { ...str, enum: ["queued"] }, note: str }, ["ok", "id", "type", "status"])),
+        },
+      },
       "/v1/admin/suppressions": {
         get: { tags: ["Admin"], security: adminSec, summary: "The platform-wide do-not-contact list: addresses no workspace may email. `q` matches part of the address", parameters: [{ name: "q", in: "query", schema: { ...str, maxLength: 200 } }, { name: "limit", in: "query", schema: { type: "integer", default: 100, maximum: 500 } }], responses: ok(obj({ suppressions: arr(obj({ id: str, email: str, reason: str, note: { type: ["string", "null"] }, createdAt: str })) }, ["suppressions"])) },
         post: { tags: ["Admin"], security: adminSec, summary: "Add an address to the platform-wide list. Answers 201 when it was added and 200 when it was already there", requestBody: j(obj({ email: str, reason: str, note: str }, ["email"])), responses: ok(obj({ suppression: { type: "object" }, created: bool })) },
@@ -644,14 +702,50 @@ export function openapi(apiUrl: string) {
           responses: ok(obj({ ok: bool, revoked: bool, note: str }, ["ok", "revoked"])),
         },
       },
-      "/v1/admin/orgs": { get: { tags: ["Admin"], security: [{ bearerAuth: [] }], summary: "Workspaces, newest first. `q` matches the name, slug or a member's email as literal text (% and _ are not wildcards). Each row carries `pendingDeletionAt`: when the workspace is due to be deleted at its owner's request, or null", parameters: [{ name: "q", in: "query", schema: { ...str, maxLength: 200 } }], responses: ok(obj({ orgs: arr({ type: "object", description: "id, name, slug, plan, status, createdAt, leadsUsed, premiumLeadsUsed, userCount, ownerEmail, ownerName, limits, pendingDeletionAt" }) })) } },
+      "/v1/admin/orgs": { get: { tags: ["Admin"], security: [{ bearerAuth: [] }], summary: "Workspaces, newest first. `q` matches the name, slug or a member's email as literal text (% and _ are not wildcards). Each row carries `pendingDeletionAt`: when the workspace is due to be deleted at its owner's request, or null", parameters: [{ name: "q", in: "query", schema: { ...str, maxLength: 200 } }], responses: ok(obj({ orgs: arr({ type: "object", description: "id, name, slug, plan, status, createdAt, leadsUsed, premiumLeadsUsed, userCount, ownerEmail, ownerName, limits, pendingDeletionAt, lastActiveAt (latest sign-in, event or API action; null when none), membersCount, leadsTotal (null when the count did not finish in time on a very large database)" }) })) } },
       "/v1/admin/orgs/{id}": {
         get: {
           tags: ["Admin"],
           security: [{ bearerAuth: [] }],
           summary: "One workspace: its users (with whether each has two-factor sign-in on and a verified address), this month's usage, its effective limits and its overrides",
           parameters: [{ name: "id", in: "path", required: true, schema: str }],
-          responses: ok(obj({ org: { type: "object", description: "Includes `limits` (plan defaults with overrides applied), `overrides` and `pendingDeletionAt`" }, overrides: { type: "object", description: "The workspace's limits that differ from its plan's defaults; empty when it simply has the plan's limits" }, users: arr(obj({ id: str, email: str, name: str, role: str, lastLoginAt: { type: ["string", "null"] }, createdAt: str, twoFactorEnabled: bool, emailVerified: bool })), usage: { type: "object" }, period: str })),
+          responses: ok(obj({ org: { type: "object", description: "Includes `limits` (plan defaults with overrides applied), `overrides` and `pendingDeletionAt`" }, overrides: { type: "object", description: "The workspace's limits that differ from its plan's defaults; empty when it simply has the plan's limits" }, users: arr(obj({ id: str, email: str, name: str, role: str, lastLoginAt: { type: ["string", "null"] }, createdAt: str, twoFactorEnabled: bool, emailVerified: bool })), usage: { type: "object" }, period: str,
+            counts: { ...nullable({ type: "object" }), description: "members, leads, companies, lists, campaigns, campaignsActive, plays, clients, apiKeysActive, webhooks, integrations, pixels, signalsSubscriptions, autopilots. null when the counts did not finish in time" },
+            countsCapped: { ...arr(str), description: "Counts that reached 1,000,000 and mean \"at least\"" },
+            lastLoginAt: nullable(dateTime),
+            lastActiveAt: { ...nullable(dateTime), description: "Latest of: a member signing in, a workspace event, a product event, an action by a member or API key" },
+            emailsSent30d: nullable(int),
+            bounceRate30d: { ...nullable(num), description: "0 to 1" },
+            integrations: arr(obj({ provider: str, status: str, lastSyncAt: nullable(dateTime), lastError: nullable(str) })),
+            senders: arr(obj({ account: { ...str, description: "The workspace's own sending address" }, provider: str, status: str })),
+            recentAudit: arr(obj({ action: str, actorType: str, createdAt: nullable(dateTime), result: str })),
+            insightsTimedOut: { ...arr(str), description: "Sections left empty because they did not finish in time" } })),
+        },
+      },
+      "/v1/admin/deliverability": {
+        get: {
+          tags: ["Admin"],
+          security: adminSec,
+          summary: "Deliverability and integration health across every workspace: daily sent, bounced, complained and replied (bounced and replied counted against the day the email was sent), rates, the 50 busiest sender accounts with the scheduler's verdict (circuit breaker) and warm-up day, suppression list sizes, whether bounce tracking is set up (never the secret), connected integrations and the ones in error, webhooks failing in the last 24 hours or switched off (host only, never the path), and the inbound-reply addresses. A section that does not finish in time is left empty and named in `timedOut`",
+          parameters: [{ name: "days", in: "query", schema: { type: "string", enum: ["7", "30"], default: "7" } }],
+          responses: ok(
+            obj(
+              {
+                days: int,
+                daily: arr(obj({ day: { ...str, description: "YYYY-MM-DD (UTC)" }, sent: int, bounced: int, complained: int, replied: int })),
+                totals: obj({ sent: int, bounced: int, complained: int, replied: int, bounceRate: num, complaintRate: num }),
+                senders: arr(obj({ orgId: uuid, orgName: str, accountId: uuid, account: str, provider: str, status: str, paused: bool, circuitBreaker: { ...str, enum: ["ok", "warn", "halt"] }, circuitReason: nullable(str), sent7d: int, bounceRate7d: num, warmupDay: nullable(int), dailyLimit: int })),
+                suppressions: obj({ global: int, workspaceTotal: int, workspaceEstimated: bool }),
+                bounceTracking: obj({ resendWebhookConfigured: bool, lastEventAt: nullable(dateTime) }),
+                integrations: obj({ byProvider: arr(obj({ provider: str, connected: int, inError: int })), errors: arr(obj({ orgId: uuid, orgName: str, provider: str, lastError: nullable(str), lastErrorAt: nullable(dateTime), credentialsRejected: bool })) }),
+                webhooks: obj({ total: int, active: int, disabled: int, failing: arr(obj({ webhookId: uuid, orgId: uuid, orgName: str, host: str, lastStatus: nullable(int), lastError: nullable(str), lastFailureAt: nullable(dateTime), failures24h: int, consecutiveFailures: int, disabled: bool })) }),
+                inbound: obj({ addressesCreated: int, repliesReceived7d: int }),
+                timedOut: arr(str),
+                generatedAt: dateTime,
+              },
+              ["days", "daily", "totals", "senders", "suppressions", "bounceTracking", "integrations", "webhooks", "inbound", "timedOut"],
+            ),
+          ),
         },
       },
       "/v1/admin/orgs/{id}/plan": {

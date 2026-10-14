@@ -6,6 +6,10 @@ import { expectLists, expectShape, fmtDate, fmtDay, fmtNum } from "../lib/api";
 import { plural } from "../lib/plural";
 import { SecurityTab } from "./AdminSecurity";
 import { GrowthTab } from "./AdminAnalytics";
+import { OverviewTab } from "./AdminOverview";
+import { SystemTab } from "./AdminSystem";
+import { DeliverabilityTab } from "./AdminDeliverability";
+import { OrgInsights, type OrgInsightsData } from "./AdminOrgInsights";
 
 type PlanLimits = Record<string, number | boolean>;
 type OrgRow = {
@@ -23,6 +27,10 @@ type OrgRow = {
   limits: PlanLimits;
   /** When the owner has asked for the workspace to be deleted: the date it is due to go. */
   pendingDeletionAt?: string | null;
+  /** Newer servers only: latest sign-in, event or API action, total leads (null when not counted in time). */
+  lastActiveAt?: string | null;
+  membersCount?: number;
+  leadsTotal?: number | null;
 };
 // `twoFactorEnabled` is absent on an older server: no badge and no reset button, rather
 // than a guess either way.
@@ -30,7 +38,7 @@ type OrgRow = {
 type OrgUser = { id: string; email: string; name: string; role: string; lastLoginAt: string | null; createdAt: string; twoFactorEnabled?: boolean; emailVerified?: boolean };
 // `overrides` (the limits that differ from the plan's own) is sent by newer servers, at the
 // top level or on the org; older ones send neither and it is worked out here (overridesOf).
-type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> | null; overrides?: Record<string, unknown> | null; aiAssist?: boolean; mailingAddressSet?: boolean }; overrides?: Record<string, unknown> | null; users: OrgUser[]; usage: Record<string, number>; period: string };
+type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> | null; overrides?: Record<string, unknown> | null; aiAssist?: boolean; mailingAddressSet?: boolean }; overrides?: Record<string, unknown> | null; users: OrgUser[]; usage: Record<string, number>; period: string } & OrgInsightsData;
 type UpgradeRequest = { id: string; orgId: string | null; orgName?: string | null; name: string; email: string; mobile: string; country: string; planId: string; message: string | null; status: string; createdAt: string };
 type Plan = { id: string; name: string; priceUsd: number; limits: PlanLimits };
 type ToolSummary = {
@@ -505,6 +513,8 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
         </div>
       )}
 
+      <OrgInsights data={detail} />
+
       <div>
         <div className="label">Users ({detail.users.length})</div>
         <ul className="space-y-1 text-sm text-ink-300 [overflow-wrap:anywhere]">
@@ -597,8 +607,8 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
         </div>
         {loadErr && <div className="border-b border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">Could not load workspaces: {loadErr} <button className={LINK_BTN} onClick={load}>Retry</button></div>}
         {!orgs && !loadErr && <div className="p-6 text-center text-sm text-ink-400" role="status">Loading workspaces…</div>}
-        <table className="w-full text-sm">
-          <thead><tr className="text-left text-ink-400"><th className="th">Workspace</th><th className="th">Plan</th><th className="th">Status</th><th className="th">Leads</th><th className="th">Premium</th><th className="th">Users</th><th className="th">Joined</th></tr></thead>
+        <table className="w-full md:min-w-[880px] text-sm">
+          <thead><tr className="text-left text-ink-400"><th className="th">Workspace</th><th className="th">Plan</th><th className="th">Status</th><th className="th">Leads</th><th className="th">Premium</th><th className="th">Users</th><th className="th max-md:hidden">Leads total</th><th className="th max-md:hidden">Last active</th><th className="th">Joined</th></tr></thead>
           <tbody>
             {orgs?.map((o) => (
               <tr
@@ -617,7 +627,9 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
                 <td className="td"><StatusBadge status={o.status} /></td>
                 <td className="td whitespace-nowrap">{usedOf(o.leadsUsed, o.limits?.leadsPerMonth, "leadsPerMonth")}</td>
                 <td className="td whitespace-nowrap">{usedOf(o.premiumLeadsUsed, o.limits?.premiumLeadsPerMonth, "premiumLeadsPerMonth")}</td>
-                <td className="td">{o.userCount}</td>
+                <td className="td">{o.membersCount ?? o.userCount}</td>
+                <td className="td whitespace-nowrap tabular-nums max-md:hidden" title={o.leadsTotal === null ? "Not counted: the count did not finish in time" : undefined}>{typeof o.leadsTotal === "number" ? fmtNum(o.leadsTotal) : "-"}</td>
+                <td className="td whitespace-nowrap max-md:hidden" title={o.lastActiveAt ? fmtDate(o.lastActiveAt) : undefined}>{o.lastActiveAt ? fmtDay(o.lastActiveAt) : o.lastActiveAt === null ? "Never" : "-"}</td>
                 <td className="td">{fmtDate(o.createdAt)}</td>
               </tr>
             ))}
@@ -1200,13 +1212,14 @@ function CreditsTab() {
   );
 }
 
-type Tab = "orgs" | "leads" | "growth" | "tools" | "credits" | "plans" | "security";
-const TABS: readonly (readonly [Tab, string])[] = [["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["growth", "Growth"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"], ["security", "Security"]];
+type Tab = "overview" | "system" | "orgs" | "leads" | "growth" | "tools" | "credits" | "plans" | "security" | "deliverability";
+const TABS: readonly (readonly [Tab, string])[] = [["overview", "Overview"], ["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["growth", "Growth"], ["deliverability", "Deliverability"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"], ["security", "Security"], ["system", "System"]];
 
 export function AdminDashboardPage() {
   const token = useAdminToken();
   const navigate = useNavigate();
-  const [tab, setTab] = useState<Tab>("orgs");
+  // The Overview is the landing tab: what needs attention comes before any list.
+  const [tab, setTab] = useState<Tab>("overview");
   // null = not loaded (yet, or the load failed - see plansErr). The page never waits on it.
   const [plans, setPlans] = useState<Plan[] | null>(null);
   // true from the first paint: the request starts in the effect below, and "not loading, no
@@ -1271,6 +1284,9 @@ export function AdminDashboardPage() {
         {tab === "credits" && <CreditsTab />}
         {tab === "plans" && <PlansTab plans={plans} loading={plansLoading} error={plansErr} onRetry={loadPlans} />}
         {tab === "security" && <SecurityTab onViewOrg={(id) => { setSelectedOrg(id); setTab("orgs"); }} />}
+        {tab === "deliverability" && <DeliverabilityTab onViewOrg={(id) => { setSelectedOrg(id); setTab("orgs"); }} />}
+        {tab === "overview" && <OverviewTab onOpenTab={(id) => { if (TABS.some(([t]) => t === id)) setTab(id as Tab); }} />}
+        {tab === "system" && <SystemTab />}
       </main>
     </div>
   );
