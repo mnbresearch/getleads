@@ -2,6 +2,17 @@
 
 > Scout (scout.mnbresearch.com) is B2B lead intelligence and AI-visibility measurement, built by MNB Research (Faridabad, India). It finds business prospects from live sources, can verify their email addresses before you send (and never sends to an address it knows is invalid), runs AI-personalised outbound email sequences, identifies companies visiting your website, and measures how AI models describe your brand when buyers research your category - Gemini and Llama today, more engines as they are connected - reporting sample sizes and confidence intervals rather than single answers. Everything is available in a web app and a REST API; an MCP server for AI agents is available on request.
 
+## What Scout does
+
+- Discovery: live search for companies and people by title, industry, location, company size and keywords; decision makers and colleagues at a named company; work-email finding and checking (risky and catch-all addresses are labelled).
+- Plays: one recipe per source of buying intent (a competitor's named customers, companies hiring for a role, recent funding, people asking for a solution in public, website visitors, contacts who changed jobs, uploaded engagers). Every candidate carries a one-sentence reason and the page that shows it, and waits for approval.
+- Signals and automation: funding, hiring and leadership news watched for your ideal customer; champion job changes; saved searches and Autopilot runs on a schedule.
+- Outreach: research-based drafts, multichannel sequences (email, LinkedIn and call steps as tasks, WhatsApp through your own account), A/B variants, a send-volume ramp, per-sender health and an automatic stop on high bounce or complaint rates; replies stop the sequence and are sorted automatically.
+- Agencies: a client area per client with its own profile, plays, campaigns and lists, monthly targets with pace, and a read-only report link the client can open.
+- Integrations: HubSpot, Pipedrive, Zoho, Google Sheets, signed webhooks (Zapier, Make), CSV, REST API; an MCP server is available on request.
+- AI visibility (AEO / GEO): measures what AI models answer when buyers research your category - Gemini and Llama today, more engines as they are connected - with sample sizes and confidence intervals.
+- Workspace: roles and invites, two-factor sign-in, read-only and expiring API keys, a security log, full data export and self-serve deletion.
+
 ## Key pages
 
 - [Home](https://scout.mnbresearch.com/): what Scout does, how the AI-visibility (AEO / GEO) measurement works, pricing and FAQ.

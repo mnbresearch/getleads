@@ -70,4 +70,24 @@ export const FAQS: Faq[] = [
     q: "Can AI agents use Scout directly?",
     a: "Yes. Scout has a REST API with API keys, and an MCP server is available on request, so an agent can search, enrich, verify and send using the same tools a human rep uses, with the same quotas and the same safeguards.",
   },
+  {
+    q: "Can I run Scout for several clients?",
+    a: "Yes. Each client gets its own ideal-customer profile, searches, plays, campaigns and lead lists inside your workspace, a monthly lead target with pace, and a read-only report link the client can open without an account. Contact details stay with you, and you can switch the link off at any time.",
+  },
+  {
+    q: "Can Scout find and verify email addresses?",
+    a: "Yes. Give it a name and a company and it looks for the work email, then checks it before it can reach a sequence. Risky and catch-all addresses are labelled as such, and Scout never sends to an address it knows is invalid.",
+  },
+  {
+    q: "Which tools does Scout connect to?",
+    a: "HubSpot, Pipedrive, Zoho and Google Sheets directly, with optional automatic sync, plus signed webhooks for Zapier, Make or your own systems. Leads also import and export as CSV, and everything is available through the REST API.",
+  },
+  {
+    q: "How does Scout know when someone replies?",
+    a: "Forward replies from your inbox, or through Zapier, Make or Gmail forwarding, to your workspace's private reply address, or mark a reply by hand. A reply stops that person's sequence and is sorted as interested, not interested, out of office, referral or unsubscribe.",
+  },
+  {
+    q: "How is my workspace data protected?",
+    a: "Each workspace's data is isolated from every other. Members have roles, sign-in supports two-factor codes, API keys can be read-only and expire, and a security log records sign-ins and sensitive changes. Owners can export everything or delete the workspace themselves.",
+  },
 ];

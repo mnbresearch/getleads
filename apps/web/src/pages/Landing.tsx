@@ -52,7 +52,26 @@ const features = [
   { icon: "◈", title: "Intent signals", desc: "Funding, hiring, leadership changes and news, watched continuously so timing stops being luck." },
   { icon: "◐", title: "AI visibility across engines", desc: "Track how AI models describe you when a buyer researches you - Gemini and Llama today, more engines as they are connected - per model, with the raw answers kept." },
   { icon: "⚑", title: "Deliverability that defends you", desc: "A gradual volume ramp for new senders, per-mailbox health scoring and an automatic stop before a bad run damages your domain." },
-  { icon: "⚡", title: "Built for AI agents", desc: "A full REST API (and an MCP server available on request), so your agents can prospect, enrich and send with the same tools your reps use." },
+  { icon: "⚡", title: "Built for AI agents", desc: "A full REST API, plus an agent console where you ask for prospects in plain words (an MCP server is available on request), so agents use the same tools your reps do." },
+  { icon: "@", title: "Email finder and decision makers", desc: "Name a company and get the people who decide, by role, with their work email found and checked. Risky and catch-all addresses are marked, never passed off as safe." },
+  { icon: "↻", title: "Autopilot and saved searches", desc: "Save a search or an ICP and Scout runs it on a schedule, adding only people you do not already have to the list you choose." },
+  { icon: "⇄", title: "Champion job changes", desc: "Know when a contact who knows you moves to a new company, so the next deal starts with someone who already trusts you." },
+  { icon: "☰", title: "Multichannel sequences", desc: "Email steps alongside LinkedIn connect and message steps, calls and custom tasks, plus WhatsApp through your own WhatsApp Business account." },
+  { icon: "↩", title: "Replies handled for you", desc: "A reply stops the sequence and is sorted as interested, not interested, out of office, referral or unsubscribe. Forward replies from any inbox to your workspace's private address." },
+  { icon: "⇆", title: "Your CRM stays in sync", desc: "HubSpot, Pipedrive, Zoho, Google Sheets and signed webhooks for Zapier or Make, with optional automatic sync, plus CSV import and export." },
+  { icon: "▤", title: "Analytics that explain outcomes", desc: "Where leads stall, which source produces replies, and which step and variant earned them, with the sample size behind every rate." },
+  { icon: "⛨", title: "Team, security and your data", desc: "Roles and invites, two-factor sign-in, read-only and expiring API keys, a security log, a full data export and self-serve workspace deletion." },
+];
+
+/**
+ * The agency half: everything a team that generates leads FOR clients needs, as built in
+ * the Clients section of the app (routes/clients.ts, pages/Clients.tsx, ClientReport.tsx).
+ */
+const agencyPoints = [
+  { title: "A workspace area per client", desc: "Each client gets its own ideal-customer profile, searches, plays, campaigns and lead lists, inside one Scout workspace your team shares." },
+  { title: "Monthly targets with pace", desc: "Set how many leads a client gets each month and see at a glance who is on track and who is behind, from the day you start." },
+  { title: "Route every lead to the right client", desc: "Assign or move leads between clients in bulk, and see the ones that still need a home in a single queue." },
+  { title: "A report link the client can open", desc: "Share a read-only page with the leads delivered, which have a verified email, and progress against target. Contact details stay with you, and the link can be switched off any time." },
 ];
 
 /**
@@ -70,6 +89,9 @@ const compare: { row: string; cells: (true | false | "varies")[] }[] = [
   { row: "Keeps raw answers so past data can be recomputed", cells: [true, false, "varies", false] },
   { row: "Writes the tracked questions from your own ICP", cells: [true, false, false, false] },
   { row: "Outbound outcomes and AI answers in one database", cells: [true, false, false, false] },
+  { row: "Every found lead comes with a checkable reason (plays)", cells: [true, false, false, false] },
+  { row: "A client area and shareable report per client", cells: [true, "varies", false, false] },
+  { row: "Syncs leads to your CRM", cells: [true, true, "varies", false] },
 ];
 
 /**
@@ -312,11 +334,13 @@ function PricingSection() {
 const NAV_LINKS: { href: string; label: string; demoOnly?: boolean }[] = [
   { href: "#demo", label: "Watch", demoOnly: true },
   { href: "#plays", label: "Plays" },
+  { href: "#agencies", label: "Agencies" },
   { href: "#problems", label: "Why Scout" },
   { href: "#ai", label: "The AI layer" },
   { href: "#visibility", label: "AI visibility" },
   { href: "#how-aeo", label: "AEO / GEO" },
   { href: "#compare", label: "Compare" },
+  { href: "#features", label: "Features" },
   { href: "#faq", label: "FAQ" },
   { href: "#pricing", label: "Pricing" },
 ];
@@ -340,7 +364,7 @@ export function LandingPage() {
       <header className="sticky top-0 z-50 border-b border-black/5 bg-cream/80 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between gap-2 px-4 py-4 sm:px-6">
           <Logo size={28} textClassName="text-lg" />
-          <nav className="hidden items-center gap-6 text-sm text-ink-300 sm:flex">
+          <nav className="hidden items-center gap-4 whitespace-nowrap text-sm text-ink-300 xl:flex">
             {links.map((l) => (
               <a key={l.href} href={l.href} className="hover:text-ink-50">{l.label}</a>
             ))}
@@ -350,7 +374,7 @@ export function LandingPage() {
             <Link to="/signup" className="btn-primary">Get started</Link>
             <button
               type="button"
-              className="grid h-9 w-9 place-items-center rounded-lg border border-black/10 bg-black/[0.03] text-ink-100 sm:hidden"
+              className="grid h-9 w-9 place-items-center rounded-lg border border-black/10 bg-black/[0.03] text-ink-100 xl:hidden"
               aria-label={menuOpen ? "Close menu" : "Open menu"}
               aria-expanded={menuOpen}
               aria-controls="landing-mobile-menu"
@@ -362,8 +386,8 @@ export function LandingPage() {
           </div>
         </div>
         {menuOpen && (
-          <nav id="landing-mobile-menu" aria-label="Sections" className="border-t border-black/5 bg-cream px-4 pb-4 pt-2 sm:hidden">
-            <ul className="grid grid-cols-2 gap-1 text-sm text-ink-200">
+          <nav id="landing-mobile-menu" aria-label="Sections" className="border-t border-black/5 bg-cream px-4 pb-4 pt-2 xl:hidden">
+            <ul className="grid grid-cols-2 gap-1 text-sm text-ink-200 sm:grid-cols-4">
               {links.map((l) => (
                 <li key={l.href}>
                   <a href={l.href} className="block rounded-lg px-3 py-2 hover:bg-black/[0.04] hover:text-ink-50" onClick={() => setMenuOpen(false)}>
@@ -451,6 +475,25 @@ export function LandingPage() {
               approve it, unless you tell a play to approve on its own.
             </p>
             <Link to="/signup" className="btn-primary shrink-0 px-5 py-2.5">Start with your website</Link>
+          </div>
+        </section>
+
+        <section id="agencies" className="scroll-mt-24 pt-20" data-testid="landing-agencies">
+          <div className="mx-auto max-w-2xl text-center">
+            <span className="badge border border-black/10 bg-black/5 text-ink-300">For agencies and lead-gen teams</span>
+            <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Run lead generation for every client from one place</h2>
+            <p className="mt-3 text-ink-300">
+              If you source leads for other companies, each client gets its own profile, targets and lead list, and a
+              report they can open without an account.
+            </p>
+          </div>
+          <div className="mt-12 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {agencyPoints.map((a) => (
+              <div key={a.title} className="card p-6">
+                <div className="font-semibold text-ink-50">{a.title}</div>
+                <p className="mt-1.5 text-sm text-ink-400">{a.desc}</p>
+              </div>
+            ))}
           </div>
         </section>
 
@@ -720,6 +763,7 @@ export function LandingPage() {
           <div className="mx-auto max-w-2xl text-center">
             <span className="badge border border-black/10 bg-black/5 text-ink-300">Features</span>
             <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Everything a modern pipeline needs</h2>
+            <p className="mt-3 text-ink-300">From the first search to the reply and the CRM, in one workspace your team and your agents share.</p>
           </div>
           <div className="mt-14 grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
             {features.map((f) => (
@@ -756,6 +800,7 @@ export function LandingPage() {
             <ul className="mt-3 space-y-2 text-ink-300">
               {HAS_DEMO_VIDEO && <li><a href="#demo" className="hover:text-ink-50">Watch the demo</a></li>}
               <li><a href="#plays" className="hover:text-ink-50">Plays</a></li>
+              <li><a href="#agencies" className="hover:text-ink-50">For agencies</a></li>
               <li><a href="#problems" className="hover:text-ink-50">Why Scout</a></li>
               <li><a href="#ai" className="hover:text-ink-50">The AI layer</a></li>
               <li><a href="#visibility" className="hover:text-ink-50">AI visibility</a></li>
