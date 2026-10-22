@@ -13,9 +13,10 @@
 - AI visibility (AEO / GEO): measures what AI models answer when buyers research your category - Gemini and Llama today, more engines as they are connected - with sample sizes and confidence intervals.
 - Workspace: roles and invites, two-factor sign-in, read-only and expiring API keys, a security log, full data export and self-serve deletion.
 
-## Key pages
+## Key pages and resources
 
 - [Home](https://scout.mnbresearch.com/): what Scout does, how the AI-visibility (AEO / GEO) measurement works, pricing and FAQ.
+- [Full Documentation for AI](https://scout.mnbresearch.com/llms-full.txt): exhaustive technical documentation, data models, API endpoints, and statistical methods.
 - [Sign up](https://scout.mnbresearch.com/signup): create a workspace.
 - [Sign in](https://scout.mnbresearch.com/login)
 - [Privacy Policy](https://scout.mnbresearch.com/privacy): what data Scout processes, sub-processors, retention and your rights (India DPDP Act 2023, GDPR).

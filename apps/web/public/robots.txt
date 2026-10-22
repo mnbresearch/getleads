@@ -5,4 +5,8 @@ Allow: /
 Disallow: /r/
 Disallow: /admin
 
+# AI documentation & model context:
+# https://scout.mnbresearch.com/llms.txt
+# https://scout.mnbresearch.com/llms-full.txt
+
 Sitemap: https://scout.mnbresearch.com/sitemap.xml

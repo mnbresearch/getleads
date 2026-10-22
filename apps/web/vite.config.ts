@@ -1,6 +1,6 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
-import { FAQS } from "./src/content/faq";
+import { FAQS } from "./src/content/faq.ts";
 
 /**
  * Write the FAQ structured data into index.html at build time.

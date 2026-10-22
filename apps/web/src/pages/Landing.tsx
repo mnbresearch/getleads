@@ -228,18 +228,86 @@ function planFeatures(p: Plan): string[] {
   return out;
 }
 
+export const DEFAULT_PLANS: Plan[] = [
+  {
+    id: "free",
+    name: "Free",
+    priceUsd: 0,
+    limits: {
+      leadsPerMonth: 50,
+      premiumLeadsPerMonth: 0,
+      searchesPerMonth: 20,
+      verificationsPerMonth: 100,
+      aiMessagesPerMonth: 50,
+      emailsPerMonth: 100,
+      campaigns: 1,
+      seats: 1,
+    },
+  },
+  {
+    id: "starter",
+    name: "Starter",
+    priceUsd: 109,
+    limits: {
+      leadsPerMonth: 1500,
+      premiumLeadsPerMonth: 150,
+      searchesPerMonth: 500,
+      verificationsPerMonth: 500,
+      aiMessagesPerMonth: 500,
+      emailsPerMonth: 2000,
+      campaigns: 3,
+      seats: 2,
+    },
+  },
+  {
+    id: "growth",
+    name: "Growth",
+    priceUsd: 359,
+    limits: {
+      leadsPerMonth: 6000,
+      premiumLeadsPerMonth: 500,
+      searchesPerMonth: 2000,
+      verificationsPerMonth: 1500,
+      aiMessagesPerMonth: 1500,
+      emailsPerMonth: 8000,
+      campaigns: 15,
+      seats: 5,
+    },
+  },
+  {
+    id: "scale",
+    name: "Scale",
+    priceUsd: 1199,
+    limits: {
+      leadsPerMonth: 20000,
+      premiumLeadsPerMonth: 1500,
+      searchesPerMonth: 8000,
+      verificationsPerMonth: 5000,
+      aiMessagesPerMonth: 8000,
+      emailsPerMonth: 40000,
+      campaigns: 100,
+      seats: 15,
+    },
+  },
+  {
+    id: "enterprise",
+    name: "Enterprise",
+    priceUsd: 3199,
+    limits: {
+      leadsPerMonth: 60000,
+      premiumLeadsPerMonth: 5000,
+      searchesPerMonth: 25000,
+      verificationsPerMonth: 15000,
+      aiMessagesPerMonth: 25000,
+      emailsPerMonth: 120000,
+      campaigns: 1000,
+      seats: 50,
+    },
+  },
+];
+
 function PricingSection() {
-  const [plans, setPlans] = useState<Plan[] | null>(null);
-  /**
-   * Whether the plans could not be FETCHED, as opposed to there being none.
-   *
-   * The catch used to collapse both into an empty array, which rendered an empty grid: no
-   * cards, no message, no way to buy, and nothing on the page admitting anything had gone
-   * wrong. A visitor arriving while the API is cold would simply conclude the product has
-   * no pricing. It is also the exact substitution the rest of this product refuses to make
-   * everywhere else - a failed call is not an empty answer - showing up on the one page
-   * where a stranger forms their first impression.
-   */
+  const [plans, setPlans] = useState<Plan[]>(DEFAULT_PLANS);
   const [unreachable, setUnreachable] = useState(false);
   // Counted once, when the section is actually on screen (lib/pageview.ts: no identifier).
   const sectionRef = useRef<HTMLElement>(null);
@@ -249,7 +317,6 @@ function PricingSection() {
       .then((r) => setPlans(r.plans.filter((p) => p.id !== "pilot").sort((a, b) => PLAN_ORDER.indexOf(a.id) - PLAN_ORDER.indexOf(b.id))))
       .catch(() => {
         setUnreachable(true);
-        setPlans([]);
       });
   }, []);
 

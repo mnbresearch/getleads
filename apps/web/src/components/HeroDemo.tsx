@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 /**
  * Animated hero demo: a buyer's question types itself, the work happens step by step,
@@ -90,12 +90,13 @@ function usePrefersReducedMotion(): boolean {
 
 /** Counts up to `to` once, so a fit score lands rather than just appearing. */
 function Count({ to, animate }: { to: number; animate: boolean }) {
-  const [v, setV] = useState(animate ? 0 : to);
+  const [v, setV] = useState(to);
   useEffect(() => {
     if (!animate) {
       setV(to);
       return;
     }
+    setV(0);
     let frame = 0;
     const id = window.setInterval(() => {
       frame += 1;
@@ -123,9 +124,10 @@ export function HeroDemo() {
   const reduced = usePrefersReducedMotion();
   const visible = usePageVisible();
   const [idx, setIdx] = useState(0);
-  const [typed, setTyped] = useState("");
-  const [phase, setPhase] = useState<Phase>("typing");
-  const [step, setStep] = useState(0);
+  const [typed, setTyped] = useState(SCENES[0].query);
+  const [phase, setPhase] = useState<Phase>("results");
+  const [step, setStep] = useState(SCENES[0].steps.length);
+  const isFirstMount = useRef(true);
 
   const scene = SCENES[idx];
   const done = phase === "results";
@@ -142,6 +144,10 @@ export function HeroDemo() {
   // frozen half-typed line.
   useEffect(() => {
     if (reduced || !visible) return;
+    if (isFirstMount.current) {
+      isFirstMount.current = false;
+      return;
+    }
     setTyped("");
     setStep(0);
     setPhase("typing");
@@ -299,21 +305,28 @@ export function HeroDemo() {
         </div>
       </div>
 
-      {/* scene dots */}
-      <div className="mt-5 flex items-center justify-center gap-2">
-        {SCENES.map((s, i) => (
-          <button
-            key={s.query}
-            type="button"
-            aria-label={s.chip}
-            onClick={() => {
-              setIdx(i);
-              setTyped(reduced ? s.query : "");
-              setStep(reduced ? s.steps.length : 0);
-              setPhase(reduced ? "results" : "typing");
-            }}
-            className={`h-1.5 rounded-full transition-all ${i === idx ? "w-7 bg-brand-500" : "w-1.5 bg-black/15 hover:bg-black/25"}`}
-          />
+      {/* Accessible machine-readable and screen-reader representation of all demo workflows */}
+      <div className="sr-only" aria-label="Interactive demo summary for screen readers and AI agents">
+        <h3>Interactive Demo Scenarios</h3>
+        {SCENES.map((s) => (
+          <div key={s.query}>
+            <h4>Workflow: {s.chip} - Query: &quot;{s.query}&quot;</h4>
+            <p>Executed steps: {s.steps.join(", ")}</p>
+            {s.kind === "leads" ? (
+              <ul>
+                {s.rows.map((r) => (
+                  <li key={r.name}>{r.name} ({r.sub}) - Status: {r.tag}, Fit score: {r.score}%</li>
+                ))}
+              </ul>
+            ) : (
+              <ul>
+                {s.engines.map((e) => (
+                  <li key={e.engine}>{e.engine}: {e.verdict} (Rate: {e.rate}) - {e.detail}</li>
+                ))}
+              </ul>
+            )}
+            <p>Outcome summary: {s.footer}</p>
+          </div>
         ))}
       </div>
     </div>

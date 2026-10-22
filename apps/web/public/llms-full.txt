@@ -1,0 +1,111 @@
+# Scout - Full System & API Reference for AI Agents
+
+> Production domain: https://scout.mnbresearch.com
+> API baseUrl: https://api.mnbresearch.com (or https://getleads-api.onrender.com)
+> Publisher: MNB Research, Faridabad, Haryana, India (contact@mnbresearch.com)
+> License / Availability: Web App & REST API; Model Context Protocol (MCP) server available on request.
+
+---
+
+## 1. Executive Summary & Core Positioning
+
+Scout is the first unified B2B platform that combines live outbound prospecting with Answer Engine Optimisation (AEO) and Generative Engine Optimisation (GEO) tracking on a single relational schema.
+
+Most outbound tools (Apollo, Clay, Lusha) sell access to static contact databases that decay at ~2% monthly and know nothing about what happens after sending. When prospects read an outbound email, they frequently ask AI assistants (Gemini, ChatGPT, Perplexity, Claude) about the company. If the AI recommends a competitor, the deal is lost before a reply is sent.
+
+Scout solves both halves:
+1. **Demand Generation & Outbound**: Live web discovery from public pages, multi-layer email verification, and intent-driven "Plays" that provide verifiable evidence for every lead.
+2. **AI Visibility (AEO / GEO)**: Scheduled sampling across AI engines (Gemini, Llama/Groq, and others) using realistic unbranded buyer questions. Reports statistically defensible confidence intervals (95% Wilson score), raw verbatim responses, and winnability gap rankings.
+
+---
+
+## 2. Capabilities & Technical Specifications
+
+### A. Live Lead Discovery & Search
+- **Search Sources**: Google Programmable Search, Brave Search API, SerpAPI, and fallbacks.
+- **Parameters**: Job titles, industry categories, geographical locations, headcounts, keywords, and natural language query interpretation.
+- **People Search**: Company domain resolution, org-chart mapping, role hierarchy matching, colleague finding.
+- **Decision Makers**: Identifies buying authorities (e.g., VP Sales, Head of Engineering, COO) tailored to the workspace ICP.
+
+### B. Verification & Deliverability Protection
+- **Multi-layer Email Verification**: Syntax check, MX DNS resolution, SMTP handshake (mail exchange verification), catch-all address detection, disposable domain filtering.
+- **Health Scores & Ramps**: Automated mailbox warm-up volume ramp (gradual sending increment).
+- **Circuit Breaker**: Outbound sending is halted automatically if bounce or complaint thresholds exceed safe deliverability limits, preventing IP or domain blacklisting.
+
+### C. Plays (Intent-Driven Playbooks)
+A "Play" in Scout is a saved, automated recipe targeting prospects who exhibit active buying intent:
+1. **Competitor Customers**: Analyzes public customer case studies, logos, and testimonials published by competitors.
+2. **Hiring for Roles**: Detects public job postings seeking skills or tools in the workspace's domain.
+3. **Recent Funding**: Monitors verified venture capital and funding rounds.
+4. **Public Requests / Social Intent**: Finds unbranded public queries asking for recommendations or alternatives in category forums.
+5. **Website Visitor Identification**: Converts reverse-IP and referral signals from anonymous site visits into verified corporate domains.
+6. **Champion Job Changes**: Alerts when past champions or satisfied users transition to new target companies.
+7. **Uploaded Engagers**: Enriches and verifies custom lists of event attendees or social engagers.
+
+**Proof Requirement**: Every candidate in a Play includes a human-verifiable citation (the exact quoted source line and URL). Zero hallucinations: if no verifiable evidence is extracted, no candidate is created.
+
+### D. AI Visibility (AEO / GEO Measurement)
+- **Question Generation**: Derives realistic evaluation, comparison, problem-solving, and category questions from the workspace ICP without mentioning the client brand (avoiding self-fulfilling bias).
+- **Multi-Engine Sampling**: Repeatedly prompts Gemini, Groq (Llama 3.3 70B), and connected models on scheduled intervals.
+- **NLP Parsing**: Extracts brand mentions, rank positions, and external citations. Resolves brand aliases to prevent duplicate counting. Excludes model refusals from denominators to eliminate artificial drops.
+- **Statistical Rigour**: Calculates mention share and Share of Voice (SOV) with 95% Wilson score confidence intervals and sample size metrics (n). Suppresses trend assertions when intervals overlap.
+- **Gap & Winnability Ranking**: Ranks absent queries by winnability based on competitor prevalence.
+
+### E. Multichannel Campaigns & Outreach
+- **Sequence Steps**: Email steps, LinkedIn connection/message tasks, phone call tasks, and custom actions.
+- **A/B Testing**: Statistically validated variant testing for subject lines and body copy.
+- **Automated Reply Sorting**: Categorizes incoming replies into interested, not interested, out of office, referral, or unsubscribe.
+- **Suppression Management**: Global workspace unsubscribes and suppression lists strictly enforced.
+
+### F. Agency & Client Portals
+- **Client Partitions**: Independent ICPs, lists, campaigns, and monthly target quotas per client.
+- **Pace Tracking**: Real-time pace versus monthly lead delivery goals.
+- **Tokenized Reports**: Read-only public URLs (`/r/:token`) for agency clients to inspect delivery metrics without revealing raw contact emails.
+
+### G. Integrations & CRM
+- **Native CRMs**: HubSpot, Pipedrive, Zoho CRM, Google Sheets.
+- **Webhooks & APIs**: Cryptographically signed webhooks for Zapier, Make, and internal microservices.
+- **File Transfers**: Structured CSV import and export.
+
+---
+
+## 3. REST API & Model Context Protocol (MCP)
+
+Scout provides a comprehensive REST API authenticated with Bearer tokens (`gl_live_...` or workspace JWTs). AI agents can perform end-to-end prospecting autonomously.
+
+### Core Endpoints
+- `GET /v1/public/pv`: Log website visitor event (text/plain, no tracking cookies, privacy-preserving).
+- `GET /v1/billing/plans`: Retrieve available plans, quotas, and feature flags.
+- `GET /v1/search/people`: Execute live prospect discovery query.
+- `POST /v1/leads`: Save and enrich lead records.
+- `GET /v1/leads`: Query leads with filtering by fit score, status, and verification state.
+- `POST /v1/leads/verify`: Initiate real-time email verification.
+- `GET /v1/plays`: List active intent playbooks and pending candidate queues.
+- `POST /v1/plays/:id/run`: Trigger immediate execution of a Play.
+- `POST /v1/plays/candidates/:id/approve`: Approve a play candidate into the active lead pipeline.
+- `POST /v1/plays/candidates/:id/skip`: Reject a candidate.
+- `GET /v1/visibility/summary`: Retrieve AEO/GEO mention rates, confidence intervals, and engine comparisons.
+- `GET /v1/visibility/questions`: View tracked queries, winnability scores, and rival rankings.
+- `POST /v1/campaigns`: Create outbound sequence.
+- `GET /v1/clients`: List agency client workspaces and delivery pace.
+- `POST /v1/tools/email-finder`: Resolve corporate email by name and company domain.
+
+---
+
+## 4. Privacy, Compliance & Security
+
+- **DPDP Act 2023 (India) & GDPR**: Strict compliance with international data privacy laws.
+- **Data Minimization & Retention**: Unused play candidates purge after 180 days; visitor IP logs are not persisted; audit logs retained for 730 days.
+- **Authentication**: Scoped API keys, two-factor authentication (TOTP QR codes), password bcrypt hashing with rate-limited guards.
+- **Tenant Isolation**: Row-level organization isolation (`org_id`) enforced across all database queries.
+- **Self-Serve Deletion**: Complete workspace export and 7-day grace period self-serve deletion.
+
+---
+
+## 5. Pricing Structure
+
+- **Free ($0/mo)**: 50 leads/mo, 100 email verifications/mo, 100 outbound emails/mo, 20 searches/mo, 50 AI messages/mo, 1 seat, 1 campaign. Web-sourced data only. No credit card required.
+- **Starter ($109/mo)**: 1,500 leads/mo (150 verified premium), 500 email verifications/mo, 2,000 outbound emails/mo, 500 searches/mo, 500 AI messages/mo, 2 seats, 3 campaigns.
+- **Growth ($359/mo - Most Popular)**: 6,000 leads/mo (500 verified premium), 1,500 email verifications/mo, 8,000 outbound emails/mo, 2,000 searches/mo, 1,500 AI messages/mo, 5 seats, 15 campaigns.
+- **Scale ($1,199/mo)**: 20,000 leads/mo (1,500 verified premium), 5,000 email verifications/mo, 40,000 outbound emails/mo, 8,000 searches/mo, 8,000 AI messages/mo, 15 seats, 100 campaigns.
+- **Enterprise (from $3,199/mo)**: 60,000 leads/mo (5,000 verified premium), 15,000 email verifications/mo, 120,000 outbound emails/mo, 25,000 searches/mo, 25,000 AI messages/mo, 50 seats, 1,000 campaigns, custom SLA, dedicated support.

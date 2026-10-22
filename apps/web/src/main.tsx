@@ -128,7 +128,8 @@ function Root() {
   );
 }
 
-ReactDOM.createRoot(document.getElementById("root")!).render(
+const rootEl = document.getElementById("root")!;
+const app = (
   <React.StrictMode>
     {/* Outer boundary catches a crash in the router itself; the inner one in Root resets on navigation. */}
     <ErrorBoundary>
@@ -136,5 +137,14 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
         <Root />
       </BrowserRouter>
     </ErrorBoundary>
-  </React.StrictMode>,
+  </React.StrictMode>
 );
+
+// If the page was pre-rendered (SSR/SSG) and the user has no active session,
+// hydrate the DOM in-place for instant First Contentful Paint.
+// If the user is signed in, mount freshly with createRoot to render the dashboard immediately.
+if (rootEl.hasChildNodes() && !localStorage.getItem("gl.token")) {
+  ReactDOM.hydrateRoot(rootEl, app);
+} else {
+  ReactDOM.createRoot(rootEl).render(app);
+}
