@@ -306,9 +306,80 @@ export const DEFAULT_PLANS: Plan[] = [
   },
 ];
 
+const trustPillars = [
+  {
+    icon: (
+      <svg className="h-4 w-4 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12a9 9 0 01-9 9m9-9a9 9 0 00-9-9m9 9H3m9 9a9 9 0 01-9-9m9 9c1.657 0 3-4.03 3-9s-1.343-9-3-9m0 18c-1.657 0-3-4.03-3-9s1.343-9 3-9m-9 9a9 9 0 019-9" />
+      </svg>
+    ),
+    badge: "Live Web",
+    title: "Zero Stale Exports",
+    desc: "Queries the open web and validates live MX records and domains in real time, not year-old static dumps.",
+  },
+  {
+    icon: (
+      <svg className="h-4 w-4 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+      </svg>
+    ),
+    badge: "95% Wilson CI",
+    title: "Defensible AEO Stats",
+    desc: "Every AI citation and visibility score includes Wilson score confidence intervals and verbatim model answers.",
+  },
+  {
+    icon: (
+      <svg className="h-4 w-4 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+      </svg>
+    ),
+    badge: "Circuit Breakers",
+    title: "Domain Protection",
+    desc: "Autonomous ramp guardrails, bounce sentinels, and mailbox health checks stop sends before your sender domain burns.",
+  },
+  {
+    icon: (
+      <svg className="h-4 w-4 text-brand-600" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4" />
+      </svg>
+    ),
+    badge: "REST API + MCP",
+    title: "First-Class AI Agents",
+    desc: "AI agents and automated workflows access the exact same search, enrichment, and verification endpoints as human SDRs.",
+  },
+];
+
+function ScrollToTop() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const onScroll = () => {
+      setVisible(window.scrollY > 600);
+    };
+    window.addEventListener("scroll", onScroll, { passive: true });
+    return () => window.removeEventListener("scroll", onScroll);
+  }, []);
+
+  if (!visible) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => window.scrollTo({ top: 0, behavior: "smooth" })}
+      aria-label="Scroll back to top"
+      className="fixed bottom-6 right-6 z-40 flex h-10 w-10 items-center justify-center rounded-full border border-black/10 bg-surface/90 text-ink-300 shadow-lg backdrop-blur transition-all hover:bg-surface hover:text-ink-50 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-brand-500"
+    >
+      <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 15l7-7 7 7" />
+      </svg>
+    </button>
+  );
+}
+
 function PricingSection() {
   const [plans, setPlans] = useState<Plan[]>(DEFAULT_PLANS);
   const [unreachable, setUnreachable] = useState(false);
+  const [annual, setAnnual] = useState(false);
   // Counted once, when the section is actually on screen (lib/pageview.ts: no identifier).
   const sectionRef = useRef<HTMLElement>(null);
   useEffect(() => sendPageViewWhenSeen(sectionRef.current, "/pricing"), []);
@@ -320,12 +391,43 @@ function PricingSection() {
       });
   }, []);
 
+  const displayPrice = (p: Plan) => {
+    if (p.priceUsd === 0) return 0;
+    // ~20% savings on annual billing: Starter $89, Growth $289, Scale $959, Enterprise $2,559
+    return annual ? Math.round(p.priceUsd * 0.8) : p.priceUsd;
+  };
+
   return (
     <section id="pricing" ref={sectionRef} className="pb-24 pt-8 scroll-mt-24">
       <div className="mx-auto max-w-2xl text-center">
         <span className="badge border border-black/10 bg-black/5 text-ink-300">Pricing</span>
         <h2 className="mt-4 text-3xl font-bold tracking-tight text-ink-50 sm:text-4xl">Simple pricing, real leads</h2>
         <p className="mt-3 text-ink-300">Every plan sources what it can for free first - you only pay for verified, provider-backed leads. Paid plans are set up with you, so your provider budget matches the volume you actually send.</p>
+
+        {/* Monthly vs Annual Toggle */}
+        <div className="mt-8 flex items-center justify-center gap-3">
+          <span className={`text-sm ${!annual ? "font-semibold text-ink-50" : "text-ink-400"}`}>Monthly</span>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={annual}
+            aria-label="Toggle annual billing with 20% discount"
+            onClick={() => setAnnual((v) => !v)}
+            className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+              annual ? "bg-brand-600" : "bg-black/15"
+            }`}
+          >
+            <span
+              className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                annual ? "translate-x-5" : "translate-x-0"
+              }`}
+            />
+          </button>
+          <span className={`inline-flex items-center gap-1.5 text-sm ${annual ? "font-semibold text-ink-50" : "text-ink-400"}`}>
+            Annual
+            <span className="badge border border-brand-200 bg-brand-50 text-[11px] font-semibold text-brand-700">Save 20%</span>
+          </span>
+        </div>
       </div>
 
       {plans === null ? (
@@ -349,6 +451,7 @@ function PricingSection() {
           {plans.map((p) => {
             const featured = p.id === "growth";
             const custom = p.id === "enterprise";
+            const price = displayPrice(p);
             return (
               <div
                 key={p.id}
@@ -361,16 +464,23 @@ function PricingSection() {
                   {custom ? (
                     <>
                       <span className="text-sm text-ink-400">from </span>
-                      <span className="text-3xl font-bold text-ink-50">${p.priceUsd.toLocaleString()}</span>
+                      <span className="text-3xl font-bold text-ink-50">${price.toLocaleString()}</span>
                       <span className="text-sm text-ink-400">/mo</span>
+                      {annual && <span className="ml-1.5 text-xs text-ink-400 line-through">${p.priceUsd}</span>}
                     </>
                   ) : p.priceUsd === 0 ? (
                     <span className="text-3xl font-bold text-ink-50">Free</span>
                   ) : (
                     <>
-                      <span className="text-3xl font-bold text-ink-50">${p.priceUsd.toLocaleString()}</span>
+                      <span className="text-3xl font-bold text-ink-50">${price.toLocaleString()}</span>
                       <span className="text-sm text-ink-400">/mo</span>
+                      {annual && <span className="ml-1.5 text-xs text-ink-400 line-through">${p.priceUsd}</span>}
                     </>
+                  )}
+                  {annual && p.priceUsd > 0 && (
+                    <div className="mt-1 text-[11px] font-medium text-emerald-700">
+                      Billed annually (Save ${(p.priceUsd * 12 - price * 12).toLocaleString()}/yr)
+                    </div>
                   )}
                 </div>
                 <ul className="mt-5 flex-1 space-y-2 text-sm text-ink-300">
@@ -382,7 +492,7 @@ function PricingSection() {
                   ))}
                 </ul>
                 <Link
-                  to={p.priceUsd === 0 ? "/signup" : `/upgrade?plan=${p.id}`}
+                  to={p.priceUsd === 0 ? "/signup" : `/upgrade?plan=${p.id}${annual ? "&billing=annual" : ""}`}
                   className={`mt-6 justify-center ${featured ? "btn-primary" : "btn-secondary"}`}
                 >
                   {custom ? "Talk to us" : p.priceUsd === 0 ? "Start free" : "Yes, I'm interested - upgrade me"}
@@ -392,7 +502,9 @@ function PricingSection() {
           })}
         </div>
       )}
-      <p className="mt-8 text-center text-xs text-ink-500">Prices in USD per month. Paid plans are set up with you on request, and every one is priced for real provider costs at real usage - no surprise overages.</p>
+      <p className="mt-8 text-center text-xs text-ink-500">
+        Prices in USD. {annual ? "Annual plans include a 20% discount. " : ""}Paid plans are set up with you on request, and every one is priced for real provider costs at real usage - no surprise overages.
+      </p>
     </section>
   );
 }
@@ -484,6 +596,28 @@ export function LandingPage() {
           </div>
           <p className="mt-4 text-xs text-ink-400">No credit card required · Free web-sourced leads on day one</p>
           <HeroDemo />
+        </section>
+
+        {/* Architecture & Trust Strip */}
+        <section aria-label="System architecture and trust guarantees" className="mx-auto -mt-4 mb-16 max-w-5xl px-4">
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4" data-testid="landing-trust-strip">
+            {trustPillars.map((p) => (
+              <div key={p.title} className="card relative flex flex-col justify-between border-black/[0.08] p-5 shadow-sm transition hover:shadow-md">
+                <div>
+                  <div className="flex items-center justify-between">
+                    <div className="grid h-8 w-8 place-items-center rounded-lg bg-brand-50">
+                      {p.icon}
+                    </div>
+                    <span className="badge border border-brand-200 bg-brand-50/70 font-mono text-[10px] font-semibold text-brand-700">
+                      {p.badge}
+                    </span>
+                  </div>
+                  <h3 className="mt-3 text-sm font-semibold text-ink-50">{p.title}</h3>
+                  <p className="mt-1 text-xs leading-relaxed text-ink-400">{p.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
         </section>
 
         <DemoVideo />
@@ -900,6 +1034,7 @@ export function LandingPage() {
           © {new Date().getFullYear()} Scout. All rights reserved.
         </div>
       </footer>
+      <ScrollToTop />
     </div>
   );
 }

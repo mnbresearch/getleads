@@ -192,6 +192,35 @@ export function HeroDemo() {
     <div className="relative mx-auto mt-10 w-full max-w-3xl">
       <div className="absolute -inset-x-8 -top-8 h-full rounded-[2rem] bg-brand-gradient opacity-[0.12] blur-3xl" aria-hidden />
 
+      {/* Interactive Scenario Tabs */}
+      <div className="relative mb-4 flex flex-wrap items-center justify-center gap-2" role="tablist" aria-label="Demo scenarios">
+        {SCENES.map((s, i) => {
+          const active = i === idx;
+          return (
+            <button
+              key={s.chip}
+              type="button"
+              role="tab"
+              aria-selected={active}
+              onClick={() => {
+                setIdx(i);
+                setTyped(s.query);
+                setStep(s.steps.length);
+                setPhase("results");
+              }}
+              className={`rounded-full px-4 py-1.5 text-xs font-medium transition-all ${
+                active
+                  ? "bg-brand-600 text-white shadow-sm ring-2 ring-brand-300/40"
+                  : "border border-black/10 bg-surface text-ink-300 hover:border-black/20 hover:text-ink-50"
+              }`}
+            >
+              <span className="mr-1.5 font-mono text-[11px] opacity-70">0{i + 1}</span>
+              {s.chip}
+            </button>
+          );
+        })}
+      </div>
+
       <div className="card relative overflow-hidden p-0 shadow-xl">
         {/* window chrome */}
         <div className="flex items-center gap-1.5 border-b border-black/[0.06] px-4 py-3">
