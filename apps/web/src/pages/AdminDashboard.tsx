@@ -4,6 +4,7 @@ import { Logo } from "../components/Logo";
 import { adminFetch, adminLogout, endAdminSession, useAdminToken } from "../lib/adminApi";
 import { expectLists, expectShape, fmtDate, fmtDay, fmtNum } from "../lib/api";
 import { plural } from "../lib/plural";
+import { Modal } from "../components/ui";
 import { SecurityTab } from "./AdminSecurity";
 import { GrowthTab } from "./AdminAnalytics";
 import { OverviewTab } from "./AdminOverview";
@@ -31,6 +32,10 @@ type OrgRow = {
   lastActiveAt?: string | null;
   membersCount?: number;
   leadsTotal?: number | null;
+  isDemo?: boolean;
+  demoExpiresAt?: string | null;
+  demoDaysLeft?: number | null;
+  isDemoExpired?: boolean;
 };
 // `twoFactorEnabled` is absent on an older server: no badge and no reset button, rather
 // than a guess either way.
@@ -38,7 +43,7 @@ type OrgRow = {
 type OrgUser = { id: string; email: string; name: string; role: string; lastLoginAt: string | null; createdAt: string; twoFactorEnabled?: boolean; emailVerified?: boolean };
 // `overrides` (the limits that differ from the plan's own) is sent by newer servers, at the
 // top level or on the org; older ones send neither and it is worked out here (overridesOf).
-type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> | null; overrides?: Record<string, unknown> | null; aiAssist?: boolean; mailingAddressSet?: boolean }; overrides?: Record<string, unknown> | null; users: OrgUser[]; usage: Record<string, number>; period: string } & OrgInsightsData;
+type OrgDetail = { org: OrgRow & { planLimits: Record<string, unknown> | null; overrides?: Record<string, unknown> | null; aiAssist?: boolean; mailingAddressSet?: boolean; demoFeatures?: Record<string, boolean> | null }; overrides?: Record<string, unknown> | null; users: OrgUser[]; usage: Record<string, number>; period: string } & OrgInsightsData;
 type UpgradeRequest = { id: string; orgId: string | null; orgName?: string | null; name: string; email: string; mobile: string; country: string; planId: string; message: string | null; status: string; createdAt: string };
 type Plan = { id: string; name: string; priceUsd: number; limits: PlanLimits };
 type ToolSummary = {
@@ -386,6 +391,51 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
         </div>
       )}
 
+      {org.isDemo && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50/70 p-3.5 text-xs text-ink-50 space-y-2">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-1.5 font-semibold text-amber-900">
+              <span>⚡ 7-Day Demo Trial</span>
+              {org.isDemoExpired ? (
+                <span className="badge border border-red-200 bg-red-100 text-red-700 font-bold">Expired</span>
+              ) : (
+                <span className="badge border border-emerald-200 bg-emerald-100 text-emerald-800 font-bold">{org.demoDaysLeft}d left</span>
+              )}
+            </div>
+            <span className="text-[11px] text-ink-400">
+              Expires: {org.demoExpiresAt ? fmtDate(org.demoExpiresAt) : "N/A"}
+            </span>
+          </div>
+          <p className="text-ink-400 text-[11px] leading-relaxed">
+            {org.isDemoExpired
+              ? "This demo workspace has expired. API access and workspace actions are locked until upgraded."
+              : "Compulsory upgrade is required once the 7 days elapse. Custom limits and feature access are active."}
+          </p>
+          <div className="flex flex-wrap gap-2 pt-1">
+            <button
+              type="button"
+              disabled={busy}
+              className="btn-secondary text-xs px-2.5 py-1"
+              onClick={() => {
+                void run("Extend demo", () => adminFetch("POST", `/v1/admin/orgs/${orgId}/extend-demo`, { days: 7 }), () => "Extended demo trial by 7 days.");
+              }}
+            >
+              + Extend Demo (+7 Days)
+            </button>
+            <button
+              type="button"
+              disabled={busy}
+              className="btn-secondary text-xs px-2.5 py-1 text-emerald-700"
+              onClick={() => {
+                void run("Convert to permanent", () => adminFetch("POST", `/v1/admin/orgs/${orgId}/convert-demo`), () => "Converted demo workspace to permanent account.");
+              }}
+            >
+              Convert to Permanent
+            </button>
+          </div>
+        </div>
+      )}
+
       <div>
         <div className="label">Plan</div>
         {planUnknown && (
@@ -550,11 +600,466 @@ function OrgDetailPanel({ orgId, plans, plansLoading, onChanged, onClose }: { or
   );
 }
 
+function CreateDemoModal({
+  open,
+  onClose,
+  plans,
+  onCreated,
+}: {
+  open: boolean;
+  onClose: () => void;
+  plans: Plan[] | null;
+  onCreated: (orgId: string) => void;
+}) {
+  const [name, setName] = useState("");
+  const [userName, setUserName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [plan, setPlan] = useState("pilot");
+  const [seedData, setSeedData] = useState(true);
+  const [features, setFeatures] = useState({
+    apiAccess: true,
+    integrations: true,
+    aiAssist: true,
+    plays: true,
+    visitors: true,
+    signals: true,
+    sequences: true,
+  });
+  const [limits, setLimits] = useState({
+    leadsPerMonth: 1000,
+    premiumLeadsPerMonth: 100,
+    searchesPerMonth: 300,
+    verificationsPerMonth: 500,
+    aiMessagesPerMonth: 500,
+    emailsPerMonth: 2000,
+    campaigns: 5,
+    seats: 3,
+  });
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+  const [createdResult, setCreatedResult] = useState<{
+    credentials: {
+      email: string;
+      password: string;
+      loginUrl: string;
+      expiresAt: string;
+      daysValid: number;
+    };
+    org: { id: string; name: string };
+  } | null>(null);
+  const [copied, setCopied] = useState(false);
+
+  const generatePassword = () => {
+    const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+    let pass = "";
+    for (let i = 0; i < 12; i++) {
+      pass += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    setPassword(`Scout-${pass.slice(0, 4)}-${pass.slice(4, 8)}!`);
+  };
+
+  const handlePlanChange = (selectedPlanId: string) => {
+    setPlan(selectedPlanId);
+    const p = plans?.find((x) => x.id === selectedPlanId);
+    if (p) {
+      setLimits({
+        leadsPerMonth: (p.limits.leadsPerMonth as number) || 1000,
+        premiumLeadsPerMonth: (p.limits.premiumLeadsPerMonth as number) || 100,
+        searchesPerMonth: (p.limits.searchesPerMonth as number) || 300,
+        verificationsPerMonth: (p.limits.verificationsPerMonth as number) || 500,
+        aiMessagesPerMonth: (p.limits.aiMessagesPerMonth as number) || 500,
+        emailsPerMonth: (p.limits.emailsPerMonth as number) || 2000,
+        campaigns: (p.limits.campaigns as number) || 5,
+        seats: (p.limits.seats as number) || 3,
+      });
+      setFeatures({
+        apiAccess: p.limits.apiAccess !== false,
+        integrations: p.limits.integrations !== false,
+        aiAssist: true,
+        plays: true,
+        visitors: true,
+        signals: true,
+        sequences: true,
+      });
+    }
+  };
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!name.trim() || !email.trim()) {
+      setErr("Company name and email are required.");
+      return;
+    }
+    setBusy(true);
+    setErr(null);
+    try {
+      const res = await adminFetch<{
+        ok: boolean;
+        org: { id: string; name: string };
+        credentials: {
+          email: string;
+          password: string;
+          loginUrl: string;
+          expiresAt: string;
+          daysValid: number;
+        };
+      }>("POST", "/v1/admin/demo-account", {
+        name: name.trim(),
+        userName: userName.trim() || name.trim(),
+        email: email.trim(),
+        password: password.trim() || undefined,
+        daysValid: 7,
+        plan,
+        features,
+        limits,
+        seedSampleData: seedData,
+      });
+      setCreatedResult({ credentials: res.credentials, org: res.org });
+    } catch (error) {
+      setErr(errText(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const copyCredentials = () => {
+    if (!createdResult) return;
+    const { email: clientEmail, password: clientPass, loginUrl, expiresAt } = createdResult.credentials;
+    const formattedExpiry = new Date(expiresAt).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    const message = `Here are your 7-day demo credentials for Scout:\n\n• Login URL: ${loginUrl}\n• Email: ${clientEmail}\n• Password: ${clientPass}\n• Access: Valid for 7 days (until ${formattedExpiry})\n\nScout gives you verified live leads, ICP learning, intent plays, and AI visibility in one workspace. Let us know if you have any questions!`;
+    void navigator.clipboard.writeText(message);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 3000);
+  };
+
+  if (!open) return null;
+
+  return (
+    <Modal open={open} onClose={onClose} title="Create 7-Day Demo Account" wide>
+      {createdResult ? (
+        <div className="space-y-4">
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50/80 p-4 text-emerald-900">
+            <div className="flex items-center gap-2 font-semibold">
+              <span className="text-emerald-600">✓</span>
+              <span>Demo Account Created Successfully!</span>
+            </div>
+            <p className="mt-1 text-xs text-emerald-700">
+              Workspace &ldquo;{createdResult.org.name}&rdquo; is ready and pre-verified. Access is granted for 7 days with compulsory upgrade upon expiration.
+            </p>
+          </div>
+
+          <div className="card space-y-3 bg-surface p-4 text-xs font-mono">
+            <div>
+              <span className="text-ink-400 font-sans block text-[11px]">Sign-in Portal:</span>
+              <span className="font-semibold text-ink-50">{createdResult.credentials.loginUrl}</span>
+            </div>
+            <div>
+              <span className="text-ink-400 font-sans block text-[11px]">Email:</span>
+              <span className="font-semibold text-ink-50">{createdResult.credentials.email}</span>
+            </div>
+            <div>
+              <span className="text-ink-400 font-sans block text-[11px]">Temporary Password:</span>
+              <span className="font-semibold text-brand-700 select-all">{createdResult.credentials.password}</span>
+            </div>
+            <div>
+              <span className="text-ink-400 font-sans block text-[11px]">Valid Until:</span>
+              <span className="text-ink-50">{new Date(createdResult.credentials.expiresAt).toLocaleString()} (7 days)</span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center justify-end gap-3 pt-2">
+            <button
+              type="button"
+              onClick={copyCredentials}
+              className="btn-primary"
+            >
+              {copied ? "✓ Copied to Clipboard!" : "Copy Invitation & Credentials"}
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onCreated(createdResult.org.id);
+                onClose();
+              }}
+              className="btn-secondary"
+            >
+              Done & View Workspace
+            </button>
+          </div>
+        </div>
+      ) : (
+        <form onSubmit={submit} className="space-y-5 text-sm">
+          {err && (
+            <div className="rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-700" role="alert">
+              {err}
+            </div>
+          )}
+
+          <div className="rounded-lg border border-brand-200 bg-brand-50/60 p-3 text-xs text-brand-900 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <span className="badge bg-brand-600 text-white font-semibold">7 Days</span>
+              <span>Account is valid for 7 days. Once expired, compulsory upgrade will be required.</span>
+            </div>
+          </div>
+
+          {/* Account Basics */}
+          <div className="space-y-3">
+            <div className="text-xs font-semibold uppercase tracking-wider text-ink-400">Account Credentials</div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-medium text-ink-200">Company / Workspace Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Acme Ventures"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  className="input mt-1"
+                />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-ink-200">Lead User Name</label>
+                <input
+                  type="text"
+                  placeholder="e.g. Jane Doe"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  className="input mt-1"
+                />
+              </div>
+            </div>
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-medium text-ink-200">User Email Address *</label>
+                <input
+                  type="email"
+                  required
+                  placeholder="e.g. jane@acme.example"
+                  value={email}
+                  onChange={(e) => setEmail(e.target.value)}
+                  className="input mt-1"
+                />
+              </div>
+              <div>
+                <div className="flex items-center justify-between">
+                  <label className="block text-xs font-medium text-ink-200">Password</label>
+                  <button
+                    type="button"
+                    onClick={generatePassword}
+                    className="text-[11px] text-brand-600 hover:underline"
+                  >
+                    Generate Random
+                  </button>
+                </div>
+                <input
+                  type="text"
+                  placeholder="Leave blank to auto-generate"
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  className="input mt-1"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Base Plan Preset */}
+          <div className="space-y-3 border-t border-black/10 pt-4">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold uppercase tracking-wider text-ink-400">Base Plan Template</span>
+              <span className="text-xs text-ink-400">Pre-populates quotas</span>
+            </div>
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+              {[
+                { id: "pilot", name: "Pilot (Trial)", desc: "1k leads, 0 prem, 2k verif" },
+                { id: "starter", name: "Starter Tier", desc: "1.5k leads, 150 prem, 500 verif" },
+                { id: "growth", name: "Growth Tier", desc: "6k leads, 500 prem, 1.5k verif" },
+                { id: "scale", name: "Scale Tier", desc: "20k leads, 1.5k prem, 5k verif" },
+              ].map((p) => (
+                <button
+                  key={p.id}
+                  type="button"
+                  onClick={() => handlePlanChange(p.id)}
+                  className={`rounded-lg border p-2.5 text-left transition ${
+                    plan === p.id
+                      ? "border-brand-500 bg-brand-50/60 ring-1 ring-brand-500"
+                      : "border-black/10 bg-surface hover:border-black/20"
+                  }`}
+                >
+                  <div className="text-xs font-semibold text-ink-50">{p.name}</div>
+                  <div className="mt-0.5 text-[10px] text-ink-400">{p.desc}</div>
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Feature Selection */}
+          <div className="space-y-3 border-t border-black/10 pt-4">
+            <div className="text-xs font-semibold uppercase tracking-wider text-ink-400">Enabled Features for Demo</div>
+            <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+              {[
+                { key: "apiAccess", label: "REST API & MCP Agent Access", desc: "Allows API keys and AI agent integrations" },
+                { key: "integrations", label: "Webhooks & External Integrations", desc: "Zapier, Make, and webhook endpoints" },
+                { key: "aiAssist", label: "AI Research & Reply Drafter", desc: "Generates account briefs & reply triage" },
+                { key: "plays", label: "Intent Plays Review Queue", desc: "Signal-based buyer intent workflows" },
+                { key: "visitors", label: "Website Visitor Identification", desc: "De-anonymizes incoming company traffic" },
+                { key: "signals", label: "Intent Radar (Hiring & Funding)", desc: "Tracks real-time industry buying signals" },
+              ].map((f) => (
+                <label key={f.key} className="flex items-start gap-2.5 rounded-lg border border-black/5 bg-surface/50 p-2.5 cursor-pointer hover:bg-surface">
+                  <input
+                    type="checkbox"
+                    checked={features[f.key as keyof typeof features]}
+                    onChange={(e) => setFeatures((prev) => ({ ...prev, [f.key]: e.target.checked }))}
+                    className="mt-0.5 h-4 w-4 rounded border-black/20 text-brand-600 focus:ring-brand-500"
+                  />
+                  <div>
+                    <div className="text-xs font-medium text-ink-50">{f.label}</div>
+                    <div className="text-[11px] text-ink-400">{f.desc}</div>
+                  </div>
+                </label>
+              ))}
+            </div>
+          </div>
+
+          {/* Granular Limits */}
+          <div className="space-y-3 border-t border-black/10 pt-4">
+            <div className="text-xs font-semibold uppercase tracking-wider text-ink-400">Custom Demo Quotas</div>
+            <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">Total Leads</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={limits.leadsPerMonth}
+                  onChange={(e) => setLimits((l) => ({ ...l, leadsPerMonth: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">Premium Leads (Paid)</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={limits.premiumLeadsPerMonth}
+                  onChange={(e) => setLimits((l) => ({ ...l, premiumLeadsPerMonth: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">Verifications</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={limits.verificationsPerMonth}
+                  onChange={(e) => setLimits((l) => ({ ...l, verificationsPerMonth: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">AI Messages</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={limits.aiMessagesPerMonth}
+                  onChange={(e) => setLimits((l) => ({ ...l, aiMessagesPerMonth: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">Email Sends</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={limits.emailsPerMonth}
+                  onChange={(e) => setLimits((l) => ({ ...l, emailsPerMonth: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">Searches</label>
+                <input
+                  type="number"
+                  min="0"
+                  value={limits.searchesPerMonth}
+                  onChange={(e) => setLimits((l) => ({ ...l, searchesPerMonth: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">Campaigns</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={limits.campaigns}
+                  onChange={(e) => setLimits((l) => ({ ...l, campaigns: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-medium text-ink-300">Seats</label>
+                <input
+                  type="number"
+                  min="1"
+                  value={limits.seats}
+                  onChange={(e) => setLimits((l) => ({ ...l, seats: Number(e.target.value) }))}
+                  className="input mt-1 text-xs"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Sample Data Seeding */}
+          <div className="border-t border-black/10 pt-4">
+            <label className="flex items-center gap-2 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={seedData}
+                onChange={(e) => setSeedData(e.target.checked)}
+                className="h-4 w-4 rounded border-black/20 text-brand-600 focus:ring-brand-500"
+              />
+              <span className="text-xs font-medium text-ink-100">
+                Pre-populate workspace with 4 verified sample leads, an ICP, and an intent play
+              </span>
+            </label>
+            <p className="mt-1 text-[11px] text-ink-400 pl-6">
+              Ensures the client experiences an active, populated pipeline the moment they log in.
+            </p>
+          </div>
+
+          <div className="flex items-center justify-end gap-3 border-t border-black/10 pt-4">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={busy}
+              className="btn-secondary"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={busy}
+              className="btn-primary"
+            >
+              {busy ? "Provisioning Demo..." : "Create 7-Day Demo Workspace"}
+            </button>
+          </div>
+        </form>
+      )}
+    </Modal>
+  );
+}
+
 function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | null; plansLoading: boolean; selected: string | null; onSelect: (id: string | null) => void }) {
   const [orgs, setOrgs] = useState<OrgRow[] | null>(null);
   const [q, setQ] = useState("");
   const [debouncedQ, setDebouncedQ] = useState("");
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  const [showCreateDemoModal, setShowCreateDemoModal] = useState(false);
+  const [filterMode, setFilterMode] = useState<"all" | "demos" | "expired" | "paid">("all");
   const narrow = useNarrow();
   const backRef = useRef<HTMLButtonElement>(null);
   // Searches used to fire on every keystroke, and a slow early response could land after a
@@ -590,27 +1095,78 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
     // Back to the row the admin came from, not the top of the document.
     if (id) setTimeout(() => document.querySelector<HTMLElement>(`[data-org-row="${id}"]`)?.focus(), 0);
   };
-  const planCell = (id: string) => {
-    const known = plans?.find((p) => p.id === id);
-    if (known) return known.name;
-    return plans && plans.length > 0 ? <span className="text-amber-800" title="This plan id is not one of the plans this build knows">Unknown ({id})</span> : <span className="capitalize">{id}</span>;
+  const planCell = (o: OrgRow) => {
+    const known = plans?.find((p) => p.id === o.plan);
+    const label = known ? known.name : plans && plans.length > 0 ? `Unknown (${o.plan})` : o.plan;
+    return (
+      <div className="flex flex-wrap items-center gap-1.5">
+        <span className="capitalize">{label}</span>
+        {o.isDemo && (
+          o.isDemoExpired ? (
+            <span className="badge border border-red-200 bg-red-50 text-[10px] font-bold text-red-700">Demo Expired</span>
+          ) : (
+            <span className="badge border border-amber-200 bg-amber-50 text-[10px] font-bold text-amber-800" title={`Valid until ${fmtDate(o.demoExpiresAt)}`}>Demo ({o.demoDaysLeft}d)</span>
+          )
+        )}
+      </div>
+    );
   };
+
+  const filteredOrgs = orgs?.filter((o) => {
+    if (filterMode === "demos") return o.isDemo && !o.isDemoExpired;
+    if (filterMode === "expired") return o.isDemo && o.isDemoExpired;
+    if (filterMode === "paid") return !o.isDemo && o.plan !== "free" && o.plan !== "pilot";
+    return true;
+  });
 
   return (
     // items-start: a stretched side column made the sticky panel as tall as the whole list,
     // so with a long list the panel's content sat far above the viewport.
     <div className="grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_360px]">
       <div className="card min-w-0 overflow-x-auto p-0">
-        <div className="border-b border-black/10 p-3">
-          <input className="input" placeholder="Search workspace or email…" aria-label="Search workspace or email" maxLength={200} value={q} onChange={(e) => setQ(e.target.value)} />
-          <div className="mt-2 text-xs text-ink-400 lg:hidden">Tap a workspace to manage its plan, status and credits.</div>
+        <div className="border-b border-black/10 p-3 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex-1 min-w-[240px]">
+              <input className="input" placeholder="Search workspace or email…" aria-label="Search workspace or email" maxLength={200} value={q} onChange={(e) => setQ(e.target.value)} />
+            </div>
+            <button
+              type="button"
+              onClick={() => setShowCreateDemoModal(true)}
+              className="btn-primary text-xs px-3.5 py-2 font-semibold shadow-sm flex items-center gap-1.5 shrink-0"
+            >
+              <span>+</span>
+              <span>Create Demo Account</span>
+            </button>
+          </div>
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+            <div className="flex flex-wrap items-center gap-1">
+              <span className="text-ink-400 mr-1">Filter:</span>
+              {(["all", "demos", "expired", "paid"] as const).map((mode) => {
+                const labels = { all: "All Workspaces", demos: "Active Demos", expired: "Expired Demos", paid: "Paid Only" };
+                const active = filterMode === mode;
+                return (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => setFilterMode(mode)}
+                    className={`rounded-md px-2.5 py-1 text-xs transition ${
+                      active ? "bg-brand-600 text-white font-medium shadow-sm" : "bg-black/5 text-ink-300 hover:text-ink-50"
+                    }`}
+                  >
+                    {labels[mode]}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="text-xs text-ink-400 lg:hidden">Tap a workspace to manage.</div>
+          </div>
         </div>
         {loadErr && <div className="border-b border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">Could not load workspaces: {loadErr} <button className={LINK_BTN} onClick={load}>Retry</button></div>}
         {!orgs && !loadErr && <div className="p-6 text-center text-sm text-ink-400" role="status">Loading workspaces…</div>}
         <table className="w-full md:min-w-[880px] text-sm">
           <thead><tr className="text-left text-ink-400"><th className="th">Workspace</th><th className="th">Plan</th><th className="th">Status</th><th className="th">Leads</th><th className="th">Premium</th><th className="th">Users</th><th className="th max-md:hidden">Leads total</th><th className="th max-md:hidden">Last active</th><th className="th">Joined</th></tr></thead>
           <tbody>
-            {orgs?.map((o) => (
+            {filteredOrgs?.map((o) => (
               <tr
                 key={o.id}
                 data-org-row={o.id}
@@ -623,7 +1179,7 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
                 onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); onSelect(o.id); } }}
               >
                 <td className="td"><div className="font-medium text-ink-50">{o.name}</div><div className="text-xs text-ink-400">{o.ownerEmail ?? "-"}</div>{o.pendingDeletionAt && <span className="badge mt-1 whitespace-nowrap bg-red-50 text-red-700" data-deletion-badge>Deletion scheduled {fmtDay(o.pendingDeletionAt)}</span>}</td>
-                <td className="td">{planCell(o.plan)}</td>
+                <td className="td">{planCell(o)}</td>
                 <td className="td"><StatusBadge status={o.status} /></td>
                 <td className="td whitespace-nowrap">{usedOf(o.leadsUsed, o.limits?.leadsPerMonth, "leadsPerMonth")}</td>
                 <td className="td whitespace-nowrap">{usedOf(o.premiumLeadsUsed, o.limits?.premiumLeadsPerMonth, "premiumLeadsPerMonth")}</td>
@@ -635,7 +1191,7 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
             ))}
           </tbody>
         </table>
-        {orgs && orgs.length === 0 && !loadErr && <div className="p-6 text-center text-sm text-ink-400">No workspaces match.</div>}
+        {filteredOrgs && filteredOrgs.length === 0 && !loadErr && <div className="p-6 text-center text-sm text-ink-400">No workspaces match this filter.</div>}
       </div>
       {selected ? (
         <div
@@ -657,6 +1213,15 @@ function OrgsTab({ plans, plansLoading, selected, onSelect }: { plans: Plan[] | 
       ) : (
         <div className="card p-5 text-sm text-ink-400 max-lg:hidden">Select a workspace to manage its plan, status, and credits.</div>
       )}
+      <CreateDemoModal
+        open={showCreateDemoModal}
+        onClose={() => setShowCreateDemoModal(false)}
+        plans={plans}
+        onCreated={(newOrgId) => {
+          void load();
+          onSelect(newOrgId);
+        }}
+      />
     </div>
   );
 }

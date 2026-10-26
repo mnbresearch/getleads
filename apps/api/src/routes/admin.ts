@@ -4,7 +4,9 @@ import { z } from "zod";
 import {
   adjustUsage,
   and,
+  apiKeys,
   auditLog,
+  companies,
   currentPeriod,
   desc,
   effectiveLimits,
@@ -12,10 +14,12 @@ import {
   getDb,
   getToolsSummary,
   globalSuppressions,
+  icps,
   ilike,
   inArray,
   isNull,
   isPlanId,
+  leads,
   limitsFor,
   MAX_PLAN_LIMIT,
   metricToLimit,
@@ -24,6 +28,7 @@ import {
   PLAN_IDS,
   planOverrides,
   PLANS,
+  plays,
   recordProviderHealth,
   sanitizePlanLimits,
   sql,
@@ -36,7 +41,7 @@ import {
 import { checkAllBalances, checkAllProviders, UNTESTED_PROVIDERS } from "@prospex/core";
 import { createHash, timingSafeEqual } from "node:crypto";
 import { env } from "../env.js";
-import { claimAdminTotpStep, issueAdminJwt, revokeAdminJwt } from "../lib/auth.js";
+import { claimAdminTotpStep, generateApiKey, hashPassword, issueAdminJwt, revokeAdminJwt } from "../lib/auth.js";
 import { ApiError, badRequest, notFound } from "../lib/errors.js";
 import { clientIp, rateLimit, requireAdmin, type Env } from "../middleware.js";
 import { audit } from "../lib/audit.js";
@@ -188,6 +193,17 @@ adminRoutes.post("/logout", async (c) => {
 
 // ── Orgs / customers ──
 
+const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "org";
+
+function generateSecurePassword(): string {
+  const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  let pass = "";
+  for (let i = 0; i < 12; i++) {
+    pass += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return `Scout-${pass.slice(0, 4)}-${pass.slice(4, 8)}!`;
+}
+
 /** `%`, `_` and `\` mean something to LIKE. Typed into a search box they are just characters. */
 const escapeLike = (v: string) => v.replace(/[\\%_]/g, "\\$&");
 
@@ -272,6 +288,16 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().max(200).o
     const owner = orgUsers[0];
     const leadsUsed = orgUsage.find((r) => r.metric === "leads")?.count ?? 0;
     const premiumLeadsUsed = orgUsage.find((r) => r.metric === "premiumLeads")?.count ?? 0;
+    const settings = (o.settings ?? {}) as Record<string, unknown>;
+    const isDemo = !!settings.isDemo;
+    const demoExpiresAt = (settings.demoExpiresAt as string) ?? null;
+    let demoDaysLeft: number | null = null;
+    let isDemoExpired = false;
+    if (isDemo && demoExpiresAt) {
+      const diffMs = new Date(demoExpiresAt).getTime() - Date.now();
+      demoDaysLeft = Math.max(0, Math.ceil(diffMs / (24 * 60 * 60 * 1000)));
+      isDemoExpired = diffMs <= 0;
+    }
     return {
       id: o.id,
       name: o.name,
@@ -292,6 +318,10 @@ adminRoutes.get("/orgs", zValidator("query", z.object({ q: z.string().max(200).o
       lastActiveAt: extras.get(o.id)?.lastActiveAt ?? null,
       membersCount: extras.get(o.id)?.membersCount ?? orgUsers.length,
       leadsTotal: extras.get(o.id)?.leadsTotal ?? null,
+      isDemo,
+      demoExpiresAt,
+      demoDaysLeft,
+      isDemoExpired,
     };
   });
 
@@ -348,6 +378,15 @@ adminRoutes.get("/orgs/:id", async (c) => {
       // The workspace's privacy switches, as yes-or-no answers (not the address itself).
       aiAssist: !aiDisabled(org),
       mailingAddressSet: !!mailingAddressOf(org),
+      isDemo: !!(org.settings as any)?.isDemo,
+      demoExpiresAt: ((org.settings as any)?.demoExpiresAt as string) ?? null,
+      demoDaysLeft: (org.settings as any)?.demoExpiresAt
+        ? Math.max(0, Math.ceil((new Date((org.settings as any).demoExpiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000)))
+        : null,
+      isDemoExpired: (org.settings as any)?.demoExpiresAt
+        ? new Date((org.settings as any).demoExpiresAt).getTime() <= Date.now()
+        : false,
+      demoFeatures: (org.settings as any)?.demoFeatures ?? null,
     },
     overrides,
     users: orgUsers,
@@ -595,7 +634,7 @@ const LIMIT_LABELS: Record<string, string> = {
   integrations: "integrations",
 };
 const limitText = (k: string, v: unknown) => `${LIMIT_LABELS[k] ?? k} ${typeof v === "boolean" ? (v ? "on" : "off") : String(v)}`;
-const PLAN_SCHEMA = z.object({ plan: z.string().max(100), overrides: OVERRIDES_SCHEMA.optional() });
+const PLAN_SCHEMA = z.object({ plan: z.string().max(100), overrides: OVERRIDES_SCHEMA.optional(), clearDemo: z.boolean().optional() });
 
 /** Key order does not matter when comparing two sets of limits (jsonb reorders keys anyway). */
 const canonical = (o: Record<string, unknown>) => JSON.stringify(Object.keys(o).sort().map((k) => [k, o[k]]));
@@ -609,24 +648,34 @@ adminRoutes.patch("/orgs/:id/plan", zValidator("json", PLAN_SCHEMA), async (c) =
   const before = await db.query.organizations.findFirst({ where: eq(organizations.id, c.req.param("id")) });
   if (!before) throw notFound("Org");
 
-  // Overrides belong to the workspace, not to the plan it happens to be on. Changing only the
-  // plan used to rewrite plan_limits from the new plan's defaults, silently discarding
-  // whatever had been granted. They are kept unless the request says otherwise: `overrides`
-  // replaces them, and an explicit `{}` clears them.
   const explicit = b.overrides !== undefined;
   const overrides = (explicit ? b.overrides! : planOverrides(before)) as Record<string, number | boolean>;
   const nextLimits = { ...limitsFor(b.plan), ...overrides };
-  // Stored values that are not usable limits (written before overrides were validated).
   const junk = sanitizePlanLimits(before.planLimits).rejected;
-  const unchanged = before.plan === b.plan && junk.length === 0 && canonical(effectiveLimits(before) as unknown as Record<string, unknown>) === canonical(nextLimits as unknown as Record<string, unknown>);
+
+  const currentSettings = { ...(((before.settings ?? {}) as Record<string, unknown>) || {}) };
+  let settingsChanged = false;
+  if (b.clearDemo || (currentSettings.isDemo && b.plan !== "pilot")) {
+    delete currentSettings.isDemo;
+    delete currentSettings.demoExpiresAt;
+    delete currentSettings.demoDays;
+    delete currentSettings.demoFeatures;
+    delete currentSettings.compulsoryUpgrade;
+    settingsChanged = true;
+  }
+
+  const unchanged = !settingsChanged && before.plan === b.plan && junk.length === 0 && canonical(effectiveLimits(before) as unknown as Record<string, unknown>) === canonical(nextLimits as unknown as Record<string, unknown>);
   const shownOverrides = planOverrides({ plan: b.plan, planLimits: nextLimits });
   if (unchanged) {
     return c.json({ id: before.id, plan: before.plan, limits: effectiveLimits(before), overrides: shownOverrides, changed: false });
   }
 
+  const updateSet: Record<string, unknown> = { plan: b.plan, planLimits: nextLimits as typeof before.planLimits };
+  if (settingsChanged) updateSet.settings = currentSettings;
+
   const [row] = await db
     .update(organizations)
-    .set({ plan: b.plan, planLimits: nextLimits as typeof before.planLimits })
+    .set(updateSet as any)
     .where(eq(organizations.id, before.id))
     .returning();
   if (!row) throw notFound("Org");
@@ -732,6 +781,369 @@ adminRoutes.patch("/orgs/:id/credits", zValidator("json", CREDITS_SCHEMA), async
     await adminAudit(c, "admin.credits_changed", org.id, { targetType: "organization", targetId: org.id, data: { metric: b.metric, period: r.period, action, amount: b.amount, before: { used: r.before }, after: { used: r.after } } });
   }
   return c.json({ metric: b.metric, period: r.period, used: r.after, limit, changed, ...(note ? { note } : {}) });
+});
+
+// ── Demo account provisioning & management (7-day trial with compulsory upgrade) ──
+
+const DEMO_ACCOUNT_SCHEMA = z.object({
+  name: z.string().min(1).max(80),
+  userName: z.string().min(1).max(80),
+  email: z.string().min(3).max(254).email(),
+  password: z.string().min(8).max(128).optional(),
+  daysValid: z.number().int().min(1).max(90).default(7),
+  plan: z.string().max(40).default("pilot"),
+  features: z
+    .object({
+      apiAccess: z.boolean().default(true),
+      integrations: z.boolean().default(true),
+      aiAssist: z.boolean().default(true),
+      plays: z.boolean().default(true),
+      visitors: z.boolean().default(true),
+      signals: z.boolean().default(true),
+      sequences: z.boolean().default(true),
+    })
+    .default({}),
+  limits: z
+    .object({
+      leadsPerMonth: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      premiumLeadsPerMonth: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      searchesPerMonth: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      verificationsPerMonth: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      aiMessagesPerMonth: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      emailsPerMonth: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      emailsPerDay: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      campaigns: z.number().int().min(0).max(MAX_PLAN_LIMIT).optional(),
+      seats: z.number().int().min(1).max(MAX_PLAN_LIMIT).optional(),
+    })
+    .optional(),
+  seedSampleData: z.boolean().default(true),
+});
+
+adminRoutes.post("/demo-account", zValidator("json", DEMO_ACCOUNT_SCHEMA), async (c) => {
+  const b = c.req.valid("json");
+  const email = b.email.toLowerCase().trim();
+  const { db } = getDb();
+
+  const existingUser = await db.query.users.findFirst({ where: eq(users.email, email) });
+  if (existingUser) {
+    throw new ApiError(409, `The email "${email}" is already registered on Scout. Choose another email or manage their existing workspace.`, "email_taken");
+  }
+
+  // Auto-generate a secure, memorable password if not supplied
+  const rawPassword = b.password?.trim() || generateSecurePassword();
+  const passwordHash = await hashPassword(rawPassword);
+
+  const days = b.daysValid || 7;
+  const demoExpiresAt = new Date(Date.now() + days * 24 * 60 * 60 * 1000).toISOString();
+
+  let slug = slugify(b.name);
+  if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) {
+    slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
+  }
+
+  const basePlan = isPlanId(b.plan) ? b.plan : "pilot";
+  const baseLimits = limitsFor(basePlan);
+  const customLimits = {
+    ...baseLimits,
+    apiAccess: b.features.apiAccess ?? true,
+    integrations: b.features.integrations ?? true,
+    ...(b.limits ?? {}),
+  };
+
+  const settings: Record<string, unknown> = {
+    isDemo: true,
+    demoCreatedAt: new Date().toISOString(),
+    demoExpiresAt,
+    demoDays: days,
+    compulsoryUpgrade: true,
+    demoFeatures: {
+      apiAccess: b.features.apiAccess ?? true,
+      integrations: b.features.integrations ?? true,
+      aiAssist: b.features.aiAssist ?? true,
+      plays: b.features.plays ?? true,
+      visitors: b.features.visitors ?? true,
+      signals: b.features.signals ?? true,
+      sequences: b.features.sequences ?? true,
+    },
+  };
+
+  const key = generateApiKey();
+
+  const { org, user } = await db.transaction(async (tx) => {
+    const [org] = await tx
+      .insert(organizations)
+      .values({
+        name: b.name.trim(),
+        slug,
+        plan: basePlan,
+        planLimits: customLimits,
+        status: "active",
+        settings,
+      })
+      .returning();
+
+    const [user] = await tx
+      .insert(users)
+      .values({
+        orgId: org.id,
+        email,
+        name: b.userName.trim(),
+        passwordHash,
+        role: "owner",
+        emailVerifiedAt: new Date(), // Pre-verified for frictionless demo onboarding
+        lastLoginAt: null,
+      })
+      .returning();
+
+    await tx.insert(apiKeys).values({
+      orgId: org.id,
+      name: "Default Demo Key",
+      prefix: key.prefix,
+      keyHash: key.hash,
+      createdBy: user.id,
+    });
+
+    if (b.seedSampleData) {
+      // Seed sample ICP
+      const [icp] = await tx
+        .insert(icps)
+        .values({
+          orgId: org.id,
+          name: "B2B SaaS Revenue Leaders",
+          description: "High-growth software companies, VP Sales, Head of Revenue Ops, Founders",
+          criteria: {
+            industries: ["Software", "Internet", "Information Technology"],
+            titles: ["VP Sales", "Head of Growth", "Director of Revenue Operations", "Chief Revenue Officer"],
+            locations: ["United States", "United Kingdom", "Canada"],
+          },
+          seedDomains: ["stripe.com", "notion.so", "datadog.com"],
+        })
+        .returning();
+
+      // Seed 2 sample companies
+      const [c1] = await tx
+        .insert(companies)
+        .values({
+          orgId: org.id,
+          domain: "cloudscale.ai",
+          name: "CloudScale AI",
+          industry: "Software",
+          size: "51-200",
+          location: "San Francisco, CA",
+          country: "United States",
+          description: "Autonomous cloud infrastructure scaling and cost optimization platform.",
+          website: "https://cloudscale.ai",
+          mxValid: true,
+          catchAll: false,
+        })
+        .returning();
+
+      const [c2] = await tx
+        .insert(companies)
+        .values({
+          orgId: org.id,
+          domain: "finpulse.io",
+          name: "FinPulse",
+          industry: "Financial Services",
+          size: "11-50",
+          location: "New York, NY",
+          country: "United States",
+          description: "Next-generation corporate treasury automation and real-time ledger intelligence.",
+          website: "https://finpulse.io",
+          mxValid: true,
+          catchAll: false,
+        })
+        .returning();
+
+      // Seed 4 verified sample leads
+      await tx.insert(leads).values([
+        {
+          orgId: org.id,
+          companyId: c1.id,
+          icpId: icp.id,
+          firstName: "Sarah",
+          lastName: "Chen",
+          fullName: "Sarah Chen",
+          title: "VP of Revenue Operations",
+          seniority: "VP",
+          department: "Revenue",
+          email: "sarah.chen@cloudscale.example",
+          emailStatus: "valid",
+          emailConfidence: 0.98,
+          location: "San Francisco, CA",
+          country: "United States",
+          source: "web_search",
+          status: "qualified",
+          tags: ["b2b-saas", "decision-maker", "high-intent"],
+        },
+        {
+          orgId: org.id,
+          companyId: c1.id,
+          icpId: icp.id,
+          firstName: "Marcus",
+          lastName: "Vance",
+          fullName: "Marcus Vance",
+          title: "Head of Global Sales",
+          seniority: "Director",
+          department: "Sales",
+          email: "marcus.v@cloudscale.example",
+          emailStatus: "valid",
+          emailConfidence: 0.95,
+          location: "San Francisco, CA",
+          country: "United States",
+          source: "web_search",
+          status: "contacted",
+          tags: ["sales-leader", "verified"],
+        },
+        {
+          orgId: org.id,
+          companyId: c2.id,
+          icpId: icp.id,
+          firstName: "Elena",
+          lastName: "Rostova",
+          fullName: "Elena Rostova",
+          title: "Director of Enterprise Sales",
+          seniority: "Director",
+          department: "Sales",
+          email: "elena@finpulse.example",
+          emailStatus: "valid",
+          emailConfidence: 0.94,
+          location: "New York, NY",
+          country: "United States",
+          source: "web_search",
+          status: "new",
+          tags: ["fintech", "enterprise"],
+        },
+        {
+          orgId: org.id,
+          companyId: c2.id,
+          icpId: icp.id,
+          firstName: "David",
+          lastName: "Miller",
+          fullName: "David Miller",
+          title: "Chief Commercial Officer",
+          seniority: "Executive",
+          department: "Executive",
+          email: "david.miller@finpulse.example",
+          emailStatus: "valid",
+          emailConfidence: 0.96,
+          location: "New York, NY",
+          country: "United States",
+          source: "web_search",
+          status: "engaged",
+          tags: ["c-suite", "inbound-intent"],
+        },
+      ]);
+
+      // Seed 1 active intent play
+      await tx.insert(plays).values({
+        orgId: org.id,
+        name: "Competitor Customer Signals",
+        type: "competitor_customers",
+        status: "active",
+        config: {
+          competitorDomains: ["apollo.io", "zoominfo.com"],
+          reviewRequired: true,
+          matchKeywords: ["prospecting", "pipeline", "b2b data"],
+        },
+        targetTitles: ["VP Sales", "Head of Growth", "Director Sales Development"],
+        icpId: icp.id,
+        autoApprove: false,
+      });
+    }
+
+    return { org, user };
+  });
+
+  await adminAudit(c, "admin.demo_account_created", org.id, {
+    targetType: "organization",
+    targetId: org.id,
+    data: {
+      email: user.email,
+      name: org.name,
+      plan: org.plan,
+      daysValid: days,
+      demoExpiresAt,
+      limits: customLimits,
+      features: settings.demoFeatures,
+      seeded: b.seedSampleData,
+    },
+  });
+
+  return c.json({
+    ok: true,
+    org: {
+      id: org.id,
+      name: org.name,
+      slug: org.slug,
+      plan: org.plan,
+      limits: customLimits,
+      demoExpiresAt,
+      daysValid: days,
+      isDemo: true,
+    },
+    user: {
+      id: user.id,
+      email: user.email,
+      name: user.name,
+    },
+    credentials: {
+      email: user.email,
+      password: rawPassword,
+      loginUrl: "https://scout.mnbresearch.com/login",
+      apiKey: key.raw,
+      expiresAt: demoExpiresAt,
+      daysValid: days,
+    },
+    message: `Demo account created successfully. Valid for ${days} days until ${new Date(demoExpiresAt).toLocaleDateString()}.`,
+  });
+});
+
+adminRoutes.post("/orgs/:id/extend-demo", zValidator("json", z.object({ days: z.number().int().min(1).max(90).default(7) })), async (c) => {
+  const { db } = getDb();
+  const orgId = c.req.param("id");
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId) });
+  if (!org) throw notFound("Org");
+  const settings = ((org.settings ?? {}) as Record<string, unknown>) || {};
+  const days = c.req.valid("json").days;
+  const currentExpiry = settings.demoExpiresAt ? new Date(settings.demoExpiresAt as string) : new Date();
+  const baseTime = Math.max(Date.now(), currentExpiry.getTime());
+  const newExpiry = new Date(baseTime + days * 24 * 60 * 60 * 1000).toISOString();
+
+  const updatedSettings = {
+    ...settings,
+    isDemo: true,
+    demoExpiresAt: newExpiry,
+    compulsoryUpgrade: true,
+  };
+
+  await db.update(organizations).set({ settings: updatedSettings }).where(eq(organizations.id, org.id));
+  await adminAudit(c, "admin.demo_extended", org.id, {
+    targetType: "organization",
+    targetId: org.id,
+    data: { previousExpiresAt: settings.demoExpiresAt, newExpiresAt: newExpiry, daysAdded: days },
+  });
+  return c.json({ ok: true, orgId: org.id, demoExpiresAt: newExpiry, daysAdded: days });
+});
+
+adminRoutes.post("/orgs/:id/convert-demo", async (c) => {
+  const { db } = getDb();
+  const orgId = c.req.param("id");
+  const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId) });
+  if (!org) throw notFound("Org");
+  const settings = { ...(((org.settings ?? {}) as Record<string, unknown>) || {}) };
+  delete settings.isDemo;
+  delete settings.demoExpiresAt;
+  delete settings.demoDays;
+  delete settings.demoFeatures;
+  delete settings.compulsoryUpgrade;
+
+  await db.update(organizations).set({ settings }).where(eq(organizations.id, org.id));
+  await adminAudit(c, "admin.demo_converted_to_permanent", org.id, {
+    targetType: "organization",
+    targetId: org.id,
+  });
+  return c.json({ ok: true, orgId: org.id, isDemo: false });
 });
 
 // ── Plans reference (read-only - prices/limits live in code, see packages/db/src/plans.ts) ──

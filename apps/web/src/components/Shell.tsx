@@ -25,10 +25,79 @@ const nav = [
   { to: "/settings", label: "Settings", icon: "⚙" },
 ];
 
+function DemoBanner({ daysLeft, expiresAt }: { daysLeft: number | null; expiresAt: string | null }) {
+  const formattedDate = expiresAt ? new Date(expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-brand-200 bg-brand-50/90 px-4 py-2 text-xs text-brand-900 shadow-sm" role="status">
+      <div className="flex items-center gap-2">
+        <span className="flex h-5 w-5 items-center justify-center rounded-full bg-brand-600 text-[11px] font-bold text-white">⚡</span>
+        <span>
+          <strong className="font-semibold">7-Day Demo Account:</strong> {daysLeft !== null ? (
+            <span>
+              <span className="font-bold text-brand-700">{daysLeft} {daysLeft === 1 ? "day" : "days"} remaining</span> (valid until {formattedDate})
+            </span>
+          ) : "Active trial"} · Upgrading is compulsory after 7 days to preserve access.
+        </span>
+      </div>
+      <a href="/upgrade" className="inline-flex items-center gap-1 rounded-md bg-brand-600 px-3 py-1 text-[11px] font-semibold text-white shadow-sm transition hover:bg-brand-700">
+        Upgrade plan ↗
+      </a>
+    </div>
+  );
+}
+
+function DemoExpiredPaywall({ onSignOut, expiresAt }: { onSignOut: () => void; expiresAt?: string | null }) {
+  const formattedDate = expiresAt ? new Date(expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "recently";
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-cream p-6">
+      <div className="card max-w-lg p-8 text-center shadow-xl border-brand-200">
+        <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-amber-100 text-amber-700 text-xl font-bold">
+          ⏱
+        </div>
+        <h2 className="mt-4 text-2xl font-bold tracking-tight text-ink-50">Your 7-Day Demo Has Ended</h2>
+        <p className="mt-2 text-sm text-ink-300">
+          Your demo workspace trial ended on {formattedDate}. As per the 7-day evaluation policy, upgrade your workspace to a paid plan to restore full pipeline access, contact discovery, and AI research capabilities.
+        </p>
+
+        <div className="mt-6 rounded-lg border border-black/10 bg-surface p-4 text-left">
+          <div className="text-xs font-semibold uppercase tracking-wider text-ink-400">Available Plans</div>
+          <div className="mt-2 grid grid-cols-2 gap-3 text-xs">
+            <div className="rounded border border-black/5 p-2.5">
+              <div className="font-semibold text-ink-50">Starter · $109/mo</div>
+              <div className="text-ink-400 mt-1">1,500 leads, 150 verified premium, 3 campaigns</div>
+            </div>
+            <div className="rounded border border-brand-200 bg-brand-50/40 p-2.5">
+              <div className="font-semibold text-brand-700">Growth · $359/mo</div>
+              <div className="text-ink-400 mt-1">6,000 leads, 500 premium, 15 campaigns</div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mt-6 flex flex-col gap-2.5 sm:flex-row sm:justify-center">
+          <a href="/upgrade" className="btn-primary justify-center px-6 py-2.5 text-sm font-semibold shadow-glow">
+            Choose Plan & Upgrade Now
+          </a>
+          <button className="btn-secondary justify-center px-4 py-2.5 text-sm" onClick={onSignOut}>
+            Sign Out
+          </button>
+        </div>
+
+        <p className="mt-4 text-xs text-ink-400">
+          Need an extension or have questions? Email us at{" "}
+          <a href="mailto:contact@mnbresearch.com" className="text-brand-600 hover:underline">
+            contact@mnbresearch.com
+          </a>
+        </p>
+      </div>
+    </div>
+  );
+}
+
 export function Shell({ children }: { children: ReactNode }) {
-  const [me, setMe] = useState<{ user: { email: string; name: string; role?: string; emailVerified?: boolean } | null; org: { name: string; plan: string; emailVerificationAvailable?: boolean }; emailVerificationAvailable?: boolean } | null>(null);
+  const [me, setMe] = useState<{ user: { email: string; name: string; role?: string; emailVerified?: boolean } | null; org: { name: string; plan: string; emailVerificationAvailable?: boolean; settings?: Record<string, unknown> }; emailVerificationAvailable?: boolean } | null>(null);
   const [open, setOpen] = useState(false);
   const [suspended, setSuspended] = useState(false);
+  const [demoExpired, setDemoExpired] = useState(false);
   const [meErr, setMeErr] = useState<string | null>(null);
   const navigate = useNavigate();
   const signOut = useCallback(() => {
@@ -44,9 +113,15 @@ export function Shell({ children }: { children: ReactNode }) {
         setMe(r);
         setMeErr(null);
         setSuspended(false);
+        const settings = (r?.org as any)?.settings as Record<string, unknown> | undefined;
+        if (settings?.isDemo && settings?.demoExpiresAt) {
+          const expired = new Date(settings.demoExpiresAt as string).getTime() <= Date.now();
+          setDemoExpired(expired);
+        }
       })
       .catch((e) => {
         if (e instanceof ProspexError && e.status === 403 && e.code === "account_suspended") setSuspended(true);
+        else if (e instanceof ProspexError && e.status === 402 && e.code === "demo_expired") setDemoExpired(true);
         else if (!(e instanceof ProspexError && e.status === 401)) setMeErr((e as Error).message);
       });
   }, []);
@@ -67,6 +142,15 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
       </div>
     );
+  }
+  const orgSettings = (me?.org as any)?.settings as Record<string, unknown> | undefined;
+  const isDemo = !!orgSettings?.isDemo;
+  const demoExpiresAt = (orgSettings?.demoExpiresAt as string) ?? null;
+  const isExpired = demoExpired || (isDemo && demoExpiresAt ? new Date(demoExpiresAt).getTime() <= Date.now() : false);
+  const demoDaysLeft = isDemo && demoExpiresAt ? Math.max(0, Math.ceil((new Date(demoExpiresAt).getTime() - Date.now()) / (24 * 60 * 60 * 1000))) : null;
+
+  if (isExpired) {
+    return <DemoExpiredPaywall onSignOut={signOut} expiresAt={demoExpiresAt} />;
   }
   return (
     <div className="flex min-h-screen bg-cream">
@@ -113,6 +197,7 @@ export function Shell({ children }: { children: ReactNode }) {
             <button className="font-medium underline" onClick={loadMe}>Retry</button>
           </div>
         )}
+        {isDemo && !isExpired && <DemoBanner daysLeft={demoDaysLeft} expiresAt={demoExpiresAt} />}
         {/* Nothing for a session that never loaded its account, an older server that does not
             say whether the address is confirmed, or a deployment that cannot send the email. */}
         <DeletionBanner isOwner={me?.user?.role === "owner"} />

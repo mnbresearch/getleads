@@ -13,6 +13,30 @@ export const requireAuth: MiddlewareHandler<Env> = async (c, next) => {
   if (auth.org.status === "deactivated" || auth.org.status === "revoked") {
     throw new ApiError(403, "This account has been suspended. Contact support to reactivate it.", "account_suspended");
   }
+
+  // 7-day demo expiration enforcement: compulsory upgrade required once expired
+  const orgSettings = (auth.org.settings ?? {}) as Record<string, unknown>;
+  if (orgSettings.isDemo && orgSettings.demoExpiresAt) {
+    const expiresAt = new Date(orgSettings.demoExpiresAt as string);
+    if (!Number.isNaN(expiresAt.getTime()) && Date.now() > expiresAt.getTime()) {
+      const path = c.req.path;
+      const isAllowedBillingPath =
+        path.startsWith("/v1/billing") ||
+        path.startsWith("/v1/upgrade") ||
+        path === "/v1/auth/me" ||
+        path === "/v1/auth/org" ||
+        path === "/v1/auth/logout";
+      if (!isAllowedBillingPath) {
+        throw new ApiError(
+          402,
+          "Your 7-day demo period has expired. Please upgrade your plan to continue using Scout.",
+          "demo_expired",
+          { demoExpired: true, expiresAt: orgSettings.demoExpiresAt, upgradeRequired: true }
+        );
+      }
+    }
+  }
+
   c.set("auth", auth);
   // A read-only API key may look and not touch. Checked here, once, for every route behind
   // requireAuth - not per route, where the next new route would forget it. (The admin API
