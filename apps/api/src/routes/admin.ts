@@ -39,7 +39,7 @@ import {
   workspaceDeletionRequests,
 } from "@prospex/db";
 import { checkAllBalances, checkAllProviders, UNTESTED_PROVIDERS } from "@prospex/core";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { env } from "../env.js";
 import { claimAdminTotpStep, generateApiKey, hashPassword, issueAdminJwt, revokeAdminJwt } from "../lib/auth.js";
 import { ApiError, badRequest, notFound } from "../lib/errors.js";
@@ -197,9 +197,10 @@ const slugify = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").repla
 
 function generateSecurePassword(): string {
   const chars = "abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789";
+  const bytes = randomBytes(12);
   let pass = "";
   for (let i = 0; i < 12; i++) {
-    pass += chars.charAt(Math.floor(Math.random() * chars.length));
+    pass += chars[bytes[i] % chars.length];
   }
   return `Scout-${pass.slice(0, 4)}-${pass.slice(4, 8)}!`;
 }
@@ -838,7 +839,7 @@ adminRoutes.post("/demo-account", zValidator("json", DEMO_ACCOUNT_SCHEMA), async
 
   let slug = slugify(b.name);
   if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) {
-    slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
+    slug = `${slug}-${randomBytes(3).toString("hex")}`;
   }
 
   const basePlan = isPlanId(b.plan) ? b.plan : "pilot";

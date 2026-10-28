@@ -82,8 +82,24 @@ function originOf(url: string): string {
 /** How much of a webhook endpoint's response is read before the rest is discarded. */
 const WEBHOOK_MAX_RESPONSE_BYTES = 64 * 1024;
 
-/** Only orgs that are allowed to run: a suspended workspace's schedules must not fire. */
-const orgIsActive = (col: unknown) => dsql`${col} IN (SELECT id FROM organizations WHERE status = 'active')`;
+/** Only orgs that are allowed to run: a suspended or demo-expired workspace's schedules must not fire. */
+const orgIsActive = (col: unknown) => dsql`${col} IN (
+  SELECT id FROM organizations
+  WHERE status = 'active'
+    AND NOT (
+      (settings->>'isDemo')::boolean IS TRUE
+      AND settings->>'demoExpiresAt' IS NOT NULL
+      AND (settings->>'demoExpiresAt')::timestamptz <= now()
+    )
+)`;
+
+function isOrgDemoExpired(settings: unknown): boolean {
+  if (!settings || typeof settings !== "object") return false;
+  const s = settings as Record<string, unknown>;
+  if (!s.isDemo || !s.demoExpiresAt) return false;
+  const expiresAt = new Date(s.demoExpiresAt as string).getTime();
+  return !Number.isNaN(expiresAt) && Date.now() > expiresAt;
+}
 
 // verifierOf lives in services/leads.ts now (the verify route uses it too); re-exported
 // here for existing importers.
@@ -915,7 +931,7 @@ export const handlers: Record<string, JobHandler> = {
       const orgs = await db
         .select({ id: organizations.id })
         .from(organizations)
-        .where(eq(organizations.status, "active"))
+        .where(and(eq(organizations.status, "active"), orgIsActive(organizations.id)))
         .orderBy(dsql`${organizations.jobCheckTickAt} ASC NULLS FIRST`)
         .limit(ORGS_PER_TICK);
 
@@ -1200,8 +1216,8 @@ export const handlers: Record<string, JobHandler> = {
     const play = await db.query.plays.findFirst({ where: eq(plays.id, playId), columns: { id: true, orgId: true } });
     if (!play) return { skipped: "missing" };
     if (foreign(job, play.orgId)) return ORG_MISMATCH;
-    const org = await db.query.organizations.findFirst({ where: eq(organizations.id, play.orgId), columns: { status: true } });
-    if (!org || org.status !== "active") return { skipped: "organization not active" };
+    const org = await db.query.organizations.findFirst({ where: eq(organizations.id, play.orgId), columns: { status: true, settings: true } });
+    if (!org || org.status !== "active" || isOrgDemoExpired(org.settings)) return { skipped: "organization not active" };
     // The campaign and the leads are the play org's own, not merely rows with those ids.
     const campaign = await db.query.campaigns.findFirst({ where: and(eq(campaigns.id, campaignId), eq(campaigns.orgId, play.orgId)) });
     if (!campaign) return { skipped: "campaign missing" };

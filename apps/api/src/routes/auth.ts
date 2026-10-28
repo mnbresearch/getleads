@@ -1,4 +1,5 @@
 import { Hono, type Context, type MiddlewareHandler } from "hono";
+import { randomBytes } from "node:crypto";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import { zValidator } from "../lib/validate.js";
 import { z } from "zod";
@@ -130,7 +131,7 @@ authRoutes.post(
     if (refused) throw new ApiError(429, refused, "rate_limited");
     const orgName = body.orgName ?? `${body.name ?? body.email.split("@")[0]}'s workspace`;
     let slug = slugify(orgName);
-    if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
+    if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) slug = `${slug}-${randomBytes(3).toString("hex")}`;
     const plan = env.defaultPlan;
     // Hash before the transaction so the slow step is not inside it. The workspace, its owner
     // and the default key are then created in ONE transaction: two signups racing the same
@@ -724,7 +725,7 @@ authRoutes.get("/google/callback", rateLimit({ perMinute: 30 }), async (c) => {
     if (refused) return fail(refused);
     const orgName = `${identity.name || identity.email.split("@")[0]}'s workspace`.replace(/\u0000/g, "");
     let slug = slugify(orgName);
-    if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) slug = `${slug}-${Math.random().toString(36).slice(2, 7)}`;
+    if (await db.query.organizations.findFirst({ where: eq(organizations.slug, slug) })) slug = `${slug}-${randomBytes(3).toString("hex")}`;
     const plan = env.defaultPlan;
     const [org] = await db.insert(organizations).values({ name: orgName, slug, plan, planLimits: limitsFor(plan) }).returning();
     // A random unusable password rather than an empty hash: the password login path compares
