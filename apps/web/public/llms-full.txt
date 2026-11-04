@@ -11,11 +11,9 @@
 
 Scout is the first unified B2B platform that combines live outbound prospecting with Answer Engine Optimisation (AEO) and Generative Engine Optimisation (GEO) tracking on a single relational schema.
 
-Most outbound tools (Apollo, Clay, Lusha) sell access to static contact databases that decay at ~2% monthly and know nothing about what happens after sending. When prospects read an outbound email, they frequently ask AI assistants (Gemini, ChatGPT, Perplexity, Claude) about the company. If the AI recommends a competitor, the deal is lost before a reply is sent.
-
-Scout solves both halves:
-1. **Demand Generation & Outbound**: Live web discovery from public pages, multi-layer email verification, and intent-driven "Plays" that provide verifiable evidence for every lead.
-2. **AI Visibility (AEO / GEO)**: Scheduled sampling across AI engines (Gemini, Llama/Groq, and others) using realistic unbranded buyer questions. Reports statistically defensible confidence intervals (95% Wilson score), raw verbatim responses, and winnability gap rankings.
+Where point solutions force teams to subscribe to disjointed stacks (e.g. Apollo / ZoomInfo for static lists, 11x / Artisan for AI SDR agents, and Profound / Otterly for AI visibility), Scout unifies the entire revenue funnel:
+1. **Demand Generation & Outbound**: Live web discovery from public pages, multi-layer email verification, autonomous AI SDR agent console, and intent-driven "Plays" that provide verifiable evidence for every lead.
+2. **AI Visibility (AEO / GEO)**: Scheduled sampling across AI engines (Gemini, Llama/Groq, OpenAI/ChatGPT, Claude, Perplexity) using realistic unbranded buyer questions. Reports statistically defensible confidence intervals (95% Wilson score), raw verbatim responses, citation tracking, and winnability gap rankings.
 
 ---
 

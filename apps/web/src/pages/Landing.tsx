@@ -50,9 +50,9 @@ const features = [
   { icon: "✉", title: "Outreach written from research", desc: "Drafts built on what Scout found about the account, sequenced and A/B tested with a statistical winner, not a hunch." },
   { icon: "◉", title: "Website visitor identification", desc: "Turn anonymous traffic into named companies and route hot visitors straight into the pipeline." },
   { icon: "◈", title: "Intent signals", desc: "Funding, hiring, leadership changes and news, watched continuously so timing stops being luck." },
-  { icon: "◐", title: "AI visibility across engines", desc: "Track how AI models describe you when a buyer researches you - Gemini and Llama today, more engines as they are connected - per model, with the raw answers kept." },
+  { icon: "◐", title: "AI visibility across engines (AEO / GEO)", desc: "Track how AI models (ChatGPT, Perplexity, Gemini, Claude, Llama) describe you when a buyer researches you - with citation links, mention rates and winnability gaps." },
   { icon: "⚑", title: "Deliverability that defends you", desc: "A gradual volume ramp for new senders, per-mailbox health scoring and an automatic stop before a bad run damages your domain." },
-  { icon: "⚡", title: "Built for AI agents", desc: "A full REST API, plus an agent console where you ask for prospects in plain words (an MCP server is available on request), so agents use the same tools your reps do." },
+  { icon: "⚡", title: "Autonomous AI SDR & Agent Console", desc: "End-to-end autonomous prospecting agent via single-prompt or REST API / MCP server. Researches accounts, enriches contacts, checks deliverability, and drafts outreach automatically." },
   { icon: "@", title: "Email finder and decision makers", desc: "Name a company and get the people who decide, by role, with their work email found and checked. Risky and catch-all addresses are marked, never passed off as safe." },
   { icon: "↻", title: "Autopilot and saved searches", desc: "Save a search or an ICP and Scout runs it on a schedule, adding only people you do not already have to the list you choose." },
   { icon: "⇄", title: "Champion job changes", desc: "Know when a contact who knows you moves to a new company, so the next deal starts with someone who already trusts you." },
@@ -61,6 +61,7 @@ const features = [
   { icon: "⇆", title: "Your CRM stays in sync", desc: "HubSpot, Pipedrive, Zoho, Google Sheets and signed webhooks for Zapier or Make, with optional automatic sync, plus CSV import and export." },
   { icon: "▤", title: "Analytics that explain outcomes", desc: "Where leads stall, which source produces replies, and which step and variant earned them, with the sample size behind every rate." },
   { icon: "⛨", title: "Team, security and your data", desc: "Roles and invites, two-factor sign-in, read-only and expiring API keys, a security log, a full data export and self-serve workspace deletion." },
+  { icon: "☵", title: "AI Crawler & Agent Analytics", desc: "Track AI bot indexing and crawler hits (GPTBot, ClaudeBot, PerplexityBot) so your public content is optimized to be cited by LLMs." },
 ];
 
 /**
@@ -79,19 +80,19 @@ const agencyPoints = [
  * vendors, and anything uncertain says "varies" rather than asserting a competitor's
  * behaviour we have not verified.
  */
-const COMPARE_COLS = ["Scout", "Prospecting tools", "AI visibility tools", "SEO / keyword tools"] as const;
+const COMPARE_COLS = ["Scout", "Prospecting tools (Apollo, ZoomInfo)", "AI SDR Agents (11x, Artisan)", "AEO / GEO Trackers (Profound, Otterly)"] as const;
 const compare: { row: string; cells: (true | false | "varies")[] }[] = [
-  { row: "Finds and verifies buyers from live sources", cells: [true, true, false, false] },
-  { row: "Writes outreach from real account research", cells: [true, true, false, false] },
-  { row: "Measures what AI answers say about you", cells: [true, false, true, "varies"] },
-  { row: "Reports per engine, not one blended number", cells: [true, false, "varies", false] },
-  { row: "Confidence intervals and sample sizes on every rate", cells: [true, false, "varies", false] },
-  { row: "Keeps raw answers so past data can be recomputed", cells: [true, false, "varies", false] },
-  { row: "Writes the tracked questions from your own ICP", cells: [true, false, false, false] },
-  { row: "Outbound outcomes and AI answers in one database", cells: [true, false, false, false] },
-  { row: "Every found lead comes with a checkable reason (plays)", cells: [true, false, false, false] },
-  { row: "A client area and shareable report per client", cells: [true, "varies", false, false] },
-  { row: "Syncs leads to your CRM", cells: [true, true, "varies", false] },
+  { row: "Live web discovery & verification (not decaying databases)", cells: [true, "varies", "varies", false] },
+  { row: "Autonomous AI SDR (describe ICP → find → score → draft)", cells: [true, false, true, false] },
+  { row: "Intent-driven Plays (competitors, hiring, funding, visitors)", cells: [true, "varies", false, false] },
+  { row: "AEO / GEO visibility across AI search engines", cells: [true, false, false, true] },
+  { row: "Multi-model sampling with Wilson score confidence intervals", cells: [true, false, false, "varies"] },
+  { row: "Raw LLM answer retention & competitive gap ranking", cells: [true, false, false, true] },
+  { row: "Outbound conversions + AI search answers in one database", cells: [true, false, false, false] },
+  { row: "Multi-channel sequences (Email, LinkedIn, Calls, WhatsApp)", cells: [true, true, true, false] },
+  { row: "Deliverability ramp & automatic bounce circuit breaker", cells: [true, "varies", "varies", false] },
+  { row: "Client partitions & tokenized reports for agencies", cells: [true, "varies", false, false] },
+  { row: "Full REST API & Model Context Protocol (MCP) server", cells: [true, "varies", false, false] },
 ];
 
 /**

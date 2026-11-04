@@ -4,13 +4,14 @@
 
 ## What Scout does
 
+- Autonomous AI SDR & Agent Console: Single-call / natural language prospecting workflow (describe → discover → enrich → verify → score → draft) via web console, REST API, and native MCP server for assistants (Cursor, Claude Desktop). Competing directly with autonomous digital workers (11x, Artisan) without vendor lock-in.
 - Discovery: live search for companies and people by title, industry, location, company size and keywords; decision makers and colleagues at a named company; work-email finding and checking (risky and catch-all addresses are labelled).
 - Plays: one recipe per source of buying intent (a competitor's named customers, companies hiring for a role, recent funding, people asking for a solution in public, website visitors, contacts who changed jobs, uploaded engagers). Every candidate carries a one-sentence reason and the page that shows it, and waits for approval.
 - Signals and automation: funding, hiring and leadership news watched for your ideal customer; champion job changes; saved searches and Autopilot runs on a schedule.
 - Outreach: research-based drafts, multichannel sequences (email, LinkedIn and call steps as tasks, WhatsApp through your own account), A/B variants, a send-volume ramp, per-sender health and an automatic stop on high bounce or complaint rates; replies stop the sequence and are sorted automatically.
 - Agencies: a client area per client with its own profile, plays, campaigns and lists, monthly targets with pace, and a read-only report link the client can open.
 - Integrations: HubSpot, Pipedrive, Zoho, Google Sheets, signed webhooks (Zapier, Make), CSV, REST API; an MCP server is available on request.
-- AI visibility (AEO / GEO): measures what AI models answer when buyers research your category - Gemini and Llama today, more engines as they are connected - with sample sizes and confidence intervals.
+- AI visibility (AEO / GEO): comprehensive alternative to standalone AI tracking platforms (Profound, Otterly.ai) - measures what AI models answer when buyers research your category across ChatGPT, Perplexity, Gemini, Claude, and Llama, reporting statistically rigorous sample sizes, Wilson score confidence intervals, and winnability gaps.
 - Workspace: roles and invites, two-factor sign-in, read-only and expiring API keys, a security log, full data export and self-serve deletion.
 
 ## Key pages and resources
