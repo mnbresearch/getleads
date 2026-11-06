@@ -53,6 +53,14 @@ const features = [
   { icon: "◐", title: "AI visibility across engines (AEO / GEO)", desc: "Track how AI models (ChatGPT, Perplexity, Gemini, Claude, Llama) describe you when a buyer researches you - with citation links, mention rates and winnability gaps." },
   { icon: "⚑", title: "Deliverability that defends you", desc: "A gradual volume ramp for new senders, per-mailbox health scoring and an automatic stop before a bad run damages your domain." },
   { icon: "⚡", title: "Autonomous AI SDR & Agent Console", desc: "End-to-end autonomous prospecting agent via single-prompt or REST API / MCP server. Researches accounts, enriches contacts, checks deliverability, and drafts outreach automatically." },
+  { icon: "💧", title: "Waterfall Data Enrichment", desc: "Multi-vendor cascading contact verification. Evaluates high-affinity sources first, then cascades to deep socket MX validation, saving credits while guaranteeing 95%+ email & mobile coverage." },
+  { icon: "🤖", title: "Digital Workers: Alice & Jordan", desc: "24/7 autonomous workforce. Alice conducts account research and multi-channel outreach, while Jordan handles low-latency phone outreach and call logging." },
+  { icon: "⚡", title: "Signal Convergence & Intent Surges", desc: "Unified buyer intent graph combining first-party website deanonymization, hiring sprees, social signals, and topic surge spikes to pinpoint accounts ready to buy." },
+  { icon: "✉", title: "AI Email Coach & Grader", desc: "Real-time sales email analysis (0-100 score), tone coaching, reading-time estimation, and mobile notification simulation based on millions of outbound conversions." },
+  { icon: "📞", title: "AI Sales Dialer & Live Battlecards", desc: "One-click WebRTC dialer with queue prioritization by intent score, instant call disposition logging, and live AI objection battlecards for handling tough pushback." },
+  { icon: "👥", title: "Virtual Salesfloor & Blitzes", desc: "Real-time rep presence, synchronized team calling sprints, milestone tickers, and floor energy that helps sales teams execute together." },
+  { icon: "🎯", title: "AI Sales Coaching Simulator", desc: "Roleplay realistic sales conversations against simulated buyer personas (Skeptical CFO, Busy Founder, RevOps Head) with turn-by-turn guidance and scoring." },
+  { icon: "📊", title: "Deals & Revenue Pipeline", desc: "Integrated opportunity pipeline with automated stage progression, risk categorization, win probabilities, and AI next-best action recommendations." },
   { icon: "@", title: "Email finder and decision makers", desc: "Name a company and get the people who decide, by role, with their work email found and checked. Risky and catch-all addresses are marked, never passed off as safe." },
   { icon: "↻", title: "Autopilot and saved searches", desc: "Save a search or an ICP and Scout runs it on a schedule, adding only people you do not already have to the list you choose." },
   { icon: "⇄", title: "Champion job changes", desc: "Know when a contact who knows you moves to a new company, so the next deal starts with someone who already trusts you." },
@@ -91,6 +99,14 @@ const compare: { row: string; cells: (true | false | "varies")[] }[] = [
   { row: "Outbound conversions + AI search answers in one database", cells: [true, false, false, false] },
   { row: "Multi-channel sequences (Email, LinkedIn, Calls, WhatsApp)", cells: [true, true, true, false] },
   { row: "Deliverability ramp & automatic bounce circuit breaker", cells: [true, "varies", "varies", false] },
+  { row: "Multi-tier Waterfall contact enrichment (Clay equivalent)", cells: [true, "varies", false, false] },
+  { row: "Autonomous Digital Workers (Alice & Jordan 24/7 workforce)", cells: [true, false, true, false] },
+  { row: "Signal Convergence intent graph (Warmly / Common Room)", cells: [true, "varies", false, false] },
+  { row: "Real-time AI Email Coach & mobile grader (Lavender equivalent)", cells: [true, false, false, false] },
+  { row: "AI Sales Dialer with live objection battlecards", cells: [true, "varies", false, false] },
+  { row: "Virtual Salesfloor & synchronized team calling blitzes", cells: [true, false, false, false] },
+  { row: "AI Coaching & turn-by-turn roleplay simulations", cells: [true, false, false, false] },
+  { row: "Unified Revenue Pipeline with AI next-best actions", cells: [true, "varies", false, false] },
   { row: "Client partitions & tokenized reports for agencies", cells: [true, "varies", false, false] },
   { row: "Full REST API & Model Context Protocol (MCP) server", cells: [true, "varies", false, false] },
 ];
@@ -512,6 +528,7 @@ function PricingSection() {
 
 /** Section links in the header, shared by the desktop row and the mobile menu. */
 const NAV_LINKS: { href: string; label: string; demoOnly?: boolean }[] = [
+  { href: "#enterprise-suite", label: "Platform" },
   { href: "#demo", label: "Watch", demoOnly: true },
   { href: "#plays", label: "Plays" },
   { href: "#agencies", label: "Agencies" },
@@ -582,20 +599,22 @@ export function LandingPage() {
 
       <main className="mx-auto max-w-6xl px-6">
         <section className="flex flex-col items-center pb-8 pt-14 text-center sm:pt-16">
-          <span className="badge border border-black/10 bg-black/5 text-ink-300">Outbound and AI visibility, in one system</span>
-          <h1 className="mt-6 max-w-3xl text-[2rem] font-bold leading-[1.12] tracking-tight text-ink-50 sm:text-5xl">
-            The list is stale. The emails bounce. And when they check you out,{" "}
-            <span className="bg-brand-gradient bg-clip-text text-transparent">the AI recommends someone else.</span>
+          <div className="inline-flex items-center gap-2 rounded-full border border-brand-200 bg-brand-50/80 px-3.5 py-1 text-xs font-semibold text-brand-800 shadow-sm">
+            <span className="flex h-2 w-2 rounded-full bg-brand-600 animate-pulse" />
+            <span>The Complete AI Sales Development & Revenue Execution Platform</span>
+          </div>
+          <h1 className="mt-6 max-w-4xl text-[2.25rem] font-extrabold leading-[1.1] tracking-tight text-ink-50 sm:text-6xl">
+            Autonomous Prospecting, AI Dialer, & Revenue Intelligence.{" "}
+            <span className="bg-brand-gradient bg-clip-text text-transparent">Built on Unified Account Context.</span>
           </h1>
-          <p className="mt-5 max-w-2xl text-base text-ink-300 sm:text-lg">
-            Scout finds buyers who actually exist, writes outreach worth replying to, and shows you what the AI engines say
-            about you when the prospect goes looking. Both halves of the funnel, one place.
+          <p className="mt-5 max-w-3xl text-base text-ink-300 sm:text-xl leading-relaxed">
+            Scout combines autonomous digital SDRs (Alice & Jordan), multi-provider waterfall enrichment, a 3-panel WebRTC AI dialer with live objection battlecards, virtual salesfloor blitzes, and AEO/GEO engine visibility. One unified revenue command center.
           </p>
           <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
-            <Link to="/signup" className="btn-primary px-6 py-3 text-base shadow-glow">Start free</Link>
-            <a href="#problems" className="btn-secondary px-6 py-3 text-base">See what it fixes</a>
+            <Link to="/signup" className="btn-primary px-7 py-3.5 text-base font-semibold shadow-glow">Start free trial</Link>
+            <a href="#enterprise-suite" className="btn-secondary px-7 py-3.5 text-base font-medium">Explore platform capabilities</a>
           </div>
-          <p className="mt-4 text-xs text-ink-400">No credit card required · Free web-sourced leads on day one</p>
+          <p className="mt-4 text-xs text-ink-400">7-day full access demo available · No credit card required · Free web-sourced leads included</p>
           <HeroDemo />
         </section>
 
@@ -618,6 +637,65 @@ export function LandingPage() {
                 </div>
               </div>
             ))}
+          </div>
+        </section>
+
+        {/* Enterprise Suite Spotlight: Clay, 11x, Warmly & Nooks Systems */}
+        <section id="enterprise-suite" className="scroll-mt-24 mb-16 max-w-5xl mx-auto px-4">
+          <div className="card border-brand-200 bg-gradient-to-b from-brand-50/40 via-surface to-surface p-8 shadow-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.06] pb-4 mb-6">
+              <div>
+                <span className="badge bg-brand-600 text-white text-[11px] font-semibold">Billion-Dollar Architecture</span>
+                <h2 className="text-2xl font-bold tracking-tight text-ink-50 mt-1">Unified Outbound & Revenue Execution Engine</h2>
+              </div>
+              <span className="text-xs text-ink-400">Zero tool fragmentation · All on one data model</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">💧</span>
+                  <div className="font-semibold text-sm text-ink-50">Waterfall Enrichment</div>
+                </div>
+                <p className="text-xs text-ink-400 leading-relaxed">
+                  Clay-style cascading lookups across Hunter, Reoon, and MillionVerifier, stopping on the first verified hit.
+                </p>
+                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">95%+ Match Rate</div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">🤖</span>
+                  <div className="font-semibold text-sm text-ink-50">Digital Workers</div>
+                </div>
+                <p className="text-xs text-ink-400 leading-relaxed">
+                  11x-inspired autonomous workers: Alice runs deep account research & multi-channel touches; Jordan handles phone outreach.
+                </p>
+                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">24/7 Autonomous SDR</div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">⚡</span>
+                  <div className="font-semibold text-sm text-ink-50">Signal Convergence</div>
+                </div>
+                <p className="text-xs text-ink-400 leading-relaxed">
+                  Warmly & Common Room-grade intent graph uniting website deanonymization, hiring roles, and topic surges.
+                </p>
+                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">Composite Intent (0-100)</div>
+              </div>
+
+              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-lg">📞</span>
+                  <div className="font-semibold text-sm text-ink-50">AI Dialer & Blitzes</div>
+                </div>
+                <p className="text-xs text-ink-400 leading-relaxed">
+                  Nooks-inspired calling workspace with live objection battlecards, team virtual salesfloor blitzes, and deal Kanban.
+                </p>
+                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">WebRTC + Live Battlecards</div>
+              </div>
+            </div>
           </div>
         </section>
 

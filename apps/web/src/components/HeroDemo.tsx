@@ -11,9 +11,11 @@ import { useEffect, useMemo, useRef, useState } from "react";
 
 type LeadRow = { name: string; sub: string; score: number; tag: string; tagTone: "green" | "amber" | "brand" };
 type EngineRow = { engine: string; verdict: string; rate: string; detail: string; tone: "good" | "warn" | "flat" };
+type RevenueRow = { account: string; stage: string; action: string; impact: string; tone: "green" | "amber" | "brand" };
 
 type Scene =
   | { kind: "leads"; chip: string; query: string; steps: string[]; rows: LeadRow[]; footer: string }
+  | { kind: "revenue"; chip: string; query: string; steps: string[]; rows: RevenueRow[]; footer: string }
   | { kind: "visibility"; chip: string; query: string; steps: string[]; engines: EngineRow[]; footer: string };
 
 const SCENES: Scene[] = [
@@ -28,6 +30,18 @@ const SCENES: Scene[] = [
       { name: "Wei Chen", sub: "Director Sales · Forma Health · 95 staff", score: 81, tag: "Risky - held back", tagTone: "amber" },
     ],
     footer: "1 address looked risky, so it was held back instead of burning your domain.",
+  },
+  {
+    kind: "revenue",
+    chip: "AI Revenue Execution",
+    query: "Prioritize open pipeline and generate live objection battlecards",
+    steps: ["Connecting to dialer queue", "Synthesizing CRM stage signals", "Extracting competitor mentions", "Arming reps with battlecards"],
+    rows: [
+      { account: "ScaleAI ($45k)", stage: "Proposal", action: "Objection Battlecard: Replacing Gong / Outreach", impact: "High Win Probability (85%)", tone: "brand" },
+      { account: "Ramp ($35k)", stage: "Demo Booked", action: "CFO Payback Simulation ready for Rep rehearsal", impact: "ROI Deck Attached", tone: "green" },
+      { account: "Databricks ($60k)", stage: "Discovery", action: "Visitor Deanonymization: 14 pageviews from SecOps", impact: "Hot Buying Signal", tone: "amber" },
+    ],
+    footer: "Reps call with live real-time battlecards and simulated coaching drills before closing.",
   },
   {
     kind: "visibility",
@@ -186,7 +200,7 @@ export function HeroDemo() {
   }, [phase, typed, step, idx, reduced, visible, scene]);
 
   const caret = phase === "typing" || phase === "erasing";
-  const label = useMemo(() => (scene.kind === "leads" ? "Live search" : "AI visibility"), [scene.kind]);
+  const label = useMemo(() => (scene.kind === "leads" ? "Live search" : scene.kind === "revenue" ? "Revenue execution" : "AI visibility"), [scene.kind]);
 
   return (
     <div className="relative mx-auto mt-10 w-full max-w-3xl">
@@ -308,6 +322,25 @@ export function HeroDemo() {
                 </div>
               ))}
             </div>
+          ) : scene.kind === "revenue" ? (
+            <div className="divide-y divide-black/[0.05]">
+              {scene.rows.map((r, i) => (
+                <div
+                  key={r.account}
+                  className="flex items-center justify-between gap-3 px-5 py-3.5 animate-rise"
+                  style={{ animationDelay: `${i * 110}ms` }}
+                >
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-semibold text-ink-50">{r.account}</span>
+                      <span className="badge bg-black/5 text-[11px] text-ink-300">{r.stage}</span>
+                    </div>
+                    <div className="truncate text-xs text-brand-700 font-medium mt-0.5">{r.action}</div>
+                  </div>
+                  <span className={`badge shrink-0 text-xs ${TAG_TONE[r.tone]}`}>{r.impact}</span>
+                </div>
+              ))}
+            </div>
           ) : (
             <div className="divide-y divide-black/[0.05]">
               {scene.engines.map((e, i) => (
@@ -345,6 +378,12 @@ export function HeroDemo() {
               <ul>
                 {s.rows.map((r) => (
                   <li key={r.name}>{r.name} ({r.sub}) - Status: {r.tag}, Fit score: {r.score}%</li>
+                ))}
+              </ul>
+            ) : s.kind === "revenue" ? (
+              <ul>
+                {s.rows.map((r) => (
+                  <li key={r.account}>{r.account} ({r.stage}) - Action: {r.action} - Impact: {r.impact}</li>
                 ))}
               </ul>
             ) : (

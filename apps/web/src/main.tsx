@@ -11,7 +11,15 @@ import { PrivacyPage, TermsPage } from "./pages/Legal";
 import { NotFoundPage } from "./pages/NotFound";
 
 // Code-split internal app pages and admin dashboards so the public landing page stays lean and fast
-const Dashboard = React.lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const Dashboard = React.lazy(() => import("./pages/SalesCommandCenter").then((m) => ({ default: m.SalesCommandCenter })));
+const DialerPage = React.lazy(() => import("./pages/Dialer").then((m) => ({ default: m.DialerPage })));
+const CoachingPage = React.lazy(() => import("./pages/Coaching").then((m) => ({ default: m.CoachingPage })));
+const SalesfloorPage = React.lazy(() => import("./pages/Salesfloor").then((m) => ({ default: m.SalesfloorPage })));
+const PipelinePage = React.lazy(() => import("./pages/Pipeline").then((m) => ({ default: m.PipelinePage })));
+const WaterfallPage = React.lazy(() => import("./pages/Waterfall").then((m) => ({ default: m.WaterfallPage })));
+const DigitalWorkersPage = React.lazy(() => import("./pages/DigitalWorkers").then((m) => ({ default: m.DigitalWorkersPage })));
+const SignalSurgesPage = React.lazy(() => import("./pages/SignalSurges").then((m) => ({ default: m.SignalSurgesPage })));
+const EmailCoachPage = React.lazy(() => import("./pages/EmailCoach").then((m) => ({ default: m.EmailCoachPage })));
 const LeadsPage = React.lazy(() => import("./pages/Leads").then((m) => ({ default: m.LeadsPage })));
 const PlaysPage = React.lazy(() => import("./pages/Plays").then((m) => ({ default: m.PlaysPage })));
 const SearchPage = React.lazy(() => import("./pages/Search").then((m) => ({ default: m.SearchPage })));
@@ -72,7 +80,7 @@ function Protected({ children }: { children: React.ReactNode }) {
  * Add the segment here when a new signed-in page is added below.
  */
 const APP_SECTIONS = [
-  "plays", "clients", "leads", "search", "icps", "campaigns", "agent", "visitors", "signals",
+  "dialer", "salesfloor", "pipeline", "coaching", "waterfall", "digital-workers", "surges", "email-coach", "plays", "clients", "leads", "search", "icps", "campaigns", "agent", "visitors", "signals",
   "visibility", "tasks", "autopilot", "tools", "analytics", "automation", "settings",
 ];
 
@@ -117,6 +125,14 @@ function Root() {
               <Protected>
                 <Shell>
                   <Routes>
+                    <Route path="/dialer" element={<DialerPage />} />
+                    <Route path="/salesfloor" element={<SalesfloorPage />} />
+                    <Route path="/pipeline" element={<PipelinePage />} />
+                    <Route path="/coaching" element={<CoachingPage />} />
+                    <Route path="/waterfall" element={<WaterfallPage />} />
+                    <Route path="/digital-workers" element={<DigitalWorkersPage />} />
+                    <Route path="/surges" element={<SignalSurgesPage />} />
+                    <Route path="/email-coach" element={<EmailCoachPage />} />
                     <Route path="/plays" element={<PlaysPage />} />
                     <Route path="/clients" element={<ClientsPage />} />
                     <Route path="/clients/:id" element={<ClientDetailPage />} />

@@ -1323,3 +1323,176 @@ export const emailOptOuts = pgTable(
   },
   (t) => ({ pk: primaryKey({ columns: [t.userId, t.kind] }) }),
 );
+
+// ── Nooks-Inspired Revenue Execution & Sales Platform Entities ──
+
+/** Deal CRM pipeline: opportunities tracked from prospecting to close. */
+export const deals = pgTable(
+  "deals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
+    leadId: uuid("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    ownerUserId: uuid("owner_user_id").references(() => users.id, { onDelete: "set null" }),
+    stage: text("stage").notNull().default("qualified"), // qualified, discovery, demo, proposal, negotiation, won, lost
+    value: integer("value").notNull().default(0), // Deal amount in local currency (e.g. USD / INR)
+    currency: text("currency").notNull().default("USD"),
+    probability: integer("probability").notNull().default(20), // 0 to 100%
+    expectedCloseDate: ts("expected_close_date"),
+    riskLevel: text("risk_level").notNull().default("low"), // low, medium, high
+    riskSummary: text("risk_summary"),
+    aiNextBestAction: text("ai_next_best_action"),
+    notes: text("notes"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("deals_org_idx").on(t.orgId),
+    stageIdx: index("deals_stage_idx").on(t.orgId, t.stage),
+  })
+);
+export type Deal = typeof deals.$inferSelect;
+
+/** AI Sales Dialer: completed and recorded call logs. */
+export const callLogs = pgTable(
+  "call_logs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "set null" }),
+    leadId: uuid("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    companyId: uuid("company_id").references(() => companies.id, { onDelete: "set null" }),
+    phoneNumber: text("phone_number").notNull(),
+    direction: text("direction").notNull().default("outbound"), // outbound, inbound
+    status: text("status").notNull().default("completed"), // completed, no_answer, busy, voicemail, failed
+    durationSeconds: integer("duration_seconds").notNull().default(0),
+    disposition: text("disposition"), // meeting_booked, interested, gatekeeper_rejection, follow_up, bad_timing, not_interested
+    recordingUrl: text("recording_url"),
+    transcript: text("transcript"),
+    summary: text("summary"),
+    sentiment: text("sentiment"), // positive, neutral, negative
+    talkToListenRatio: integer("talk_to_listen_ratio").default(50), // percent rep talk
+    keyObjections: jsonb("key_objections").$type<string[]>().default([]),
+    nextSteps: text("next_steps"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("call_logs_org_idx").on(t.orgId),
+    leadIdx: index("call_logs_lead_idx").on(t.orgId, t.leadId),
+  })
+);
+export type CallLog = typeof callLogs.$inferSelect;
+
+/** AI Sales Coaching: roleplay simulations & rep practice sessions. */
+export const coachingSessions = pgTable(
+  "coaching_sessions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    userId: uuid("user_id").references(() => users.id, { onDelete: "cascade" }),
+    personaName: text("persona_name").notNull(), // e.g. "Skeptical CFO", "Busy Founder"
+    personaDescription: text("persona_description").notNull(),
+    scenario: text("scenario").notNull(),
+    transcriptHistory: jsonb("transcript_history").$type<{ role: string; content: string }[]>().default([]),
+    score: integer("score"), // 0 to 100
+    strengths: jsonb("strengths").$type<string[]>().default([]),
+    improvements: jsonb("improvements").$type<string[]>().default([]),
+    feedback: text("feedback"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgUserIdx: index("coaching_sessions_org_user_idx").on(t.orgId, t.userId),
+  })
+);
+export type CoachingSession = typeof coachingSessions.$inferSelect;
+
+/** Virtual Salesfloor: active rep states and blitz sessions. */
+export const salesfloorBlitzes = pgTable(
+  "salesfloor_blitzes",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(), // e.g. "Power Hour: Q4 Outbound Blitz"
+    targetCalls: integer("target_calls").notNull().default(50),
+    targetMeetings: integer("target_meetings").notNull().default(5),
+    completedCalls: integer("completed_calls").notNull().default(0),
+    bookedMeetings: integer("booked_meetings").notNull().default(0),
+    status: text("status").notNull().default("active"), // active, completed
+    startedAt: ts("started_at").notNull().defaultNow(),
+    endedAt: ts("ended_at"),
+  },
+  (t) => ({
+    orgIdx: index("salesfloor_blitzes_org_idx").on(t.orgId),
+  })
+);
+export type SalesfloorBlitz = typeof salesfloorBlitzes.$inferSelect;
+
+/** Waterfall Enrichment Providers & Rules: multi-source email/phone cascaded search. */
+export const waterfallConfigs = pgTable(
+  "waterfall_configs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull().default("Default Waterfall"),
+    providerOrder: jsonb("provider_order").$type<string[]>().default(["hunter", "reoon", "millionverifier", "smtp_direct"]),
+    findMobilePhones: boolean("find_mobile_phones").notNull().default(true),
+    stopOnFirstVerified: boolean("stop_on_first_verified").notNull().default(true),
+    requireMxCheck: boolean("require_mx_check").notNull().default(true),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("waterfall_configs_org_idx").on(t.orgId),
+  })
+);
+export type WaterfallConfig = typeof waterfallConfigs.$inferSelect;
+
+/** Autonomous Digital Workers (e.g. Alice for email/social, Jordan for voice calling). */
+export const digitalWorkers = pgTable(
+  "digital_workers",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(), // "Alice" or "Jordan" or custom
+    role: text("role").notNull(), // "outbound_sdr", "voice_caller", "research_specialist"
+    channel: text("channel").notNull().default("multichannel"), // email, voice, linkedin, multichannel
+    status: text("status").notNull().default("active"), // active, paused, training
+    dailyCapacity: integer("daily_capacity").notNull().default(100),
+    actionsExecutedToday: integer("actions_executed_today").notNull().default(0),
+    autonomousMode: boolean("autonomous_mode").notNull().default(false), // true: autonomous, false: human approval required
+    config: jsonb("config").$type<Record<string, unknown>>().default({}),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("digital_workers_org_idx").on(t.orgId),
+  })
+);
+export type DigitalWorker = typeof digitalWorkers.$inferSelect;
+
+/** Signal Convergence & Identity Graph: combines website visitor, topic surge, hiring, and social intent. */
+export const signalSurges = pgTable(
+  "signal_surges",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    companyName: text("company_name").notNull(),
+    companyDomain: text("company_domain").notNull(),
+    compositeIntentScore: integer("composite_intent_score").notNull().default(50), // 0 - 100
+    surgeLevel: text("surge_level").notNull().default("moderate"), // low, moderate, high, explosive
+    detectedSignals: jsonb("detected_signals").$type<{ source: string; detail: string; detectedAt: string }[]>().default([]),
+    primaryTopic: text("primary_topic"), // e.g. "Sales AI Automation", "CRM Replacement"
+    decisionMakersIdentified: integer("decision_makers_identified").notNull().default(0),
+    autoEnrolledPlayId: uuid("auto_enrolled_play_id").references(() => plays.id, { onDelete: "set null" }),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgDomainIdx: index("signal_surges_org_domain_idx").on(t.orgId, t.companyDomain),
+  })
+);
+export type SignalSurge = typeof signalSurges.$inferSelect;
+
+

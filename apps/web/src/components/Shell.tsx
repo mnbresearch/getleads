@@ -6,13 +6,21 @@ import { DeletionBanner, RecoveryCodeNotice, VerifyEmailBanner } from "./Account
 import { emailVerificationAvailable } from "../lib/me";
 
 const nav = [
-  { to: "/", label: "Overview", icon: "▦" },
+  { to: "/", label: "Command center", icon: "▦" },
+  { to: "/dialer", label: "AI Dialer", icon: "📞" },
+  { to: "/salesfloor", label: "Virtual salesfloor", icon: "👥" },
+  { to: "/pipeline", label: "Deals & CRM", icon: "📊" },
+  { to: "/coaching", label: "AI coaching", icon: "🎯" },
+  { to: "/waterfall", label: "Waterfall enrichment", icon: "💧" },
+  { to: "/digital-workers", label: "Digital workers", icon: "🤖" },
+  { to: "/surges", label: "Signal surges", icon: "⚡" },
+  { to: "/email-coach", label: "Email coach", icon: "✉" },
   { to: "/plays", label: "Plays", icon: "▷" },
   { to: "/clients", label: "Clients", icon: "◧" },
   { to: "/search", label: "Find leads", icon: "⌕" },
   { to: "/leads", label: "Leads", icon: "☰" },
   { to: "/icps", label: "Ideal customers", icon: "◎" },
-  { to: "/campaigns", label: "Campaigns", icon: "✉" },
+  { to: "/campaigns", label: "Campaigns", icon: "📨" },
   { to: "/tasks", label: "Tasks", icon: "☑" },
   { to: "/visitors", label: "Website visitors", icon: "◉" },
   { to: "/signals", label: "Intent signals", icon: "◈" },

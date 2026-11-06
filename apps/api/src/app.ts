@@ -31,6 +31,11 @@ import { runMaintenanceTick } from "./jobs.js";
 import { emailEventRoutes } from "./routes/emailEvents.js";
 import { auditRoutes } from "./routes/audit.js";
 import { accountRoutes } from "./routes/account.js";
+import { dealsRoutes } from "./routes/deals.js";
+import { dialerRoutes } from "./routes/dialer.js";
+import { coachingRoutes } from "./routes/coaching.js";
+import { salesfloorRoutes } from "./routes/salesfloor.js";
+import { competitorScaleRoutes } from "./routes/competitors.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
 
 // ── Access log ──
@@ -395,6 +400,11 @@ export function createApp(opts: AppOptions = {}) {
   app.route("/v1/visibility", visibilityRoutes);
   app.route("/v1/agent", agentRoutes);
   app.route("/v1/automation", automationRoutes);
+  app.route("/v1/deals", dealsRoutes);
+  app.route("/v1/dialer", dialerRoutes);
+  app.route("/v1/coaching", coachingRoutes);
+  app.route("/v1/salesfloor", salesfloorRoutes);
+  app.route("/v1/scale", competitorScaleRoutes);
   app.route("/v1/visitors", visitorRoutes);
   app.route("/v1/signals", signalRoutes);
   app.route("/v1/plays", playRoutes);
