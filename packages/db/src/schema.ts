@@ -1495,4 +1495,104 @@ export const signalSurges = pgTable(
 );
 export type SignalSurge = typeof signalSurges.$inferSelect;
 
+/** Buying Committee & Stakeholder Multi-Threading (Moat: prevents single-threaded deal failure) */
+export const buyingCommittees = pgTable(
+  "buying_committees",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    dealId: uuid("deal_id").references(() => deals.id, { onDelete: "cascade" }),
+    companyDomain: text("company_domain").notNull(),
+    companyName: text("company_name").notNull(),
+    healthStatus: text("health_status").notNull().default("single_threaded"), // single_threaded, multi_threaded, consensus_ready, at_risk
+    coverageScore: integer("coverage_score").notNull().default(25), // 0 - 100%
+    stakeholders: jsonb("stakeholders").$type<{
+      id: string;
+      name: string;
+      title: string;
+      email: string;
+      role: "economic_buyer" | "champion" | "technical_evaluator" | "end_user" | "blocker" | "legal_procurement";
+      engagementStatus: "uncontacted" | "contacted" | "engaged" | "supportive" | "objecting";
+      lastTouchAt?: string;
+      sentiment?: "positive" | "neutral" | "negative";
+      customAngle?: string;
+    }[]>().default([]),
+    coverageGaps: jsonb("coverage_gaps").$type<string[]>().default([]), // e.g. ["Missing CFO / Economic Buyer", "Legal not engaged"]
+    recommendedAction: text("recommended_action"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgDealIdx: index("buying_committees_org_deal_idx").on(t.orgId, t.dealId),
+  })
+);
+export type BuyingCommittee = typeof buyingCommittees.$inferSelect;
+
+/** Digital Sales Rooms & Mutual Action Plans (DSR/MAP: Moat for closing enterprise deals) */
+export const digitalSalesRooms = pgTable(
+  "digital_sales_rooms",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    dealId: uuid("deal_id").references(() => deals.id, { onDelete: "set null" }),
+    title: text("title").notNull(), // e.g. "Acme Corp <> Scout Evaluation Hub"
+    shareToken: text("share_token").notNull().unique(), // Secure link for buying committee
+    targetCompany: text("target_company").notNull(),
+    status: text("status").notNull().default("active"), // draft, active, closed_won, archived
+    championName: text("champion_name"),
+    championEmail: text("champion_email"),
+    targetGoLiveDate: ts("target_go_live_date"),
+    milestones: jsonb("milestones").$type<{
+      id: string;
+      title: string;
+      owner: "buyer" | "seller" | "mutual";
+      assignedTo: string;
+      dueDate: string;
+      completed: boolean;
+      status: "pending" | "in_progress" | "completed" | "delayed";
+      notes?: string;
+    }[]>().default([]),
+    artifacts: jsonb("artifacts").$type<{
+      title: string;
+      type: "proposal" | "security_doc" | "roi_calculator" | "executive_summary";
+      url?: string;
+      content?: string;
+    }[]>().default([]),
+    viewsCount: integer("views_count").notNull().default(0),
+    lastViewedAt: ts("last_viewed_at"),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgTokenIdx: index("digital_sales_rooms_org_token_idx").on(t.orgId, t.shareToken),
+  })
+);
+export type DigitalSalesRoom = typeof digitalSalesRooms.$inferSelect;
+
+/** Autonomous GTM Agentic Campaigns (Autopilot ABM: Moat for multi-account orchestration) */
+export const autonomousGtmCampaigns = pgTable(
+  "autonomous_gtm_campaigns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    orgId: uuid("org_id").notNull().references(() => organizations.id, { onDelete: "cascade" }),
+    name: text("name").notNull(),
+    objective: text("objective").notNull(), // e.g. "$1.5M New Pipeline in Series B Fintechs"
+    status: text("status").notNull().default("active"), // active, paused, completed
+    budgetTokensOrUsd: integer("budget_tokens_or_usd").default(500),
+    strategyPlaybook: text("strategy_playbook"),
+    targetAccountCount: integer("target_account_count").notNull().default(0),
+    accountsPenetrated: integer("accounts_penetrated").notNull().default(0),
+    meetingsBooked: integer("meetings_booked").notNull().default(0),
+    pipelineGeneratedUsd: integer("pipeline_generated_usd").notNull().default(0),
+    orchestratedChannels: jsonb("orchestrated_channels").$type<string[]>().default(["waterfall_enrichment", "email", "phone_dialer", "buying_committee_multithread"]),
+    createdAt: ts("created_at").notNull().defaultNow(),
+    updatedAt: ts("updated_at").notNull().defaultNow(),
+  },
+  (t) => ({
+    orgIdx: index("autonomous_gtm_campaigns_org_idx").on(t.orgId),
+  })
+);
+export type AutonomousGtmCampaign = typeof autonomousGtmCampaigns.$inferSelect;
+
+
 

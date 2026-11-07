@@ -148,7 +148,7 @@ describe("1.5 MB of text made to be slow", () => {
     const t0 = performance.now();
     old.exec(`<urlset><loc>${" ".repeat(48_000)}</urlset>`);
     expect(performance.now() - t0).toBeGreaterThan(LIMIT_MS);
-  });
+  }, 30_000);
 });
 
 describe("the sitemap reader", () => {

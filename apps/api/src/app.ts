@@ -36,6 +36,7 @@ import { dialerRoutes } from "./routes/dialer.js";
 import { coachingRoutes } from "./routes/coaching.js";
 import { salesfloorRoutes } from "./routes/salesfloor.js";
 import { competitorScaleRoutes } from "./routes/competitors.js";
+import { moatRoutes, publicDsrRoute } from "./routes/moat.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
 
 // ── Access log ──
@@ -405,6 +406,8 @@ export function createApp(opts: AppOptions = {}) {
   app.route("/v1/coaching", coachingRoutes);
   app.route("/v1/salesfloor", salesfloorRoutes);
   app.route("/v1/scale", competitorScaleRoutes);
+  app.route("/v1/moat", moatRoutes);
+  app.route("/v1/dsr", publicDsrRoute);
   app.route("/v1/visitors", visitorRoutes);
   app.route("/v1/signals", signalRoutes);
   app.route("/v1/plays", playRoutes);

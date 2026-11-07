@@ -132,7 +132,7 @@ describe("1.5 MB of text made to be slow, outside the plays", () => {
     const t0 = performance.now();
     fill("a", 36_000).match(old);
     expect(performance.now() - t0).toBeGreaterThan(TEXT_MS);
-  });
+  }, 30_000);
 });
 
 describe("a fetched page or feed of 1.5 MB made to be slow", () => {

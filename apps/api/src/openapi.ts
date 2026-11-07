@@ -1206,6 +1206,13 @@ export function openapi(apiUrl: string) {
       "/v1/scale/digital-workers": { get: { tags: ["Agents"], summary: "Get autonomous digital workers status (Alice & Jordan)", responses: ok() } },
       "/v1/scale/signal-surges": { get: { tags: ["Signals"], summary: "Get intent signal surges and convergence graph", responses: ok() } },
       "/v1/scale/email-coach/score": { post: { tags: ["Coaching"], summary: "Real-time cold email scoring and optimization feedback", requestBody: j(obj({ subject: str, body: str }, ["body"])), responses: ok() } },
+      "/v1/moat/committees": { get: { tags: ["Moat"], summary: "List buying committees with coverage health and multi-threading gaps", responses: ok() } },
+      "/v1/moat/rooms": {
+        get: { tags: ["Moat"], summary: "List active Digital Sales Rooms and Mutual Action Plans", responses: ok() },
+        post: { tags: ["Moat"], summary: "Create a new Digital Sales Room for target buying committee", requestBody: j(obj({ title: str, targetCompany: str }, ["title", "targetCompany"])), responses: ok() },
+      },
+      "/v1/moat/gtm-campaigns": { get: { tags: ["Moat"], summary: "List goal-driven autonomous GTM campaigns and pipeline generated", responses: ok() } },
+      "/v1/dsr/room/{token}": { get: { tags: ["Moat"], summary: "Public buyer-facing Digital Sales Room and interactive Mutual Action Plan", parameters: [{ name: "token", in: "path", required: true, schema: str }], responses: ok() } },
     },
   };
 

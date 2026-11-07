@@ -20,6 +20,10 @@ const WaterfallPage = React.lazy(() => import("./pages/Waterfall").then((m) => (
 const DigitalWorkersPage = React.lazy(() => import("./pages/DigitalWorkers").then((m) => ({ default: m.DigitalWorkersPage })));
 const SignalSurgesPage = React.lazy(() => import("./pages/SignalSurges").then((m) => ({ default: m.SignalSurgesPage })));
 const EmailCoachPage = React.lazy(() => import("./pages/EmailCoach").then((m) => ({ default: m.EmailCoachPage })));
+const BuyingCommitteesPage = React.lazy(() => import("./pages/BuyingCommittees").then((m) => ({ default: m.BuyingCommitteesPage })));
+const DigitalSalesRoomsPage = React.lazy(() => import("./pages/DigitalSalesRooms").then((m) => ({ default: m.DigitalSalesRoomsPage })));
+const AutonomousGtmCampaignsPage = React.lazy(() => import("./pages/AutonomousGtmCampaigns").then((m) => ({ default: m.AutonomousGtmCampaignsPage })));
+const PublicBuyingRoomPage = React.lazy(() => import("./pages/PublicBuyingRoom").then((m) => ({ default: m.PublicBuyingRoomPage })));
 const LeadsPage = React.lazy(() => import("./pages/Leads").then((m) => ({ default: m.LeadsPage })));
 const PlaysPage = React.lazy(() => import("./pages/Plays").then((m) => ({ default: m.PlaysPage })));
 const SearchPage = React.lazy(() => import("./pages/Search").then((m) => ({ default: m.SearchPage })));
@@ -80,7 +84,7 @@ function Protected({ children }: { children: React.ReactNode }) {
  * Add the segment here when a new signed-in page is added below.
  */
 const APP_SECTIONS = [
-  "dialer", "salesfloor", "pipeline", "coaching", "waterfall", "digital-workers", "surges", "email-coach", "plays", "clients", "leads", "search", "icps", "campaigns", "agent", "visitors", "signals",
+  "dialer", "salesfloor", "pipeline", "coaching", "committees", "rooms", "gtm", "waterfall", "digital-workers", "surges", "email-coach", "plays", "clients", "leads", "search", "icps", "campaigns", "agent", "visitors", "signals",
   "visibility", "tasks", "autopilot", "tools", "analytics", "automation", "settings",
 ];
 
@@ -117,6 +121,8 @@ function Root() {
           <Route path="/admin" element={<AdminDashboardPage />} />
           {/* Public: an agency's client opens this from a shared link, with no account. */}
           <Route path="/r/:token" element={<ClientReportPage />} />
+          {/* Public: buyer champion opens their shared Digital Sales Room / Mutual Action Plan */}
+          <Route path="/dsr/:token" element={<PublicBuyingRoomPage />} />
           <Route path="/" element={token ? <Protected><Shell><Dashboard /></Shell></Protected> : <LandingPage />} />
           <Route
             path="/*"
@@ -129,6 +135,9 @@ function Root() {
                     <Route path="/salesfloor" element={<SalesfloorPage />} />
                     <Route path="/pipeline" element={<PipelinePage />} />
                     <Route path="/coaching" element={<CoachingPage />} />
+                    <Route path="/committees" element={<BuyingCommitteesPage />} />
+                    <Route path="/rooms" element={<DigitalSalesRoomsPage />} />
+                    <Route path="/gtm" element={<AutonomousGtmCampaignsPage />} />
                     <Route path="/waterfall" element={<WaterfallPage />} />
                     <Route path="/digital-workers" element={<DigitalWorkersPage />} />
                     <Route path="/surges" element={<SignalSurgesPage />} />
