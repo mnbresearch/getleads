@@ -9,6 +9,7 @@
   ],
   "scripts": {
     "build": "npm run build -w packages/core -w packages/db -w packages/sdk -w packages/mcp -w apps/api -w apps/web",
+    "secret-scan": "node scripts/secret-scan.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "dev:api": "npm run dev -w apps/api",

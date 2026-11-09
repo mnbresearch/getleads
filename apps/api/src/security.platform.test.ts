@@ -1179,6 +1179,13 @@ describe("access log: no address, name or search text is written down", () => {
     expect(await line("/v1/leads/3f0c2a1e-9d54-4c1b-8a55-2f1d6f0b7c11")).toBe("/v1/leads/3f0c2a1e-9d54-4c1b-8a55-2f1d6f0b7c11");
   });
 
+  it("public token paths: report, reply, pixel and digital sales room tokens are redacted", async () => {
+    expect(await line("/v1/public/clients/report/tok_1234567890abcdef")).toBe("/v1/public/clients/report/[redacted]");
+    expect(await line("/v1/public/inbound/inb_1234567890abcdef")).toBe("/v1/public/inbound/[redacted]");
+    expect(await line("/v1/dsr/room/dsr_secret_token_123")).toBe("/v1/dsr/room/[redacted]");
+    expect(await line("/t/c/tok_click_12345678")).toBe("/t/c/[redacted]");
+  });
+
   it("credentials in a query are still redacted", async () => {
     expect(await line("/internal/jobs/run", "token=abc123&maxMs=1000")).toBe("/internal/jobs/run?token=[redacted]&maxMs=1000");
   });
