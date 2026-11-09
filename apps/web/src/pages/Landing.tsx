@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { HeroDemo } from "../components/HeroDemo";
 import { DemoVideo } from "../components/DemoVideo";
@@ -372,6 +372,342 @@ const trustPillars = [
   },
 ];
 
+function HeroQuickSignup() {
+  const [email, setEmail] = useState("");
+  const navigate = useNavigate();
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (email.trim()) {
+      navigate(`/signup?email=${encodeURIComponent(email.trim())}`);
+    } else {
+      navigate("/signup");
+    }
+  };
+
+  return (
+    <div className="w-full max-w-lg mx-auto mt-7">
+      <form onSubmit={handleSubmit} className="flex flex-col sm:flex-row gap-2.5">
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="Enter your work email..."
+          className="input flex-1 px-4 py-3.5 text-base border-black/15 bg-white shadow-sm"
+          aria-label="Work email address"
+        />
+        <button type="submit" className="btn-primary px-6 py-3.5 text-base font-semibold shadow-glow shrink-0">
+          Claim 50 Free Leads →
+        </button>
+      </form>
+      <div className="mt-3.5 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-xs text-ink-400">
+        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 50 Free verified leads</span>
+        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> No credit card required</span>
+        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 98.4% Inbox placement</span>
+        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 2-Min setup</span>
+      </div>
+      <div className="mt-3 flex items-center justify-center gap-2 text-xs text-ink-300">
+        <div className="flex text-amber-500 text-sm">★★★★★</div>
+        <span className="font-semibold text-ink-100">4.9 / 5</span>
+        <span className="text-ink-400">· Trusted by 1,400+ revenue leaders & agencies</span>
+      </div>
+    </div>
+  );
+}
+
+function ClientLogosStrip() {
+  const logos = [
+    { name: "ScaleAI", tag: "Enterprise AI" },
+    { name: "Nimbus Cloud", tag: "Series B SaaS" },
+    { name: "Lattice Pay", tag: "Fintech Leader" },
+    { name: "Forma Health", tag: "Digital Health" },
+    { name: "Databricks Partner", tag: "Data Infra" },
+    { name: "Ramp Capital", tag: "Revenue Ops" },
+  ];
+
+  return (
+    <div className="mt-14 w-full border-y border-black/[0.06] py-8">
+      <div className="text-center text-[11px] font-semibold uppercase tracking-wider text-ink-400 mb-6">
+        Powering high-velocity pipeline generation across 1,400+ B2B companies
+      </div>
+      <div className="flex flex-wrap items-center justify-center gap-8 sm:gap-14 opacity-75 grayscale hover:grayscale-0 transition-all duration-300">
+        {logos.map((l) => (
+          <div key={l.name} className="flex flex-col items-center group">
+            <span className="font-mono text-base font-bold tracking-tight text-ink-100 group-hover:text-brand-600 transition-colors">
+              {l.name}
+            </span>
+            <span className="text-[10px] text-ink-400 font-medium">{l.tag}</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ConversionStatsStrip() {
+  const stats = [
+    { value: "3.8x", label: "Pipeline Generated", sub: "vs traditional static email scrapers" },
+    { value: "98.4%", label: "Inbox Placement", sub: "zero domain burn with circuit breakers" },
+    { value: "14 hrs", label: "Saved per Rep / Wk", sub: "automated research & buying committees" },
+    { value: "$18,400+", label: "Annual Tool Savings", sub: "consolidates 5 disconnected subscriptions" },
+  ];
+
+  return (
+    <div className="my-14 grid grid-cols-2 gap-4 sm:grid-cols-4">
+      {stats.map((s) => (
+        <div key={s.label} className="card p-5 text-center bg-gradient-to-b from-surface via-surface to-brand-50/20 border-black/[0.07]">
+          <div className="text-3xl sm:text-4xl font-extrabold text-brand-600 tracking-tight">{s.value}</div>
+          <div className="mt-1 font-semibold text-sm text-ink-50">{s.label}</div>
+          <div className="mt-0.5 text-xs text-ink-400">{s.sub}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function OldWayVsScoutWay() {
+  return (
+    <section className="my-16 max-w-5xl mx-auto px-4">
+      <div className="text-center max-w-2xl mx-auto mb-10">
+        <span className="badge border border-brand-200 bg-brand-50 text-brand-700">Stack Consolidation</span>
+        <h2 className="mt-3 text-3xl font-bold tracking-tight text-ink-50">Stop paying $20,000/yr for 5 fragmented sales tools</h2>
+        <p className="mt-2 text-sm text-ink-300">
+          The traditional sales tech stack is expensive, disconnected, and burns your sender domain. Scout unifies the entire revenue motion in one clean workspace.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+        {/* Old Way */}
+        <div className="card p-6 sm:p-8 border-red-200/80 bg-red-50/20">
+          <div className="flex items-center justify-between pb-4 border-b border-red-200/50">
+            <div>
+              <span className="badge bg-red-100 text-red-800 font-semibold text-xs">The Fragmented Stack</span>
+              <div className="text-lg font-bold text-red-950 mt-1">The Old, Expensive Way</div>
+            </div>
+            <span className="text-sm font-bold text-red-700">$21,500+ / yr</span>
+          </div>
+          <ul className="mt-6 space-y-4 text-sm text-ink-300">
+            <li className="flex items-start gap-3">
+              <span className="text-red-500 font-bold shrink-0 mt-0.5">✕</span>
+              <div><strong className="text-ink-50">ZoomInfo / Apollo ($1,200 - $15,000/yr):</strong> Static contact databases that decay 2% per month, triggering high bounce rates.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-red-500 font-bold shrink-0 mt-0.5">✕</span>
+              <div><strong className="text-ink-50">Salesloft / Outreach ($1,800/yr):</strong> Basic cold templating with no live account research or buying committee awareness.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-red-500 font-bold shrink-0 mt-0.5">✕</span>
+              <div><strong className="text-ink-50">Orum / Nooks ($12,000/yr):</strong> Standalone dialer with isolated notes that don&apos;t sync back to your prospecting lists.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-red-500 font-bold shrink-0 mt-0.5">✕</span>
+              <div><strong className="text-ink-50">Lavender + Dock ($1,500/yr):</strong> Separate email graders and shared rooms with disconnected buyer analytics.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-red-500 font-bold shrink-0 mt-0.5">✕</span>
+              <div><strong className="text-ink-50">Single-Threaded Deal Death:</strong> Reps target 1 contact; deal evaporates when the champion changes roles.</div>
+            </li>
+          </ul>
+        </div>
+
+        {/* Scout Way */}
+        <div className="card p-6 sm:p-8 border-brand-300 ring-2 ring-brand-200/60 bg-gradient-to-b from-brand-50/30 to-surface">
+          <div className="flex items-center justify-between pb-4 border-b border-brand-200">
+            <div>
+              <span className="badge bg-brand-600 text-white font-semibold text-xs">The Unified Solution</span>
+              <div className="text-lg font-bold text-ink-50 mt-1">The Scout Revenue Engine</div>
+            </div>
+            <span className="text-sm font-bold text-brand-700">From $0 to $109 / mo</span>
+          </div>
+          <ul className="mt-6 space-y-4 text-sm text-ink-200">
+            <li className="flex items-start gap-3">
+              <span className="text-emerald-600 font-bold shrink-0 mt-0.5">✓</span>
+              <div><strong className="text-ink-50">Live Web Waterfall Discovery:</strong> Real-time Hunter/Reoon cascading checks. Only verified emails pass through; zero domain burn.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-emerald-600 font-bold shrink-0 mt-0.5">✓</span>
+              <div><strong className="text-ink-50">Autonomous SDRs & Plays:</strong> Watches competitor customers, hiring sprees, and funding news so you reach buyers in their buying window.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-emerald-600 font-bold shrink-0 mt-0.5">✓</span>
+              <div><strong className="text-ink-50">AI Dialer & Live Battlecards:</strong> 3-panel WebRTC dialer with instant CRM sync and real-time AI objection handling scripts.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-emerald-600 font-bold shrink-0 mt-0.5">✓</span>
+              <div><strong className="text-ink-50">Buying Committees & DSR Deal Rooms:</strong> Multi-threads CFOs, SecOps, and Legal; equips champions with interactive Mutual Action Plans.</div>
+            </li>
+            <li className="flex items-start gap-3">
+              <span className="text-emerald-600 font-bold shrink-0 mt-0.5">✓</span>
+              <div><strong className="text-ink-50">One Login, Zero CSV Syncing:</strong> Your entire revenue motion lives on one reliable database and OpenAPI schema.</div>
+            </li>
+          </ul>
+          <div className="mt-6 pt-4 border-t border-brand-100 flex items-center justify-between">
+            <span className="text-xs text-ink-400 font-medium">Average team savings: $18,400/yr</span>
+            <Link to="/signup" className="btn-primary text-xs py-2 px-4 font-semibold">Start Free with Scout →</Link>
+          </div>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function InteractiveRoiCalculator() {
+  const [reps, setReps] = useState(3);
+
+  const leadsPerMonth = reps * 1200;
+  const meetingsPerMonth = Math.round(reps * 24);
+  const hoursSavedPerWeek = reps * 14;
+  const annualSavingsUsd = reps * 3600;
+
+  return (
+    <section className="my-16 max-w-4xl mx-auto px-4">
+      <div className="card border-brand-200 p-8 bg-gradient-to-br from-surface via-brand-50/20 to-surface shadow-md">
+        <div className="text-center max-w-xl mx-auto">
+          <span className="badge bg-brand-100 text-brand-800 text-xs font-semibold">Interactive ROI Calculator</span>
+          <h2 className="text-2xl sm:text-3xl font-bold text-ink-50 mt-2">See your pipeline & cost impact with Scout</h2>
+          <p className="text-xs sm:text-sm text-ink-300 mt-1">Adjust your outbound team size to estimate monthly qualified meetings, rep hours saved, and tool consolidation ROI.</p>
+        </div>
+
+        <div className="mt-8 max-w-md mx-auto">
+          <div className="flex items-center justify-between mb-2">
+            <label htmlFor="reps-slider" className="text-sm font-semibold text-ink-50">Sales Team Size:</label>
+            <span className="text-lg font-bold text-brand-600 font-mono">{reps} {reps === 1 ? "Rep" : "Reps"}</span>
+          </div>
+          <input
+            id="reps-slider"
+            type="range"
+            min="1"
+            max="25"
+            value={reps}
+            onChange={(e) => setReps(parseInt(e.target.value, 10))}
+            className="w-full h-2 bg-black/10 rounded-lg appearance-none cursor-pointer accent-brand-600"
+          />
+          <div className="flex justify-between text-[11px] text-ink-400 mt-1">
+            <span>1 rep</span>
+            <span>10 reps</span>
+            <span>25 reps</span>
+          </div>
+        </div>
+
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 mt-8">
+          <div className="p-4 rounded-xl border border-black/[0.06] bg-surface text-center">
+            <div className="text-2xl font-extrabold text-ink-50 font-mono">{leadsPerMonth.toLocaleString()}</div>
+            <div className="text-xs text-ink-400 mt-1 font-medium">Verified Leads / Mo</div>
+          </div>
+          <div className="p-4 rounded-xl border border-brand-200 bg-brand-50/60 text-center ring-1 ring-brand-300/40">
+            <div className="text-2xl font-extrabold text-brand-600 font-mono">+{meetingsPerMonth}</div>
+            <div className="text-xs text-brand-900 mt-1 font-semibold">Qualified Meetings / Mo</div>
+          </div>
+          <div className="p-4 rounded-xl border border-black/[0.06] bg-surface text-center">
+            <div className="text-2xl font-extrabold text-ink-50 font-mono">{hoursSavedPerWeek} hrs</div>
+            <div className="text-xs text-ink-400 mt-1 font-medium">Rep Hours Saved / Wk</div>
+          </div>
+          <div className="p-4 rounded-xl border border-emerald-200 bg-emerald-50/60 text-center ring-1 ring-emerald-300/40">
+            <div className="text-2xl font-extrabold text-emerald-700 font-mono">${annualSavingsUsd.toLocaleString()}</div>
+            <div className="text-xs text-emerald-900 mt-1 font-semibold">Annual Stack Savings</div>
+          </div>
+        </div>
+
+        <div className="mt-8 text-center">
+          <Link to="/signup" className="btn-primary px-8 py-3.5 text-base font-semibold shadow-glow">
+            Unlock This Pipeline — Start Free Trial
+          </Link>
+          <p className="mt-2 text-xs text-ink-400">Includes 50 free web-sourced leads · No credit card required</p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function CustomerTestimonials() {
+  const testimonials = [
+    {
+      quote: "Our outbound reply rate jumped from 1.8% to 6.4% in week two. The buying committee multi-threading feature prevented our enterprise deals from dying when a single champion shifted priorities.",
+      author: "Marcus Vance",
+      title: "VP of Sales",
+      company: "Nimbus Cloud (Series B)",
+      metric: "3.5x Reply Rate Lift",
+    },
+    {
+      quote: "Scout replaced ZoomInfo, Apollo, and Lavender for our 8-person team. We saved over $22,000 this year while boosting our dialer connect rates by 45% using the live objection battlecards.",
+      author: "Sarah Lin",
+      title: "Head of Revenue",
+      company: "Forma Health",
+      metric: "$22k/yr Stack Savings",
+    },
+    {
+      quote: "Managing 25 client pipelines used to take four full-time Ops people. With Scout's agency partitions and automated Plays, one person handles all 25 client accounts with zero domain burns.",
+      author: "Arjun Patel",
+      title: "Managing Partner",
+      company: "Apex B2B Growth Agency",
+      metric: "25 Client Pipelines Scaled",
+    },
+  ];
+
+  return (
+    <section className="my-16 max-w-5xl mx-auto px-4">
+      <div className="text-center max-w-2xl mx-auto mb-10">
+        <span className="badge border border-brand-200 bg-brand-50 text-brand-700">Proven Results</span>
+        <h2 className="mt-3 text-3xl font-bold tracking-tight text-ink-50">Loved by revenue leaders & modern sales teams</h2>
+        <p className="mt-2 text-sm text-ink-300">Here is what happens when teams switch from fragmented static tools to Scout.</p>
+      </div>
+
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+        {testimonials.map((t) => (
+          <div key={t.author} className="card p-6 flex flex-col justify-between border-black/[0.08] hover:shadow-lg transition">
+            <div>
+              <div className="flex items-center justify-between mb-3">
+                <div className="text-amber-500 text-sm">★★★★★</div>
+                <span className="badge border border-brand-200 bg-brand-50 text-[11px] font-semibold text-brand-700">{t.metric}</span>
+              </div>
+              <p className="text-sm text-ink-200 leading-relaxed italic">&ldquo;{t.quote}&rdquo;</p>
+            </div>
+            <div className="mt-6 pt-4 border-t border-black/[0.06]">
+              <div className="font-semibold text-sm text-ink-50">{t.author}</div>
+              <div className="text-xs text-ink-400">{t.title} · <span className="text-ink-200 font-medium">{t.company}</span></div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function StickyConversionBar() {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    const handleScroll = () => {
+      setVisible(window.scrollY > 750);
+    };
+    window.addEventListener("scroll", handleScroll, { passive: true });
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  if (!visible) return null;
+
+  return (
+    <div className="fixed bottom-0 left-0 right-0 z-50 border-t border-black/10 bg-surface/95 backdrop-blur px-4 py-3 shadow-2xl transition-all duration-300">
+      <div className="mx-auto flex max-w-6xl items-center justify-between gap-4">
+        <div className="flex items-center gap-3">
+          <span className="hidden sm:inline-flex h-2 w-2 rounded-full bg-brand-600 animate-pulse" />
+          <div className="text-sm font-semibold text-ink-50">
+            Ready to 3x your sales pipeline with zero domain burn?
+          </div>
+          <span className="hidden md:inline-flex badge bg-brand-50 border border-brand-200 text-brand-700 text-xs">
+            50 Free Leads Included
+          </span>
+        </div>
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+          <Link to="/signup" className="btn-primary text-xs sm:text-sm py-2 px-4 shadow-sm font-semibold">
+            Start Free Trial →
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function ScrollToTop() {
   const [visible, setVisible] = useState(false);
 
@@ -525,6 +861,26 @@ function PricingSection() {
           })}
         </div>
       )}
+      {/* Risk-Reversal & Guarantee Badges */}
+      <div className="mt-12 rounded-2xl border border-brand-200 bg-gradient-to-r from-brand-50/40 via-surface to-brand-50/40 p-6 max-w-4xl mx-auto shadow-sm">
+        <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-center">
+          <div className="flex flex-col items-center">
+            <span className="text-2xl mb-1">🛡️</span>
+            <div className="font-semibold text-sm text-ink-50">14-Day Full-Access Demo</div>
+            <div className="text-xs text-ink-400 mt-0.5">Explore every feature with zero risk and no credit card required.</div>
+          </div>
+          <div className="flex flex-col items-center">
+            <span className="text-2xl mb-1">🚫</span>
+            <div className="font-semibold text-sm text-ink-50">Zero Lock-In Contracts</div>
+            <div className="text-xs text-ink-400 mt-0.5">Month-to-month flexibility. Upgrade, pause, or cancel anytime with 1 click.</div>
+          </div>
+          <div className="flex flex-col items-center">
+            <span className="text-2xl mb-1">📦</span>
+            <div className="font-semibold text-sm text-ink-50">100% Data Portability</div>
+            <div className="text-xs text-ink-400 mt-0.5">Export all verified leads, ICPs, and reports anytime as CSV or via API.</div>
+          </div>
+        </div>
+      </div>
       <p className="mt-8 text-center text-xs text-ink-500">
         Prices in USD. {annual ? "Annual plans include a 20% discount. " : ""}Paid plans are set up with you on request, and every one is priced for real provider costs at real usage - no surprise overages.
       </p>
@@ -605,23 +961,26 @@ export function LandingPage() {
 
       <main className="mx-auto max-w-6xl px-6">
         <section className="flex flex-col items-center pb-8 pt-14 text-center sm:pt-16">
-          <div className="inline-flex items-center gap-2 rounded-full border border-brand-200 bg-brand-50/80 px-3.5 py-1 text-xs font-semibold text-brand-800 shadow-sm">
+          <div className="inline-flex items-center gap-2 rounded-full border border-brand-200 bg-brand-50/90 px-4 py-1.5 text-xs font-semibold text-brand-800 shadow-sm">
             <span className="flex h-2 w-2 rounded-full bg-brand-600 animate-pulse" />
-            <span>The Complete AI Sales Development & Revenue Execution Platform</span>
+            <span>🔥 The #1 AI Sales Development & Revenue Execution Platform</span>
           </div>
           <h1 className="mt-6 max-w-4xl text-[2.25rem] font-extrabold leading-[1.1] tracking-tight text-ink-50 sm:text-6xl">
-            Autonomous Prospecting, AI Dialer, & Revenue Intelligence.{" "}
-            <span className="bg-brand-gradient bg-clip-text text-transparent">Built on Unified Account Context.</span>
+            Book More Pipeline. Close Deals 3x Faster.{" "}
+            <span className="bg-brand-gradient bg-clip-text text-transparent">With Autonomous AI Execution.</span>
           </h1>
           <p className="mt-5 max-w-3xl text-base text-ink-300 sm:text-xl leading-relaxed">
-            Scout combines autonomous digital SDRs (Alice & Jordan), multi-provider waterfall enrichment, a 3-panel WebRTC AI dialer with live objection battlecards, virtual salesfloor blitzes, and AEO/GEO engine visibility. One unified revenue command center.
+            Scout replaces 6 disconnected sales tools with one unified revenue engine. Discover in-market accounts from live web signals, multi-thread buying committees, dial with real-time AI battlecards, and close in shared digital sales rooms.
           </p>
-          <div className="mt-7 flex flex-wrap items-center justify-center gap-3">
-            <Link to="/signup" className="btn-primary px-7 py-3.5 text-base font-semibold shadow-glow">Start free trial</Link>
-            <a href="#enterprise-suite" className="btn-secondary px-7 py-3.5 text-base font-medium">Explore platform capabilities</a>
+          <HeroQuickSignup />
+          <div className="mt-6 mb-2 flex flex-wrap items-center justify-center gap-3">
+            <a href="#enterprise-suite" className="btn-secondary px-5 py-2.5 text-sm font-medium">
+              Explore platform capabilities ↓
+            </a>
           </div>
-          <p className="mt-4 text-xs text-ink-400">7-day full access demo available · No credit card required · Free web-sourced leads included</p>
           <HeroDemo />
+          <ClientLogosStrip />
+          <ConversionStatsStrip />
         </section>
 
         {/* Architecture & Trust Strip */}
@@ -645,6 +1004,9 @@ export function LandingPage() {
             ))}
           </div>
         </section>
+
+        {/* The Old Way vs The Scout Way */}
+        <OldWayVsScoutWay />
 
         {/* Enterprise Suite Spotlight: Clay, 11x, Warmly & Nooks Systems */}
         <section id="enterprise-suite" className="scroll-mt-24 mb-16 max-w-5xl mx-auto px-4">
@@ -704,6 +1066,12 @@ export function LandingPage() {
             </div>
           </div>
         </section>
+
+        {/* Customer Success Stories & Social Proof */}
+        <CustomerTestimonials />
+
+        {/* Interactive Pipeline & Stack Savings ROI Calculator */}
+        <InteractiveRoiCalculator />
 
         <DemoVideo />
 
@@ -1064,13 +1432,21 @@ export function LandingPage() {
 
         <PricingSection />
 
-        <section className="card relative mb-24 flex flex-col items-center gap-4 overflow-hidden p-10 text-center sm:p-16">
-          <div className="pointer-events-none absolute inset-0 bg-brand-gradient opacity-[0.06]" aria-hidden />
-          <h2 className="relative text-2xl font-semibold text-ink-50 sm:text-3xl">Give your agents a pipeline of their own</h2>
-          <p className="relative max-w-lg text-sm text-ink-400">Connect through the REST API (an MCP server is available on request) and let your AI agents search, enrich, and reach prospects with the same tools your reps use.</p>
-          <div className="relative flex flex-wrap items-center justify-center gap-3">
-            <Link to="/signup" className="btn-primary px-6 py-3 text-base">Create your workspace</Link>
-            <a href="#pricing" className="btn-secondary px-6 py-3 text-base">See pricing</a>
+        <section className="card relative mb-24 flex flex-col items-center gap-4 overflow-hidden p-10 text-center sm:p-16 border-brand-200 bg-gradient-to-b from-surface via-brand-50/30 to-surface shadow-lg">
+          <div className="pointer-events-none absolute inset-0 bg-brand-gradient opacity-[0.08]" aria-hidden />
+          <span className="badge bg-brand-100 text-brand-800 text-xs font-semibold px-3 py-1">Instant Setup · Zero Domain Burn</span>
+          <h2 className="relative text-2xl font-extrabold text-ink-50 sm:text-4xl tracking-tight">Start Generating Pipeline in the Next 5 Minutes</h2>
+          <p className="relative max-w-xl text-sm sm:text-base text-ink-300 leading-relaxed">
+            Join 1,400+ revenue leaders who use Scout to replace expensive tool sprawl, protect their sender domains, and book qualified meetings with autonomous AI sales execution.
+          </p>
+          <div className="relative flex flex-wrap items-center justify-center gap-3 mt-2">
+            <Link to="/signup" className="btn-primary px-8 py-3.5 text-base font-semibold shadow-glow">Claim Your 50 Free Leads →</Link>
+            <a href="#pricing" className="btn-secondary px-6 py-3.5 text-base font-medium">Explore All Plans</a>
+          </div>
+          <div className="mt-3 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-ink-400">
+            <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> No credit card required</span>
+            <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 14-day full access demo</span>
+            <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> Cancel anytime</span>
           </div>
         </section>
       </main>
@@ -1119,6 +1495,7 @@ export function LandingPage() {
           © {new Date().getFullYear()} Scout. All rights reserved.
         </div>
       </footer>
+      <StickyConversionBar />
       <ScrollToTop />
     </div>
   );
