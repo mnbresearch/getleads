@@ -401,10 +401,10 @@ function HeroQuickSignup() {
         </button>
       </form>
       <div className="mt-3.5 flex flex-wrap items-center justify-center gap-x-4 gap-y-1.5 text-xs text-ink-400">
-        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 50 Free verified leads</span>
+        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 50 Free web-sourced leads</span>
+        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> Test zero-credit features free</span>
         <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> No credit card required</span>
-        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 98.4% Inbox placement</span>
-        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 2-Min setup</span>
+        <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> Paid plans for verified provider credits</span>
       </div>
       <div className="mt-3 flex items-center justify-center gap-2 text-xs text-ink-300">
         <div className="flex text-amber-500 text-sm">★★★★★</div>
@@ -612,7 +612,7 @@ function InteractiveRoiCalculator() {
           <Link to="/signup" className="btn-primary px-8 py-3.5 text-base font-semibold shadow-glow">
             Unlock This Pipeline — Start Free Trial
           </Link>
-          <p className="mt-2 text-xs text-ink-400">Includes 50 free web-sourced leads · No credit card required</p>
+          <p className="mt-2 text-xs text-ink-400">Test all zero-credit tools free · Paid tiers cover external provider verification & direct dials</p>
         </div>
       </div>
     </section>
@@ -695,7 +695,7 @@ function StickyConversionBar() {
             Ready to 3x your sales pipeline with zero domain burn?
           </div>
           <span className="hidden md:inline-flex badge bg-brand-50 border border-brand-200 text-brand-700 text-xs">
-            50 Free Leads Included
+            Test Zero-Credit Features Free
           </span>
         </div>
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
@@ -861,24 +861,57 @@ function PricingSection() {
           })}
         </div>
       )}
-      {/* Risk-Reversal & Guarantee Badges */}
+      {/* Risk-Reversal & Pricing Clarity */}
       <div className="mt-12 rounded-2xl border border-brand-200 bg-gradient-to-r from-brand-50/40 via-surface to-brand-50/40 p-6 max-w-4xl mx-auto shadow-sm">
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-6 text-center">
           <div className="flex flex-col items-center">
             <span className="text-2xl mb-1">🛡️</span>
-            <div className="font-semibold text-sm text-ink-50">14-Day Full-Access Demo</div>
-            <div className="text-xs text-ink-400 mt-0.5">Explore every feature with zero risk and no credit card required.</div>
+            <div className="font-semibold text-sm text-ink-50">Free Zero-Credit Sandbox</div>
+            <div className="text-xs text-ink-400 mt-0.5">Test open-web discovery, email coaching, and deal rooms free. No card needed.</div>
+          </div>
+          <div className="flex flex-col items-center">
+            <span className="text-2xl mb-1">💳</span>
+            <div className="font-semibold text-sm text-ink-50">Paid Provider Credits</div>
+            <div className="text-xs text-ink-400 mt-0.5">Waterfall verification, direct dials, and live dialing require a paid tier to cover external costs.</div>
           </div>
           <div className="flex flex-col items-center">
             <span className="text-2xl mb-1">🚫</span>
             <div className="font-semibold text-sm text-ink-50">Zero Lock-In Contracts</div>
             <div className="text-xs text-ink-400 mt-0.5">Month-to-month flexibility. Upgrade, pause, or cancel anytime with 1 click.</div>
           </div>
-          <div className="flex flex-col items-center">
-            <span className="text-2xl mb-1">📦</span>
-            <div className="font-semibold text-sm text-ink-50">100% Data Portability</div>
-            <div className="text-xs text-ink-400 mt-0.5">Export all verified leads, ICPs, and reports anytime as CSV or via API.</div>
+        </div>
+      </div>
+
+      {/* Clear Feature Separation: Zero-Credit Free vs Paid Provider Credits */}
+      <div className="mt-8 max-w-4xl mx-auto grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+        <div className="card p-5 border-black/[0.08] bg-surface">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="badge bg-emerald-100 text-emerald-800 text-xs font-semibold">Free Forever</span>
+            <h4 className="text-sm font-bold text-ink-50">Zero-Credit Workflow Tools</h4>
           </div>
+          <ul className="space-y-2 text-xs text-ink-300">
+            <li className="flex items-center gap-2"><span className="text-emerald-600 font-bold">✓</span> Open-Web Company & People Search</li>
+            <li className="flex items-center gap-2"><span className="text-emerald-600 font-bold">✓</span> AI Email Coach & Mobile iPhone Grader</li>
+            <li className="flex items-center gap-2"><span className="text-emerald-600 font-bold">✓</span> Buying Committee Mapping & Multi-Threading</li>
+            <li className="flex items-center gap-2"><span className="text-emerald-600 font-bold">✓</span> Digital Sales Rooms & Mutual Action Plans</li>
+            <li className="flex items-center gap-2"><span className="text-emerald-600 font-bold">✓</span> Goal-Driven Autonomous GTM Campaign Planner</li>
+            <li className="flex items-center gap-2"><span className="text-emerald-600 font-bold">✓</span> 50 Web-Sourced Leads / Month</li>
+          </ul>
+        </div>
+
+        <div className="card p-5 border-brand-200 bg-brand-50/20">
+          <div className="flex items-center gap-2 mb-3">
+            <span className="badge bg-brand-600 text-white text-xs font-semibold">Paid Plans Only</span>
+            <h4 className="text-sm font-bold text-ink-50">External Provider Costs & Volume</h4>
+          </div>
+          <ul className="space-y-2 text-xs text-ink-300">
+            <li className="flex items-center gap-2"><span className="text-brand-600 font-bold">●</span> Multi-Vendor Waterfall Email Verification (Hunter, Reoon, MillionVerifier)</li>
+            <li className="flex items-center gap-2"><span className="text-brand-600 font-bold">●</span> Direct-Dial Mobile Phone Numbers & Contact Enrichment</li>
+            <li className="flex items-center gap-2"><span className="text-brand-600 font-bold">●</span> WebRTC AI Live Dialer & Voice Calling (Digital Worker Jordan)</li>
+            <li className="flex items-center gap-2"><span className="text-brand-600 font-bold">●</span> Multi-Model Scheduled AEO / GEO Engine Visibility Tracking</li>
+            <li className="flex items-center gap-2"><span className="text-brand-600 font-bold">●</span> High-Volume Outbound Senders & Domain Ramp Management</li>
+            <li className="flex items-center gap-2"><span className="text-brand-600 font-bold">●</span> Up to 60,000 Verified Leads & 120,000 Outbound Emails / Month</li>
+          </ul>
         </div>
       </div>
       <p className="mt-8 text-center text-xs text-ink-500">
@@ -1444,9 +1477,9 @@ export function LandingPage() {
             <a href="#pricing" className="btn-secondary px-6 py-3.5 text-base font-medium">Explore All Plans</a>
           </div>
           <div className="mt-3 flex flex-wrap items-center justify-center gap-x-5 gap-y-2 text-xs text-ink-400">
+            <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> Test zero-credit features free</span>
             <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> No credit card required</span>
-            <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> 14-day full access demo</span>
-            <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> Cancel anytime</span>
+            <span className="flex items-center gap-1"><span className="text-emerald-600 font-bold">✓</span> Transparent paid plans for provider credits</span>
           </div>
         </section>
       </main>
