@@ -81,8 +81,11 @@ async function cheapCount(tx: Db, table: "global_suppressions" | "suppressions")
   const [est] = rowsOf(await tx.execute(sql`SELECT reltuples::bigint AS n FROM pg_class WHERE oid = to_regclass(${table})`));
   const n = Number(est?.n ?? -1);
   if (n > EXACT_COUNT_MAX) return { count: n, estimated: true };
-  // The table name is one of two constants, never input.
-  const [r] = rowsOf(await tx.execute(sql.raw(`SELECT count(*)::int AS n FROM ${table}`)));
+  const [r] = rowsOf(
+    table === "global_suppressions"
+      ? await tx.execute(sql`SELECT count(*)::int AS n FROM global_suppressions`)
+      : await tx.execute(sql`SELECT count(*)::int AS n FROM suppressions`)
+  );
   return { count: num(r?.n), estimated: false };
 }
 

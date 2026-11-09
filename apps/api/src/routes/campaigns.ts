@@ -763,7 +763,7 @@ campaignRoutes.post(
     const [wroteIn] = await db
       .select({ id: messages.id })
       .from(messages)
-      .where(and(eq(messages.orgId, oid), eq(messages.leadId, lead.id), eq(messages.direction, "inbound"), sql`${messages.createdAt} > now() - interval '${sql.raw(String(REPLY_WINDOW_DAYS))} days'`))
+      .where(and(eq(messages.orgId, oid), eq(messages.leadId, lead.id), eq(messages.direction, "inbound"), sql`${messages.createdAt} > now() - (${REPLY_WINDOW_DAYS} * interval '1 day')`))
       .limit(1);
     const slot = await reserveManualSend(sendOrg, account, { answeringInbound: !!wroteIn });
     if (!slot.ok) throw new ApiError(slot.status, slot.message, slot.code);
