@@ -18,6 +18,7 @@ interface ChatMessage {
 
 export function CoachingPage() {
   const [personas, setPersonas] = useState<Persona[]>([]);
+  const [loading, setLoading] = useState(true);
   const [selectedPersona, setSelectedPersona] = useState<Persona | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -26,6 +27,7 @@ export function CoachingPage() {
   const { toast, Toast } = useToast();
 
   const loadPersonas = useCallback(() => {
+    setLoading(true);
     apiFetch<{ personas: Persona[] }>("GET", "/v1/coaching/personas")
       .then((res) => {
         setPersonas(res.personas || []);
@@ -33,7 +35,8 @@ export function CoachingPage() {
           selectPersona(res.personas[0]);
         }
       })
-      .catch((e) => toast((e as Error).message, "err"));
+      .catch((e) => toast((e as Error).message, "err"))
+      .finally(() => setLoading(false));
   }, [toast]);
 
   useEffect(() => {
@@ -111,6 +114,14 @@ export function CoachingPage() {
     }
   };
 
+  if (loading || !selectedPersona) {
+    return (
+      <Page title="AI Sales Coaching & Roleplay" subtitle="Interactive roleplay simulator with simulated enterprise buyer personas to sharpen talk-tracks and objection handling.">
+        <Spinner label="Loading coaching simulator…" />
+      </Page>
+    );
+  }
+
   return (
     <Page
       title="AI Sales Coaching & Roleplay"
@@ -126,10 +137,11 @@ export function CoachingPage() {
 
           <div className="space-y-3">
             {personas.map((p) => (
-              <div
+              <button
+                type="button"
                 key={p.name}
                 onClick={() => selectPersona(p)}
-                className={`p-3.5 rounded-lg border text-left cursor-pointer transition ${
+                className={`w-full p-3.5 rounded-lg border text-left cursor-pointer transition ${
                   selectedPersona?.name === p.name
                     ? "border-brand-500 bg-brand-50/60 shadow-xs"
                     : "border-black/10 hover:border-black/20 bg-surface"
@@ -138,7 +150,7 @@ export function CoachingPage() {
                 <div className="font-semibold text-xs text-ink-50">{p.name}</div>
                 <div className="text-[11px] text-ink-300 font-medium mt-0.5">{p.title}</div>
                 <p className="text-xs text-ink-400 mt-2 line-clamp-2">{p.scenario}</p>
-              </div>
+              </button>
             ))}
           </div>
 

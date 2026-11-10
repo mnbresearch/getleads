@@ -199,7 +199,14 @@ export function Shell({ children }: { children: ReactNode }) {
       </aside>
       <div className="flex min-w-0 flex-1 flex-col">
         <header className="flex h-14 items-center gap-3 border-b border-black/10 bg-surface/90 px-4 backdrop-blur sm:hidden">
-          <button onClick={() => setOpen((o) => !o)} className="text-xl text-ink-100">☰</button>
+          <button
+            onClick={() => setOpen((o) => !o)}
+            aria-label="Toggle navigation menu"
+            aria-expanded={open}
+            className="text-xl text-ink-100"
+          >
+            ☰
+          </button>
           <Logo size={22} textClassName="text-sm" />
         </header>
         {meErr && (

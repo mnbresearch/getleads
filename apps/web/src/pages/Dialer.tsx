@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import { apiFetch } from "../lib/api";
-import { Page, Spinner, useToast } from "../components/ui";
+import { Empty, Page, Spinner, useToast } from "../components/ui";
 
 interface QueueItem {
   id: string;
@@ -19,6 +20,7 @@ interface QueueItem {
 
 export function DialerPage() {
   const [queue, setQueue] = useState<QueueItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [currentIdx, setCurrentIdx] = useState(0);
   const [callActive, setCallActive] = useState(false);
   const [callSeconds, setCallSeconds] = useState(0);
@@ -30,12 +32,14 @@ export function DialerPage() {
   const { toast, Toast } = useToast();
 
   const loadQueue = useCallback(() => {
+    setLoading(true);
     apiFetch<{ queue: QueueItem[] }>("GET", "/v1/dialer/queue")
       .then((res) => {
         setQueue(res.queue || []);
         setCurrentIdx(0);
       })
-      .catch((e) => toast((e as Error).message, "err"));
+      .catch((e) => toast((e as Error).message, "err"))
+      .finally(() => setLoading(false));
   }, [toast]);
 
   useEffect(() => {
@@ -98,10 +102,22 @@ export function DialerPage() {
     return `${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}`;
   };
 
-  if (!queue.length) {
+  if (loading) {
     return (
       <Page title="AI Sales Dialer" subtitle="AI-assisted calling workspace with real-time talk-tracks and objection battlecards.">
         <Spinner label="Loading callable queue…" />
+      </Page>
+    );
+  }
+
+  if (!queue.length) {
+    return (
+      <Page title="AI Sales Dialer" subtitle="AI-assisted calling workspace with real-time talk-tracks and objection battlecards.">
+        <Empty
+          title="No leads in callable queue"
+          hint="All leads with phone numbers have been called or none have been assigned yet. Import or enrich leads with phone numbers to populate the dialer."
+          action={<Link to="/leads" className="btn-primary text-xs">View Leads →</Link>}
+        />
       </Page>
     );
   }
@@ -136,10 +152,12 @@ export function DialerPage() {
 
           <div className="mt-3 flex-1 overflow-y-auto space-y-2 pr-1">
             {queue.map((item, idx) => (
-              <div
+              <button
+                type="button"
                 key={item.id}
                 onClick={() => !callActive && setCurrentIdx(idx)}
-                className={`p-3 rounded-lg border text-left cursor-pointer transition ${
+                disabled={callActive}
+                className={`w-full p-3 rounded-lg border text-left transition cursor-pointer disabled:cursor-not-allowed ${
                   currentIdx === idx
                     ? "border-brand-500 bg-brand-50/50 shadow-xs"
                     : "border-black/5 hover:border-black/15 bg-white/60"
@@ -153,7 +171,7 @@ export function DialerPage() {
                 </div>
                 <div className="text-[11px] text-ink-300 truncate mt-0.5">{item.title}</div>
                 <div className="text-[11px] text-ink-400 font-mono mt-1">{item.phone}</div>
-              </div>
+              </button>
             ))}
           </div>
         </div>

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiFetch } from "../lib/api";
-import { Page } from "../components/ui";
+import { Empty, Modal, Page, Spinner } from "../components/ui";
 
 interface Milestone {
   id: string;
@@ -35,6 +35,7 @@ interface RoomStats {
 export function DigitalSalesRoomsPage() {
   const [rooms, setRooms] = useState<RoomItem[]>([]);
   const [stats, setStats] = useState<RoomStats | null>(null);
+  const [loading, setLoading] = useState(true);
   const [modalOpen, setModalOpen] = useState(false);
   const [newTitle, setNewTitle] = useState("");
   const [newCompany, setNewCompany] = useState("");
@@ -44,19 +45,20 @@ export function DigitalSalesRoomsPage() {
   useEffect(() => {
     apiFetch<{ rooms: RoomItem[]; stats: RoomStats }>("GET", "/v1/moat/rooms")
       .then((res) => {
-        setRooms(res.rooms);
-        setStats(res.stats);
+        setRooms(res.rooms || []);
+        setStats(res.stats || null);
       })
-      .catch((err) => console.error("Error loading sales rooms:", err));
+      .catch((err) => console.error("Error loading sales rooms:", err))
+      .finally(() => setLoading(false));
   }, []);
 
   const createRoom = async () => {
-    if (!newTitle || !newCompany) return;
+    if (!newTitle.trim() || !newCompany.trim()) return;
     try {
       const res = await apiFetch<{ room: RoomItem }>("POST", "/v1/moat/rooms", {
-        title: newTitle,
-        targetCompany: newCompany,
-        championName: newChampion,
+        title: newTitle.trim(),
+        targetCompany: newCompany.trim(),
+        championName: newChampion.trim(),
       });
       setRooms([res.room, ...rooms]);
       setModalOpen(false);
@@ -74,6 +76,14 @@ export function DigitalSalesRoomsPage() {
     setCopiedToken(token);
     setTimeout(() => setCopiedToken(null), 2500);
   };
+
+  if (loading) {
+    return (
+      <Page title="Digital Sales Rooms & Mutual Action Plans (MAP)" subtitle="Equip your champions to sell on your behalf. Shared collaborative deal hubs housing ROI models, security clearances, mutual action timelines, and stakeholder deliverables.">
+        <Spinner label="Loading digital sales rooms…" />
+      </Page>
+    );
+  }
 
   return (
     <Page
@@ -105,93 +115,104 @@ export function DigitalSalesRoomsPage() {
       </div>
 
       {/* Rooms Grid */}
-      <div className="space-y-4">
-        {rooms.map((room) => {
-          const completedCount = room.milestones?.filter((m) => m.completed).length || 0;
-          const totalMilestones = room.milestones?.length || 1;
-          const pct = Math.round((completedCount / totalMilestones) * 100);
+      {rooms.length === 0 ? (
+        <Empty
+          title="No digital sales rooms yet"
+          hint="Create a branded deal room equipped with a mutual action plan to help your champion navigate security, finance, and procurement."
+          action={
+            <button onClick={() => setModalOpen(true)} className="btn-primary text-xs">
+              + Create Digital Sales Room
+            </button>
+          }
+        />
+      ) : (
+        <div className="space-y-4">
+          {rooms.map((room) => {
+            const completedCount = room.milestones?.filter((m) => m.completed).length || 0;
+            const totalMilestones = room.milestones?.length || 1;
+            const pct = Math.round((completedCount / totalMilestones) * 100);
 
-          return (
-            <div key={room.id} className="card p-6 hover:border-brand-300 transition">
-              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-black/5 pb-4 mb-4">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-lg font-bold text-ink-50">{room.title}</h3>
-                    <span className="badge bg-emerald-50 text-emerald-700 border border-emerald-200">Active Room</span>
-                    <span className="badge bg-black/5 text-ink-400">{room.viewsCount || 0} Buyer Views</span>
-                  </div>
-                  <div className="text-xs text-ink-400 mt-0.5">
-                    Target Company: <span className="font-semibold text-ink-200">{room.targetCompany}</span> · Champion:{" "}
-                    <span className="font-semibold text-ink-200">{room.championName || "Sarah Chen"}</span>
-                  </div>
-                </div>
-
-                <div className="flex items-center gap-2">
-                  <a
-                    href={`/dsr/${room.shareToken}`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="btn-secondary text-xs"
-                  >
-                    Preview Hub ↗
-                  </a>
-                  <button
-                    onClick={() => copyShareLink(room.shareToken)}
-                    className="btn-primary text-xs"
-                  >
-                    {copiedToken === room.shareToken ? "✓ Link Copied!" : "Copy Champion Link"}
-                  </button>
-                </div>
-              </div>
-
-              {/* MAP Milestones Timeline */}
-              <div className="space-y-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-xs font-semibold uppercase tracking-wider text-ink-400">
-                    Mutual Action Plan: {completedCount}/{totalMilestones} Steps Completed ({pct}%)
-                  </div>
-                </div>
-
-                <div className="h-2 rounded-full bg-black/10 overflow-hidden">
-                  <div className="h-full bg-brand-600 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
-                </div>
-
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
-                  {room.milestones?.map((m) => (
-                    <div
-                      key={m.id}
-                      className={`p-3 rounded-lg border text-xs ${
-                        m.completed
-                          ? "bg-emerald-50/50 border-emerald-200 text-emerald-950"
-                          : m.status === "in_progress"
-                          ? "bg-brand-50/50 border-brand-200 text-brand-950"
-                          : "bg-surface border-black/10 text-ink-300"
-                      }`}
-                    >
-                      <div className="flex items-center justify-between font-bold mb-1">
-                        <span className="truncate">{m.title}</span>
-                        <span>{m.completed ? "✓" : "○"}</span>
-                      </div>
-                      <div className="text-[11px] text-ink-400">Due: {m.dueDate} · {m.assignedTo}</div>
+            return (
+              <div key={room.id} className="card p-6 hover:border-brand-300 transition">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-black/5 pb-4 mb-4">
+                  <div>
+                    <div className="flex items-center gap-2">
+                      <h3 className="text-lg font-bold text-ink-50">{room.title}</h3>
+                      <span className="badge bg-emerald-50 text-emerald-700 border border-emerald-200">Active Room</span>
+                      <span className="badge bg-black/5 text-ink-400">{room.viewsCount || 0} Buyer Views</span>
                     </div>
-                  ))}
+                    <div className="text-xs text-ink-400 mt-0.5">
+                      Target Company: <span className="font-semibold text-ink-200">{room.targetCompany}</span> · Champion:{" "}
+                      <span className="font-semibold text-ink-200">{room.championName || "Sarah Chen"}</span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <a
+                      href={`/dsr/${room.shareToken}`}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="btn-secondary text-xs"
+                    >
+                      Preview Hub ↗
+                    </a>
+                    <button
+                      onClick={() => copyShareLink(room.shareToken)}
+                      className="btn-primary text-xs"
+                    >
+                      {copiedToken === room.shareToken ? "✓ Link Copied!" : "Copy Champion Link"}
+                    </button>
+                  </div>
+                </div>
+
+                {/* MAP Milestones Timeline */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-xs font-semibold uppercase tracking-wider text-ink-400">
+                      Mutual Action Plan: {completedCount}/{totalMilestones} Steps Completed ({pct}%)
+                    </div>
+                  </div>
+
+                  <div className="h-2 rounded-full bg-black/10 overflow-hidden">
+                    <div className="h-full bg-brand-600 rounded-full transition-all duration-500" style={{ width: `${pct}%` }} />
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 pt-2">
+                    {room.milestones?.map((m) => (
+                      <div
+                        key={m.id}
+                        className={`p-3 rounded-lg border text-xs ${
+                          m.completed
+                            ? "bg-emerald-50/50 border-emerald-200 text-emerald-950"
+                            : m.status === "in_progress"
+                            ? "bg-brand-50/50 border-brand-200 text-brand-950"
+                            : "bg-surface border-black/10 text-ink-300"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between font-bold mb-1">
+                          <span className="truncate">{m.title}</span>
+                          <span>{m.completed ? "✓" : "○"}</span>
+                        </div>
+                        <div className="text-[11px] text-ink-400">Due: {m.dueDate} · {m.assignedTo}</div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               </div>
-            </div>
-          );
-        })}
-      </div>
+            );
+          })}
+        </div>
+      )}
 
-      {/* Modal for Creating Digital Sales Room */}
+      {/* Accessible Modal for Creating Digital Sales Room */}
       {modalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4">
-          <div className="card max-w-md w-full p-6 space-y-4">
-            <h3 className="text-lg font-bold text-ink-50">Create New Digital Sales Room</h3>
+        <Modal open={modalOpen} title="Create New Digital Sales Room" onClose={() => setModalOpen(false)}>
+          <div className="space-y-4">
             <p className="text-xs text-ink-400">Generates a branded, collaborative hub equipped with an interactive Mutual Action Plan for your target champion.</p>
 
             <div className="space-y-3">
               <div>
-                <label className="text-xs font-semibold text-ink-300">Room Title</label>
+                <label className="text-xs font-semibold text-ink-300">Room Title *</label>
                 <input
                   value={newTitle}
                   onChange={(e) => setNewTitle(e.target.value)}
@@ -201,7 +222,7 @@ export function DigitalSalesRoomsPage() {
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-ink-300">Target Company Name</label>
+                <label className="text-xs font-semibold text-ink-300">Target Company Name *</label>
                 <input
                   value={newCompany}
                   onChange={(e) => setNewCompany(e.target.value)}
@@ -222,11 +243,18 @@ export function DigitalSalesRoomsPage() {
             </div>
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-black/5">
-              <button onClick={() => setModalOpen(false)} className="btn-secondary text-xs">Cancel</button>
-              <button onClick={createRoom} className="btn-primary text-xs">Create Hub</button>
+              <button type="button" onClick={() => setModalOpen(false)} className="btn-secondary text-xs">Cancel</button>
+              <button
+                type="button"
+                onClick={createRoom}
+                disabled={!newTitle.trim() || !newCompany.trim()}
+                className="btn-primary text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Create Hub
+              </button>
             </div>
           </div>
-        </div>
+        </Modal>
       )}
     </Page>
   );

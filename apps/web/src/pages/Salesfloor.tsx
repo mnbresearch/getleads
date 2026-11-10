@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch } from "../lib/api";
-import { Page, Spinner, useToast } from "../components/ui";
+import { LoadError, Page, Spinner, useToast } from "../components/ui";
 
 interface BlitzState {
   id: string;
@@ -35,9 +35,12 @@ export function SalesfloorPage() {
   const [milestones, setMilestones] = useState<Milestone[]>([]);
   const [onlineCount, setOnlineCount] = useState(0);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const { toast, Toast } = useToast();
 
   const loadState = useCallback(() => {
+    setLoading(true);
+    setError(null);
     apiFetch<{
       blitz: BlitzState;
       teamMembers: TeamMember[];
@@ -50,7 +53,10 @@ export function SalesfloorPage() {
         setMilestones(res.recentMilestones || []);
         setOnlineCount(res.salesfloorOnlineCount || 0);
       })
-      .catch((e) => toast((e as Error).message, "err"))
+      .catch((e) => {
+        setError((e as Error).message);
+        toast((e as Error).message, "err");
+      })
       .finally(() => setLoading(false));
   }, [toast]);
 
@@ -58,10 +64,18 @@ export function SalesfloorPage() {
     loadState();
   }, [loadState]);
 
-  if (loading || !blitz) {
+  if (loading) {
     return (
       <Page title="Virtual Salesfloor" subtitle="Collaborative digital bullpen for sales teams with live presence and calling blitzes.">
         <Spinner label="Loading salesfloor presence…" />
+      </Page>
+    );
+  }
+
+  if (error || !blitz) {
+    return (
+      <Page title="Virtual Salesfloor" subtitle="Collaborative digital bullpen for sales teams with live presence and calling blitzes.">
+        <LoadError message={error || "Could not load salesfloor presence."} onRetry={loadState} />
       </Page>
     );
   }
@@ -128,9 +142,9 @@ export function SalesfloorPage() {
               <h3 className="font-semibold text-sm text-ink-50">Team Floor Status</h3>
               <p className="text-xs text-ink-400">Live dialing presence across your sales team.</p>
             </div>
-            <span className="text-xs text-brand-600 font-semibold cursor-pointer hover:underline" onClick={loadState}>
+            <button type="button" className="text-xs text-brand-600 font-semibold cursor-pointer hover:underline bg-transparent border-0 p-0" onClick={loadState}>
               Refresh ↻
-            </span>
+            </button>
           </div>
 
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">

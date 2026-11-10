@@ -1,4 +1,6 @@
 import { Hono } from "hono";
+import { zValidator } from "@hono/zod-validator";
+import { z } from "zod";
 import { and, companies, consume, count, desc, eq, getDb, isNull, leads, or, signals } from "@prospex/db";
 import { generateAccountBrief, hasAi } from "@prospex/core";
 import { AI_OFF_UNAVAILABLE, aiDisabled, aiFor, aiMissingNote } from "../lib/ai.js";
@@ -25,14 +27,13 @@ companyRoutes.get("/:id", async (c) => {
  * regenerate. Uses the same free-tier-first AI provider gating as the rest of the platform -
  * Growth+ plans get the best available provider, lower plans stay on free providers only.
  */
-companyRoutes.post("/:id/brief", async (c) => {
+companyRoutes.post("/:id/brief", zValidator("json", z.object({ refresh: z.boolean().optional() })), async (c) => {
   const oid = orgId(c);
   const { db } = getDb();
   const company = await db.query.companies.findFirst({ where: and(eq(companies.id, c.req.param("id")), eq(companies.orgId, oid)) });
   if (!company) throw notFound("Company");
 
-  const body = await c.req.json().catch(() => ({}));
-  const refresh = body?.refresh === true;
+  const { refresh } = c.req.valid("json");
   const cached = company.aiBrief as { summary: string; whyNow: string; angles: string[] } | null;
   if (cached && !refresh) return c.json({ brief: cached, cached: true, generatedAt: company.aiBriefAt });
 

@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiFetch } from "../lib/api";
-import { Page } from "../components/ui";
+import { Page, Spinner } from "../components/ui";
 
 interface WaterfallProvider {
   id: string;
@@ -65,6 +65,10 @@ export function WaterfallPage() {
       setSimulating(false);
     }
   };
+
+  if (loading) {
+    return <Spinner label="Loading waterfall configuration…" />;
+  }
 
   return (
     <Page title="Waterfall Data Enrichment" subtitle="Multi-provider cascading verification engine: query cost-effective sources first, cascade down on misses, and guarantee verified emails and mobile numbers.">
@@ -165,7 +169,11 @@ export function WaterfallPage() {
                 <input value={testDomain} onChange={(e: React.ChangeEvent<HTMLInputElement>) => setTestDomain(e.target.value)} placeholder="e.g. scale.com" className="w-full mt-1 p-2 text-sm rounded-lg border border-black/10 bg-surface focus:outline-none focus:ring-2 focus:ring-brand-500" />
               </div>
 
-              <button onClick={runSimulation} disabled={simulating} className="btn-primary w-full mt-2">
+              <button
+                onClick={runSimulation}
+                disabled={simulating || !testFirst.trim() || !testLast.trim() || !testDomain.trim()}
+                className="btn-primary w-full mt-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
                 {simulating ? "Executing Waterfall Cascade..." : "Run Multi-Tier Cascade"}
               </button>
             </div>

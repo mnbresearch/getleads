@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiFetch } from "../lib/api";
-import { Page } from "../components/ui";
+import { Page, Spinner } from "../components/ui";
 
 interface GtmCampaign {
   id: string;
@@ -24,12 +24,20 @@ export function AutonomousGtmCampaignsPage() {
   useEffect(() => {
     apiFetch<{ campaigns: GtmCampaign[]; summary: any }>("GET", "/v1/moat/gtm-campaigns")
       .then((res) => {
-        setCampaigns(res.campaigns);
-        setSummary(res.summary);
+        setCampaigns(res.campaigns || []);
+        setSummary(res.summary || null);
       })
       .catch((err) => console.error("Error loading GTM campaigns:", err))
       .finally(() => setLoading(false));
   }, []);
+
+  if (loading) {
+    return (
+      <Page title="Autonomous GTM & Goal-Driven ABM" subtitle="Shift from manual lists to goal-driven pipeline generation. Define a revenue target, and Scout autonomously maps accounts, activates buying committees, and orchestrates cross-channel plays.">
+        <Spinner label="Loading GTM campaigns…" />
+      </Page>
+    );
+  }
 
   return (
     <Page
@@ -92,7 +100,7 @@ export function AutonomousGtmCampaignsPage() {
             <div className="flex flex-wrap items-center justify-between gap-3 pt-2 text-xs">
               <div className="flex items-center gap-2">
                 <span className="text-ink-400 font-semibold uppercase text-[10px] tracking-wider">Orchestration Layers:</span>
-                {camp.orchestratedChannels.map((ch) => (
+                {(camp.orchestratedChannels || []).map((ch) => (
                   <span key={ch} className="badge bg-brand-50 text-brand-700 border border-brand-200">
                     {ch.replace(/_/g, " ")}
                   </span>

@@ -68,7 +68,11 @@ export function EmailCoachPage() {
                 <span className="text-xs text-ink-400">
                   {body.trim().split(/\s+/).filter(Boolean).length} words · ~{Math.round((body.trim().split(/\s+/).filter(Boolean).length / 200) * 60)}s reading time
                 </span>
-                <button onClick={analyzeEmail} disabled={analyzing} className="btn-primary text-xs">
+                <button
+                  onClick={analyzeEmail}
+                  disabled={analyzing || !subject.trim() || !body.trim()}
+                  className="btn-primary text-xs disabled:opacity-50 disabled:cursor-not-allowed"
+                >
                   {analyzing ? "Evaluating Draft..." : "Grade & Optimize Draft"}
                 </button>
               </div>

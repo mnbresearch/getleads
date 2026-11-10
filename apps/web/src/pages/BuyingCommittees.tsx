@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { apiFetch } from "../lib/api";
-import { Page } from "../components/ui";
+import { Page, Spinner } from "../components/ui";
 
 interface Stakeholder {
   id: string;
@@ -41,13 +41,22 @@ export function BuyingCommitteesPage() {
   useEffect(() => {
     apiFetch<{ committees: CommitteeItem[]; stats: CommitteeStats }>("GET", "/v1/moat/committees")
       .then((res) => {
-        setCommittees(res.committees);
-        setStats(res.stats);
-        if (res.committees.length > 0) setSelectedCommittee(res.committees[0]);
+        const commList = res.committees || [];
+        setCommittees(commList);
+        setStats(res.stats || null);
+        if (commList.length > 0) setSelectedCommittee(commList[0]);
       })
       .catch((err) => console.error("Error loading buying committees:", err))
       .finally(() => setLoading(false));
   }, []);
+
+  if (loading) {
+    return (
+      <Page title="Buying Committee & Multi-Threading Intelligence" subtitle="Defend against the #1 killer of B2B deals: single-threaded champion traps. Map entire enterprise committees, flag coverage gaps, and coordinate role-specific touches.">
+        <Spinner label="Loading buying committees…" />
+      </Page>
+    );
+  }
 
   const getRoleBadge = (role: string) => {
     switch (role) {
