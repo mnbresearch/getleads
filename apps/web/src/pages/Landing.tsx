@@ -610,7 +610,7 @@ function InteractiveRoiCalculator() {
 
         <div className="mt-8 text-center">
           <Link to="/signup" className="btn-primary px-8 py-3.5 text-base font-semibold shadow-glow">
-            Unlock This Pipeline — Start Free Trial
+            Unlock This Pipeline — Start Free Sandbox
           </Link>
           <p className="mt-2 text-xs text-ink-400">Test all zero-credit tools free · Paid tiers cover external provider verification & direct dials</p>
         </div>
@@ -700,7 +700,7 @@ function StickyConversionBar() {
         </div>
         <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           <Link to="/signup" className="btn-primary text-xs sm:text-sm py-2 px-4 shadow-sm font-semibold">
-            Start Free Trial →
+            Start Free Sandbox →
           </Link>
         </div>
       </div>
