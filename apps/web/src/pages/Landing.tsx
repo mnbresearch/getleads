@@ -921,9 +921,230 @@ function PricingSection() {
   );
 }
 
+function ExclusiveCapabilitiesSection() {
+  const exclusiveFeatures = [
+    {
+      id: "aeo-geo",
+      icon: "◐",
+      badge: "Industry First · Patent-Grade",
+      badgeColor: "bg-purple-100 text-purple-800 border-purple-200 dark:bg-purple-950 dark:text-purple-300 dark:border-purple-800",
+      title: "Generative AI Search Visibility (AEO & GEO Radar)",
+      tagline: "Track & influence what ChatGPT, Perplexity, Gemini, Claude & DeepSeek tell buyers about you",
+      description:
+        "Every legacy sales database (Apollo, ZoomInfo, Clay) is 100% blind to what AI models tell your buyers when they research your category. Scout continuously queries frontier LLMs using 95% Wilson Score confidence intervals, maps citation share against competitors, detects brand visibility gaps, and pipes lost-visibility accounts directly into outbound plays.",
+      replaces: "Replaces Otterly + Profound ($12,000/yr)",
+      proof: "Continuous Multi-Engine Sampling · Wilson Score CI · Live Citation Graph",
+    },
+    {
+      id: "waterfall",
+      icon: "💧",
+      badge: "Zero Credit Burn · 95%+ Verified",
+      badgeColor: "bg-blue-100 text-blue-800 border-blue-200 dark:bg-blue-950 dark:text-blue-300 dark:border-blue-800",
+      title: "Waterfall Multi-Vendor Cascade + Native Socket Handshake",
+      tagline: "Multi-tier verification cascade that stops on the first hit, with zero wasted credits",
+      description:
+        "Instead of locking you into a single decaying list (ZoomInfo) or forcing you to maintain 5 complex API subscriptions on spreadsheets (Clay), Scout evaluates Hunter → Reoon → MillionVerifier sequentially, then falls back to Scout's proprietary deep-socket SMTP handshake to guarantee 95%+ verified deliverability with zero credit burn on misses.",
+      replaces: "Replaces Clay + 5 API Subscriptions ($4,800/yr)",
+      proof: "95%+ Match Rate · 0% domain burn · Native socket MX ping",
+    },
+    {
+      id: "digital-workers",
+      icon: "🤖",
+      badge: "24/7 Autonomous Workforce",
+      badgeColor: "bg-emerald-100 text-emerald-800 border-emerald-200 dark:bg-emerald-950 dark:text-emerald-300 dark:border-emerald-800",
+      title: "Autonomous Digital SDRs (Alice & Jordan) with 480ms Telephony",
+      tagline: "24/7 autonomous agents handling deep research, cold email, and conversational phone calls",
+      description:
+        "Standalone AI SDR tools like 11x cost $30,000+/year just for email drafts. Scout deploys Alice (conducting 24/7 account research, reading SEC filings/news, and drafting multi-touch cadences) and Jordan (conducting live conversational voice phone calls with dynamic objection battlecards under 480ms)—fully unified with your CRM.",
+      replaces: "Replaces 11x + Artisan ($36,000/yr)",
+      proof: "Sub-480ms Voice Telephony · Live Speech Recognition · 24/7 Autonomous SDR",
+    },
+    {
+      id: "committees",
+      icon: "👥",
+      badge: "Enterprise Deal Defense",
+      badgeColor: "bg-amber-100 text-amber-800 border-amber-200 dark:bg-amber-950 dark:text-amber-300 dark:border-amber-800",
+      title: "Buying Committee Graph & Single-Thread Risk Defense",
+      tagline: "Automatically map all 6-10 stakeholders and eliminate single-threaded deal death",
+      description:
+        "82% of enterprise B2B opportunities fail because sales reps only speak with a single contact who lacks signing authority. Scout automatically identifies and graphs the entire buying group—Economic Buyer (CFO), Technical Champion, SecOps, Legal, and Procurement—and launches automated multi-threading plays if a deal stalls.",
+      replaces: "Replaces Demandbase + 6sense committee modules ($18,000/yr)",
+      proof: "6–10 Stakeholders Auto-Mapped · Real-Time Single-Thread Risk Trigger",
+    },
+    {
+      id: "rooms",
+      icon: "🤝",
+      badge: "Buyer-Led Closing Engine",
+      badgeColor: "bg-indigo-100 text-indigo-800 border-indigo-200 dark:bg-indigo-950 dark:text-indigo-300 dark:border-indigo-800",
+      title: "Digital Sales Rooms (DSR) & Interactive Mutual Action Plans",
+      tagline: "Branded collaborative hubs with interactive milestones and real-time CFO telemetry",
+      description:
+        "Eliminate chaotic email attachments and buried PDFs. Scout auto-provisions a private, branded collaborative buyer hub equipped with interactive Mutual Action Plans (MAP), security compliance artifacts, and telemetry that notifies your AE the exact second a CFO or procurement officer logs in.",
+      replaces: "Replaces Trumpet + Dock + Accord ($3,600/yr)",
+      proof: "42% Faster Enterprise Closes · Real-Time Buyer Telemetry · Public Token Security",
+    },
+    {
+      id: "dialer",
+      icon: "📞",
+      badge: "Live Team Bullpen",
+      badgeColor: "bg-rose-100 text-rose-800 border-rose-200 dark:bg-rose-950 dark:text-rose-300 dark:border-rose-800",
+      title: "WebRTC AI Sales Dialer & Virtual Salesfloor",
+      tagline: "Predictive multi-line calling with live speech battlecards and synchronized team blitzes",
+      description:
+        "Nooks costs $100M+ valuation prices as a disconnected add-on. Scout includes a native WebRTC predictive dialer right in your browser. Live speech recognition detects prospect pushback ('no budget', 'send info', 'competitor X') and surfaces instant contextual battlecards while your team blitzes together in a live virtual bullpen.",
+      replaces: "Replaces Nooks + Orum ($15,000/yr)",
+      proof: "44% Connect Rate · Instant AI Battlecard Overlay · Live Team Presence",
+    },
+    {
+      id: "auto-router",
+      icon: "⚡",
+      badge: "Multi-LLM Precision",
+      badgeColor: "bg-brand-100 text-brand-800 border-brand-200 dark:bg-brand-950 dark:text-brand-300 dark:border-brand-800",
+      title: "Dynamic Multi-Model Auto-Router (Krater.ai Architecture)",
+      tagline: "Intelligently routes each sales task to the world's best frontier AI model",
+      description:
+        "Single-model AI wrappers produce generic spam that lands in junk folders. Scout incorporates Krater-style multi-engine intelligence: dynamically routing 2M token company dossiers to Gemini 1.5 Pro, human-calibrated cold copy to Claude 3.5 Sonnet, and committee graph reasoning to DeepSeek R1.",
+      replaces: "Replaces brittle single-LLM prompt wrappers",
+      proof: "Gemini 1.5 Pro + Claude 3.5 + DeepSeek R1 · Zero AI Boilerplate",
+    },
+  ];
+
+  const engineeringExpertise = [
+    {
+      badge: "Deliverability Defense",
+      title: "Algorithmic Circuit Breakers",
+      desc: "Automatic send-volume ramping per mailbox, domain warm-up guards, and instant circuit breakers that trip at 2.1% bounce rate before your domain reputation can ever be burned.",
+    },
+    {
+      badge: "Statistical Rigor",
+      title: "95% Wilson Score Intervals",
+      desc: "Our AI search visibility engine runs multiple deterministic trials with Wilson Score confidence intervals—meaning every statistic you present to your board is mathematically defensible.",
+    },
+    {
+      badge: "Zero-Credit Free Sandbox",
+      title: "Transparent Free Testing",
+      desc: "Explore every built-in workflow, dialer simulation, and roleplay coach for free. We never charge credits for platform features—credits are only consumed when verifying real external data.",
+    },
+    {
+      badge: "Enterprise Security",
+      title: "72-Table Row Level Security",
+      desc: "Engineered with default-deny Row Level Security (RLS) across all 72 PostgreSQL database tables, locked search_path isolation, and automated pre-commit secret scanning.",
+    },
+  ];
+
+  return (
+    <section id="enterprise-suite" className="scroll-mt-24 mb-20 max-w-6xl mx-auto px-4">
+      {/* Section Header */}
+      <div className="text-center max-w-3xl mx-auto mb-12">
+        <div className="inline-flex items-center gap-2 rounded-full border border-brand-200 bg-brand-50/90 dark:bg-brand-950/50 px-4 py-1.5 text-xs font-bold uppercase tracking-wider text-brand-800 dark:text-brand-400 shadow-xs mb-3">
+          <span className="flex h-2 w-2 rounded-full bg-brand-600 animate-pulse" />
+          <span>Exclusive to Scout · Zero Competitor Equivalent</span>
+        </div>
+        <h2 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-ink-50 dark:text-white leading-[1.15]">
+          Breakthrough Features & Expertise That Exist{" "}
+          <span className="bg-brand-gradient bg-clip-text text-transparent">ONLY in Scout</span>
+        </h2>
+        <p className="mt-4 text-sm sm:text-base text-ink-300 dark:text-slate-300 leading-relaxed">
+          Legacy sales databases sell stale lists that bounce and burn your domain. Point solutions force you to juggle 6 disconnected logins. Scout delivers 7 proprietary capabilities engineered from the ground up to win enterprise revenue.
+        </p>
+      </div>
+
+      {/* The 7 Proprietary Capabilities Grid */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+        {exclusiveFeatures.map((feat, idx) => {
+          const isFeatured = idx === 0;
+          return (
+            <div
+              key={feat.id}
+              className={`card p-6 flex flex-col justify-between transition-all duration-300 hover:-translate-y-1 hover:shadow-xl relative overflow-hidden ${
+                isFeatured
+                  ? "md:col-span-2 lg:col-span-2 border-brand-300 dark:border-brand-700 bg-gradient-to-br from-brand-50/50 via-surface to-brand-50/20 dark:from-slate-900 dark:via-slate-900 dark:to-brand-950/30"
+                  : "border-black/[0.08] dark:border-white/10 bg-surface dark:bg-slate-900"
+              }`}
+            >
+              <div>
+                {/* Header Strip */}
+                <div className="flex items-center justify-between gap-2 mb-3">
+                  <div className="flex items-center gap-2.5">
+                    <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-brand-50 dark:bg-brand-950/60 text-lg border border-brand-200 dark:border-brand-800">
+                      {feat.icon}
+                    </span>
+                    <span className={`badge border text-[10px] font-bold uppercase tracking-wider ${feat.badgeColor}`}>
+                      {feat.badge}
+                    </span>
+                  </div>
+                  <span className="text-[11px] font-mono text-ink-400 dark:text-slate-500">
+                    0{idx + 1}
+                  </span>
+                </div>
+
+                <h3 className="text-base sm:text-lg font-bold text-ink-50 dark:text-white leading-snug">
+                  {feat.title}
+                </h3>
+                <div className="text-xs font-semibold text-brand-700 dark:text-brand-400 mt-1 mb-2.5">
+                  {feat.tagline}
+                </div>
+                <p className="text-xs sm:text-sm text-ink-300 dark:text-slate-300 leading-relaxed">
+                  {feat.description}
+                </p>
+              </div>
+
+              {/* Bottom Meta & Proof */}
+              <div className="mt-5 pt-4 border-t border-black/5 dark:border-white/5 space-y-2">
+                <div className="flex items-center justify-between text-[11px]">
+                  <span className="font-semibold text-brand-800 dark:text-brand-300 bg-brand-50 dark:bg-brand-950/50 px-2 py-0.5 rounded border border-brand-200 dark:border-brand-800">
+                    {feat.replaces}
+                  </span>
+                </div>
+                <div className="text-[10px] text-ink-400 dark:text-slate-400 flex items-center gap-1.5 font-medium">
+                  <span className="text-emerald-500">✓</span>
+                  <span>{feat.proof}</span>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Deep Revenue Engineering Expertise Strip */}
+      <div className="mt-10 card p-6 sm:p-8 border-brand-200 dark:border-brand-800 bg-gradient-to-r from-surface via-brand-50/20 to-surface dark:from-slate-900 dark:via-slate-800/50 dark:to-slate-900 shadow-sm">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-black/5 dark:border-white/5 pb-4 mb-6">
+          <div>
+            <span className="badge bg-brand-600 text-white text-[10px] font-bold uppercase tracking-wider">
+              Engineering Architecture
+            </span>
+            <h3 className="text-lg sm:text-xl font-bold text-ink-50 dark:text-white mt-1">
+              Engineered by Senior Revenue & Security Architects
+            </h3>
+          </div>
+          <span className="text-xs text-ink-400 dark:text-slate-400">
+            Defensible mathematical models · Zero hallucination data
+          </span>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          {engineeringExpertise.map((eng) => (
+            <div key={eng.title} className="p-4 rounded-xl border border-black/5 dark:border-white/10 bg-black/[0.01] dark:bg-white/[0.02]">
+              <span className="badge bg-black/5 dark:bg-white/10 text-[10px] font-semibold text-brand-700 dark:text-brand-400 mb-2">
+                {eng.badge}
+              </span>
+              <h4 className="font-bold text-xs sm:text-sm text-ink-50 dark:text-white mb-1">
+                {eng.title}
+              </h4>
+              <p className="text-[11px] text-ink-400 dark:text-slate-400 leading-relaxed">
+                {eng.desc}
+              </p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 /** Section links in the header, shared by the desktop row and the mobile menu. */
 const NAV_LINKS: { href: string; label: string; demoOnly?: boolean }[] = [
-  { href: "#enterprise-suite", label: "Platform" },
+  { href: "#enterprise-suite", label: "Exclusive Moats" },
   { href: "#demo", label: "Watch", demoOnly: true },
   { href: "#plays", label: "Plays" },
   { href: "#agencies", label: "Agencies" },
@@ -1003,12 +1224,12 @@ export function LandingPage() {
             <span className="bg-brand-gradient bg-clip-text text-transparent">With Autonomous AI Execution.</span>
           </h1>
           <p className="mt-5 max-w-3xl text-base text-ink-300 sm:text-xl leading-relaxed">
-            Scout replaces 6 disconnected sales tools with one unified revenue engine. Discover in-market accounts from live web signals, multi-thread buying committees, dial with real-time AI battlecards, and close in shared digital sales rooms.
+            The only platform in the world unifying <strong className="text-ink-50 font-semibold">AI Search Visibility (AEO/GEO)</strong>, <strong className="text-ink-50 font-semibold">Waterfall Cascading Verification</strong>, <strong className="text-ink-50 font-semibold">Autonomous SDRs Alice & Jordan</strong>, and <strong className="text-ink-50 font-semibold">Digital Sales Rooms</strong> into one continuous revenue engine.
           </p>
           <HeroQuickSignup />
           <div className="mt-6 mb-2 flex flex-wrap items-center justify-center gap-3">
             <a href="#enterprise-suite" className="btn-secondary px-5 py-2.5 text-sm font-medium">
-              Explore platform capabilities ↓
+              Explore exclusive moats & capabilities ↓
             </a>
           </div>
           <HeroDemo />
@@ -1041,64 +1262,8 @@ export function LandingPage() {
         {/* The Old Way vs The Scout Way */}
         <OldWayVsScoutWay />
 
-        {/* Enterprise Suite Spotlight: Clay, 11x, Warmly & Nooks Systems */}
-        <section id="enterprise-suite" className="scroll-mt-24 mb-16 max-w-5xl mx-auto px-4">
-          <div className="card border-brand-200 bg-gradient-to-b from-brand-50/40 via-surface to-surface p-8 shadow-sm">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-black/[0.06] pb-4 mb-6">
-              <div>
-                <span className="badge bg-brand-600 text-white text-[11px] font-semibold">Billion-Dollar Architecture</span>
-                <h2 className="text-2xl font-bold tracking-tight text-ink-50 mt-1">Unified Outbound & Revenue Execution Engine</h2>
-              </div>
-              <span className="text-xs text-ink-400">Zero tool fragmentation · All on one data model</span>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
-              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-lg">💧</span>
-                  <div className="font-semibold text-sm text-ink-50">Waterfall Enrichment</div>
-                </div>
-                <p className="text-xs text-ink-400 leading-relaxed">
-                  Clay-style cascading lookups across Hunter, Reoon, and MillionVerifier, stopping on the first verified hit.
-                </p>
-                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">95%+ Match Rate</div>
-              </div>
-
-              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-lg">🤖</span>
-                  <div className="font-semibold text-sm text-ink-50">Digital Workers</div>
-                </div>
-                <p className="text-xs text-ink-400 leading-relaxed">
-                  11x-inspired autonomous workers: Alice runs deep account research & multi-channel touches; Jordan handles phone outreach.
-                </p>
-                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">24/7 Autonomous SDR</div>
-              </div>
-
-              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-lg">⚡</span>
-                  <div className="font-semibold text-sm text-ink-50">Signal Convergence</div>
-                </div>
-                <p className="text-xs text-ink-400 leading-relaxed">
-                  Warmly & Common Room-grade intent graph uniting website deanonymization, hiring roles, and topic surges.
-                </p>
-                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">Composite Intent (0-100)</div>
-              </div>
-
-              <div className="p-4 rounded-xl border border-black/[0.06] bg-surface">
-                <div className="flex items-center gap-2 mb-2">
-                  <span className="text-lg">📞</span>
-                  <div className="font-semibold text-sm text-ink-50">AI Dialer & Blitzes</div>
-                </div>
-                <p className="text-xs text-ink-400 leading-relaxed">
-                  Nooks-inspired calling workspace with live objection battlecards, team virtual salesfloor blitzes, and deal Kanban.
-                </p>
-                <div className="mt-3 pt-2 border-t border-black/[0.05] text-[11px] font-semibold text-brand-700">WebRTC + Live Battlecards</div>
-              </div>
-            </div>
-          </div>
-        </section>
+        {/* Breakthrough Features & Expertise That Exist ONLY in Scout */}
+        <ExclusiveCapabilitiesSection />
 
         {/* Customer Success Stories & Social Proof */}
         <CustomerTestimonials />
