@@ -9,15 +9,29 @@
   html {
     color-scheme: light;
   }
+  html.dark {
+    color-scheme: dark;
+  }
   body {
-    @apply bg-cream text-ink-100 antialiased;
+    @apply bg-cream text-ink-100 antialiased transition-colors duration-200;
     background-image:
       radial-gradient(circle at 12% 0%, rgba(193, 95, 55, 0.07), transparent 42%),
       radial-gradient(circle at 88% 8%, rgba(140, 125, 103, 0.08), transparent 40%);
     background-attachment: fixed;
   }
+  html.dark body {
+    background-color: #0b0f17;
+    color: #f1f5f9;
+    background-image:
+      radial-gradient(circle at 12% 0%, rgba(193, 95, 55, 0.12), transparent 42%),
+      radial-gradient(circle at 88% 8%, rgba(99, 102, 241, 0.08), transparent 40%);
+  }
   ::selection {
     @apply bg-brand-300/50 text-ink-50;
+  }
+  html.dark ::selection {
+    background-color: rgba(193, 95, 55, 0.4);
+    color: #ffffff;
   }
 }
 
@@ -32,6 +46,52 @@
   .badge { @apply inline-flex max-w-full items-center rounded-full px-2 py-0.5 text-xs font-medium; }
   .th { @apply px-3 py-2 text-left text-xs font-semibold uppercase tracking-wide text-ink-400; }
   .td { @apply px-3 py-2 text-sm align-top text-ink-200; }
+
+  /* Krater.ai-Style Dark Theme Elevation & Polish */
+  html.dark .card {
+    background-color: #111622;
+    border-color: rgba(255, 255, 255, 0.08);
+    box-shadow: 0 4px 20px -2px rgba(0, 0, 0, 0.5), 0 1px 3px rgba(0, 0, 0, 0.3);
+  }
+  html.dark .input {
+    background-color: #111622;
+    border-color: rgba(255, 255, 255, 0.12);
+    color: #f8fafc;
+  }
+  html.dark .input::placeholder {
+    color: #64748b;
+  }
+  html.dark .btn-secondary {
+    background-color: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.12);
+    color: #f1f5f9;
+  }
+  html.dark .btn-secondary:hover {
+    background-color: rgba(255, 255, 255, 0.09);
+  }
+  html.dark .text-ink-50 { color: #ffffff; }
+  html.dark .text-ink-100 { color: #f1f5f9; }
+  html.dark .text-ink-200 { color: #e2e8f0; }
+  html.dark .text-ink-300 { color: #cbd5e1; }
+  html.dark .text-ink-400 { color: #94a3b8; }
+  html.dark .text-ink-500 { color: #64748b; }
+  html.dark .bg-surface { background-color: #111622; }
+  html.dark .bg-cream { background-color: #0b0f17; }
+  html.dark .border-black\/5,
+  html.dark .border-black\/10,
+  html.dark .border-black\/20,
+  html.dark .border-black\/\[0\.06\],
+  html.dark .border-black\/\[0\.08\] {
+    border-color: rgba(255, 255, 255, 0.08);
+  }
+  html.dark .bg-black\/5,
+  html.dark .bg-black\/10 {
+    background-color: rgba(255, 255, 255, 0.06);
+  }
+  html.dark .bg-black\/\[0\.02\],
+  html.dark .bg-black\/\[0\.03\] {
+    background-color: rgba(255, 255, 255, 0.03);
+  }
 }
 
 @layer utilities {
