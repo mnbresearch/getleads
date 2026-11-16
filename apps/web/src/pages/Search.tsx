@@ -11,18 +11,18 @@ const MAX_LIMIT = 200;
 interface Search { id: string; status: string; resultCount: number; query: Record<string, unknown>; createdAt: string; error: string | null; jobId: string | null; clientId?: string | null; clientClaim?: { claimed: number; ownedByAnotherClient: number; skipped?: string; error?: string } | null }
 
 export function SearchPage() {
-  const [query, setQuery] = useState("");
-  const [titles, setTitles] = useState<string[]>([]);
-  const [industries, setIndustries] = useState<string[]>([]);
-  const [locations, setLocations] = useState<string[]>([]);
+  const [params] = useSearchParams();
+  const initialQ = params.get("q") ?? params.get("query") ?? "";
+  const [query, setQuery] = useState(initialQ);
+  const [titles, setTitles] = useState<string[]>(params.get("titles") ? params.get("titles")!.split(",").map((s) => s.trim()).filter(Boolean) : []);
+  const [industries, setIndustries] = useState<string[]>(params.get("industries") ? params.get("industries")!.split(",").map((s) => s.trim()).filter(Boolean) : []);
+  const [locations, setLocations] = useState<string[]>(params.get("locations") ? params.get("locations")!.split(",").map((s) => s.trim()).filter(Boolean) : []);
+  const [keywords, setKeywords] = useState<string[]>(params.get("keywords") ? params.get("keywords")!.split(",").map((s) => s.trim()).filter(Boolean) : []);
   const [domains, setDomains] = useState<string[]>([]);
   const [limit, setLimit] = useState(25);
   const [findEmails, setFindEmails] = useState(true);
   const [icps, setIcps] = useState<{ id: string; name: string }[]>([]);
   const [icpId, setIcpId] = useState("");
-  // A search can be run for a client: its leads are delivered straight to that client. Opened
-  // from a client's page, the client is pre-selected.
-  const [params] = useSearchParams();
   const [clients, setClients] = useState<{ id: string; name: string }[]>([]);
   const [clientId, setClientId] = useState(params.get("clientId") ?? "");
   const [searches, setSearches] = useState<Search[]>([]);
@@ -98,11 +98,21 @@ export function SearchPage() {
   };
   const problem = invalid();
 
-  const searchBody = () => ({ query: query || undefined, titles: titles.length ? titles : undefined, industries: industries.length ? industries : undefined, locations: locations.length ? locations : undefined, companyDomains: domains.length ? domains : undefined, limit, findEmails, icpId: icpId || undefined });
+  const searchBody = () => ({
+    query: query || undefined,
+    titles: titles.length ? titles : undefined,
+    industries: industries.length ? industries : undefined,
+    locations: locations.length ? locations : undefined,
+    keywords: keywords.length ? keywords : undefined,
+    companyDomains: domains.length ? domains : undefined,
+    limit,
+    findEmails,
+    icpId: icpId || undefined,
+  });
 
   const saveSearch = async () => {
     if (problem) return toast(problem, "err");
-    const name = prompt("Name this saved search", query || titles.join(", "));
+    const name = prompt("Name this saved search", query || titles.join(", ") || keywords.join(", "));
     if (!name) return;
     const alert = confirm("Email me when new leads appear (daily)?");
     try {
@@ -118,10 +128,12 @@ export function SearchPage() {
     if (!query) return;
     setParsing(true);
     try {
-      const r = await apiFetch<{ titles?: string[]; industries?: string[]; locations?: string[] }>("POST", "/v1/search/parse", { query });
-      setTitles(r.titles ?? []);
-      setIndustries(r.industries ?? []);
-      setLocations(r.locations ?? []);
+      const r = await apiFetch<{ titles?: string[]; industries?: string[]; locations?: string[]; keywords?: string[] }>("POST", "/v1/search/parse", { query });
+      if (r.titles?.length) setTitles(r.titles);
+      if (r.industries?.length) setIndustries(r.industries);
+      if (r.locations?.length) setLocations(r.locations);
+      if (r.keywords?.length) setKeywords(r.keywords);
+      toast("Targeting criteria extracted successfully");
     } catch (e) {
       toast((e as Error).message, "err");
     } finally {
@@ -157,10 +169,11 @@ export function SearchPage() {
             </div>
           </div>
           <div className="grid gap-3 sm:grid-cols-2">
-            <div><label className="label">Job titles</label><TagInput value={titles} onChange={setTitles} placeholder="Head of Sales, CTO…" /></div>
-            <div><label className="label">Industries</label><TagInput value={industries} onChange={setIndustries} placeholder="fintech, D2C…" /></div>
-            <div><label className="label">Locations</label><TagInput value={locations} onChange={setLocations} placeholder="Bengaluru, India…" /></div>
-            <div><label className="label">Specific company domains (optional)</label><TagInput value={domains} onChange={setDomains} placeholder="razorpay.com, zerodha.com…" /></div>
+            <div><label className="label">Job titles</label><TagInput value={titles} onChange={setTitles} placeholder="Founder, CEO, VP Sales, CTO…" /></div>
+            <div><label className="label">Industries & categories</label><TagInput value={industries} onChange={setIndustries} placeholder="Food & Beverage, SaaS, FMCG…" /></div>
+            <div><label className="label">Locations</label><TagInput value={locations} onChange={setLocations} placeholder="India, California, London, Singapore…" /></div>
+            <div><label className="label">Keywords & product niches</label><TagInput value={keywords} onChange={setKeywords} placeholder="rice meals, ready to eat, payments, AI…" /></div>
+            <div className="sm:col-span-2"><label className="label">Specific company domains (optional)</label><TagInput value={domains} onChange={setDomains} placeholder="tastybite.com, razorpay.com…" /></div>
           </div>
           <div className="flex flex-wrap items-end gap-4">
             <div><label className="label">Max leads</label><input type="number" className="input w-24" min={1} max={MAX_LIMIT} value={Number.isFinite(limit) ? limit : ""} onChange={(e) => setLimit(e.target.value === "" ? NaN : Number(e.target.value))} /></div>
@@ -177,8 +190,8 @@ export function SearchPage() {
               </div>
             )}
             <label className="mb-2 flex items-center gap-2 text-sm"><input type="checkbox" checked={findEmails} onChange={(e) => setFindEmails(e.target.checked)} /> Find + verify emails</label>
-            <button className="btn-secondary ml-auto" disabled={!query && !titles.length && !domains.length} onClick={saveSearch}>Save search</button>
-            <button className="btn-primary" onClick={run} disabled={busy || !!problem || (!query && !titles.length && !domains.length)}>{busy ? "Starting…" : "Run search"}</button>
+            <button className="btn-secondary ml-auto" disabled={!query && !titles.length && !domains.length && !keywords.length && !industries.length} onClick={saveSearch}>Save search</button>
+            <button className="btn-primary" onClick={run} disabled={busy || !!problem || (!query && !titles.length && !domains.length && !keywords.length && !industries.length)}>{busy ? "Starting…" : "Run search"}</button>
           </div>
           {problem && <div className="rounded-lg bg-amber-50 px-3 py-2 text-sm text-amber-800" role="alert">{problem}</div>}
         </div>

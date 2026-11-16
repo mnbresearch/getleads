@@ -817,7 +817,7 @@ const DEMO_ACCOUNT_SCHEMA = z.object({
       seats: z.number().int().min(1).max(MAX_PLAN_LIMIT).optional(),
     })
     .optional(),
-  seedSampleData: z.boolean().default(true),
+  seedSampleData: z.boolean().default(false),
 });
 
 adminRoutes.post("/demo-account", zValidator("json", DEMO_ACCOUNT_SCHEMA), async (c) => {

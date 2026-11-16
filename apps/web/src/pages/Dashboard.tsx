@@ -4,6 +4,7 @@ import { apiFetch, fmtNum, expectLists } from "../lib/api";
 import { metricLabel } from "../lib/metrics";
 import { LoadError, Page, Spinner, Stat } from "../components/ui";
 import { plural } from "../lib/plural";
+import { OnboardingModal, openOnboardingTour } from "../components/OnboardingModal";
 
 interface Overview {
   leads: { total: number; withEmail: number; verified: number; last7d: number; avgScore: number };
@@ -53,7 +54,46 @@ export function Dashboard() {
   if (!d) return <Page title="Overview"><Spinner label="Loading…" /></Page>;
   const max = Math.max(1, ...d.daily.map((x) => Math.max(x.leads, x.sent)));
   return (
-    <Page title="Overview" subtitle={`Plan: ${d.usage.plan} · period ${d.usage.period}`} actions={<Link to="/search" className="btn-primary">Find leads</Link>}>
+    <Page
+      title="Overview"
+      subtitle={`Plan: ${d.usage.plan} · period ${d.usage.period}`}
+      actions={
+        <div className="flex items-center gap-2">
+          <button type="button" onClick={openOnboardingTour} className="btn-secondary text-xs">
+            Guided Tour & Objectives
+          </button>
+          <Link to="/search" className="btn-primary">
+            Find leads
+          </Link>
+        </div>
+      }
+    >
+      <OnboardingModal />
+
+      {d.leads.total === 0 && (
+        <div className="card mb-6 border-brand-200 bg-gradient-to-r from-brand-50/40 via-surface to-brand-50/40 p-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <span className="badge bg-brand-100 text-brand-800 text-[10px] font-bold uppercase tracking-wider mb-1 inline-block">
+                Zero-Sample Workspace
+              </span>
+              <h3 className="font-bold text-sm text-ink-50">Welcome to your clean Scout workspace</h3>
+              <p className="text-xs text-ink-300 mt-0.5 max-w-xl">
+                We never inject fabricated or sample leads into your database. Start your first real prospect search to discover verified decision-makers and companies.
+              </p>
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              <button type="button" onClick={openOnboardingTour} className="btn-secondary text-xs py-2 px-3">
+                View Setup Guide
+              </button>
+              <Link to="/search" className="btn-primary text-xs py-2 px-4">
+                Run First Search →
+              </Link>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Leads" value={fmtNum(d.leads.total)} hint={`${fmtNum(d.leads.last7d)} in last 7 days`} />
         <Stat label="Verified emails" value={fmtNum(d.leads.verified)} hint={`${fmtNum(d.leads.withEmail)} with any email`} />

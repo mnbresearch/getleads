@@ -48,6 +48,155 @@ export interface PipelineOptions {
   maxProviderLeads?: number;
 }
 
+const KNOWN_ROLES_REGEX = /\b(ceo|cto|cfo|cmo|coo|cro|cio|cpo|vp|vice\s+president|director|head\s+of|lead|manager|founder|co-founder|owner|partner|executive|consultant|recruiter|engineer|developer|designer|analyst|buyer|purchaser|sourcing)\b/i;
+
+const DEFAULT_DECISION_MAKER_TITLES = [
+  "Founder",
+  "Co-Founder",
+  "CEO",
+  "Managing Director",
+  "Owner",
+  "Head of Sourcing",
+  "Director of Operations",
+];
+
+const NICHE_CATEGORY_DICTIONARY: Array<{
+  pattern: RegExp;
+  industries: string[];
+  keywords: string[];
+  defaultTitles?: string[];
+}> = [
+  {
+    pattern: /\b(rice|meal|meals|paddy|basmati|grain|pulses|ready\s+to\s+eat|rte)\b/i,
+    industries: ["Food & Beverage", "FMCG", "Packaged Foods", "Food Processing", "Agribusiness"],
+    keywords: ["rice meals", "ready to eat", "packaged food", "food processing", "FMCG"],
+    defaultTitles: ["Founder", "Co-Founder", "CEO", "Managing Director", "Owner", "Head of Sourcing", "Director of Operations"],
+  },
+  {
+    pattern: /\b(food|beverage|snack|bakery|dairy|spices|confectionery|organic\s+food)\b/i,
+    industries: ["Food & Beverage", "FMCG", "Food Processing"],
+    keywords: ["food products", "packaged foods", "FMCG", "food manufacturing"],
+    defaultTitles: ["Founder", "CEO", "Managing Director", "Owner", "Head of Sourcing"],
+  },
+  {
+    pattern: /\b(coffee|tea|cafe|roastery|brew)\b/i,
+    industries: ["Food & Beverage", "FMCG", "Retail"],
+    keywords: ["specialty coffee", "beverages", "roastery", "FMCG"],
+    defaultTitles: ["Founder", "CEO", "Owner", "Managing Director"],
+  },
+  {
+    pattern: /\b(solar|clean\s+energy|renewables|photovoltaic|ev|battery|cleantech)\b/i,
+    industries: ["Renewables & Environment", "Solar Energy", "Electrical Manufacturing"],
+    keywords: ["solar", "clean energy", "photovoltaic", "renewables"],
+    defaultTitles: ["Founder", "CEO", "Managing Director", "Operations Director"],
+  },
+  {
+    pattern: /\b(fintech|payments|banking|lending|wealthtech|crypto|defi|neobank)\b/i,
+    industries: ["Financial Services", "Fintech", "Software"],
+    keywords: ["fintech", "payments", "banking", "financial technology"],
+    defaultTitles: ["CEO", "CTO", "Head of Growth", "VP Sales", "Founder"],
+  },
+  {
+    pattern: /\b(saas|software|cloud|b2b\s+software|devops|cybersecurity|security)\b/i,
+    industries: ["Software", "Internet", "Information Technology"],
+    keywords: ["SaaS", "cloud", "B2B software"],
+    defaultTitles: ["Founder", "CEO", "VP Sales", "Head of Growth", "CTO"],
+  },
+  {
+    pattern: /\b(logistics|freight|supply\s+chain|trucking|warehousing|3pl|shipping)\b/i,
+    industries: ["Logistics & Supply Chain", "Transportation", "Warehousing"],
+    keywords: ["logistics", "freight", "supply chain", "warehousing"],
+    defaultTitles: ["Head of Supply Chain", "Director of Logistics", "VP Operations", "CEO", "Founder"],
+  },
+  {
+    pattern: /\b(agency|marketing\s+agency|design\s+agency|digital\s+agency|creative\s+agency|advertising)\b/i,
+    industries: ["Marketing & Advertising", "Design", "Management Consulting"],
+    keywords: ["marketing agency", "client services", "performance marketing"],
+    defaultTitles: ["Agency Owner", "Managing Director", "Founder", "Head of Growth"],
+  },
+  {
+    pattern: /\b(real\s+estate|property|realtor|brokerage|housing|construction)\b/i,
+    industries: ["Real Estate", "Commercial Real Estate", "Construction"],
+    keywords: ["real estate", "property development", "brokerage"],
+    defaultTitles: ["Managing Director", "Principal Broker", "Owner", "Developer"],
+  },
+  {
+    pattern: /\b(health|healthcare|clinic|dental|dentist|hospital|pharma|biotech|medtech)\b/i,
+    industries: ["Hospital & Health Care", "Medical Devices", "Biotechnology"],
+    keywords: ["healthcare", "healthtech", "clinical", "medical devices"],
+    defaultTitles: ["Medical Director", "CEO", "Founder", "Clinic Owner", "Head of Clinical Operations"],
+  },
+  {
+    pattern: /\b(d2c|ecommerce|e-commerce|retail|apparel|fashion|cosmetics|skincare)\b/i,
+    industries: ["Retail", "Apparel & Fashion", "Consumer Goods", "Internet"],
+    keywords: ["D2C", "ecommerce", "consumer brands", "retail"],
+    defaultTitles: ["Founder", "Co-Founder", "CEO", "Head of Marketing", "Brand Director"],
+  },
+  {
+    pattern: /\b(manufacturing|industrial|factory|steel|textiles|machinery|chemicals)\b/i,
+    industries: ["Manufacturing", "Mechanical or Industrial Engineering", "Textiles"],
+    keywords: ["manufacturing", "industrial", "OEM", "supply"],
+    defaultTitles: ["Managing Director", "Plant Head", "VP Operations", "Director of Sourcing", "CEO"],
+  },
+];
+
+export function heuristicParseLeadQuery(rawQuery: string): {
+  titles: string[];
+  industries: string[];
+  locations: string[];
+  keywords: string[];
+} {
+  const query = rawQuery.trim();
+  const m = query.match(/^(.*?)(?:\s+(?:at|for)\s+(.*?))?(?:\s+in\s+(.*))?$/i);
+  let rawSubject = (m?.[1] ?? query).trim();
+  let rawOrgOrIndustry = (m?.[2] ?? "").trim();
+  let rawLocation = (m?.[3] ?? "").trim();
+
+  const hasExplicitRole = KNOWN_ROLES_REGEX.test(rawSubject);
+
+  let titles: string[] = [];
+  let industries: string[] = [];
+  let keywords: string[] = [];
+  let locations: string[] = rawLocation ? [rawLocation] : [];
+
+  if (hasExplicitRole) {
+    titles = [rawSubject];
+    if (rawOrgOrIndustry) {
+      industries.push(rawOrgOrIndustry);
+      keywords.push(rawOrgOrIndustry);
+    }
+  } else {
+    keywords.push(rawSubject);
+    if (rawOrgOrIndustry) {
+      keywords.push(rawOrgOrIndustry);
+      industries.push(rawOrgOrIndustry);
+    }
+
+    let matchedNiche = false;
+    for (const entry of NICHE_CATEGORY_DICTIONARY) {
+      if (entry.pattern.test(rawSubject) || (rawOrgOrIndustry && entry.pattern.test(rawOrgOrIndustry))) {
+        industries.push(...entry.industries);
+        keywords.push(...entry.keywords);
+        titles.push(...(entry.defaultTitles ?? DEFAULT_DECISION_MAKER_TITLES));
+        matchedNiche = true;
+        break;
+      }
+    }
+
+    if (!matchedNiche) {
+      titles = [...DEFAULT_DECISION_MAKER_TITLES];
+      industries.push(rawSubject);
+    }
+  }
+
+  return {
+    titles: Array.from(new Set(titles.map((t) => t.trim()).filter(Boolean))).slice(0, 7),
+    industries: Array.from(new Set(industries.map((i) => i.trim()).filter(Boolean))).slice(0, 10),
+    locations: Array.from(new Set(locations.map((l) => l.trim()).filter(Boolean))).slice(0, 10),
+    keywords: Array.from(new Set(keywords.map((k) => k.trim()).filter(Boolean))).slice(0, 10),
+  };
+}
+
 /** Turn a natural-language query into structured filters using AI (or heuristics if unavailable). */
 export async function parseQuery(ai: AiProvider | undefined, q: LeadSearchQuery): Promise<LeadSearchQuery> {
   return (await parseQueryDetailed(ai, q)).query;
@@ -68,35 +217,55 @@ export async function parseQueryDetailed(ai: AiProvider | undefined, q: LeadSear
       {
         role: "system",
         content:
-          'Extract B2B lead search filters from the search text in the query block. JSON {"titles":[], "industries":[], "locations":[], "keywords":[], "companySizes":[]}. Titles are job titles to search on LinkedIn (max 4). Keep arrays short. ' +
+          'Extract precise B2B prospect discovery targeting criteria from the user\'s natural language search query. ' +
+          'Return JSON: {"titles":[], "industries":[], "locations":[], "keywords":[], "companySizes":[]}. ' +
+          'CRITICAL RULES: ' +
+          '1. NEVER output product names, commodities, or business categories as job titles. For example, "rice meals" is a PRODUCT/INDUSTRY, NOT a job title. ' +
+          '2. If the user searches for a product, niche, or business category (e.g., "rice meals", "specialty coffee", "commercial solar", "dental clinics") without specifying a person\'s role: ' +
+          '   - Put the product/niche in keywords (e.g. ["rice meals", "ready to eat", "food processing"]). ' +
+          '   - Set industries to the appropriate category (e.g. ["Food & Beverage", "FMCG", "Packaged Foods"]). ' +
+          '   - Set titles to the relevant decision-makers who run or buy for those companies (e.g. ["Founder", "Co-Founder", "CEO", "Managing Director", "Owner", "Head of Sourcing"]). ' +
+          '3. When the user specifies both roles and company types (e.g. "CTO at fintech in Bangalore"): ' +
+          '   - titles: ["CTO"], industries: ["Financial Services", "Fintech"], locations: ["Bangalore"], keywords: ["fintech"]. ' +
+          '4. Keep arrays short, clean, and deduplicated. ' +
           UNTRUSTED_RULE,
       },
       { role: "user", content: `${fenceBlock("query", q.query, 2000)}\nReturn JSON only.` },
-    ], { maxTokens: 300, temperature: 0 }).catch((e) => {
+    ], { maxTokens: 400, temperature: 0 }).catch((e) => {
       // The reason is kept for the operator; the upstream body never reaches the note verbatim.
       note = `AI query parsing failed (${redact((e as Error).message ?? String(e), { max: 160 })}); used the keyword parser instead`;
       return null;
     });
     if (res && typeof res === "object") {
-      // Shape-checked: each filter is a short list of short strings or it is nothing. A
-      // model that answers {"titles": "CEO; DROP"} or {"industries": {"a": 1}} used to have
-      // that value passed straight into the provider queries.
       const list = (v: unknown, max: number) => stringList(v, max, 100);
       const sizes = list(res.companySizes, 7).filter((x) => /^(?:\d{1,6}-\d{1,6}|\d{1,6}\+)$/.test(x));
+      const aiTitles = list(res.titles, 6);
+      const aiIndustries = list(res.industries, 10);
+      const aiKeywords = list(res.keywords, 10);
       return { note: null, query: {
         ...q,
-        titles: q.titles?.length ? q.titles : list(res.titles, 6),
-        industries: q.industries?.length ? q.industries : list(res.industries, 10),
+        titles: q.titles?.length ? q.titles : (aiTitles.length ? aiTitles : DEFAULT_DECISION_MAKER_TITLES),
+        industries: q.industries?.length ? q.industries : aiIndustries,
         locations: q.locations?.length ? q.locations : list(res.locations, 10),
-        keywords: q.keywords?.length ? q.keywords : list(res.keywords, 10),
+        keywords: q.keywords?.length ? q.keywords : aiKeywords,
         companySizes: q.companySizes?.length ? q.companySizes : sizes,
       } };
     }
     note ??= "AI query parsing returned nothing usable; used the keyword parser instead";
   }
-  // Heuristic: "X at Y in Z"
-  const m = q.query.match(/^(.*?)(?:\s+(?:at|in|for)\s+(.*?))?(?:\s+in\s+(.*))?$/i);
-  return { note, query: { ...q, titles: q.titles ?? (m?.[1] ? [m[1].trim()] : []), industries: q.industries ?? (m?.[2] ? [m[2].trim()] : []), locations: q.locations ?? (m?.[3] ? [m[3].trim()] : []) } };
+  
+  // Robust heuristic parser: handles roles, products, industries, niches & locations
+  const parsed = heuristicParseLeadQuery(q.query);
+  return {
+    note,
+    query: {
+      ...q,
+      titles: q.titles?.length ? q.titles : parsed.titles,
+      industries: q.industries?.length ? q.industries : parsed.industries,
+      locations: q.locations?.length ? q.locations : parsed.locations,
+      keywords: q.keywords?.length ? q.keywords : parsed.keywords,
+    },
+  };
 }
 
 export interface PipelineOutcome {

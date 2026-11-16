@@ -1,5 +1,5 @@
-export const BRAND_NAME = "Scout";
-export const BRAND_TAGLINE = "Lead intelligence for sales teams and AI agents";
+export const BRAND_NAME = "MNB Scout";
+export const BRAND_TAGLINE = "AI-powered prospect discovery, custom audience generation and sales intelligence";
 
 /**
  * Logo mark: a compass/spyglass needle pointing to a found target — scouting
@@ -23,11 +23,28 @@ export function LogoMark({ size = 28, className = "" }: { size?: number; classNa
   );
 }
 
-export function Logo({ size = 28, textClassName = "text-lg", className = "" }: { size?: number; textClassName?: string; className?: string }) {
+export function Logo({
+  size = 28,
+  textClassName = "text-lg",
+  className = "",
+  showBadge = false,
+}: {
+  size?: number;
+  textClassName?: string;
+  className?: string;
+  showBadge?: boolean;
+}) {
   return (
     <div className={`flex items-center gap-2 ${className}`}>
       <LogoMark size={size} />
-      <span className={`font-semibold tracking-tight text-ink-50 ${textClassName}`}>{BRAND_NAME}</span>
+      <div className="flex items-center gap-1.5">
+        <span className={`font-semibold tracking-tight text-ink-50 dark:text-white ${textClassName}`}>{BRAND_NAME}</span>
+        {showBadge && (
+          <span className="rounded bg-brand-500/10 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-brand-600 dark:text-brand-400 border border-brand-500/20">
+            AI Discovery
+          </span>
+        )}
+      </div>
     </div>
   );
 }

@@ -16,15 +16,23 @@ export interface CompanySearchInput {
 export function buildCompanyQueries(input: CompanySearchInput): string[] {
   const loc = input.locations?.length ? input.locations.map((l) => `"${l}"`).join(" OR ") : "";
   const base = input.query ?? "";
-  const inds = input.industries?.length ? input.industries : [""];
-  const kw = input.keywords?.join(" ") ?? "";
+  const inds = (input.industries ?? []).filter(Boolean);
+  const indClause = inds.length ? `(${inds.slice(0, 3).map((i) => `"${i}"`).join(" OR ")})` : "";
+  const kw = (input.keywords ?? []).filter((k) => k.toLowerCase() !== base.toLowerCase()).slice(0, 3).join(" ");
   const qs: string[] = [];
-  for (const ind of inds) {
-    qs.push([base, ind, kw, loc && `(${loc})`, "company"].filter(Boolean).join(" ").trim());
-    // LinkedIn company pages give clean names + one-line descriptions
-    qs.push([`site:linkedin.com/company`, base, ind, kw, loc && `(${loc})`].filter(Boolean).join(" ").trim());
+
+  // General company web search
+  qs.push([base, indClause, kw, loc && `(${loc})`, "companies OR manufacturers OR brands"].filter(Boolean).join(" ").trim());
+  // LinkedIn company pages give clean names + one-line descriptions
+  qs.push([`site:linkedin.com/company`, base, indClause, loc && `(${loc})`].filter(Boolean).join(" ").trim());
+
+  if (inds.length > 0 && !base) {
+    for (const ind of inds.slice(0, 2)) {
+      qs.push([ind, kw, loc && `(${loc})`, "company"].filter(Boolean).join(" ").trim());
+    }
   }
-  return qs;
+
+  return Array.from(new Set(qs.filter(Boolean)));
 }
 
 export function extractCompaniesFromResults(results: SearchResult[]): CompanyCandidate[] {

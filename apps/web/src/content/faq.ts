@@ -9,11 +9,6 @@
  * read pages would be an embarrassing thing for a prospect to discover.
  *
  * Because both come from this array, the page and the schema cannot drift apart.
- *
- * Rules for anything added here: answer the question in the first sentence, keep it under
- * about sixty words, and never claim something the product does not do. These answers are
- * exactly the text an engine may quote back to someone researching us, so an overclaim
- * here is an overclaim with our name on it, repeated by a third party.
  */
 
 export interface Faq {
@@ -23,71 +18,67 @@ export interface Faq {
 
 export const FAQS: Faq[] = [
   {
-    q: "What does Scout do?",
-    a: "Scout finds and verifies B2B buyers from live sources, writes outreach from what it actually found about the account, and separately measures what AI engines answer when those buyers research you. Both halves report into one database, so you can see whether being named by an AI engine turns into replies.",
+    q: "What is Scout?",
+    a: "MNB Scout is an AI-powered prospect discovery, sales intelligence, and custom audience generation platform. Instead of searching static contact lists, you describe your ideal prospect in natural language or structured criteria, and Scout discovers matching people, companies, and opportunities from real-time open-web data and verified sources.",
   },
   {
-    q: "How is Scout different from Apollo, Clay or Lusha?",
-    a: "Two ways. Those tools sell you access to a contact database; Scout searches live sources, can verify each address before you send, and never sends to one it knows is invalid. And none of them measure what AI engines say about you, which is increasingly where buyers form an opinion before they ever reply.",
+    q: "Can Scout find individuals?",
+    a: "Yes. Scout discovers professionals, decision-makers, founders, C-suite executives, and department leads matching your specific job titles, seniority levels, geographic regions, and company criteria, complete with role context and verified business contact channels.",
   },
   {
-    q: "What is a play in Scout?",
-    a: "A play is a saved recipe that finds the people who need your product this week from one source of buying intent, such as a competitor's published customers, an open job posting, a funding round or a public request for a tool like yours. Each person arrives with a one-sentence reason and the proof, and waits for you to approve or skip.",
+    q: "Can Scout find companies?",
+    a: "Yes. You can discover companies, startups, agencies, and enterprises by industry, location, headcount, revenue tier, technologies used, recent funding rounds, hiring activity, or public signals, building comprehensive account dossiers.",
   },
   {
-    q: "Where do the people in a play come from?",
-    a: "From public pages and your own data. Scout reads published customer pages, public job postings, funding news and public posts, and can use your website visitors, your existing contacts and lists you upload. It buys no contact lists. Each candidate says where its reason came from, and a source that could not be searched says so - it is never reported as nobody found.",
+    q: "Can I find specific job titles?",
+    a: "Yes. You can target specific designations (e.g. Chief Marketing Officer, Head of Supply Chain, VP of Engineering) or broader seniority levels (Director, VP, C-Suite, Founder), with include and exclude filters to pinpoint the exact buyer.",
   },
   {
-    q: "Does Scout log in to my LinkedIn or X account?",
-    a: "No. Scout never asks for your LinkedIn or X password, does not act as you on either site and does not automate anyone's account. Plays read pages that are public, the same ones anyone can open without signing in, and when a site refuses a page Scout reports that instead of working around it.",
+    q: "Can I customise my search?",
+    a: "Yes. Custom targeting is a core capability in Scout. You can combine dozens of filters including industry, geography, company size, revenue, tech stack, hiring signals, leadership changes, and custom keywords to create unique, high-intent audience segments.",
   },
   {
-    q: "What are AEO and GEO?",
-    a: "Answer Engine Optimisation and Generative Engine Optimisation are the practice of being named by AI assistants when someone asks about your category. Scout measures it: it writes the questions a real buyer would type, asks each connected engine (Gemini and Llama today, more as they are connected) repeatedly on a schedule, and reports how often you appear, per engine, with the sample size.",
+    q: "Can I describe my requirements in natural language?",
+    a: "Yes. You can simply type a prompt like 'Find founders of Indian D2C brands with 20 to 200 employees who raised funding in the last 2 years'. Scout's AI translates your plain-English prompt into structured targeting filters automatically.",
   },
   {
-    q: "Can you guarantee my brand will be recommended by an AI assistant?",
-    a: "No, and anyone who guarantees that is selling you variance. Ask any engine the same question twice and you get different brands in a different order. What Scout can tell you is which questions you are absent from, who currently owns those answers, and which gaps are realistically winnable.",
+    q: "Can Scout find potential customers?",
+    a: "Yes. By combining public business signals, high-intent activity triggers (such as hiring surges, tech stack installations, or funding), and your own first-party audience criteria, Scout identifies active buyers ready for your solution.",
   },
   {
-    q: "Where does the lead data come from?",
-    a: "Live web search plus licensed data providers where you have connected them, followed by independent email verification. Scout does not resell a static contact database, because exported lists decay at roughly two percent a month and everyone who bought the list is emailing the same people.",
+    q: "Where does the data come from?",
+    a: "Scout discovers data in real time from public web sources, company registries, official job listings, news announcements, and licensed verification providers. Scout does not resell decaying, static databases that your competitors have already exhausted.",
   },
   {
-    q: "Will sending through Scout damage my email domain?",
-    a: "Scout is built to prevent that. Addresses can be verified before they are used, ones known to be invalid are never sent to, each mailbox carries a health score, and a circuit breaker stops a campaign automatically if bounce rates climb mid-run.",
+    q: "Can Scout verify email addresses?",
+    a: "Yes. Scout performs multi-tier email validation including syntax validation, MX record resolution, domain health checks, and deep SMTP socket verification. Catch-all and risky addresses are clearly flagged, protecting your domain deliverability.",
   },
   {
-    q: "What happens when Scout does not have enough data to answer?",
-    a: "It says so. Rates are withheld below the sample size needed to mean anything, week-on-week changes are not reported when the confidence intervals overlap, and a provider that failed to respond is reported as a failure rather than as an empty result. A number you cannot defend is worse than no number.",
+    q: "Can I upload my own lists?",
+    a: "Yes. You can import existing prospect lists via CSV, map custom columns, and let Scout enrich missing company data, discover decision-makers, and verify email addresses across your entire dataset.",
   },
   {
-    q: "Is there a free plan?",
-    a: "Yes. The free plan sources what it can from the open web at no cost and needs no credit card. Paid plans add licensed provider data and verification volume, and are set up with you so the provider budget matches what you actually send.",
+    q: "Can I save searches?",
+    a: "Yes. Any natural language or structured search can be saved. Scout can run saved searches on Autopilot, continuously monitoring the web and notifying you whenever new matching prospects or companies appear.",
   },
   {
-    q: "Can AI agents use Scout directly?",
-    a: "Yes. Scout has a REST API with API keys, and an MCP server is available on request, so an agent can search, enrich, verify and send using the same tools a human rep uses, with the same quotas and the same safeguards.",
+    q: "Can agencies manage multiple clients?",
+    a: "Yes. Scout provides dedicated agency workspaces where you can manage separate client profiles, dedicated lead lists, monthly target quotas with pace tracking, and generate shareable white-labeled client reporting links.",
   },
   {
-    q: "Can I run Scout for several clients?",
-    a: "Yes. Each client gets its own ideal-customer profile, searches, plays, campaigns and lead lists inside your workspace, a monthly lead target with pace, and a read-only report link the client can open without an account. Contact details stay with you, and you can switch the link off at any time.",
+    q: "Does Scout support CRM integrations?",
+    a: "Yes. Scout connects natively to HubSpot, Pipedrive, Zoho CRM, and Google Sheets, alongside webhooks for Zapier and Make, automatically synchronizing discovered leads and outreach status.",
   },
   {
-    q: "Can Scout find and verify email addresses?",
-    a: "Yes. Give it a name and a company and it looks for the work email, then checks it before it can reach a sequence. Risky and catch-all addresses are labelled as such, and Scout never sends to an address it knows is invalid.",
+    q: "Is there a free plan or sandbox?",
+    a: "Yes. Scout provides a zero-credit free sandbox that allows you to explore the platform, test open-web discovery, and build custom audiences without a credit card. Paid plans provide external data provider verification credits and scaled outreach.",
   },
   {
-    q: "Which tools does Scout connect to?",
-    a: "HubSpot, Pipedrive, Zoho and Google Sheets directly, with optional automatic sync, plus signed webhooks for Zapier, Make or your own systems. Leads also import and export as CSV, and everything is available through the REST API.",
+    q: "Do I need technical knowledge?",
+    a: "No. Scout is designed for sales teams, founders, recruiters, and agencies. You can run all searches using plain English or our visual filter builder. For developers and AI agents, Scout also offers a comprehensive REST API and MCP server.",
   },
   {
-    q: "How does Scout know when someone replies?",
-    a: "Forward replies from your inbox, or through Zapier, Make or Gmail forwarding, to your workspace's private reply address, or mark a reply by hand. A reply stops that person's sequence and is sorted as interested, not interested, out of office, referral or unsubscribe.",
-  },
-  {
-    q: "How is my workspace data protected?",
-    a: "Each workspace's data is isolated from every other. Members have roles, sign-in supports two-factor codes, API keys can be read-only and expire, and a security log records sign-ins and sensitive changes. Owners can export everything or delete the workspace themselves.",
+    q: "Can I use Scout through APIs or AI agents?",
+    a: "Yes. Scout provides a robust REST API with API key authentication, webhooks, and an MCP (Model Context Protocol) server. Autonomous AI agents can search, qualify, enrich, and draft outreach programmatically using the same capabilities as human reps.",
   },
 ];

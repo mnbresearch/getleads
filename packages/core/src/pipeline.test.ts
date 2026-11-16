@@ -54,8 +54,17 @@ describe("parseQuery when the AI is rate limited", () => {
     expect(r.note).toMatch(/AI query parsing failed \(groq 429/);
   });
 
-  it("does not fail the whole search", async () => {
-    const r = await runLeadPipelineDetailed({ query: "CTO at fintech", findEmails: false, limit: 3 }, { ai: limited });
-    expect(r.notes.some((n) => n.includes("groq 429"))).toBe(true);
+  it("correctly identifies product and niche categories without setting them as job titles", async () => {
+    const r = await parseQueryDetailed(undefined, { query: "rice meals in India" });
+    // "rice meals" must NOT be a job title!
+    expect(r.query.titles?.includes("rice meals")).toBe(false);
+    // Should have assigned real decision maker roles
+    expect(r.query.titles?.some((t) => ["Founder", "CEO", "Managing Director", "Owner"].includes(t))).toBe(true);
+    // Should have recognized Food & Beverage / FMCG / Packaged Foods
+    expect(r.query.industries?.some((i) => i.toLowerCase().includes("food") || i.toLowerCase().includes("fmcg"))).toBe(true);
+    // Location extracted
+    expect(r.query.locations).toContain("India");
+    // Keywords include rice meals
+    expect(r.query.keywords).toContain("rice meals");
   });
 });

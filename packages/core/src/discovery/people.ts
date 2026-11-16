@@ -78,13 +78,28 @@ export interface PeopleSearchInput {
 
 /** Build one or more search queries targeting LinkedIn profiles. */
 export function buildPeopleQueries(input: PeopleSearchInput): string[] {
-  const titleGroups = (input.titles?.length ? input.titles : [""]).map((t) => (t ? `"${t}"` : ""));
   const loc = input.locations?.length ? input.locations.map((l) => `"${l}"`).join(" OR ") : "";
   const ind = input.industries?.length ? input.industries.slice(0, 3).map((i) => `"${i}"`).join(" OR ") : "";
   const kw = input.keywords?.length ? input.keywords.slice(0, 4).join(" ") : "";
   const comp = input.companyName ? `"${input.companyName}"` : "";
+
+  const validTitles = (input.titles ?? []).map((t) => t.trim()).filter(Boolean);
+  const titleBatches: string[] = [];
+  if (validTitles.length === 0) {
+    titleBatches.push("");
+  } else if (validTitles.length === 1) {
+    titleBatches.push(`"${validTitles[0]}"`);
+  } else {
+    // Group into batches of up to 3 titles using OR
+    for (let i = 0; i < validTitles.length; i += 3) {
+      const slice = validTitles.slice(i, i + 3);
+      titleBatches.push(`(${slice.map((t) => `"${t}"`).join(" OR ")})`);
+      if (titleBatches.length >= 2) break; // max 2 batches (up to 6 titles)
+    }
+  }
+
   const queries: string[] = [];
-  for (const t of titleGroups) {
+  for (const t of titleBatches) {
     const q = [`site:linkedin.com/in`, t, comp, loc && `(${loc})`, ind && `(${ind})`, kw].filter(Boolean).join(" ");
     queries.push(q.trim());
   }
