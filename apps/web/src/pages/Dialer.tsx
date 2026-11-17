@@ -67,7 +67,16 @@ export function DialerPage() {
     setCallSeconds(0);
     setIsMuted(false);
     setIsOnHold(false);
-    toast(`Connecting to ${activeContact.name} (${activeContact.phone})…`);
+    // Scout does not carry voice itself: the call is placed by the device
+    // (phone, or a softphone registered for tel: links) and this screen times
+    // it and logs the outcome. Saying "connecting" here would claim otherwise.
+    const digits = String(activeContact.phone ?? "").replace(/[^\d+]/g, "");
+    if (digits) {
+      window.location.href = `tel:${digits}`;
+      toast(`Calling ${activeContact.name} from your phone. Log the outcome here when you finish.`);
+    } else {
+      toast(`${activeContact.name} has no phone number on file. The timer is running for a manual call.`);
+    }
   };
 
   const endCall = async () => {
@@ -125,11 +134,11 @@ export function DialerPage() {
   return (
     <Page
       title="AI Sales Dialer"
-      subtitle="Intelligent calling workspace with instant CRM context, live objection battlecards, and automatic post-call disposition logging."
+      subtitle="A call queue with lead context, objection battlecards and outcome logging. Calls are placed from your phone or softphone."
       actions={
         <div className="flex items-center gap-2">
           <span className="badge border border-emerald-300 bg-emerald-50 text-emerald-800 font-medium text-xs">
-            ● Voice WebRTC Ready (Twilio/Exotel)
+            Calls dial from your phone · logged here
           </span>
           <button className="btn-secondary text-xs" onClick={loadQueue}>
             Refresh Queue

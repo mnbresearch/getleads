@@ -6,7 +6,7 @@ import { apiFetch } from "../lib/api";
 import { sendPageView, sendPageViewWhenSeen } from "../lib/pageview";
 
 /**
- * MNB SCOUT — LANDING PAGE
+ * MNB SCOUT - LANDING PAGE
  *
  * Brand: MNB Scout (owned by MNB Research)
  * Category: AI-Powered Lead Discovery, Prospect Intelligence and Custom Audience Generation Platform
@@ -93,18 +93,6 @@ function DatabaseIcon({ className = "h-4 w-4" }: { className?: string }) {
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3" />
       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5" />
     </svg>
-  );
-}
-
-function StarRating() {
-  return (
-    <div className="flex text-amber-500 gap-0.5">
-      {[...Array(5)].map((_, i) => (
-        <svg key={i} className="h-3.5 w-3.5 fill-current" viewBox="0 0 20 20">
-          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
-        </svg>
-      ))}
-    </div>
   );
 }
 
@@ -274,7 +262,8 @@ function NavigationBar() {
           </Link>
           <button
             type="button"
-            className="grid h-8 w-8 place-items-center rounded-lg border border-black/10 bg-black/[0.03] text-ink-100 lg:hidden"
+            data-testid="landing-menu-button"
+            className="grid h-10 w-10 place-items-center rounded-lg border border-black/10 bg-black/[0.03] text-ink-100 lg:hidden"
             aria-label={menuOpen ? "Close menu" : "Open menu"}
             aria-expanded={menuOpen}
             onClick={() => setMenuOpen((v) => !v)}
@@ -488,9 +477,7 @@ function HeroSection() {
           </div>
 
           <div className="mt-3 flex items-center justify-center gap-2 text-xs text-ink-400">
-            <StarRating />
-            <span className="font-semibold text-ink-50">4.9 / 5</span>
-            <span>· Trusted by 1,400+ modern revenue teams & lead gen agencies</span>
+            <span>Free plan to start · No card needed · Every lead comes with the reason it matches</span>
           </div>
         </div>
 
@@ -502,7 +489,7 @@ function HeroSection() {
               <span className="flex h-3 w-3 rounded-full bg-amber-400" />
               <span className="flex h-3 w-3 rounded-full bg-emerald-400" />
               <span className="ml-2 font-mono text-xs font-semibold text-ink-400">
-                MNB Scout — Custom Lead Discovery Console
+                MNB Scout · Lead discovery console
               </span>
             </div>
 
@@ -751,7 +738,7 @@ function WhatCanYouFindSection() {
           Comprehensive Discovery Scope
         </span>
         <h2 className="mt-3 text-3xl sm:text-4xl font-extrabold tracking-tight text-ink-50">
-          One Platform. Endless Prospecting Possibilities.
+          One platform for finding, checking and reaching prospects
         </h2>
         <p className="mt-3 text-sm sm:text-base text-ink-300 leading-relaxed">
           Scout moves far beyond static email directories. Search across people, companies, high-intent buyers, and bespoke audience segments using one unified intelligence engine.
@@ -1084,7 +1071,7 @@ function ProspectIntelligenceSection() {
             <div className="card p-5 border-black/[0.08]">
               <h4 className="font-bold text-sm text-ink-50">Multi-Tier Contact Verification</h4>
               <p className="mt-1 text-xs text-ink-300 leading-relaxed">
-                Emails undergo syntax checking, MX record resolution, domain health assessment, and deep SMTP handshakes to guarantee 95%+ deliverability.
+                Emails go through syntax checks, MX lookup, domain health and an SMTP probe, and each one is labelled valid, risky or invalid before you send.
               </p>
             </div>
             <div className="card p-5 border-black/[0.08]">
@@ -1139,7 +1126,7 @@ function ProspectIntelligenceSection() {
 
             <div className="mt-6 pt-4 border-t border-black/5">
               <div className="text-xs text-ink-400">
-                <strong className="text-ink-50">Verification Status:</strong> Primary MX verified via direct socket probe. Catch-all: False. Bounce risk: Low (&lt;1.2%).
+                <strong className="text-ink-50">Verification Status:</strong> Primary MX verified via direct socket probe. Catch-all: False. Bounce risk: Low.
               </div>
             </div>
           </div>
@@ -1147,15 +1134,15 @@ function ProspectIntelligenceSection() {
           {/* Right Column */}
           <div className="space-y-4">
             <div className="card p-5 border-black/[0.08]">
-              <h4 className="font-bold text-sm text-ink-50">Zero Stale List Guarantees</h4>
+              <h4 className="font-bold text-sm text-ink-50">Checked when you find them</h4>
               <p className="mt-1 text-xs text-ink-300 leading-relaxed">
-                Traditional CSV databases decay at 2% monthly. Scout queries live surfaces so every phone number and email is validated prior to your campaign.
+                Bought lists go stale while they sit in a spreadsheet. Scout looks people up from live sources when you search, and verifies the email before it goes into a campaign.
               </p>
             </div>
             <div className="card p-5 border-black/[0.08]">
               <h4 className="font-bold text-sm text-ink-50">Algorithmic Deliverability Defense</h4>
               <p className="mt-1 text-xs text-ink-300 leading-relaxed">
-                Automated ramp schedules and bounce circuit breakers trip at 2.1% bounce rate, protecting your corporate sending domain from damage.
+                Sending warms up gradually and halts automatically when bounces climb, so a bad list cannot burn your sending domain.
               </p>
             </div>
             <div className="card p-5 border-black/[0.08]">
@@ -1263,16 +1250,20 @@ function SalesExecutionSection() {
       desc: "Maps the complete buying group (Champions, CFO Economic Buyers, SecOps, Legal) to safeguard against single-threaded deal stalls.",
     },
     {
-      title: "Native WebRTC Dialer & Battlecards",
-      desc: "One-click browser dialing with instant objection battlecards and disposition logging right back into your prospect lists.",
+      title: "Call Queue & Battlecards",
+      desc: "Work a prioritised call list with objection battlecards beside each lead. Calls go out from your phone and the outcome is logged back to the lead.",
     },
     {
       title: "Digital Sales Rooms (DSR)",
-      desc: "Equip your champion with collaborative deal hubs containing interactive Mutual Action Plans and real-time CFO telemetry.",
+      desc: "Give your champion a shared deal page with the proposal, a mutual action plan and the next steps, and see when they open it.",
     },
     {
-      title: "Two-Way CRM Synchronization",
-      desc: "Bi-directional sync with HubSpot, Pipedrive, Zoho CRM, Google Sheets, or webhooks for Zapier and Make.",
+      title: "CRM & Sheets Export",
+      desc: "Send leads to HubSpot, Pipedrive, Zoho CRM or Google Sheets, or to Zapier and Make by webhook.",
+    },
+    {
+      title: "AI Search Visibility",
+      desc: "See whether AI assistants name your company when buyers ask about your category. Sampled on Gemini and Llama today.",
     },
     {
       title: "Autopilot Saved Searches",
@@ -1407,7 +1398,7 @@ function AgencyWorkspaceSection() {
             Agency Infrastructure
           </span>
           <h2 className="mt-3 text-3xl sm:text-4xl font-extrabold tracking-tight text-ink-50">
-            One Scout Workspace. Multiple Clients. Unlimited Possibilities.
+            One Scout workspace for every client you run
           </h2>
           <p className="mt-3 text-sm sm:text-base text-ink-300 leading-relaxed">
             Eliminate chaotic spreadsheets and multiple logins. Run lead generation for all your clients from one centralized, collaborative agency dashboard.
@@ -1505,7 +1496,7 @@ function DifferentiationMatrixSection() {
   const matrix = [
     { capability: "Natural Language AI Prospect Search", cells: [true, false, false, "varies"] },
     { capability: "Custom Targeting (roles, niches, commodities, geography)", cells: [true, "varies", false, true] },
-    { capability: "Live Web & Registry Discovery (not 2% monthly decaying lists)", cells: [true, false, false, true] },
+    { capability: "Live web & registry discovery (not a static list)", cells: [true, false, false, true] },
     { capability: "Multi-Tier Waterfall Email Verification (socket MX probe)", cells: [true, "varies", true, false] },
     { capability: "Evidence-Backed Relevance (proof sentence on every lead)", cells: [true, false, false, "varies"] },
     { capability: "Intent-Driven Discovery Plays (hiring, competitor displacement)", cells: [true, false, false, false] },
@@ -1562,7 +1553,7 @@ function DifferentiationMatrixSection() {
                       ) : cell === "varies" ? (
                         <span className="text-ink-400 italic">Varies</span>
                       ) : (
-                        <span className="text-ink-300">—</span>
+                        <span className="text-ink-300">-</span>
                       )}
                     </td>
                   ))}
@@ -1603,7 +1594,7 @@ function InteractiveProductDemoSection() {
           Try Finding Your Ideal Prospects
         </h2>
         <p className="mt-3 text-sm text-ink-300">
-          Experience how Scout extracts targeting criteria and discovers matching opportunities.
+          A worked example with sample data: how Scout turns a sentence into targeting criteria and matches. Your results come from live sources.
         </p>
       </div>
 

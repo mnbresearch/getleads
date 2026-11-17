@@ -125,3 +125,22 @@
     animation: none !important;
   }
 }
+
+/* Glass surface for the Command Center tiles. A plain card where blur is
+   unsupported or the user asked for less transparency. */
+.glass {
+  background-color: rgb(255 255 255 / 0.72);
+  border-color: rgb(0 0 0 / 0.08);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 0.04), 0 10px 28px -14px rgb(0 0 0 / 0.18);
+}
+.dark .glass {
+  background-color: rgb(15 23 42 / 0.66);
+  border-color: rgb(255 255 255 / 0.1);
+}
+@supports ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  .glass { -webkit-backdrop-filter: blur(14px) saturate(140%); backdrop-filter: blur(14px) saturate(140%); }
+}
+@media (prefers-reduced-transparency: reduce) {
+  .glass { -webkit-backdrop-filter: none; backdrop-filter: none; background-color: rgb(255 255 255); }
+  .dark .glass { background-color: rgb(15 23 42); }
+}

@@ -1778,6 +1778,14 @@ function CreditsTab() {
 }
 
 type Tab = "overview" | "system" | "orgs" | "leads" | "growth" | "tools" | "credits" | "plans" | "security" | "deliverability";
+// Grouped by what the operator came to do. Every tab is still here once.
+const TAB_GROUPS: readonly { name: string; tabs: readonly Tab[] }[] = [
+  { name: "Home", tabs: ["overview"] },
+  { name: "Customers", tabs: ["orgs", "leads", "growth"] },
+  { name: "Billing", tabs: ["plans", "credits"] },
+  { name: "Operations", tabs: ["tools", "deliverability", "system"] },
+  { name: "Trust", tabs: ["security"] },
+];
 const TABS: readonly (readonly [Tab, string])[] = [["overview", "Overview"], ["orgs", "Users & workspaces"], ["leads", "Upgrade requests"], ["growth", "Growth"], ["deliverability", "Deliverability"], ["tools", "Tools & limits"], ["credits", "Credits left"], ["plans", "Pricing"], ["security", "Security"], ["system", "System"]];
 
 export function AdminDashboardPage() {
@@ -1830,18 +1838,27 @@ export function AdminDashboardPage() {
         </div>
         <button className="btn-secondary" onClick={() => { adminLogout(); navigate("/admin/login", { replace: true }); }}>Sign out</button>
       </header>
-      <main className="mx-auto max-w-6xl p-4 sm:p-6">
+      <div className="mx-auto max-w-7xl gap-6 p-4 sm:p-6 lg:grid lg:grid-cols-[13rem_minmax(0,1fr)]">
+        <nav className="-mx-4 mb-5 flex gap-4 overflow-x-auto whitespace-nowrap px-4 sm:mx-0 sm:px-0 lg:sticky lg:top-6 lg:mb-0 lg:flex-col lg:gap-3 lg:self-start lg:overflow-visible lg:whitespace-normal" aria-label="Admin sections">
+          {TAB_GROUPS.map((g) => (
+            <div key={g.name} className="flex shrink-0 items-center gap-1 lg:block lg:space-y-0.5">
+              <div className="pr-1 text-[10px] font-bold uppercase tracking-wider text-ink-400 lg:px-3 lg:pb-1">{g.name}</div>
+              {g.tabs.map((id) => {
+                const label = TABS.find(([t]) => t === id)?.[1] ?? id;
+                return (
+                  <button key={id} className={`shrink-0 rounded-lg px-3 py-1.5 text-left text-sm max-lg:min-h-[40px] lg:block lg:w-full ${tab === id ? "bg-brand-600 text-white" : "text-ink-300 hover:bg-black/5"}`} aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>{label}</button>
+                );
+              })}
+            </div>
+          ))}
+        </nav>
+      <main className="min-w-0">
         {plansErr && !plans && (
           <div className="mb-4 rounded-lg border border-red-200 bg-red-50 p-3 text-sm text-red-700" role="alert">
             Could not load plans ({plansErr}) - plan names and the plan picker will be incomplete.{" "}
             <button className={LINK_BTN} disabled={plansLoading} onClick={loadPlans}>{plansLoading ? "Retrying…" : "Retry"}</button>
           </div>
         )}
-        <nav className="-mx-4 mb-5 flex gap-2 overflow-x-auto whitespace-nowrap px-4 sm:mx-0 sm:px-0" aria-label="Admin sections">
-          {TABS.map(([id, label]) => (
-            <button key={id} className={`shrink-0 rounded-lg px-3 py-1.5 text-sm max-lg:min-h-[40px] ${tab === id ? "bg-brand-600 text-white" : "text-ink-300 hover:bg-black/5"}`} aria-current={tab === id ? "page" : undefined} onClick={() => setTab(id)}>{label}</button>
-          ))}
-        </nav>
         {tab === "orgs" && <OrgsTab plans={plans} plansLoading={plansLoading} selected={selectedOrg} onSelect={setSelectedOrg} />}
         {tab === "leads" && <LeadsTab plans={plans} onViewOrg={(id) => { setSelectedOrg(id); setTab("orgs"); }} />}
         {tab === "growth" && <GrowthTab />}
@@ -1853,6 +1870,7 @@ export function AdminDashboardPage() {
         {tab === "overview" && <OverviewTab onOpenTab={(id) => { if (TABS.some(([t]) => t === id)) setTab(id as Tab); }} />}
         {tab === "system" && <SystemTab />}
       </main>
+      </div>
     </div>
   );
 }

@@ -75,10 +75,10 @@ export const FAQS: Faq[] = [
   },
   {
     q: "Do I need technical knowledge?",
-    a: "No. Scout is designed for sales teams, founders, recruiters, and agencies. You can run all searches using plain English or our visual filter builder. For developers and AI agents, Scout also offers a comprehensive REST API and MCP server.",
+    a: "No. Scout is designed for sales teams, founders, recruiters, and agencies. You can run all searches using plain English or our visual filter builder. For developers and AI agents there is a REST API, and an MCP server is available on request.",
   },
   {
     q: "Can I use Scout through APIs or AI agents?",
-    a: "Yes. Scout provides a robust REST API with API key authentication, webhooks, and an MCP (Model Context Protocol) server. Autonomous AI agents can search, qualify, enrich, and draft outreach programmatically using the same capabilities as human reps.",
+    a: "Yes. Scout has a REST API with API key authentication and webhooks, so agents can search, qualify, enrich and draft outreach with the same capabilities as a rep. An MCP server is available on request.",
   },
 ];

@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 
 export interface CommandItem {
   id: string;
-  category: "Actions" | "Navigation" | "AI Engine";
+  category: "Actions" | "Navigation";
   title: string;
   subtitle: string;
   icon: string;
@@ -14,13 +14,9 @@ export interface CommandItem {
 export function CommandPalette({
   open,
   onClose,
-  activeModel,
-  onSelectModel,
 }: {
   open: boolean;
   onClose: () => void;
-  activeModel: string;
-  onSelectModel: (m: string) => void;
 }) {
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -207,51 +203,6 @@ export function CommandPalette({
       },
     },
 
-    // AI Model Switcher
-    {
-      id: "model-scout-router",
-      category: "AI Engine",
-      title: "Scout Autonomous Router (Recommended)",
-      subtitle: "Auto-routes between Gemini 1.5, Claude 3.5 & DeepSeek for optimal precision",
-      icon: "⚡",
-      run: () => {
-        onSelectModel("Scout Autonomous Router");
-        onClose();
-      },
-    },
-    {
-      id: "model-gemini-pro",
-      category: "AI Engine",
-      title: "Gemini 1.5 Pro (Deep Research & Signals)",
-      subtitle: "2M token context for complete account dossiers and multi-source intent",
-      icon: "🧠",
-      run: () => {
-        onSelectModel("Gemini 1.5 Pro");
-        onClose();
-      },
-    },
-    {
-      id: "model-claude-sonnet",
-      category: "AI Engine",
-      title: "Claude 3.5 Sonnet (Hyper-Personalized Copy)",
-      subtitle: "State-of-the-art cold outbound tone, empathy & objection battlecards",
-      icon: "🖋️",
-      run: () => {
-        onSelectModel("Claude 3.5 Sonnet");
-        onClose();
-      },
-    },
-    {
-      id: "model-deepseek-r1",
-      category: "AI Engine",
-      title: "DeepSeek R1 / Reasoning (Committee Graph)",
-      subtitle: "Chain-of-thought analysis for complex multi-stakeholder enterprise deals",
-      icon: "🔬",
-      run: () => {
-        onSelectModel("DeepSeek R1");
-        onClose();
-      },
-    },
   ];
 
   const filtered = query.trim()
@@ -302,7 +253,7 @@ export function CommandPalette({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             onKeyDown={handleKeyDown}
-            placeholder="Search commands, run AI actions, or switch model engine (esc to exit)..."
+            placeholder="Search pages and actions (esc to close)…"
             className="flex-1 bg-transparent text-sm text-ink-50 dark:text-white placeholder:text-ink-400 dark:placeholder:text-slate-400 focus:outline-none"
           />
           {query && (
@@ -318,14 +269,8 @@ export function CommandPalette({
           </span>
         </div>
 
-        {/* Current Active Engine Indicator */}
-        <div className="flex items-center justify-between px-4 py-2 text-[11px] bg-brand-50/50 dark:bg-brand-950/30 border-b border-black/5 dark:border-white/5 text-ink-300 dark:text-slate-300">
-          <div className="flex items-center gap-1.5">
-            <span className="flex h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-            <span>Active Intelligence Engine:</span>
-            <strong className="text-brand-700 dark:text-brand-400 font-semibold">{activeModel}</strong>
-          </div>
-          <span className="text-ink-400 dark:text-slate-400">Use ↑↓ arrows to navigate, ↵ to select</span>
+        <div className="flex items-center justify-end px-4 py-2 text-[11px] border-b border-black/5 dark:border-white/5 text-ink-400 dark:text-slate-400">
+          Use ↑↓ to move, ↵ to open
         </div>
 
         {/* Results List */}

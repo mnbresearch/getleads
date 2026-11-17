@@ -11,68 +11,68 @@ interface NavCategory {
   items: { to: string; label: string; icon: string; badge?: string }[];
 }
 
+// Grouped in the order the work happens: find people, reach them, run the
+// deals, then the AI helpers and the workspace itself. Every route that was
+// in the menu is still here.
 const navCategories: NavCategory[] = [
   {
-    name: "Revenue Pipeline",
-    items: [
-      { to: "/", label: "Command Center", icon: "▦" },
-      { to: "/pipeline", label: "Deals & CRM", icon: "📊" },
-      { to: "/salesfloor", label: "Virtual Salesfloor", icon: "👥", badge: "Live" },
-      { to: "/rooms", label: "Digital Sales Rooms", icon: "🤝" },
-      { to: "/committees", label: "Buying Committees", icon: "👥" },
-    ],
+    name: "Home",
+    items: [{ to: "/", label: "Command Center", icon: "▦" }],
   },
   {
-    name: "Prospecting & Intent Radar",
+    name: "Find leads",
     items: [
       { to: "/search", label: "Find Leads", icon: "⌕" },
-      { to: "/waterfall", label: "Waterfall Enrichment", icon: "💧", badge: "Moat" },
-      { to: "/surges", label: "Signal Surges", icon: "⚡", badge: "Hot" },
       { to: "/leads", label: "Leads Database", icon: "☰" },
-      { to: "/visitors", label: "Website Visitors", icon: "◉" },
-      { to: "/signals", label: "Intent Signals", icon: "◈" },
       { to: "/icps", label: "Ideal Customers", icon: "◎" },
+      { to: "/waterfall", label: "Waterfall Enrichment", icon: "💧" },
+      { to: "/signals", label: "Intent Signals", icon: "◈" },
+      { to: "/surges", label: "Signal Surges", icon: "⚡" },
+      { to: "/visitors", label: "Website Visitors", icon: "◉" },
     ],
   },
   {
-    name: "Autonomous Outbound",
+    name: "Outreach",
     items: [
-      { to: "/gtm", label: "Autonomous GTM", icon: "🎯", badge: "New" },
-      { to: "/dialer", label: "AI Sales Dialer", icon: "📞" },
-      { to: "/email-coach", label: "Email Coach", icon: "✉" },
       { to: "/campaigns", label: "Campaigns", icon: "📨" },
       { to: "/plays", label: "Plays & Cadences", icon: "▷" },
+      { to: "/email-coach", label: "Email Coach", icon: "✉" },
+      { to: "/dialer", label: "AI Sales Dialer", icon: "📞" },
+      { to: "/gtm", label: "Autonomous GTM", icon: "🎯", badge: "New" },
       { to: "/autopilot", label: "Autopilot Engine", icon: "∞" },
     ],
   },
   {
-    name: "AI Workforce & Agents",
+    name: "Pipeline",
     items: [
-      { to: "/digital-workers", label: "Digital SDRs (Alice & Jordan)", icon: "🤖", badge: "24/7" },
+      { to: "/pipeline", label: "Deals & CRM", icon: "📊" },
+      { to: "/committees", label: "Buying Committees", icon: "👥" },
+      { to: "/rooms", label: "Digital Sales Rooms", icon: "🤝" },
+      { to: "/salesfloor", label: "Virtual Salesfloor", icon: "👥" },
+      { to: "/tasks", label: "Tasks", icon: "☑" },
+    ],
+  },
+  {
+    name: "AI agents",
+    items: [
       { to: "/agent", label: "Agent Console", icon: "⚡" },
+      { to: "/digital-workers", label: "Digital SDRs (Alice & Jordan)", icon: "🤖" },
       { to: "/coaching", label: "AI Roleplay Coaching", icon: "🎯" },
       { to: "/visibility", label: "AI Search Visibility", icon: "◇" },
     ],
   },
   {
-    name: "Workspace & Controls",
+    name: "Workspace",
     items: [
       { to: "/analytics", label: "Analytics & Quota", icon: "▤" },
-      { to: "/tasks", label: "Tasks", icon: "☑" },
       { to: "/automation", label: "Automation", icon: "⟳" },
-      { to: "/tools", label: "Diagnostic Tools", icon: "⚒" },
       { to: "/clients", label: "Agency Clients", icon: "◧" },
+      { to: "/tools", label: "Diagnostic Tools", icon: "⚒" },
       { to: "/settings", label: "Settings", icon: "⚙" },
     ],
   },
 ];
 
-const AI_ENGINES = [
-  { id: "Scout Autonomous Router", label: "⚡ Scout Router", desc: "Auto-routes between models for optimal precision" },
-  { id: "Gemini 1.5 Pro", label: "🧠 Gemini 1.5 Pro", desc: "Deep multi-source intent & company dossiers" },
-  { id: "Claude 3.5 Sonnet", label: "🖋️ Claude 3.5", desc: "Hyper-personalized outbound copy & battlecards" },
-  { id: "DeepSeek R1", label: "🔬 DeepSeek R1", desc: "Chain-of-thought buying committee graph mapping" },
-];
 
 function DemoBanner({ daysLeft, expiresAt }: { daysLeft: number | null; expiresAt: string | null }) {
   const formattedDate = expiresAt ? new Date(expiresAt).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) : "";
@@ -149,7 +149,6 @@ export function Shell({ children }: { children: ReactNode }) {
   const [demoExpired, setDemoExpired] = useState(false);
   const [meErr, setMeErr] = useState<string | null>(null);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
-  const [engineMenuOpen, setEngineMenuOpen] = useState(false);
 
   // Theme Management (Dark / Light Mode Toggle)
   const [isDarkMode, setIsDarkMode] = useState<boolean>(() => {
@@ -161,16 +160,26 @@ export function Shell({ children }: { children: ReactNode }) {
     return false;
   });
 
-  // Active AI Model Engine Selection
-  const [activeModel, setActiveModel] = useState<string>(() => {
-    if (typeof window !== "undefined") {
-      return localStorage.getItem("scout_ai_engine") || "Scout Autonomous Router";
-    }
-    return "Scout Autonomous Router";
-  });
-
   const navigate = useNavigate();
   const location = useLocation();
+
+  const [closedGroups, setClosedGroups] = useState<Record<string, boolean>>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("scout_nav_closed") || "{}") as Record<string, boolean>;
+    } catch {
+      return {};
+    }
+  });
+  const toggleGroup = (name: string) =>
+    setClosedGroups((prev) => {
+      const next = { ...prev, [name]: !prev[name] };
+      try {
+        localStorage.setItem("scout_nav_closed", JSON.stringify(next));
+      } catch {
+        /* storage unavailable */
+      }
+      return next;
+    });
 
   useEffect(() => {
     if (isDarkMode) {
@@ -184,12 +193,6 @@ export function Shell({ children }: { children: ReactNode }) {
 
   const toggleTheme = () => {
     setIsDarkMode((prev) => !prev);
-  };
-
-  const handleSelectModel = (model: string) => {
-    setActiveModel(model);
-    localStorage.setItem("scout_ai_engine", model);
-    setEngineMenuOpen(false);
   };
 
   // Keyboard shortcut listener for Command Palette (⌘K or Ctrl+K)
@@ -291,13 +294,26 @@ export function Shell({ children }: { children: ReactNode }) {
         </div>
 
         {/* Categorized Nav Hierarchy */}
-        <nav className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-2 py-3">
-          {navCategories.map((cat) => (
+        <nav className="flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-2 py-3">
+          {navCategories.map((cat) => {
+            // A group folds and remembers it; the group holding the open page
+            // never folds, so you can always see where you are.
+            const holdsActive = cat.items.some((i) =>
+              i.to === "/" ? location.pathname === "/" : location.pathname.startsWith(i.to),
+            );
+            const folded = !!closedGroups[cat.name] && !holdsActive;
+            return (
             <div key={cat.name} className="space-y-0.5">
-              <div className="px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-slate-400">
-                {cat.name}
-              </div>
-              {cat.items.map((item) => (
+              <button
+                type="button"
+                onClick={() => toggleGroup(cat.name)}
+                aria-expanded={!folded}
+                className="flex w-full items-center justify-between px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-slate-400 hover:text-ink-100 dark:hover:text-white"
+              >
+                <span>{cat.name}</span>
+                <span aria-hidden className={`transition-transform ${folded ? "-rotate-90" : ""}`}>▾</span>
+              </button>
+              {!folded && cat.items.map((item) => (
                 <NavLink
                   key={item.to}
                   to={item.to}
@@ -329,25 +345,28 @@ export function Shell({ children }: { children: ReactNode }) {
                 </NavLink>
               ))}
             </div>
-          ))}
+            );
+          })}
         </nav>
 
-        {/* Real-time Sandbox & Credits Meter */}
+        {/* Plan note — only on the free sandbox, where it is true. */}
         <div className="shrink-0 border-t border-black/10 dark:border-white/10 p-3 bg-black/[0.01] dark:bg-white/[0.02]">
+          {(!me?.org.plan || me.org.plan === "free") && (
           <div className="rounded-lg border border-black/5 dark:border-white/10 p-2.5 bg-surface dark:bg-slate-900">
             <div className="flex items-center justify-between text-[11px] mb-1">
               <span className="font-semibold text-ink-50 dark:text-white flex items-center gap-1.5">
                 <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
-                Zero-Cost Sandbox
+                Free plan
               </span>
               <a href="/upgrade" className="text-[10px] font-bold text-brand-600 dark:text-brand-400 hover:underline">
                 Upgrade ↗
               </a>
             </div>
             <p className="text-[10px] text-ink-400 dark:text-slate-400 leading-tight">
-              Test platform features without burning costly verified provider credits.
+              Try the platform on the free plan. Verified contact credits come with a paid plan.
             </p>
           </div>
+          )}
 
           {/* User profile & actions */}
           <div className="mt-3 flex items-center justify-between text-xs text-ink-400 dark:text-slate-400">
@@ -390,55 +409,15 @@ export function Shell({ children }: { children: ReactNode }) {
               className="hidden sm:flex items-center gap-2.5 px-3 py-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.04] text-xs text-ink-400 dark:text-slate-400 hover:border-brand-400 dark:hover:border-brand-500 transition w-72 lg:w-96 text-left"
             >
               <span>⌕</span>
-              <span className="flex-1 truncate">Search leads, run AI actions, switch models...</span>
+              <span className="flex-1 truncate">Search pages and actions…</span>
               <kbd className="rounded bg-black/5 dark:bg-white/10 px-1.5 py-0.5 text-[10px] font-mono text-ink-400 dark:text-slate-300">
                 ⌘K
               </kbd>
             </button>
           </div>
 
-          {/* Right Top Bar Controls: AI Engine Switcher & Dark/Light Toggle */}
+          {/* Right top-bar controls: theme and dialer */}
           <div className="flex items-center gap-2.5">
-            {/* Active AI Intelligence Engine Selector (Krater.ai Model Switcher) */}
-            <div className="relative">
-              <button
-                onClick={() => setEngineMenuOpen((prev) => !prev)}
-                className="flex items-center gap-1.5 rounded-lg border border-black/10 dark:border-white/10 bg-black/[0.02] dark:bg-white/[0.04] px-2.5 py-1 text-xs font-semibold text-ink-100 dark:text-white hover:bg-black/5 dark:hover:bg-white/10 transition"
-              >
-                <span>{activeModel.split(" ")[0]}</span>
-                <span className="hidden md:inline">{activeModel}</span>
-                <span className="text-[10px] text-ink-400">▾</span>
-              </button>
-
-              {engineMenuOpen && (
-                <>
-                  <div className="fixed inset-0 z-40" onClick={() => setEngineMenuOpen(false)} />
-                  <div className="absolute right-0 mt-2 z-50 w-72 rounded-xl border border-black/10 dark:border-white/10 bg-surface dark:bg-slate-900 shadow-xl p-2 space-y-1 animate-rise">
-                    <div className="px-2 py-1 text-[10px] font-bold uppercase tracking-wider text-ink-400 dark:text-slate-400 border-b border-black/5 dark:border-white/5 mb-1">
-                      Select Intelligence Engine
-                    </div>
-                    {AI_ENGINES.map((eng) => (
-                      <div
-                        key={eng.id}
-                        onClick={() => handleSelectModel(eng.id)}
-                        className={`p-2 rounded-lg text-xs cursor-pointer transition ${
-                          activeModel === eng.id
-                            ? "bg-brand-50 dark:bg-brand-950/50 text-brand-700 dark:text-brand-400 border border-brand-200 dark:border-brand-800"
-                            : "hover:bg-black/5 dark:hover:bg-white/5 text-ink-100 dark:text-slate-200"
-                        }`}
-                      >
-                        <div className="font-semibold flex items-center justify-between">
-                          <span>{eng.label}</span>
-                          {activeModel === eng.id && <span className="text-brand-600">✓</span>}
-                        </div>
-                        <div className="text-[10px] text-ink-400 dark:text-slate-400 mt-0.5">{eng.desc}</div>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </div>
-
             {/* Dark / Light Mode Switcher */}
             <button
               onClick={toggleTheme}
@@ -483,8 +462,6 @@ export function Shell({ children }: { children: ReactNode }) {
       <CommandPalette
         open={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
-        activeModel={activeModel}
-        onSelectModel={handleSelectModel}
       />
     </div>
   );

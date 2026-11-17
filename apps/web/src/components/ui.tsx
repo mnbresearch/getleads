@@ -18,9 +18,9 @@ export function Page({ title, actions, children, subtitle }: { title: string; su
   );
 }
 
-export function Stat({ label, value, hint }: { label: string; value: ReactNode; hint?: string }) {
+export function Stat({ label, value, hint, glass = false }: { label: string; value: ReactNode; hint?: string; glass?: boolean }) {
   return (
-    <div className="card min-w-0 p-4 [overflow-wrap:anywhere]">
+    <div className={`card min-w-0 p-4 [overflow-wrap:anywhere]${glass ? " glass" : ""}`}>
       <div className="text-xs font-semibold uppercase tracking-wide text-ink-400">{label}</div>
       <div className="mt-1 text-2xl font-semibold">{value}</div>
       {hint && <div className="mt-1 text-xs text-ink-400">{hint}</div>}

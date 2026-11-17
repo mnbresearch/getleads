@@ -53,9 +53,12 @@ export function Dashboard() {
   if (err) return <Page title="Overview"><LoadError message={err} onRetry={load} /></Page>;
   if (!d) return <Page title="Overview"><Spinner label="Loading…" /></Page>;
   const max = Math.max(1, ...d.daily.map((x) => Math.max(x.leads, x.sent)));
+  // Needs your attention: only things somebody can act on, built from reads
+  // that succeeded. A metric is "nearly used" only when it has a real limit.
+  const nearlyUsed = Object.entries(d.usage.usage).filter(([, v]) => v.limit > 0 && v.used / v.limit >= 0.8);
   return (
     <Page
-      title="Overview"
+      title="Command Center"
       subtitle={`Plan: ${d.usage.plan} · period ${d.usage.period}`}
       actions={
         <div className="flex items-center gap-2">
@@ -94,12 +97,44 @@ export function Dashboard() {
         </div>
       )}
 
+      {nearlyUsed.length > 0 && (
+        <div className="card glass mb-6 p-4" role="region" aria-label="Needs your attention">
+          <div className="mb-2 text-[11px] font-bold uppercase tracking-wider text-amber-700 dark:text-amber-400">Needs your attention</div>
+          <ul className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
+            {nearlyUsed.map(([k, v]) => (
+              <li key={k}>
+                <Link to="/analytics" className="block rounded-lg border border-amber-300/60 bg-amber-50/60 px-3 py-2 text-sm hover:bg-amber-100/70 dark:border-amber-700/50 dark:bg-amber-900/15">
+                  <span className="font-medium">{metricLabel(k)}: {Math.round((v.used / v.limit) * 100)}% used →</span>
+                  <span className="block text-xs text-ink-400">{fmtNum(v.used)} of {fmtNum(v.limit)} this period</span>
+                </Link>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        <Stat label="Leads" value={fmtNum(d.leads.total)} hint={`${fmtNum(d.leads.last7d)} in last 7 days`} />
-        <Stat label="Verified emails" value={fmtNum(d.leads.verified)} hint={`${fmtNum(d.leads.withEmail)} with any email`} />
-        <Stat label="Emails sent" value={fmtNum(d.messages.sent)} hint={`${d.messages.sent ? Math.round((d.messages.opened / d.messages.sent) * 100) : 0}% opened · ${d.messages.sent ? Math.round((d.messages.replied / d.messages.sent) * 100) : 0}% replied`} />
-        <Stat label="Active campaigns" value={fmtNum(d.campaigns.active)} hint={`${plural(d.companies, "company")} tracked`} />
+        <Stat glass label="Leads" value={fmtNum(d.leads.total)} hint={`${fmtNum(d.leads.last7d)} in last 7 days`} />
+        <Stat glass label="Verified emails" value={fmtNum(d.leads.verified)} hint={`${fmtNum(d.leads.withEmail)} with any email`} />
+        <Stat glass label="Emails sent" value={fmtNum(d.messages.sent)} hint={`${d.messages.sent ? Math.round((d.messages.opened / d.messages.sent) * 100) : 0}% opened · ${d.messages.sent ? Math.round((d.messages.replied / d.messages.sent) * 100) : 0}% replied`} />
+        <Stat glass label="Active campaigns" value={fmtNum(d.campaigns.active)} hint={`${plural(d.companies, "company")} tracked`} />
       </div>
+
+      <nav aria-label="Quick tools" className="mt-4 grid grid-cols-3 gap-2 sm:grid-cols-6">
+        {[
+          { to: "/search", label: "Find leads", icon: "⌕" },
+          { to: "/leads", label: "Leads", icon: "☰" },
+          { to: "/campaigns", label: "Campaigns", icon: "📨" },
+          { to: "/plays", label: "Plays", icon: "▷" },
+          { to: "/pipeline", label: "Deals", icon: "📊" },
+          { to: "/analytics", label: "Analytics", icon: "▤" },
+        ].map((q) => (
+          <Link key={q.to} to={q.to} className="card glass flex min-h-16 flex-col items-center justify-center gap-1 p-2 text-center text-xs font-medium transition hover:border-brand-300">
+            <span className="text-lg text-brand-600 dark:text-brand-400" aria-hidden>{q.icon}</span>
+            {q.label}
+          </Link>
+        ))}
+      </nav>
 
       {waiting > 0 && (
         <Link to="/plays" className="card mt-6 flex flex-wrap items-center justify-between gap-3 p-4 transition hover:border-brand-300" data-testid="plays-waiting">
