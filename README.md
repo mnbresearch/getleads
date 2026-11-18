@@ -119,7 +119,9 @@ Cursor / Claude Desktop (`mcp.json`):
   "headers": { "Authorization": "Bearer px_live_..." } } } }
 ```
 
-API keys only: a browser session token is refused. Each tool call runs as an ordinary request
+Included on Growth and above (`mcpCallsPerMonth`: 5,000 / 25,000 / 100,000 tool calls a
+month on Growth / Scale / Enterprise); other plans get 403 `plan_required` and keep the REST
+API. API keys only: a browser session token is refused. Each tool call runs as an ordinary request
 with that key, so the key's workspace, plan limits and scope all apply - a read-only key can
 list and read, and every write tool answers `insufficient_scope`. 120 MCP messages a minute per
 workspace, on top of each route's own limit.

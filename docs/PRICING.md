@@ -48,14 +48,42 @@ The pipeline (`packages/core/src/pipeline.ts`) already checks paid data provider
 
 This mirrors what Apollo/Clay/Clearbit actually do: cheap discovery for volume, paid waterfall credits gated as a premium action.
 
-## Paid tiers (live in plans.ts, >=85% gross margin)
+## Paid tiers (live in plans.ts)
 
-| Plan | Price | Total leads/mo | Premium (provider) leads/mo | Verifications/mo | Searches/mo | AI msgs/mo | Seats | Est. COGS | Est. gross margin |
-|---|---|---|---|---|---|---|---|---|---|
-| Starter | $109/mo | 1,500 | 150 | 500 | 500 | 500 | 2 | ~$14.80 | ~86.4% |
-| Growth | $359/mo | 6,000 | 500 | 1,500 | 2,000 | 1,500 | 5 | ~$49.70 | ~86.2% |
-| Scale | $1,199/mo | 20,000 | 1,500 | 5,000 | 8,000 | 8,000 | 15 | ~$178 | ~85.2% |
-| Enterprise | $3,199/mo | 60,000 | 5,000 | 15,000 | 25,000 | 25,000 | 50 | ~$473 | ~85.2% |
+| Plan | Price | Total leads/mo | Premium (provider) leads/mo | Verifications/mo | Searches/mo | AI msgs/mo | Hosted MCP calls/mo | Seats | Margin, typical use | Margin, FULL use (floor) |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Starter | $109/mo | 1,500 | 150 | 500 | 500 | 500 | - | 2 | ~86% | 83.6% |
+| Growth | $359/mo | 6,000 | 500 | 1,500 | 2,000 | 1,500 | 5,000 | 5 | ~86% | 80.8% |
+| Scale | $1,199/mo | 20,000 | 1,500 | 5,000 | 8,000 | 5,000 | 25,000 | 15 | ~85% | 80.4% |
+| Enterprise | $3,199/mo | 60,000 | 5,000 | 15,000 | 25,000 | 15,000 | 100,000 | 50 | ~85% | 80.5% |
+
+### Hosted MCP is the Growth-and-above moat, and why the floor is "full use" (Nov 18 2026)
+
+Hosted MCP (`POST /mcp`, Claude Code / Cursor / Claude Desktop) is on Growth, Scale and
+Enterprise only (`mcpCallsPerMonth`; 0 on Free, Pilot and Starter, which keep the REST API).
+An assistant runs loops, so a connected workspace can hit EVERY monthly limit, every month.
+The plans that carry MCP are therefore priced to keep **at least 80% gross margin at 100% use
+of everything they sell, after payment fees**, not on an average. `packages/db/src/economics.ts`
+computes it and `apps/api/src/economics.test.ts` fails the build if any paid plan drops under.
+
+What "full use" costs per plan: every premium lead, verification, search, email and AI message
+at the provider rates above, AI on a paid engine for Growth+ (Claude Haiku at 2,000 tokens in and
+the full 1,024 out, $0.006 a message - free/pilot/starter never reach it), $0.0001 compute per MCP
+tool call, and 2.9% + $0.30 card fees rounded to 3%. Hosting is fixed and not in it.
+
+Two changes this forced, both stated rather than hidden:
+- **Scale AI messages 8,000 -> 5,000 and Enterprise 25,000 -> 15,000.** On a paid AI engine those
+  allowances alone took full use to 78.9% and 78.6%. MCP itself costs about $2.50 and $10 a month
+  at full use; the AI allowance was the leak. Workspaces already on those plans keep their stored
+  limits (`plan_limits` holds the merged set), so nobody loses quota mid-contract.
+- **No self-serve annual discount.** The landing page offered "annual, save 20%", but checkout
+  only sells the monthly price and `/upgrade` ignored `?billing=annual`. At 20% off, every plan
+  falls to 74-79% at full use. Annual terms are now agreed by email, where they can be priced.
+
+MCP calls are metered per `tools/call` (initialize, tools/list and notifications are free); past
+the allowance the endpoint answers JSON-RPC -32002 `quota_exceeded`. Each tool's own cost - a
+search, a verification, a lead - is also counted against the plan's normal limits, so MCP cannot
+spend more than the plan sells.
 
 Free/Pilot: `premiumLeadsPerMonth = 0` - these orgs only ever get web-discovery + site-crawl leads, so they cost nothing to run beyond a fraction-of-a-cent search query per lead. That's the literal implementation of "for the free version, get them leads wherever we can from scraping/their website, at no cost to us."
 

@@ -136,6 +136,7 @@ const LIMIT_LABELS: Record<string, string> = {
   verificationsPerMonth: "verifications/month",
   aiMessagesPerMonth: "AI messages/month",
   emailsPerMonth: "emails/month",
+  mcpCallsPerMonth: "MCP tool calls/month",
   emailsPerDay: "emails/day",
   campaigns: "campaigns",
   seats: "seats",
@@ -184,6 +185,7 @@ const CREDIT_METRICS = [
   ["verifications", "Verifications", "verificationsPerMonth"],
   ["aiMessages", "AI messages", "aiMessagesPerMonth"],
   ["emails", "Emails", "emailsPerMonth"],
+  ["mcpCalls", "MCP tool calls", "mcpCallsPerMonth"],
 ] as const;
 const metricLabel = (m: string) => CREDIT_METRICS.find(([id]) => id === m)?.[1] ?? m;
 const metricLimitKey = (m: string) => CREDIT_METRICS.find(([id]) => id === m)?.[2];

@@ -79,6 +79,6 @@ export const FAQS: Faq[] = [
   },
   {
     q: "Can I use Scout through APIs or AI agents?",
-    a: "Yes. Scout has a REST API with API key authentication and webhooks, so agents can search, qualify, enrich and draft outreach with the same capabilities as a rep. The hosted MCP endpoint gives Claude Code, Cursor and Claude Desktop the same tools with nothing to install: add it with an API key, and every call obeys that key's plan limits and read-only scope.",
+    a: "Yes. Scout has a REST API with API key authentication and webhooks, so agents can search, qualify, enrich and draft outreach with the same capabilities as a rep. The hosted MCP endpoint, on the Growth plan and above, gives Claude Code, Cursor and Claude Desktop the same tools with nothing to install: add it with an API key, and every call obeys that key's plan limits and read-only scope.",
   },
 ];

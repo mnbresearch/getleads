@@ -611,6 +611,7 @@ const OVERRIDES_SCHEMA = z
     verificationsPerMonth: countLimit,
     aiMessagesPerMonth: countLimit,
     emailsPerMonth: countLimit,
+    mcpCallsPerMonth: countLimit,
     seats: countLimit,
     /** The workspace's daily sending ceiling, when it should differ from the computed one. */
     emailsPerDay: z.number().int().min(1).max(MAX_PLAN_LIMIT),
@@ -628,6 +629,7 @@ const LIMIT_LABELS: Record<string, string> = {
   verificationsPerMonth: "verifications/month",
   aiMessagesPerMonth: "AI messages/month",
   emailsPerMonth: "emails/month",
+  mcpCallsPerMonth: "MCP tool calls/month",
   emailsPerDay: "emails/day",
   campaigns: "campaigns",
   seats: "seats",
@@ -720,7 +722,7 @@ const MAX_CREDIT_AMOUNT = 1_000_000;
 const CREDIT_ACTIONS = ["grant", "set"] as const;
 const CREDITS_SCHEMA = z
   .object({
-    metric: z.enum(["leads", "premiumLeads", "searches", "verifications", "aiMessages", "emails"]),
+    metric: z.enum(["leads", "premiumLeads", "searches", "verifications", "aiMessages", "emails", "mcpCalls"]),
     action: z.enum(CREDIT_ACTIONS).optional(),
     mode: z.enum(CREDIT_ACTIONS).optional(),
     amount: z.number().int().min(-MAX_CREDIT_AMOUNT).max(MAX_CREDIT_AMOUNT),
@@ -729,7 +731,7 @@ const CREDITS_SCHEMA = z
     if (!v.action && !v.mode) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["action"], message: "Required" });
     else if (v.action && v.mode && v.action !== v.mode) ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["mode"], message: "Does not match `action`; send one of them" });
   });
-const METRIC_LABEL: Record<string, string> = { leads: "leads", premiumLeads: "premium leads", searches: "searches", verifications: "verifications", aiMessages: "AI messages", emails: "emails" };
+const METRIC_LABEL: Record<string, string> = { leads: "leads", premiumLeads: "premium leads", searches: "searches", verifications: "verifications", aiMessages: "AI messages", emails: "emails", mcpCalls: "MCP tool calls" };
 
 adminRoutes.patch("/orgs/:id/credits", zValidator("json", CREDITS_SCHEMA), async (c) => {
   const b = c.req.valid("json");
@@ -740,9 +742,9 @@ adminRoutes.patch("/orgs/:id/credits", zValidator("json", CREDITS_SCHEMA), async
   if (!org) throw notFound("Org");
   const what = METRIC_LABEL[b.metric] ?? b.metric;
   // The allowance this usage is measured against. null = no limit (a stored 0 for the monthly
-  // metrics); premium leads are the exception, where 0 means none at all.
-  const rawLimit = effectiveLimits(org)[metricToLimit[b.metric]] as number;
-  const limit = b.metric === "premiumLeads" || rawLimit > 0 ? rawLimit : null;
+  // metrics); premium leads and hosted MCP calls are the exceptions, where 0 means none at all.
+  const rawLimit = (effectiveLimits(org)[metricToLimit[b.metric]] as number | undefined) ?? 0;
+  const limit = b.metric === "premiumLeads" || b.metric === "mcpCalls" || rawLimit > 0 ? rawLimit : null;
 
   if (action === "grant" && b.amount === 0) {
     const row = await db.query.usage.findFirst({ where: and(eq(usage.orgId, org.id), eq(usage.period, currentPeriod()), eq(usage.metric, b.metric)) });

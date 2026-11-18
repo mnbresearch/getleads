@@ -72,7 +72,7 @@ A "Play" in Scout is a saved, automated recipe targeting prospects who exhibit a
 Scout provides a REST API authenticated with an API key (`x-api-key: px_live_...`) or a workspace session token. The full reference is the OpenAPI document at https://api.mnbresearch.com/openapi.json.
 
 ### MCP
-The same capabilities are served to AI assistants at `POST https://api.mnbresearch.com/mcp` (Streamable HTTP, stateless). Connect with an API key: `claude mcp add --transport http scout https://api.mnbresearch.com/mcp --header "Authorization: Bearer px_live_..."`. Every tool call obeys the key's plan limits and scope: a read-only key can search and read, and write tools answer `insufficient_scope`.
+The same capabilities are served to AI assistants at `POST https://api.mnbresearch.com/mcp` (Streamable HTTP, stateless). Connect with an API key: `claude mcp add --transport http scout https://api.mnbresearch.com/mcp --header "Authorization: Bearer px_live_..."`. Hosted MCP is included on the Growth plan and above, metered as tool calls per month. Every tool call obeys the key's plan limits and scope: a read-only key can search and read, and write tools answer `insufficient_scope`.
 
 ### Core Endpoints
 - `GET /v1/public/pv`: Log website visitor event (text/plain, no tracking cookies, privacy-preserving).

@@ -11,7 +11,7 @@
 import { beforeAll, describe, expect, it } from "vitest";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { apiKeyFromHeaders } from "./routes/mcp.js";
+import { apiKeyFromHeaders, countToolCalls, firstMcpPlan } from "./routes/mcp.js";
 
 const root = resolve(__dirname, "../../..");
 const read = (f: string) => readFileSync(resolve(root, f), "utf8");
@@ -24,6 +24,17 @@ describe("hosted MCP: what it accepts as a key", () => {
     expect(apiKeyFromHeaders("Basic dXNlcjpwYXNz", undefined)).toBeNull();
     expect(apiKeyFromHeaders("Bearer", undefined)).toBeNull();
     expect(apiKeyFromHeaders(undefined, undefined)).toBeNull();
+  });
+
+  it("meters tools/call and nothing else, in a single message or a batch", () => {
+    expect(countToolCalls({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {} })).toBe(1);
+    expect(countToolCalls([{ method: "tools/call" }, { method: "tools/list" }, { method: "tools/call" }])).toBe(2);
+    for (const m of ["initialize", "tools/list", "notifications/initialized"]) expect(countToolCalls({ method: m })).toBe(0);
+    expect(countToolCalls(null)).toBe(0);
+  });
+
+  it("names Growth as the cheapest plan with hosted MCP", () => {
+    expect(firstMcpPlan()?.id).toBe("growth");
   });
 
   it("serves the same tool registrations as the stdio server, not a copy", () => {
@@ -70,6 +81,17 @@ suite("hosted MCP over HTTP", () => {
   let session = "";
   let full = "";
   let readOnly = "";
+  let email = "";
+  let orgId = "";
+  const setPlan = async (plan: string, planLimits: Record<string, unknown> = {}) => {
+    const dbPkg = await import("@prospex/db");
+    // As an upgrade does: the plan, and its limits stored as the whole merged set.
+    await dbPkg.getDb().db.update(dbPkg.organizations).set({ plan, planLimits: { ...dbPkg.limitsFor(plan), ...planLimits } }).where(dbPkg.eq(dbPkg.organizations.id, orgId));
+  };
+  const used = async () => {
+    const dbPkg = await import("@prospex/db");
+    return (await dbPkg.getUsage(dbPkg.getDb().db, orgId)).usage.mcpCalls;
+  };
   const post = (path: string, body: unknown, headers: Record<string, string> = {}) =>
     app.fetch(new Request(`http://local${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) }));
   const rpc = (key: string, body: unknown) => post("/mcp", body, { accept: "application/json, text/event-stream", authorization: `Bearer ${key}` });
@@ -84,11 +106,16 @@ suite("hosted MCP over HTTP", () => {
     await dbPkg.runMigrations(TEST_DB);
     const { createApp } = await import("./app.js");
     app = createApp({ print: false } as any);
-    const s = await (await post("/v1/auth/signup", { email: `mcp-${Date.now()}@example.com`, password: "Correct-Horse-9-Battery!", name: "Mcp Test" })).json();
+    email = `mcp-${Date.now()}@example.com`;
+    const s = await (await post("/v1/auth/signup", { email, password: "Correct-Horse-9-Battery!", name: "Mcp Test" })).json();
     session = s.token;
     const mk = async (scope: string) => (await (await post("/v1/auth/api-keys", { name: `mcp ${scope}`, scope }, { authorization: `Bearer ${session}` })).json()).key;
     full = await mk("full");
     readOnly = await mk("read");
+    // Hosted MCP is a Growth-and-above feature; a new workspace starts on Free.
+    const me = await dbPkg.getDb().db.query.users.findFirst({ where: dbPkg.eq(dbPkg.users.email, email) });
+    orgId = me!.orgId;
+    await setPlan("growth");
   });
 
   it("refuses no key and a browser session token", async () => {
@@ -113,6 +140,45 @@ suite("hosted MCP over HTTP", () => {
     const res = await call(readOnly, "create_icp", { name: "x", industries: ["software"] });
     expect(res.isError).toBe(true);
     expect(res.content[0].text).toMatch(/insufficient_scope/);
+  });
+
+  it("charges one mcpCalls per tools/call, and nothing for listing", async () => {
+    const before = (await used()).used;
+    await rpc(full, { jsonrpc: "2.0", id: 10, method: "tools/list" });
+    expect((await used()).used).toBe(before);
+    await call(full, "usage");
+    expect((await used()).used).toBe(before + 1);
+    expect((await used()).limit).toBe(5000);
+  });
+
+  it("refuses a plan without hosted MCP, naming the plan that has it", async () => {
+    await setPlan("starter");
+    try {
+      const r = await rpc(full, { jsonrpc: "2.0", id: 11, method: "tools/list" });
+      expect(r.status).toBe(403);
+      const body = await r.json();
+      expect(body.error.code).toBe("plan_required");
+      expect(body.error.message).toMatch(/Growth plan \(\$359\/month\) and above/);
+    } finally {
+      await setPlan("growth");
+    }
+  });
+
+  it("stops at the monthly allowance with a JSON-RPC error the assistant can relay", async () => {
+    const now = (await used()).used;
+    await setPlan("growth", { mcpCallsPerMonth: now + 1 });
+    try {
+      expect((await call(full, "usage")).isError).toBeFalsy();
+      const r = await rpc(full, { jsonrpc: "2.0", id: 12, method: "tools/call", params: { name: "usage", arguments: {} } });
+      expect(r.status).toBe(200);
+      const body = await r.json();
+      expect(body.id).toBe(12);
+      expect(body.error.code).toBe(-32002);
+      expect(body.error.data).toMatchObject({ code: "quota_exceeded", metric: "mcpCalls" });
+      expect((await used()).used).toBe(now + 1);
+    } finally {
+      await setPlan("growth");
+    }
   });
 
   it("is stateless: no stream to open, no session to end", async () => {

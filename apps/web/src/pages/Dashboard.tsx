@@ -242,5 +242,5 @@ export function Dashboard() {
  */
 function limitLabel(metric: string, limit: number): string {
   if (limit > 0) return fmtNum(limit);
-  return metric === "premiumLeads" ? "0 (not on this plan)" : "unlimited";
+  return metric === "premiumLeads" || metric === "mcpCalls" ? "0 (not on this plan)" : "unlimited";
 }

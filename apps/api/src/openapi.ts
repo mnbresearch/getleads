@@ -211,9 +211,9 @@ export function openapi(apiUrl: string) {
       post: {
         tags: ["Agents"],
         security: [{ apiKey: [] }],
-        summary: "Model Context Protocol endpoint for AI assistants (Claude Code, Claude Desktop, Cursor). Send MCP JSON-RPC (initialize, tools/list, tools/call) with `Authorization: Bearer px_live_...` or `x-api-key`, and `Accept: application/json, text/event-stream`. API keys only: a browser session token is refused with 401. Every tool call runs as an ordinary request with that key, so a read-only key can list tools and read but each write tool answers `insufficient_scope`. 120 MCP messages a minute per workspace, on top of each route's own limit. Add it with `claude mcp add --transport http scout <API address>/mcp --header \"Authorization: Bearer px_live_...\"`",
+        summary: "Model Context Protocol endpoint for AI assistants (Claude Code, Claude Desktop, Cursor). Send MCP JSON-RPC (initialize, tools/list, tools/call) with `Authorization: Bearer px_live_...` or `x-api-key`, and `Accept: application/json, text/event-stream`. API keys only: a browser session token is refused with 401. Every tool call runs as an ordinary request with that key, so a read-only key can list tools and read but each write tool answers `insufficient_scope`. 120 MCP messages a minute per workspace, on top of each route's own limit. Included on Growth and above (`mcpCallsPerMonth`); a plan without it gets 403 `plan_required`. Each `tools/call` is metered as one `mcpCalls` (initialize, tools/list and notifications are free); past the monthly allowance a call answers JSON-RPC error -32002 with `data.code: quota_exceeded`. Add it with `claude mcp add --transport http scout <API address>/mcp --header \"Authorization: Bearer px_live_...\"`",
         requestBody: j({ type: "object", description: "A JSON-RPC 2.0 request or notification" }),
-        responses: { ...ok({ type: "object", description: "The JSON-RPC response" }), "202": { description: "A notification was accepted" }, ...res("401", "No API key, or not an API key", errorBody), ...res("429", "Too many MCP messages", errorBody) },
+        responses: { ...ok({ type: "object", description: "The JSON-RPC response" }), "202": { description: "A notification was accepted" }, ...res("401", "No API key, or not an API key", errorBody), ...res("403", "The plan does not include hosted MCP (plan_required)", errorBody), ...res("429", "Too many MCP messages", errorBody) },
       },
       get: { tags: ["Agents"], security: [{ apiKey: [] }], summary: "Not supported: the endpoint is stateless, so there is no server stream to open", responses: { "405": { description: "Method not allowed" } } },
       delete: { tags: ["Agents"], security: [{ apiKey: [] }], summary: "Not supported: there is no session to end", responses: { "405": { description: "Method not allowed" } } },
@@ -776,7 +776,7 @@ export function openapi(apiUrl: string) {
                   additionalProperties: false,
                   description: "Strict partial of the plan limits the server enforces. Counts are whole numbers from 0 (0 = no limit for the monthly metrics; for premiumLeadsPerMonth 0 means none)",
                   properties: Object.fromEntries([
-                    ...["leadsPerMonth", "premiumLeadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth", "seats"].map((k) => [k, { type: "integer", minimum: 0, maximum: 1000000000 }]),
+                    ...["leadsPerMonth", "premiumLeadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth", "mcpCallsPerMonth", "seats"].map((k) => [k, { type: "integer", minimum: 0, maximum: 1000000000 }]),
                     ["emailsPerDay", { type: "integer", minimum: 1, maximum: 1000000000, description: "Daily sending ceiling for this workspace" }],
                   ]),
                 },
@@ -806,7 +806,7 @@ export function openapi(apiUrl: string) {
           requestBody: j(
             obj(
               {
-                metric: { ...str, enum: ["leads", "premiumLeads", "searches", "verifications", "aiMessages", "emails"] },
+                metric: { ...str, enum: ["leads", "premiumLeads", "searches", "verifications", "aiMessages", "emails", "mcpCalls"] },
                 action: { ...str, enum: ["grant", "set"], description: "Also accepted as `mode`" },
                 amount: { type: "integer", minimum: -1000000, maximum: 1000000 },
               },

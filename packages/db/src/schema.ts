@@ -739,6 +739,13 @@ export interface PlanLimits {
   emailsPerMonth: number;
   campaigns: number;
   seats: number;
+/**
+   * Hosted MCP tool calls a month (POST /mcp, tools/call messages). Like premiumLeadsPerMonth,
+   * <= 0 here means NO hosted MCP on the plan, not unlimited: it is a paid-plan feature, sized
+   * so the plan's worst-case margin holds (packages/db/src/economics.ts). Optional so stored
+   * plan_limits written before it existed still parse; a missing value reads as 0.
+   */
+  mcpCallsPerMonth?: number;
   apiAccess: boolean;
   integrations: boolean;
 }

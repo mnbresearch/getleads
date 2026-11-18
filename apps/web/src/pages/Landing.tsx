@@ -107,6 +107,8 @@ type PlanLimits = {
   verificationsPerMonth: number;
   aiMessagesPerMonth: number;
   emailsPerMonth: number;
+  /** Hosted MCP tool calls a month; 0 = not on the plan. Optional: older API responses lack it. */
+  mcpCallsPerMonth?: number;
   campaigns: number;
   seats: number;
 };
@@ -127,6 +129,7 @@ function planFeatures(p: Plan): string[] {
   out.push(l.premiumLeadsPerMonth > 0 ? `${l.premiumLeadsPerMonth.toLocaleString()} verified provider leads/mo` : "Web-sourced discovery testing");
   out.push(`${l.verificationsPerMonth.toLocaleString()} email verifications/mo`);
   out.push(`${l.emailsPerMonth.toLocaleString()} outbound emails/mo`);
+  if ((l.mcpCallsPerMonth ?? 0) > 0) out.push(`Hosted MCP for Claude Code & Cursor · ${l.mcpCallsPerMonth!.toLocaleString()} tool calls/mo`);
   out.push(`${l.seats} seat${l.seats === 1 ? "" : "s"} · ${l.campaigns} campaign${l.campaigns === 1 ? "" : "s"}`);
   return out;
 }
@@ -142,6 +145,7 @@ export const DEFAULT_PLANS: Plan[] = [
       searchesPerMonth: 20,
       verificationsPerMonth: 50,
       aiMessagesPerMonth: 50,
+      mcpCallsPerMonth: 0,
       emailsPerMonth: 100,
       campaigns: 1,
       seats: 1,
@@ -157,6 +161,7 @@ export const DEFAULT_PLANS: Plan[] = [
       searchesPerMonth: 500,
       verificationsPerMonth: 500,
       aiMessagesPerMonth: 500,
+      mcpCallsPerMonth: 0,
       emailsPerMonth: 2000,
       campaigns: 3,
       seats: 2,
@@ -172,6 +177,7 @@ export const DEFAULT_PLANS: Plan[] = [
       searchesPerMonth: 2000,
       verificationsPerMonth: 1500,
       aiMessagesPerMonth: 1500,
+      mcpCallsPerMonth: 5000,
       emailsPerMonth: 8000,
       campaigns: 15,
       seats: 5,
@@ -186,7 +192,8 @@ export const DEFAULT_PLANS: Plan[] = [
       premiumLeadsPerMonth: 1500,
       searchesPerMonth: 8000,
       verificationsPerMonth: 5000,
-      aiMessagesPerMonth: 8000,
+      aiMessagesPerMonth: 5000,
+      mcpCallsPerMonth: 25000,
       emailsPerMonth: 40000,
       campaigns: 100,
       seats: 15,
@@ -201,7 +208,8 @@ export const DEFAULT_PLANS: Plan[] = [
       premiumLeadsPerMonth: 5000,
       searchesPerMonth: 25000,
       verificationsPerMonth: 15000,
-      aiMessagesPerMonth: 25000,
+      aiMessagesPerMonth: 15000,
+      mcpCallsPerMonth: 100000,
       emailsPerMonth: 120000,
       campaigns: 1000,
       seats: 50,
@@ -1517,7 +1525,7 @@ const DEV_SNIPPETS: Record<string, { label: string; code: string }> = {
 function DevelopersSection() {
   const [tab, setTab] = useState<keyof typeof DEV_SNIPPETS>("claude");
   const cards = [
-    { t: "Hosted MCP", d: "Claude Code, Cursor and Claude Desktop get 60+ Scout tools with one command. Nothing to install, nothing to host." },
+    { t: "Hosted MCP", d: "Claude Code, Cursor and Claude Desktop get 60+ Scout tools with one command. Nothing to install, nothing to host. Growth plan and above." },
     { t: "REST API + OpenAPI", d: "Every action in the app is an endpoint, documented at /docs. Long jobs return a job id to poll." },
     { t: "TypeScript SDK", d: "Typed client for every route, with ids and domains validated before a request is made." },
     { t: "Webhooks + CRM sync", d: "Signed events for new leads and replies, plus HubSpot, Pipedrive, Zoho and Google Sheets." },
@@ -1887,7 +1895,6 @@ function InteractiveProductDemoSection() {
 function PricingSection() {
   const [plans, setPlans] = useState<Plan[]>(DEFAULT_PLANS);
   const [unreachable, setUnreachable] = useState(false);
-  const [annual, setAnnual] = useState(false);
   const sectionRef = useRef<HTMLElement>(null);
 
   useEffect(() => sendPageViewWhenSeen(sectionRef.current, "/pricing"), []);
@@ -1903,10 +1910,11 @@ function PricingSection() {
       .catch(() => setUnreachable(true));
   }, []);
 
-  const displayPrice = (p: Plan) => {
-    if (p.priceUsd === 0) return 0;
-    return annual ? Math.round(p.priceUsd * 0.8) : p.priceUsd;
-  };
+  // Monthly only. An "annual, save 20%" switch used to sit here, but checkout sells one monthly
+  // price per plan and /upgrade ignored ?billing=annual, so the discounted figure was a price
+  // nobody could be charged. It would also take every plan under its 80% margin floor at full
+  // use (packages/db/src/economics.ts). Annual terms are agreed, not self-served.
+  const displayPrice = (p: Plan) => p.priceUsd;
 
   return (
     <section id="pricing" ref={sectionRef} className="py-20 border-y border-black/5 bg-cream/40 scroll-mt-20">
@@ -1922,30 +1930,7 @@ function PricingSection() {
             Test platform workflows and open-web discovery in our free sandbox. Paid plans include verified external provider credits and high-volume email verification.
           </p>
 
-          {/* Billing Switch */}
-          <div className="mt-7 flex items-center justify-center gap-3">
-            <span className={`text-xs font-semibold ${!annual ? "text-ink-50" : "text-ink-400"}`}>Monthly</span>
-            <button
-              type="button"
-              role="switch"
-              aria-checked={annual}
-              aria-label="Toggle annual billing with 20% savings"
-              onClick={() => setAnnual((v) => !v)}
-              className={`relative inline-flex h-6 w-11 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                annual ? "bg-brand-600" : "bg-black/15"
-              }`}
-            >
-              <span
-                className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow-xs ring-0 transition duration-200 ease-in-out ${
-                  annual ? "translate-x-5" : "translate-x-0"
-                }`}
-              />
-            </button>
-            <span className={`inline-flex items-center gap-1.5 text-xs font-semibold ${annual ? "text-ink-50" : "text-ink-400"}`}>
-              Annual
-              <span className="badge border border-brand-200 bg-brand-50 text-[10px] font-bold text-brand-700">Save 20%</span>
-            </span>
-          </div>
+          <p className="mt-5 text-xs text-ink-400">Prices are per month, in US dollars. Paying yearly? <a href="mailto:contact@mnbresearch.com" className="font-semibold text-brand-600 hover:underline">Talk to us</a>.</p>
         </div>
 
         {plans.length === 0 ? (
@@ -1990,12 +1975,6 @@ function PricingSection() {
                       <div>
                         <span className="text-3xl font-extrabold text-ink-50">${price.toLocaleString()}</span>
                         <span className="text-xs text-ink-400">/mo</span>
-                        {annual && <span className="ml-1.5 text-xs text-ink-400 line-through">${p.priceUsd}</span>}
-                      </div>
-                    )}
-                    {annual && p.priceUsd > 0 && (
-                      <div className="mt-1 text-[10px] font-semibold text-emerald-700">
-                        Billed annually (Save ${(p.priceUsd * 12 - price * 12).toLocaleString()}/yr)
                       </div>
                     )}
                   </div>
@@ -2010,7 +1989,7 @@ function PricingSection() {
                   </ul>
 
                   <Link
-                    to={p.priceUsd === 0 ? "/signup" : `/upgrade?plan=${p.id}${annual ? "&billing=annual" : ""}`}
+                    to={p.priceUsd === 0 ? "/signup" : `/upgrade?plan=${p.id}`}
                     className={`mt-6 justify-center text-xs py-2.5 font-semibold ${
                       featured ? "btn-primary" : "btn-secondary"
                     }`}
@@ -2031,7 +2010,7 @@ function PricingSection() {
             </span>
             <h4 className="text-sm font-bold text-ink-50">Zero-Credit Platform Tools</h4>
             <p className="mt-1 text-xs text-ink-400 leading-relaxed">
-              Explore open-web prospect discovery, test natural language targeting, map buying committees, and evaluate digital sales rooms without entering a credit card.
+              Explore open-web prospect discovery, test natural-language targeting and build a digital sales room without entering a credit card.
             </p>
           </div>
           <div className="card p-5 border-brand-200 bg-brand-50/20">
@@ -2040,7 +2019,7 @@ function PricingSection() {
             </span>
             <h4 className="text-sm font-bold text-ink-50">External Provider Costs & Scaled Volume</h4>
             <p className="mt-1 text-xs text-ink-400 leading-relaxed">
-              Paid plans cover external verification provider API costs (Hunter, Reoon, MillionVerifier), live phone telephony, high-volume senders, and dedicated agency seats.
+              Paid plans cover external verification providers (Hunter, Reoon, MillionVerifier), premium provider leads, higher sending volume and more seats. Growth and above add hosted MCP, so Claude Code and Cursor can run Scout directly.
             </p>
           </div>
         </div>

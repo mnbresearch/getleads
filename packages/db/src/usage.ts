@@ -3,7 +3,7 @@ import type { Db } from "./client.js";
 import { organizations, usage, type PlanLimits } from "./schema.js";
 import { effectiveLimits } from "./plans.js";
 
-export type Metric = "leads" | "searches" | "verifications" | "aiMessages" | "emails" | "premiumLeads";
+export type Metric = "leads" | "searches" | "verifications" | "aiMessages" | "emails" | "premiumLeads" | "mcpCalls";
 
 /** Which plan limit each usage metric is measured against. */
 export const metricToLimit: Record<Metric, keyof PlanLimits> = {
@@ -13,6 +13,7 @@ export const metricToLimit: Record<Metric, keyof PlanLimits> = {
   aiMessages: "aiMessagesPerMonth",
   emails: "emailsPerMonth",
   premiumLeads: "premiumLeadsPerMonth",
+  mcpCalls: "mcpCallsPerMonth",
 };
 
 export function currentPeriod(d = new Date()) {
@@ -29,7 +30,7 @@ export async function getUsage(db: Db, orgId: string) {
   const out: Record<string, { used: number; limit: number }> = {};
   for (const m of Object.keys(metricToLimit) as Metric[]) {
     const used = rows.find((r) => r.metric === m)?.count ?? 0;
-    out[m] = { used, limit: limits[metricToLimit[m]] as number };
+    out[m] = { used, limit: (limits[metricToLimit[m]] as number | undefined) ?? 0 };
   }
   return { period, plan: org?.plan ?? "free", usage: out };
 }
@@ -42,6 +43,7 @@ const METRIC_NOUNS: Record<Metric, [string, string]> = {
   aiMessages: ["AI message", "AI messages"],
   emails: ["email", "emails"],
   premiumLeads: ["premium provider lead", "premium provider leads"],
+  mcpCalls: ["AI assistant (MCP) tool call", "AI assistant (MCP) tool calls"],
 };
 
 /**
@@ -84,7 +86,7 @@ export async function consume(db: Db, orgId: string, metric: Metric, amount = 1,
   const org = await db.query.organizations.findFirst({ where: eq(organizations.id, orgId) });
   // A stored limit that is not a whole number of zero or more is ignored (plan default), so a
   // damaged plan_limits value can never switch a quota off. 0 still means "no limit" here.
-  const limit = effectiveLimits(org)[metricToLimit[metric]] as number;
+  const limit = (effectiveLimits(org)[metricToLimit[metric]] as number | undefined) ?? 0;
   const [row] = await db
     .insert(usage)
     .values({ orgId, period, metric, count: amount })

@@ -11,6 +11,7 @@ const METRIC_LABELS: Record<string, string> = {
   aiMessages: "AI messages",
   emails: "Emails sent",
   premiumLeads: "Premium provider leads",
+  mcpCalls: "AI assistant (MCP) calls",
 };
 
 export function metricLabel(key: string): string {
@@ -27,5 +28,6 @@ export function metricLabel(key: string): string {
  */
 export function limitLabel(metric: string, limit: number): string {
   if (limit > 0) return limit.toLocaleString();
-  return metric === "premiumLeads" ? "0 (not on this plan)" : "unlimited";
+  // For provider leads and hosted MCP, 0 means the plan includes none (packages/db plans.ts).
+  return metric === "premiumLeads" || metric === "mcpCalls" ? "0 (not on this plan)" : "unlimited";
 }

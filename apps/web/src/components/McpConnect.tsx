@@ -37,7 +37,7 @@ export function McpConnect({ compact = false }: { compact?: boolean }) {
       {!compact && (
         <p className="text-ink-300">
           Scout's tools - prospect, find and verify emails, enrich companies, build sequences, read signals and website visitors - are served to AI assistants at{" "}
-          <code className="[overflow-wrap:anywhere]">{API_URL}/mcp</code>. Nothing to install: add it with an API key. A read-only key can search and read; every write needs a full-access key.
+          <code className="[overflow-wrap:anywhere]">{API_URL}/mcp</code>. Nothing to install: add it with an API key. Included on the Growth plan and above; a read-only key can search and read, and every write needs a full-access key.
         </p>
       )}
       <div className="mt-3 flex flex-wrap gap-1.5" role="tablist" aria-label="Assistant">
@@ -60,7 +60,7 @@ export function McpConnect({ compact = false }: { compact?: boolean }) {
           {copied ? "Copied" : "Copy"}
         </button>
       </div>
-      <p className="mt-2 text-xs text-ink-400">Replace px_live_YOUR_KEY with a key from Settings &rarr; API keys. Tool calls count against the same plan limits as the app.</p>
+      <p className="mt-2 text-xs text-ink-400">Replace px_live_YOUR_KEY with a key from Settings &rarr; API keys. Growth plan and above. Each tool call counts as one MCP call on your monthly allowance, and anything it does (a search, a verification) counts against the same limits as the app.</p>
     </div>
   );
 }

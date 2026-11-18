@@ -21,6 +21,10 @@ import type { PlanLimits } from "./schema.js";
  * env config. Growth+ plans get the best configured provider. All AI calls across every
  * plan are still metered against aiMessagesPerMonth below, so usage stays bounded either way.
  *
+ * Hosted MCP (mcpCallsPerMonth) is on Growth and above only. An assistant drives every quota
+ * toward 100%, so the plans that carry it must keep their margin at FULL use of every limit,
+ * after payment fees: economics.ts computes that and economics.test.ts holds it at >= 80%.
+ *
  * Paid tiers (starter/growth/scale/enterprise) are priced for >=85% gross margin against
  * real paid-provider costs at moderate volume:
  *   Apollo Professional  $79/user/mo,  2,000 export credits  -> ~$0.04/premium lead
@@ -44,6 +48,7 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
       emailsPerMonth: 100,
       campaigns: 1,
       seats: 1,
+      mcpCallsPerMonth: 0,
       apiAccess: true,
       integrations: false,
     },
@@ -60,6 +65,7 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
       emailsPerMonth: 1500,
       campaigns: 5,
       seats: 3,
+      mcpCallsPerMonth: 0,
       apiAccess: true,
       integrations: true,
     },
@@ -83,6 +89,7 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
       emailsPerMonth: 2000,
       campaigns: 3,
       seats: 2,
+      mcpCallsPerMonth: 0,
       apiAccess: true,
       integrations: true,
     },
@@ -90,6 +97,8 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
 
   // COGS ~= 500 premium * $0.04 + 1,500 verif * $0.01 + 2,000 search * $0.005 + ai/email ~$4.7
   //        = $20 + $15 + $10 + $4.70 = ~$49.70  ->  margin (359 - 49.7) / 359 = 86.2%
+  // The first plan with hosted MCP. At FULL use with paid AI, 5,000 MCP calls and payment
+  // fees (economics.ts): 80.8%.
   growth: {
     name: "Growth",
     priceUsd: 359,
@@ -102,6 +111,7 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
       emailsPerMonth: 8000,
       campaigns: 15,
       seats: 5,
+      mcpCallsPerMonth: 5000,
       apiAccess: true,
       integrations: true,
     },
@@ -109,6 +119,8 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
 
   // COGS ~= 1,500 premium * $0.04 + 5,000 verif * $0.01 + 8,000 search * $0.005 + ai/email ~$28
   //        = $60 + $50 + $40 + $28 = ~$178  ->  margin (1199 - 178) / 1199 = 85.2%
+  // At FULL use with paid AI, MCP and payment fees (economics.ts): 80.4%. AI messages were
+  // 8,000, which on a paid engine took full use to 78.9%; 5,000 is the most that keeps 80%.
   scale: {
     name: "Scale",
     priceUsd: 1199,
@@ -117,10 +129,11 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
       premiumLeadsPerMonth: 1500,
       searchesPerMonth: 8000,
       verificationsPerMonth: 5000,
-      aiMessagesPerMonth: 8000,
+      aiMessagesPerMonth: 5000,
       emailsPerMonth: 40000,
       campaigns: 100,
       seats: 15,
+      mcpCallsPerMonth: 25000,
       apiAccess: true,
       integrations: true,
     },
@@ -132,6 +145,8 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
   // comes from, not a thinner cost basis.
   // COGS ~= 5,000 premium * $0.032 + 15,000 verif * $0.008 + 25,000 search * $0.004 + ai/email ~$93
   //        = $160 + $120 + $100 + $93 = ~$473  ->  margin (3199 - 473) / 3199 = 85.2%
+  // At FULL use with paid AI, MCP and payment fees (economics.ts): 80.5%. AI messages were
+  // 25,000 (78.6% at full use); 15,000 keeps 80%. A contract above that is priced, not defaulted.
   enterprise: {
     name: "Enterprise",
     priceUsd: 3199,
@@ -140,10 +155,11 @@ export const PLANS: Record<string, { name: string; priceUsd: number; limits: Pla
       premiumLeadsPerMonth: 5000,
       searchesPerMonth: 25000,
       verificationsPerMonth: 15000,
-      aiMessagesPerMonth: 25000,
+      aiMessagesPerMonth: 15000,
       emailsPerMonth: 120000,
       campaigns: 1000,
       seats: 50,
+      mcpCallsPerMonth: 100000,
       apiAccess: true,
       integrations: true,
     },
@@ -173,7 +189,7 @@ export function limitsFor(plan: string | null | undefined): PlanLimits {
 // ── Per-workspace limits (organizations.plan_limits) ──
 
 /** Limits that are counts. Whole numbers, zero or more. */
-export const NUMERIC_LIMIT_KEYS = ["leadsPerMonth", "premiumLeadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth", "campaigns", "seats"] as const;
+export const NUMERIC_LIMIT_KEYS = ["leadsPerMonth", "premiumLeadsPerMonth", "searchesPerMonth", "verificationsPerMonth", "aiMessagesPerMonth", "emailsPerMonth", "mcpCallsPerMonth", "campaigns", "seats"] as const;
 /** Limits that are switches. */
 export const BOOLEAN_LIMIT_KEYS = ["apiAccess", "integrations"] as const;
 /**
