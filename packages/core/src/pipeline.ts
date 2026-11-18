@@ -49,6 +49,8 @@ export interface PipelineOptions {
 }
 
 const KNOWN_ROLES_REGEX = /\b(ceo|cto|cfo|cmo|coo|cro|cio|cpo|vp|vice\s+president|director|head\s+of|lead|manager|founder|co-founder|owner|partner|executive|consultant|recruiter|engineer|developer|designer|analyst|buyer|purchaser|sourcing)\b/i;
+/** A role named in a query, singular or plural ("ceos", "directors"). "lead" is left out: "rice meal leads" asks for leads, not for people titled lead. */
+const ROLE_NAMED_REGEX = /\b(ceo|cto|cfo|cmo|coo|cro|cio|cpo|vps?|vice\s+presidents?|directors?|heads?\s+of|managers?|founders?|co-founders?|owners?|partners?|executives?|consultants?|recruiters?|engineers?|developers?|designers?|analysts?|buyers?|purchasers?)s?\b/i;
 
 const DEFAULT_DECISION_MAKER_TITLES = [
   "Founder",
@@ -244,7 +246,10 @@ export async function parseQueryDetailed(ai: AiProvider | undefined, q: LeadSear
       const aiKeywords = list(res.keywords, 10);
       return { note: null, query: {
         ...q,
-        titles: q.titles?.length ? q.titles : (aiTitles.length ? aiTitles : DEFAULT_DECISION_MAKER_TITLES),
+        // Decision-maker defaults only when the query names no role at all ("rice meals in
+        // Delhi"). When it does ("ceos in india") and the model's titles were unusable, a
+        // generic founder/owner list would replace the role the user asked for.
+        titles: q.titles?.length ? q.titles : aiTitles.length ? aiTitles : ROLE_NAMED_REGEX.test(q.query) ? [] : DEFAULT_DECISION_MAKER_TITLES,
         industries: q.industries?.length ? q.industries : aiIndustries,
         locations: q.locations?.length ? q.locations : list(res.locations, 10),
         keywords: q.keywords?.length ? q.keywords : aiKeywords,

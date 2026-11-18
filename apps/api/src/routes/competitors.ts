@@ -2,150 +2,52 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { zValidator } from "../lib/validate.js";
 import { orgId, requireAuth, type Env } from "../middleware.js";
-import { getDb, waterfallConfigs, digitalWorkers, signalSurges, eq, desc } from "@prospex/db";
+import { getDb, digitalWorkers, signalSurges, eq, desc, getUsage } from "@prospex/db";
+import { verifyOptsFor } from "../lib/verifyOpts.js";
 
 export const competitorScaleRoutes = new Hono<Env>();
 competitorScaleRoutes.use("*", requireAuth);
 
-/** Waterfall Enrichment: Multi-vendor cascading contact verification (Clay equivalent) */
+/**
+ * Waterfall verification: the chain Scout really runs for this workspace.
+ *
+ * This used to return a hard-coded provider list with invented hit rates and invented
+ * monthly totals ("94.6% match rate", "1,240 enriched"), and a /simulate endpoint that
+ * built firstname.lastname@domain, called it "verified" at 98% confidence and attached a
+ * random US mobile number. Nothing was checked. The chain below is the one verifyEmail in
+ * @prospex/core walks, in its order, marked with which links have a key on this deployment
+ * (or this workspace's own Hunter key). A real test lookup is POST /v1/search/find-email.
+ */
 competitorScaleRoutes.get("/waterfall", async (c) => {
   const oid = orgId(c);
+  const opts = await verifyOptsFor(oid);
   const { db } = getDb();
-  const [config] = await db.select().from(waterfallConfigs).where(eq(waterfallConfigs.orgId, oid)).limit(1);
-
-  // Return existing config or standard default waterfall stack
-  const fallback = {
-    id: "default-waterfall",
-    name: "Enterprise Multi-Provider Waterfall",
-    providerOrder: ["hunter", "reoon", "millionverifier", "smtp_direct"],
-    findMobilePhones: true,
-    stopOnFirstVerified: true,
-    requireMxCheck: true,
-    availableProviders: [
-      { id: "hunter", name: "Hunter.io", tier: "primary", description: "Direct verified email pattern resolution", hitRate: "72%" },
-      { id: "reoon", name: "Reoon Verifier", tier: "secondary", description: "Deep SMTP MX handshake & inbox ping", hitRate: "89%" },
-      { id: "millionverifier", name: "MillionVerifier", tier: "secondary", description: "Catch-all disambiguation & spam-trap defense", hitRate: "84%" },
-      { id: "smtp_direct", name: "Native Direct Probe", tier: "fallback", description: "Scout engine direct socket SMTP validation", hitRate: "68%" },
-    ],
-  };
-
+  const usage = await getUsage(db, oid).catch(() => null);
+  const chain = [
+    { id: "syntax_mx", name: "Syntax, disposable-domain and MX checks", configured: true, description: "Always run first, free. A domain that cannot receive mail stops here." },
+    { id: "reoon", name: "Reoon", configured: Boolean(opts.reoonApiKey), description: "Mailbox-level verification." },
+    { id: "millionverifier", name: "MillionVerifier", configured: Boolean(opts.millionVerifierApiKey), description: "Mailbox-level verification and catch-all detection." },
+    { id: "hunter", name: "Hunter", configured: Boolean(opts.hunterApiKey), description: "Email finder and verifier." },
+    { id: "abstract", name: "Abstract", configured: Boolean(opts.abstractApiKey), description: "Deliverability check." },
+    { id: "smtp_direct", name: "Direct SMTP probe", configured: Boolean(opts.smtp), description: "Asks the mail server directly. Off where the host blocks port 25." },
+  ];
   return c.json({
-    config: config || fallback,
-    stats: {
-      totalEnrichedThisMonth: 1240,
-      waterfallSuccessRate: "94.6%",
-      creditsSavedVsSingleVendor: "38%",
-      averageTimePerContactSec: 0.84,
-    },
+    chain,
+    stopOnFirstVerdict: true,
+    mobilePhones: false,
+    usage: usage?.usage?.verifications ?? null,
+    testWith: "POST /v1/search/find-email",
   });
 });
 
-competitorScaleRoutes.post(
-  "/waterfall/simulate",
-  zValidator(
-    "json",
-    z.object({
-      firstName: z.string().min(1),
-      lastName: z.string().min(1),
-      domain: z.string().min(3),
-    })
-  ),
-  async (c) => {
-    const { firstName, lastName, domain } = c.req.valid("json");
-    const cleanDomain = domain.replace(/^https?:\/\//, "").replace(/\/.*$/, "").toLowerCase();
-    const cleanFirst = firstName.toLowerCase().replace(/[^a-z]/g, "");
-    const cleanLast = lastName.toLowerCase().replace(/[^a-z]/g, "");
-
-    // Realistic multi-tier waterfall execution log
-    const steps = [
-      { provider: "Hunter.io", action: "Pattern resolution", status: "miss", durationMs: 140, note: "No verified direct match in cache" },
-      { provider: "Reoon Verifier", action: "Deep MX Socket Handshake", status: "hit", durationMs: 420, note: `Mailbox validated: ${cleanFirst}.${cleanLast}@${cleanDomain}` },
-      { provider: "MillionVerifier", action: "Catch-All Verification", status: "skipped", durationMs: 0, note: "Skipped: First verified address found" },
-      { provider: "Native SMTP Socket", action: "Direct Probe", status: "skipped", durationMs: 0, note: "Skipped: Pre-verified" },
-    ];
-
-    return c.json({
-      contact: {
-        firstName,
-        lastName,
-        domain: cleanDomain,
-        email: `${cleanFirst}.${cleanLast}@${cleanDomain}`,
-        emailStatus: "verified",
-        confidenceScore: 98,
-        isCatchAll: false,
-        mobilePhone: "+1 (415) 890-" + Math.floor(1000 + Math.random() * 9000),
-      },
-      waterfallExecution: {
-        totalSteps: 4,
-        stepsExecuted: 2,
-        durationMs: 560,
-        providerUsed: "Reoon Verifier",
-        costCredits: 1,
-        steps,
-      },
-    });
-  }
-);
-
 /** Autonomous Digital Workers (11x Alice & Jordan equivalent) */
 competitorScaleRoutes.get("/digital-workers", async (c) => {
+  // Only what this workspace has. The invented "Alice" and "Jordan" with their invented
+  // daily counts are gone; the AI SDR that actually runs is an Autopilot (/v1/automation).
   const oid = orgId(c);
   const { db } = getDb();
-  let workers = await db.select().from(digitalWorkers).where(eq(digitalWorkers.orgId, oid));
-
-  if (!workers || workers.length === 0) {
-    workers = [
-      {
-        id: "worker-alice",
-        orgId: oid,
-        name: "Alice",
-        role: "Autonomous Outbound SDR",
-        channel: "email_and_linkedin",
-        status: "active",
-        dailyCapacity: 250,
-        actionsExecutedToday: 84,
-        autonomousMode: true,
-        config: {
-          personalizationDepth: "deep",
-          tone: "direct_and_peer",
-          autoFollowupHours: 48,
-          sentimentRouting: true,
-        },
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-      {
-        id: "worker-jordan",
-        orgId: oid,
-        name: "Jordan",
-        role: "AI Voice & Telephony Agent",
-        channel: "voice",
-        status: "active",
-        dailyCapacity: 120,
-        actionsExecutedToday: 32,
-        autonomousMode: false, // human-in-the-loop for voice calling
-        config: {
-          voiceModel: "conversational_warm",
-          objectionLatencyMs: 480,
-          callDispositionAutoLog: true,
-          meetingSchedulerAutoDrop: true,
-        },
-        createdAt: new Date(),
-        updatedAt: new Date(),
-      },
-    ] as any;
-  }
-
-  return c.json({
-    workers,
-    summary: {
-      activeWorkers: workers.length,
-      totalTouches24h: 312,
-      repliesCategorized: 28,
-      meetingsBookedThisWeek: 9,
-      hoursSavedVsManualSdr: 42.5,
-    },
-  });
+  const workers = await db.select().from(digitalWorkers).where(eq(digitalWorkers.orgId, oid));
+  return c.json({ workers, summary: { activeWorkers: workers.filter((w) => w.status === "active").length }, realFeature: "/v1/tools/autopilots" });
 });
 
 /** Signal Convergence & Intent Surges (Warmly + Common Room equivalent) */
@@ -154,56 +56,15 @@ competitorScaleRoutes.get("/signal-surges", async (c) => {
   const { db } = getDb();
   const surges = await db.select().from(signalSurges).where(eq(signalSurges.orgId, oid)).orderBy(desc(signalSurges.compositeIntentScore)).limit(20);
 
-  const mockSurges = surges.length > 0 ? surges : [
-    {
-      id: "surge-1",
-      companyName: "Ramp Financial",
-      companyDomain: "ramp.com",
-      compositeIntentScore: 96,
-      surgeLevel: "explosive",
-      primaryTopic: "AI Sales Automation & Dialers",
-      decisionMakersIdentified: 4,
-      detectedSignals: [
-        { source: "Website Deanonymization", detail: "6 visits to /pricing and /features in last 24h", detectedAt: "2h ago" },
-        { source: "Hiring Signal", detail: "3 open SDR / BDR leadership positions", detectedAt: "1d ago" },
-        { source: "Social / Content Surge", detail: "VP of Sales engaged with AI Outbound post", detectedAt: "3d ago" },
-      ],
-    },
-    {
-      id: "surge-2",
-      companyName: "Scale AI",
-      companyDomain: "scale.com",
-      compositeIntentScore: 91,
-      surgeLevel: "high",
-      primaryTopic: "Outbound Lead Discovery Infrastructure",
-      decisionMakersIdentified: 3,
-      detectedSignals: [
-        { source: "Website Deanonymization", detail: "SecOps team downloaded API whitepaper", detectedAt: "5h ago" },
-        { source: "Competitor Displacement", detail: "Case study customer of ZoomInfo seeking alternatives", detectedAt: "2d ago" },
-      ],
-    },
-    {
-      id: "surge-3",
-      companyName: "Figma",
-      companyDomain: "figma.com",
-      compositeIntentScore: 84,
-      surgeLevel: "high",
-      primaryTopic: "RevOps Team Scaling",
-      decisionMakersIdentified: 2,
-      detectedSignals: [
-        { source: "Hiring Role", detail: "Hiring Head of Revenue Operations in SF", detectedAt: "1d ago" },
-        { source: "Recent Funding / Valuation", detail: "Major revenue milestone announced", detectedAt: "4d ago" },
-      ],
-    },
-  ];
-
+  // Only this workspace's rows: the three invented surges at real companies are gone.
+  const scores = surges.map((x) => x.compositeIntentScore ?? 0);
   return c.json({
-    surges: mockSurges,
+    surges,
     aggregate: {
-      surgingAccounts: mockSurges.length,
-      averageIntentScore: 90,
-      autoEnrolledInPlays: 2,
+      surgingAccounts: surges.length,
+      averageIntentScore: scores.length ? Math.round(scores.reduce((a, b) => a + b, 0) / scores.length) : null,
     },
+    realFeature: "/v1/signals/feed",
   });
 });
 

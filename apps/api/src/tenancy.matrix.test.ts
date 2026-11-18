@@ -249,6 +249,12 @@ async function makeTenant(label: string): Promise<Tenant> {
   ids.playRun = playRun.id;
   const playCandidate = await ins(S.playCandidates, { orgId, playId: play.id, runId: playRun.id, kind: "company", companyName: `${tag} Customer Co`, relevantBecause: `Named as a customer of ${tag} Rival.`, evidenceTitle: `${tag} case study`, signalType: "competitor_customer", dedupeKey: `cn:${tag.toLowerCase()} customer co` });
   ids.playCandidate = playCandidate.id;
+  // sales desk: a deal and a buyer room, so the deal and room routes have something to refuse
+  const deal = await ins(S.deals, { orgId, name: `${tag} Deal`, leadId: lead1.id, stage: "qualified", value: 1000 });
+  ids.deal = deal.id;
+  const room = await ins(S.digitalSalesRooms, { orgId, title: `${tag} Room`, targetCompany: `${tag} Corp`, shareToken: `dsr-${tag.toLowerCase().replace(/[^a-z0-9]/g, "").padEnd(12, "0")}${"0".repeat(4)}`, milestones: [] });
+  ids.room = room.id;
+  ids.roomToken = room.shareToken;
   ids.owner = ownerId;
   ids.member = memberId;
   ids.apiKey = keyRow.id;
@@ -650,6 +656,36 @@ function plan(A: Tenant, B: Tenant): Record<string, Entry> {
     // ── agent / automation ──
     "POST /v1/agent/prospect": noref(provider),
     "GET /v1/agent/capabilities": list("/v1/agent/capabilities"),
+    // Hosted MCP: no id of its own. Each tool call is an inner /v1 request made with the
+    // caller's API key, and THAT request's entry in this plan covers its tenancy
+    // (routes/mcp.ts; driven end to end in mcp.hosted.test.ts).
+    // ── sales desk (deals, dialer, coaching, salesfloor, verification chain, buyer rooms) ──
+    "GET /v1/deals": list("/v1/deals"),
+    "POST /v1/deals": E("body leadId, companyId", X("B deal on A's lead", "/v1/deals", { name: "pwned", leadId: a.lead }), X("B deal on A's company", "/v1/deals", { name: "pwned", companyId: a.company })),
+    "PATCH /v1/deals/:id": E("path :id", X("edit A's deal", `/v1/deals/${a.deal}`, { stage: "lost" })),
+    "GET /v1/dialer/queue": list("/v1/dialer/queue"),
+    "POST /v1/dialer/log": E("body leadId", X("B logs a call on A's lead", "/v1/dialer/log", { leadId: a.lead, phoneNumber: "+15550100", disposition: "interested" })),
+    "GET /v1/dialer/history": list("/v1/dialer/history"),
+    "GET /v1/coaching/personas": list("/v1/coaching/personas"),
+    "POST /v1/coaching/simulate-turn": noref("roleplay turn against a built-in persona; stores nothing that names another row"),
+    "POST /v1/coaching/complete": noref("scores a finished roleplay; no object reference"),
+    "GET /v1/salesfloor/state": list("/v1/salesfloor/state"),
+    "POST /v1/salesfloor/blitz": noref("creates this workspace's blitz; no object reference"),
+    "GET /v1/scale/waterfall": list("/v1/scale/waterfall"),
+    "GET /v1/scale/digital-workers": list("/v1/scale/digital-workers"),
+    "GET /v1/scale/signal-surges": list("/v1/scale/signal-surges"),
+    "POST /v1/scale/email-coach/score": noref("grades text in the request body; no object reference"),
+    "GET /v1/moat/committees": list("/v1/moat/committees"),
+    "GET /v1/moat/rooms": list("/v1/moat/rooms"),
+    "POST /v1/moat/rooms": noref("creates this workspace's room; no object reference"),
+    "GET /v1/moat/gtm-campaigns": list("/v1/moat/gtm-campaigns"),
+    "GET /v1/dsr/room/:token": pub("the share token is the credential; the payload names no org, deal or address (moat.ts publicRoom)"),
+    "POST /v1/admin/demo-account": { cls: "admin", cases: [X("customer credential", "/v1/admin/demo-account", {})] },
+    "POST /v1/admin/orgs/:id/extend-demo": { cls: "admin", cases: [X("customer credential", `/v1/admin/orgs/${a.org}/extend-demo`, {})] },
+    "POST /v1/admin/orgs/:id/convert-demo": { cls: "admin", cases: [X("customer credential", `/v1/admin/orgs/${a.org}/convert-demo`, {})] },
+    "POST /mcp": noref("JSON-RPC envelope; every tool call is an ordinary /v1 request under the caller's key"),
+    "GET /mcp": pub("answers 405 to everyone; holds no data"),
+    "DELETE /mcp": pub("answers 405 to everyone; holds no data"),
     "POST /v1/automation/discover": E("body icpId", { ...X("score against A's ICP (preview)", "/v1/automation/discover", { query: "ceo at saas companies", count: 1, icpId: a.icp, preview: true }, true), also: [502] }),
     "POST /v1/automation/linkedin-scrape": E("body icpId", { ...X("score against A's ICP (preview)", "/v1/automation/linkedin-scrape", { query: "ceo at saas companies", count: 1, icpId: a.icp, preview: true }, true), also: [502] }),
     "GET /v1/automation/leads": E("query runId, company", X("all", "/v1/automation/leads?limit=500", undefined, true), X("A's run", `/v1/automation/leads?runId=${a.agentRun}`, undefined, true), X("A's company", `/v1/automation/leads?company=${encodeURIComponent(`${A.tag} Corp`)}`, undefined, true)),

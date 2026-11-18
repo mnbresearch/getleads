@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "prebuild": "cd ../.. && npm run build -w packages/sdk -w packages/mcp",
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/server.ts",
@@ -15,8 +16,11 @@
   "dependencies": {
     "@hono/node-server": "^1.19.18",
     "@hono/zod-validator": "^0.4.1",
+    "@modelcontextprotocol/sdk": "^1.32.1",
     "@prospex/core": "*",
     "@prospex/db": "*",
+    "@prospex/mcp": "*",
+    "@prospex/sdk": "*",
     "bcryptjs": "^2.4.3",
     "hono": "^4.6.14",
     "nodemailer": "^10.0.10",

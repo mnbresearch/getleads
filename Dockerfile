@@ -9,7 +9,7 @@ COPY apps ./apps
 # Build with the dev dependencies (TypeScript), then drop them: the runtime image carries only
 # what the server loads.
 RUN npm ci --ignore-scripts \
- && npm run build -w packages/core -w packages/db -w apps/api \
+ && npm run build -w packages/core -w packages/db -w packages/sdk -w packages/mcp -w apps/api \
  && npm prune --omit=dev --ignore-scripts
 
 FROM node:22-alpine

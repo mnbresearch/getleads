@@ -13,11 +13,16 @@ interface NavCategory {
 
 // Grouped in the order the work happens: find people, reach them, run the
 // deals, then the AI helpers and the workspace itself. Every route that was
-// in the menu is still here.
+// in the menu is still here, except four pages that only ever showed invented data
+// (digital workers, signal surges, buying committees, GTM campaigns): those addresses now
+// open the real feature that does the job (main.tsx).
 const navCategories: NavCategory[] = [
   {
     name: "Home",
-    items: [{ to: "/", label: "Command Center", icon: "▦" }],
+    items: [
+      { to: "/", label: "Home", icon: "▦" },
+      { to: "/sales", label: "Sales desk", icon: "◫" },
+    ],
   },
   {
     name: "Find leads",
@@ -25,9 +30,8 @@ const navCategories: NavCategory[] = [
       { to: "/search", label: "Find Leads", icon: "⌕" },
       { to: "/leads", label: "Leads Database", icon: "☰" },
       { to: "/icps", label: "Ideal Customers", icon: "◎" },
-      { to: "/waterfall", label: "Waterfall Enrichment", icon: "💧" },
+      { to: "/waterfall", label: "Email verification", icon: "💧" },
       { to: "/signals", label: "Intent Signals", icon: "◈" },
-      { to: "/surges", label: "Signal Surges", icon: "⚡" },
       { to: "/visitors", label: "Website Visitors", icon: "◉" },
     ],
   },
@@ -37,18 +41,16 @@ const navCategories: NavCategory[] = [
       { to: "/campaigns", label: "Campaigns", icon: "📨" },
       { to: "/plays", label: "Plays & Cadences", icon: "▷" },
       { to: "/email-coach", label: "Email Coach", icon: "✉" },
-      { to: "/dialer", label: "AI Sales Dialer", icon: "📞" },
-      { to: "/gtm", label: "Autonomous GTM", icon: "🎯", badge: "New" },
-      { to: "/autopilot", label: "Autopilot Engine", icon: "∞" },
+      { to: "/dialer", label: "Call queue", icon: "📞" },
+      { to: "/autopilot", label: "Autopilot (AI SDR)", icon: "∞" },
     ],
   },
   {
     name: "Pipeline",
     items: [
       { to: "/pipeline", label: "Deals & CRM", icon: "📊" },
-      { to: "/committees", label: "Buying Committees", icon: "👥" },
       { to: "/rooms", label: "Digital Sales Rooms", icon: "🤝" },
-      { to: "/salesfloor", label: "Virtual Salesfloor", icon: "👥" },
+      { to: "/salesfloor", label: "Salesfloor", icon: "👥" },
       { to: "/tasks", label: "Tasks", icon: "☑" },
     ],
   },
@@ -56,7 +58,6 @@ const navCategories: NavCategory[] = [
     name: "AI agents",
     items: [
       { to: "/agent", label: "Agent Console", icon: "⚡" },
-      { to: "/digital-workers", label: "Digital SDRs (Alice & Jordan)", icon: "🤖" },
       { to: "/coaching", label: "AI Roleplay Coaching", icon: "🎯" },
       { to: "/visibility", label: "AI Search Visibility", icon: "◇" },
     ],

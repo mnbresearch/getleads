@@ -11,18 +11,15 @@ import { PrivacyPage, TermsPage } from "./pages/Legal";
 import { NotFoundPage } from "./pages/NotFound";
 
 // Code-split internal app pages and admin dashboards so the public landing page stays lean and fast
-const Dashboard = React.lazy(() => import("./pages/SalesCommandCenter").then((m) => ({ default: m.SalesCommandCenter })));
+const Dashboard = React.lazy(() => import("./pages/Dashboard").then((m) => ({ default: m.Dashboard })));
+const SalesDeskPage = React.lazy(() => import("./pages/SalesCommandCenter").then((m) => ({ default: m.SalesCommandCenter })));
 const DialerPage = React.lazy(() => import("./pages/Dialer").then((m) => ({ default: m.DialerPage })));
 const CoachingPage = React.lazy(() => import("./pages/Coaching").then((m) => ({ default: m.CoachingPage })));
 const SalesfloorPage = React.lazy(() => import("./pages/Salesfloor").then((m) => ({ default: m.SalesfloorPage })));
 const PipelinePage = React.lazy(() => import("./pages/Pipeline").then((m) => ({ default: m.PipelinePage })));
 const WaterfallPage = React.lazy(() => import("./pages/Waterfall").then((m) => ({ default: m.WaterfallPage })));
-const DigitalWorkersPage = React.lazy(() => import("./pages/DigitalWorkers").then((m) => ({ default: m.DigitalWorkersPage })));
-const SignalSurgesPage = React.lazy(() => import("./pages/SignalSurges").then((m) => ({ default: m.SignalSurgesPage })));
 const EmailCoachPage = React.lazy(() => import("./pages/EmailCoach").then((m) => ({ default: m.EmailCoachPage })));
-const BuyingCommitteesPage = React.lazy(() => import("./pages/BuyingCommittees").then((m) => ({ default: m.BuyingCommitteesPage })));
 const DigitalSalesRoomsPage = React.lazy(() => import("./pages/DigitalSalesRooms").then((m) => ({ default: m.DigitalSalesRoomsPage })));
-const AutonomousGtmCampaignsPage = React.lazy(() => import("./pages/AutonomousGtmCampaigns").then((m) => ({ default: m.AutonomousGtmCampaignsPage })));
 const PublicBuyingRoomPage = React.lazy(() => import("./pages/PublicBuyingRoom").then((m) => ({ default: m.PublicBuyingRoomPage })));
 const LeadsPage = React.lazy(() => import("./pages/Leads").then((m) => ({ default: m.LeadsPage })));
 const PlaysPage = React.lazy(() => import("./pages/Plays").then((m) => ({ default: m.PlaysPage })));
@@ -85,7 +82,7 @@ function Protected({ children }: { children: React.ReactNode }) {
  */
 const APP_SECTIONS = [
   "dialer", "salesfloor", "pipeline", "coaching", "committees", "rooms", "gtm", "waterfall", "digital-workers", "surges", "email-coach", "plays", "clients", "leads", "search", "icps", "campaigns", "agent", "visitors", "signals",
-  "visibility", "tasks", "autopilot", "tools", "analytics", "automation", "settings",
+  "visibility", "tasks", "autopilot", "tools", "analytics", "automation", "settings", "sales",
 ];
 
 function isAppPath(pathname: string): boolean {
@@ -135,12 +132,13 @@ function Root() {
                     <Route path="/salesfloor" element={<SalesfloorPage />} />
                     <Route path="/pipeline" element={<PipelinePage />} />
                     <Route path="/coaching" element={<CoachingPage />} />
-                    <Route path="/committees" element={<BuyingCommitteesPage />} />
+                    <Route path="/committees" element={<Navigate to="/pipeline" replace />} />
                     <Route path="/rooms" element={<DigitalSalesRoomsPage />} />
-                    <Route path="/gtm" element={<AutonomousGtmCampaignsPage />} />
+                    <Route path="/gtm" element={<Navigate to="/plays" replace />} />
                     <Route path="/waterfall" element={<WaterfallPage />} />
-                    <Route path="/digital-workers" element={<DigitalWorkersPage />} />
-                    <Route path="/surges" element={<SignalSurgesPage />} />
+                    <Route path="/digital-workers" element={<Navigate to="/autopilot" replace />} />
+                    <Route path="/sales" element={<SalesDeskPage />} />
+                    <Route path="/surges" element={<Navigate to="/signals" replace />} />
                     <Route path="/email-coach" element={<EmailCoachPage />} />
                     <Route path="/plays" element={<PlaysPage />} />
                     <Route path="/clients" element={<ClientsPage />} />

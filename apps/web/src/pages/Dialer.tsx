@@ -6,10 +6,10 @@ import { Empty, Page, Spinner, useToast } from "../components/ui";
 interface QueueItem {
   id: string;
   name: string;
-  title: string;
+  title: string | null;
   phone: string;
-  companyName: string;
-  priorityScore: number;
+  companyName: string | null;
+  priorityScore: number | null;
   status: string;
   aiTalkTrack: {
     opener: string;
@@ -124,7 +124,7 @@ export function DialerPage() {
       <Page title="AI Sales Dialer" subtitle="AI-assisted calling workspace with real-time talk-tracks and objection battlecards.">
         <Empty
           title="No leads in callable queue"
-          hint="All leads with phone numbers have been called or none have been assigned yet. Import or enrich leads with phone numbers to populate the dialer."
+          hint="Only leads with a phone number on record are callable. Add numbers to leads, or import a list that has them, and they appear here."
           action={<Link to="/leads" className="btn-primary text-xs">View Leads →</Link>}
         />
       </Page>
@@ -175,7 +175,7 @@ export function DialerPage() {
                 <div className="flex items-center justify-between">
                   <div className="font-semibold text-xs text-ink-50 truncate max-w-[140px]">{item.name}</div>
                   <span className="text-[10px] font-bold text-brand-700 bg-brand-100/60 px-1.5 py-0.5 rounded">
-                    Score {item.priorityScore}
+                    {item.priorityScore != null ? `Score ${item.priorityScore}` : "Unscored"}
                   </span>
                 </div>
                 <div className="text-[11px] text-ink-300 truncate mt-0.5">{item.title}</div>
@@ -195,7 +195,7 @@ export function DialerPage() {
                 </span>
                 <h2 className="mt-2 text-xl font-bold text-ink-50">{activeContact?.name}</h2>
                 <p className="text-xs text-ink-400">
-                  {activeContact?.title} · {activeContact?.companyName}
+                  {[activeContact?.title, activeContact?.companyName].filter(Boolean).join(" · ") || "No title or company on record"}
                 </p>
                 <div className="mt-1 font-mono text-xs font-semibold text-ink-200">{activeContact?.phone}</div>
               </div>

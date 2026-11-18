@@ -94,7 +94,12 @@ describe("B5 public copy claims only what production does", () => {
     expect(all).not.toMatch(/MCP-connected agents/);
     expect(all).not.toMatch(/billed monthly/i);
     expect(pages.llms).not.toMatch(/verifies their email addresses before anything is sent/);
-    expect(pages.faq).toMatch(/MCP server is available on request/);
+    // The MCP claim follows production: the API serves it at /mcp (routes/mcp.ts), so the
+    // copy says "hosted MCP endpoint" and no longer "on request". What it must still never
+    // claim is a package to install from a public registry.
+    expect(pages.faq).toMatch(/hosted MCP endpoint/);
+    expect(all).not.toMatch(/available on request/);
+    expect(all).not.toMatch(/npx[^\n]{0,40}@prospex\/mcp/);
   });
 
   it("has no em dashes in the copy B5 touched", () => {
@@ -209,7 +214,7 @@ describe("B5 SDK and MCP", () => {
   });
 
   it("MCP argument limits match what the API accepts", () => {
-    const mcp = read("packages/mcp/src/server.ts");
+    const mcp = read("packages/mcp/src/tools.ts");
     const tool = (name: string) => {
       const i = mcp.indexOf(`"${name}"`);
       expect(i, name).toBeGreaterThan(-1);

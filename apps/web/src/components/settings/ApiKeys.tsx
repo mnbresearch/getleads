@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { API_URL, apiFetch, expectLists, fmtDate, fmtDay } from "../../lib/api";
 import { EXTERNAL_REL } from "../../lib/safeHref";
 import { LoadError, useToast } from "../ui";
+import { McpConnect } from "../McpConnect";
 
 type Scope = "full" | "read";
 type Status = "active" | "expiring" | "expired" | "revoked";
@@ -284,8 +285,8 @@ export function ApiKeysPanel() {
         <p className="text-ink-300">REST: send <code>x-api-key</code>. OpenAPI spec at <a className="text-brand-600" href={`${API_URL}/openapi.json`} target="_blank" rel={EXTERNAL_REL}>{API_URL}/openapi.json</a>, interactive docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel={EXTERNAL_REL}>/docs</a>.</p>
         {/* This used to print an `npx` command for a package name on the public registry that is
             not ours - anyone could publish under it, and the command would have run their code
-            with the customer's API key in its environment. */}
-        <p className="mt-2 text-ink-300" data-testid="mcp-note">Scout has an MCP server for AI assistants (Claude Desktop, Cursor). It is not published to a public package registry. <a className="text-brand-600 hover:underline" href="mailto:contact@mnbresearch.com?subject=Scout%20MCP%20server">Ask support</a> for the package, or use the REST API and OpenAPI document with your API key.</p>
+            with the customer's API key in its environment. The hosted endpoint needs no package. */}
+        <div className="mt-3" data-testid="mcp-note"><div className="mb-1 font-medium">MCP (Claude Code, Cursor, Claude Desktop)</div><McpConnect /></div>
       </div>
     </div>
   );

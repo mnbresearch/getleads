@@ -19,5 +19,15 @@
     "@prospex/sdk": "*",
     "zod": "^3.23.8"
   },
-  "license": "MIT"
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "import": "./dist/server.js"
+    },
+    "./tools": {
+      "types": "./dist/tools.d.ts",
+      "import": "./dist/tools.js"
+    }
+  },
+  "types": "./dist/tools.d.ts"
 }

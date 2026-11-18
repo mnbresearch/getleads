@@ -38,6 +38,7 @@ import { salesfloorRoutes } from "./routes/salesfloor.js";
 import { competitorScaleRoutes } from "./routes/competitors.js";
 import { moatRoutes, publicDsrRoute } from "./routes/moat.js";
 import { wireToolMeter } from "./lib/toolMeter.js";
+import { mcpRoutes } from "./routes/mcp.js";
 
 // ── Access log ──
 
@@ -447,6 +448,10 @@ export function createApp(opts: AppOptions = {}) {
   };
   app.post("/internal/jobs/run", requireInternalToken, runJobs);
   app.get("/internal/jobs/run", requireInternalToken, runJobs);
+
+  // Hosted MCP for AI assistants (routes/mcp.ts). Its tools call this same app's /v1 routes
+  // in process, with the caller's API key, so every limit and scope above applies unchanged.
+  app.route("/mcp", mcpRoutes(app));
 
   app.notFound((c) => c.json({ error: { code: "not_found", message: `No route for ${c.req.method} ${c.req.path}` } }, 404));
   return app;

@@ -491,5 +491,5 @@ Migration `0023` adds three nullable columns to `api_keys` and three new tables 
 | Team seats + invites | Yes (invite link shown; email needs mail provider) | Resend |
 | Domain deliverability check (SPF/DKIM/DMARC/MX) | Yes | - |
 | Webhooks (HMAC), CRM sync (HubSpot, Pipedrive, Zoho, Cortex, generic, Sheets) | Yes | customer's CRM tokens |
-| REST API + OpenAPI + SDK + MCP (run from the repo, on request) | Yes | - |
+| REST API + OpenAPI + SDK + hosted MCP at `/mcp` (stdio build in the repo) | Yes | - |
 | Stripe billing (online checkout) | Off; upgrades arrive as requests | Stripe keys |

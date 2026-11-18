@@ -28,8 +28,8 @@ interface RoomItem {
 
 interface RoomStats {
   activeRooms: number;
-  avgMilestoneCompletion: string;
-  buyerEngagementRate: string;
+  avgMilestoneCompletion: number | null;
+  roomsViewed: number;
 }
 
 export function DigitalSalesRoomsPage() {
@@ -98,19 +98,19 @@ export function DigitalSalesRoomsPage() {
       {/* Metric Cards */}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3 mb-6">
         <div className="card p-4 border-l-4 border-brand-500">
-          <div className="text-xs uppercase tracking-wider text-ink-400 font-semibold">Active Buying Rooms</div>
-          <div className="text-2xl font-bold text-ink-50 mt-1">{stats?.activeRooms || rooms.length} Hubs</div>
-          <div className="text-xs text-brand-700 mt-0.5">Live champion collaborative workspaces</div>
+          <div className="text-xs uppercase tracking-wider text-ink-400 font-semibold">Active rooms</div>
+          <div className="text-2xl font-bold text-ink-50 mt-1">{stats?.activeRooms ?? rooms.length}</div>
+          <div className="text-xs text-brand-700 mt-0.5">rooms marked active</div>
         </div>
         <div className="card p-4 border-l-4 border-emerald-500">
-          <div className="text-xs uppercase tracking-wider text-ink-400 font-semibold">Milestone Completion Pace</div>
-          <div className="text-2xl font-bold text-emerald-700 mt-1">{stats?.avgMilestoneCompletion || "50%"}</div>
-          <div className="text-xs text-emerald-700 mt-0.5">Security, Legal & Pilot Milestones</div>
+          <div className="text-xs uppercase tracking-wider text-ink-400 font-semibold">Milestones completed</div>
+          <div className="text-2xl font-bold text-emerald-700 mt-1">{stats?.avgMilestoneCompletion != null ? `${stats.avgMilestoneCompletion}%` : "-"}</div>
+          <div className="text-xs text-emerald-700 mt-0.5">across every room's action plan</div>
         </div>
         <div className="card p-4 border-l-4 border-purple-500">
-          <div className="text-xs uppercase tracking-wider text-ink-400 font-semibold">Buyer Engagement Rate</div>
-          <div className="text-2xl font-bold text-purple-700 mt-1">{stats?.buyerEngagementRate || "88%"}</div>
-          <div className="text-xs text-purple-700 mt-0.5">Execs viewing DSR content before calls</div>
+          <div className="text-xs uppercase tracking-wider text-ink-400 font-semibold">Rooms a buyer has opened</div>
+          <div className="text-2xl font-bold text-purple-700 mt-1">{stats ? `${stats.roomsViewed} of ${rooms.length}` : "-"}</div>
+          <div className="text-xs text-purple-700 mt-0.5">counted from views of the share link</div>
         </div>
       </div>
 
@@ -143,7 +143,7 @@ export function DigitalSalesRoomsPage() {
                     </div>
                     <div className="text-xs text-ink-400 mt-0.5">
                       Target Company: <span className="font-semibold text-ink-200">{room.targetCompany}</span> · Champion:{" "}
-                      <span className="font-semibold text-ink-200">{room.championName || "Sarah Chen"}</span>
+                      <span className="font-semibold text-ink-200">{room.championName || "not set"}</span>
                     </div>
                   </div>
 
@@ -236,7 +236,7 @@ export function DigitalSalesRoomsPage() {
                 <input
                   value={newChampion}
                   onChange={(e) => setNewChampion(e.target.value)}
-                  placeholder="e.g. Sarah Chen (Head of Outbound)"
+                  placeholder="e.g. Head of Operations"
                   className="w-full mt-1 p-2 text-sm rounded-lg border border-black/10 bg-surface focus:outline-none focus:ring-2 focus:ring-brand-500"
                 />
               </div>

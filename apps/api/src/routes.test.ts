@@ -74,6 +74,8 @@ suite("route surface", () => {
     { match: /^\/v1\/public\/clients\/report\/:token$/, why: "the client-facing report; the unguessable token in the URL is the credential" },
     // Exactly this route. The provider's Svix signature is the credential; it is covered by the jobs hardening suite.
     { match: /^\/v1\/email-events\/resend$/, why: "the email provider's bounce/complaint webhook; authenticated by its signature, not a session" },
+    // Exactly this route. The share token is the credential, and its payload is limited by publicRoom() (dsr.public.test.ts).
+    { match: /^\/v1\/dsr\/room\/:token$/, why: "the buyer-facing sales room; the unguessable token in the URL is the credential" },
   ];
 
   beforeAll(async () => {

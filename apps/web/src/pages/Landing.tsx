@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { Logo } from "../components/Logo";
 import { FAQS } from "../content/faq";
-import { apiFetch } from "../lib/api";
+import { API_URL, apiFetch } from "../lib/api";
 import { sendPageView, sendPageViewWhenSeen } from "../lib/pageview";
 
 /**
@@ -215,13 +215,13 @@ export const DEFAULT_PLANS: Plan[] = [
 
 const NAV_LINKS = [
   { href: "#product", label: "Product" },
-  { href: "#find-leads", label: "Find Leads" },
-  { href: "#find-companies", label: "Find Companies" },
-  { href: "#find-people", label: "Find People" },
-  { href: "#features", label: "Features" },
-  { href: "#use-cases", label: "Use Cases" },
-  { href: "#agencies", label: "For Agencies" },
+  { href: "#how-it-works", label: "How it works" },
+  { href: "#features", label: "Plays" },
+  { href: "#developers", label: "Developers" },
+  { href: "#compare", label: "Compare" },
+  { href: "#agencies", label: "Agencies" },
   { href: "#pricing", label: "Pricing" },
+  { href: "#faq", label: "FAQ" },
 ];
 
 function NavigationBar() {
@@ -431,53 +431,55 @@ function HeroSection() {
   const sampleResults = HERO_SAMPLE_RESULTS[activeQueryKey] ?? HERO_SAMPLE_RESULTS.saas;
 
   return (
-    <section className="relative overflow-hidden pt-12 pb-20 sm:pt-16 sm:pb-24 border-b border-black/5 bg-gradient-to-b from-cream via-cream to-surface">
-      <div className="mx-auto max-w-6xl px-4 sm:px-6">
-        {/* Trust Pill */}
+    <section className="relative overflow-hidden bg-ink-50 pt-14 pb-20 text-white sm:pt-20 sm:pb-24">
+      {/* Warm glow behind the headline; decorative only. */}
+      <div aria-hidden className="pointer-events-none absolute inset-x-0 -top-40 mx-auto h-[520px] max-w-4xl rounded-full bg-brand-500/25 blur-3xl" />
+      <div aria-hidden className="pointer-events-none absolute inset-0 opacity-[0.07] [background-image:linear-gradient(rgba(255,255,255,.6)_1px,transparent_1px),linear-gradient(90deg,rgba(255,255,255,.6)_1px,transparent_1px)] [background-size:44px_44px] [mask-image:radial-gradient(ellipse_at_top,black,transparent_70%)]" />
+      <div className="relative mx-auto max-w-6xl px-4 sm:px-6">
         <div className="flex justify-center">
-          <div className="inline-flex items-center gap-2 rounded-full border border-brand-200 bg-brand-50/90 px-4 py-1.5 text-xs font-semibold text-brand-800 shadow-xs">
-            <span className="flex h-2 w-2 rounded-full bg-brand-600 animate-pulse" />
-            <span>AI-Powered Prospect Discovery & Custom Audience Generation</span>
-          </div>
+          <a href="#developers" className="group inline-flex items-center gap-2 rounded-full border border-white/15 bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-white/80 backdrop-blur transition hover:border-white/30">
+            <span className="rounded-full bg-brand-500 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-white">New</span>
+            <span>Scout now runs inside Claude Code and Cursor, with one command</span>
+            <ArrowRightIcon className="h-3.5 w-3.5 transition group-hover:translate-x-0.5" />
+          </a>
         </div>
 
-        {/* Primary Headline */}
-        <div className="mt-6 text-center max-w-4xl mx-auto">
-          <h1 className="text-3xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight text-ink-50 leading-[1.12]">
-            Find Anyone. Find Any Business.{" "}
-            <span className="bg-brand-gradient bg-clip-text text-transparent">
-              Find Your Next Customer.
-            </span>
+        <div className="mx-auto mt-7 max-w-4xl text-center">
+          <h1 className="text-4xl font-extrabold leading-[1.05] tracking-tight sm:text-6xl lg:text-7xl">
+            Pipeline from the live web.{" "}
+            <span className="bg-brand-gradient bg-clip-text text-transparent">For your reps and your agents.</span>
           </h1>
-          <p className="mt-5 text-sm sm:text-lg text-ink-300 max-w-3xl mx-auto leading-relaxed">
-            Scout is your AI-powered prospect discovery platform. Describe who you are looking for in natural English, customise your targeting criteria, and discover relevant people, businesses, and potential customers from live, available sources.
+          <p className="mx-auto mt-6 max-w-2xl text-base leading-relaxed text-white/70 sm:text-lg">
+            Describe the customer you want in plain English. Scout finds the people and companies that match from live sources, finds and verifies their work email, tells you why each one fits, and runs the outreach. Use it in the app, over the API, or straight from your AI assistant.
           </p>
 
-          {/* Quick Onboarding Form */}
-          <form onSubmit={handleHeroSubmit} className="mt-7 flex flex-col sm:flex-row items-center justify-center gap-2 max-w-md mx-auto">
+          <form onSubmit={handleHeroSubmit} className="mx-auto mt-8 flex max-w-md flex-col items-center justify-center gap-2 sm:flex-row">
             <input
               type="email"
               value={emailInput}
               onChange={(e) => setEmailInput(e.target.value)}
-              placeholder="Enter your work email..."
-              className="input w-full px-4 py-3 text-sm border-black/15 bg-white shadow-xs"
+              placeholder="Enter your work email"
+              className="w-full rounded-lg border border-white/15 bg-white/[0.07] px-4 py-3 text-sm text-white placeholder:text-white/40 outline-none focus:border-brand-400 focus:ring-2 focus:ring-brand-500/30"
               aria-label="Work email"
             />
-            <button type="submit" className="btn-primary w-full sm:w-auto px-6 py-3 text-sm font-semibold whitespace-nowrap shadow-xs">
-              Find My First Leads →
+            <button type="submit" className="btn-primary w-full whitespace-nowrap px-6 py-3 text-sm font-semibold shadow-glow sm:w-auto">
+              Find my first leads
             </button>
           </form>
+          <div className="mt-3 text-xs text-white/50">Free plan to start · No card needed · Every lead comes with the reason it matches</div>
 
-          {/* Trust points */}
-          <div className="mt-4 flex flex-wrap items-center justify-center gap-x-5 gap-y-1.5 text-xs text-ink-400">
-            <span className="flex items-center gap-1.5 font-medium"><CheckIcon className="h-3.5 w-3.5 text-brand-600" /> AI-Powered Prospect Discovery</span>
-            <span className="flex items-center gap-1.5 font-medium"><CheckIcon className="h-3.5 w-3.5 text-brand-600" /> Customisable Targeting Rules</span>
-            <span className="flex items-center gap-1.5 font-medium"><CheckIcon className="h-3.5 w-3.5 text-brand-600" /> Source-Backed Evidence</span>
-            <span className="flex items-center gap-1.5 font-medium"><CheckIcon className="h-3.5 w-3.5 text-brand-600" /> Free Sandbox Exploration</span>
-          </div>
-
-          <div className="mt-3 flex items-center justify-center gap-2 text-xs text-ink-400">
-            <span>Free plan to start · No card needed · Every lead comes with the reason it matches</span>
+          <div className="mx-auto mt-8 grid max-w-3xl grid-cols-2 gap-px overflow-hidden rounded-xl border border-white/10 bg-white/10 text-left sm:grid-cols-4">
+            {[
+              { k: "Live", v: "web and registry discovery, not a resold list" },
+              { k: "Verified", v: "work emails; a known-bad address is never sent to" },
+              { k: "60+", v: "tools for Claude and Cursor over hosted MCP" },
+              { k: "2,000+", v: "businesses served by MNB Research" },
+            ].map((x) => (
+              <div key={x.k} className="bg-ink-50/90 p-4">
+                <div className="text-lg font-bold text-white">{x.k}</div>
+                <div className="mt-0.5 text-[11px] leading-snug text-white/55">{x.v}</div>
+              </div>
+            ))}
           </div>
         </div>
 
@@ -1488,21 +1490,103 @@ function IntegrationsSection() {
 }
 
 /* =========================================================================
+   SECTION 11b: DEVELOPERS AND AI AGENTS
+   One key, four surfaces. Every snippet here is a real command against the real API: the
+   hosted MCP endpoint is apps/api/src/routes/mcp.ts, the REST calls are in openapi.ts.
+   ========================================================================= */
+
+const DEV_SNIPPETS: Record<string, { label: string; code: string }> = {
+  claude: {
+    label: "Claude Code",
+    code: `claude mcp add --transport http scout ${API_URL}/mcp \\\n  --header "Authorization: Bearer px_live_..."\n\n# then, in Claude Code:\n> Find 25 heads of procurement at Indian textile mills,\n  verify their emails and draft a first touch for each.`,
+  },
+  cursor: {
+    label: "Cursor / Claude Desktop",
+    code: JSON.stringify({ mcpServers: { scout: { url: `${API_URL}/mcp`, headers: { Authorization: "Bearer px_live_..." } } } }, null, 2),
+  },
+  rest: {
+    label: "REST",
+    code: `curl -X POST ${API_URL}/v1/agent/prospect \\\n  -H "x-api-key: px_live_..." -H "content-type: application/json" \\\n  -d '{"query":"heads of growth at Series A fintechs in Bengaluru","limit":10}'`,
+  },
+  clay: {
+    label: "Clay / n8n / Make",
+    code: `# Any "HTTP request" step can call Scout per row.\nPOST ${API_URL}/v1/search/verify\nx-api-key: px_live_...\ncontent-type: application/json\n\n{ "email": "{{Work Email}}" }`,
+  },
+};
+
+function DevelopersSection() {
+  const [tab, setTab] = useState<keyof typeof DEV_SNIPPETS>("claude");
+  const cards = [
+    { t: "Hosted MCP", d: "Claude Code, Cursor and Claude Desktop get 60+ Scout tools with one command. Nothing to install, nothing to host." },
+    { t: "REST API + OpenAPI", d: "Every action in the app is an endpoint, documented at /docs. Long jobs return a job id to poll." },
+    { t: "TypeScript SDK", d: "Typed client for every route, with ids and domains validated before a request is made." },
+    { t: "Webhooks + CRM sync", d: "Signed events for new leads and replies, plus HubSpot, Pipedrive, Zoho and Google Sheets." },
+  ];
+  return (
+    <section id="developers" className="scroll-mt-20 border-y border-white/5 bg-ink-50 py-20 text-white">
+      <div className="mx-auto grid max-w-6xl gap-10 px-4 sm:px-6 lg:grid-cols-[1fr_1.15fr] lg:items-center">
+        <div>
+          <span className="inline-flex rounded-full border border-white/15 bg-white/[0.06] px-3 py-1 text-xs font-semibold text-white/80">For developers and AI agents</span>
+          <h2 className="mt-4 text-3xl font-extrabold tracking-tight sm:text-4xl">One API key. Your reps, your scripts and your agents.</h2>
+          <p className="mt-4 text-sm leading-relaxed text-white/65">
+            Contact-data APIs stop at a JSON record. Scout gives an agent the whole motion: find the right accounts from live sources, find and verify the people, explain why each one fits, write the sequence, and sync the CRM. The key carries your plan limits and its own scope, so a read-only key can research and can never send.
+          </p>
+          <div className="mt-6 grid gap-3 sm:grid-cols-2">
+            {cards.map((c) => (
+              <div key={c.t} className="rounded-xl border border-white/10 bg-white/[0.04] p-4">
+                <div className="text-sm font-semibold">{c.t}</div>
+                <div className="mt-1 text-xs leading-relaxed text-white/55">{c.d}</div>
+              </div>
+            ))}
+          </div>
+          <div className="mt-6 flex flex-wrap gap-3 text-sm">
+            <Link to="/signup" className="btn-primary px-5 py-2.5 font-semibold">Get an API key</Link>
+            <a href={`${API_URL}/docs`} target="_blank" rel="noopener noreferrer" className="rounded-lg border border-white/20 px-5 py-2.5 font-semibold text-white/85 hover:border-white/40">Read the API docs</a>
+          </div>
+        </div>
+        <div className="min-w-0 overflow-hidden rounded-2xl border border-white/10 bg-black/40 shadow-glow">
+          <div className="flex flex-wrap gap-1 border-b border-white/10 p-2" role="tablist" aria-label="Integration">
+            {(Object.keys(DEV_SNIPPETS) as (keyof typeof DEV_SNIPPETS)[]).map((k) => (
+              <button
+                key={k}
+                type="button"
+                role="tab"
+                aria-selected={tab === k}
+                onClick={() => setTab(k)}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium transition ${tab === k ? "bg-white/10 text-white" : "text-white/50 hover:text-white/80"}`}
+              >
+                {DEV_SNIPPETS[k].label}
+              </button>
+            ))}
+          </div>
+          <pre className="max-w-full overflow-x-auto p-5 text-[12px] leading-relaxed text-emerald-200"><code>{DEV_SNIPPETS[tab].code}</code></pre>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+/* =========================================================================
    SECTION 12: PRODUCT DIFFERENTIATION MATRIX
    ========================================================================= */
 
 function DifferentiationMatrixSection() {
-  const COMPARE_COLS = ["MNB Scout", "Traditional Static Databases", "Point Email Finders", "Manual Rep Research"];
+  // Columns are categories, not named vendors: a claim about somebody else's product is one
+  // we cannot keep true. Rows where Scout does NOT lead are kept on purpose.
+  const COMPARE_COLS = ["MNB Scout", "Contact-data APIs", "Static B2B databases", "Point email finders"];
   const matrix = [
-    { capability: "Natural Language AI Prospect Search", cells: [true, false, false, "varies"] },
-    { capability: "Custom Targeting (roles, niches, commodities, geography)", cells: [true, "varies", false, true] },
-    { capability: "Live web & registry discovery (not a static list)", cells: [true, false, false, true] },
-    { capability: "Multi-Tier Waterfall Email Verification (socket MX probe)", cells: [true, "varies", true, false] },
-    { capability: "Evidence-Backed Relevance (proof sentence on every lead)", cells: [true, false, false, "varies"] },
-    { capability: "Intent-Driven Discovery Plays (hiring, competitor displacement)", cells: [true, false, false, false] },
-    { capability: "Multi-Client Partitions & White-Labeled Reports for Agencies", cells: [true, false, false, false] },
-    { capability: "Integrated Sales Execution (email drafting, dialer, deal rooms)", cells: [true, false, false, false] },
-    { capability: "Full REST API & Model Context Protocol (MCP) for AI Agents", cells: [true, "varies", false, false] },
+    { capability: "Natural-language search for people and companies", cells: [true, false, "varies", false] },
+    { capability: "Live web and registry discovery, not a resold static list", cells: [true, false, false, false] },
+    { capability: "Works outside the US: India, SEA, the Middle East, SMBs and commodity trades", cells: [true, "varies", "varies", "varies"] },
+    { capability: "A reason on every lead: the sentence and source that make it a match", cells: [true, false, false, false] },
+    { capability: "Work-email finding with verification before sending", cells: [true, true, "varies", true] },
+    { capability: "Intent plays: hiring, funding, competitor customers, job changes", cells: [true, false, "varies", false] },
+    { capability: "Sequences, CRM sync, dialer and deal rooms in the same product", cells: [true, false, "varies", false] },
+    { capability: "Hosted MCP for Claude Code and Cursor, plus REST and SDK", cells: [true, "varies", "varies", false] },
+    { capability: "A web app your reps can use, not only an API", cells: [true, false, true, true] },
+    { capability: "Agency client workspaces and branded client reports", cells: [true, false, false, false] },
+    { capability: "Carrier-verified mobile numbers", cells: [false, "varies", "varies", false] },
+    { capability: "Flat-price unlimited lookups", cells: [false, "varies", false, false] },
   ];
 
   return (
@@ -1510,13 +1594,13 @@ function DifferentiationMatrixSection() {
       <div className="max-w-6xl mx-auto px-4 sm:px-6">
         <div className="text-center max-w-3xl mx-auto mb-14">
           <span className="badge border border-brand-200 bg-brand-50 text-brand-700 font-semibold text-xs">
-            Objective Comparison
+            Honest comparison
           </span>
           <h2 className="mt-3 text-3xl sm:text-4xl font-extrabold tracking-tight text-ink-50">
-            Why Scout Instead of Traditional Lead Databases?
+            Data APIs sell records. Scout delivers pipeline.
           </h2>
           <p className="mt-3 text-sm text-ink-300">
-            Static directories sell the exact same contact lists to every competitor. Scout discovers matching prospects dynamically based on your unique criteria.
+            Contact-data APIs and static databases hand you a row and leave the rest to you. Scout finds the accounts from live sources, explains why each one fits and runs the outreach. Where we do not lead yet, the table says so.
           </p>
         </div>
 
@@ -2188,6 +2272,7 @@ export function LandingPage() {
         <WhoIsScoutForSection />
         <AgencyWorkspaceSection />
         <IntegrationsSection />
+        <DevelopersSection />
         <DifferentiationMatrixSection />
         <InteractiveProductDemoSection />
         <PricingSection />

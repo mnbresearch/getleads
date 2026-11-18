@@ -19,9 +19,9 @@ export function PublicBuyingRoomPage() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    apiFetch<{ room: any }>("GET", `/v1/dsr/room/${token || "demo"}`)
+    apiFetch<{ room: any }>("GET", `/v1/dsr/room/${encodeURIComponent(token ?? "")}`)
       .then((res) => setRoom(res.room))
-      .catch((err) => console.error("Error loading buying room:", err))
+      .catch(() => setRoom(null))
       .finally(() => setLoading(false));
   }, [token]);
 
@@ -29,6 +29,17 @@ export function PublicBuyingRoomPage() {
     return (
       <div className="min-h-screen bg-cream flex items-center justify-center p-6 text-sm text-ink-400">
         Loading Digital Sales Room...
+      </div>
+    );
+  }
+
+  if (!room) {
+    return (
+      <div className="min-h-screen bg-cream flex items-center justify-center p-6 text-center">
+        <div className="max-w-sm">
+          <div className="text-base font-semibold text-ink-50">This room is not available</div>
+          <p className="mt-2 text-sm text-ink-400">The link may be mistyped, or the team that shared it has closed the room. Ask them for a new link.</p>
+        </div>
       </div>
     );
   }
@@ -47,12 +58,12 @@ export function PublicBuyingRoomPage() {
             <div>
               <div className="flex items-center gap-2">
                 <span className="badge bg-brand-50 text-brand-700 border border-brand-200">Shared Evaluation Hub</span>
-                <span className="text-xs text-ink-400">Target Go-Live: {room?.targetGoLiveDate || "Dec 2026"}</span>
+                <span className="text-xs text-ink-400">{room?.targetGoLiveDate ? `Target go-live: ${new Date(room.targetGoLiveDate).toLocaleDateString()}` : "No go-live date set"}</span>
               </div>
               <h1 className="text-2xl sm:text-3xl font-extrabold text-ink-50 mt-2">{room?.title}</h1>
               <p className="text-sm text-ink-300 mt-1">
-                Prepared by Scout by MNB Research for <strong className="text-ink-50">{room?.targetCompany}</strong> · Champion:{" "}
-                <span className="text-brand-700 font-semibold">{room?.championName || "Executive Sponsor"}</span>
+                Prepared{room?.preparedBy ? ` by ${room.preparedBy}` : ""} for <strong className="text-ink-50">{room?.targetCompany}</strong> · Champion:{" "}
+                <span className="text-brand-700 font-semibold">{room?.championName || "not named yet"}</span>
               </p>
             </div>
 

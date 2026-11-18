@@ -2,6 +2,7 @@ import { useState } from "react";
 import { API_URL, apiFetch } from "../lib/api";
 import { EmailStatusBadge, Page, ScoreBar, useToast } from "../components/ui";
 import { ExtLink } from "../components/ExtLink";
+import { McpConnect } from "../components/McpConnect";
 
 interface Result { leadId?: string; name: string; title?: string; company?: string; domain?: string; email?: string; emailStatus?: string; score?: number; scoreReasons?: string[]; linkedinUrl?: string; companyDescription?: string; draftEmail?: { subject: string; body: string } }
 
@@ -57,7 +58,7 @@ export function AgentPage() {
   -H "x-api-key: px_live_..." -H "content-type: application/json" \\
   -d '{"query": ${JSON.stringify(query || "CTOs at Series A SaaS startups in Pune")}, "limit": ${limit}${gen ? `, "generateEmails": true, "sender": ${JSON.stringify(sender)}` : ""}}'`;
   return (
-    <Page title="Agent console" subtitle="The same single-call workflow your AI agents use: describe → discover → enrich → verify → score → (draft). Also available as an MCP server.">
+    <Page title="Agent console" subtitle="The same single-call workflow your AI agents use: describe → discover → enrich → verify → score → (draft). Also served to AI assistants over MCP.">
       {Toast}
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
         <div className="card space-y-3 p-5 lg:col-span-2">
@@ -69,7 +70,7 @@ export function AgentPage() {
           </div>
           {gen && <div className="grid gap-2 sm:grid-cols-3"><input className="input" placeholder="Your name" value={sender.name} onChange={(e) => setSender({ ...sender, name: e.target.value })} /><input className="input" placeholder="Your company" value={sender.company} onChange={(e) => setSender({ ...sender, company: e.target.value })} /><input className="input" placeholder="Value proposition" value={sender.valueProp} onChange={(e) => setSender({ ...sender, valueProp: e.target.value })} /></div>}
         </div>
-        <div className="card min-w-0 p-4"><div className="label">Equivalent API call</div><pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-[11px] leading-relaxed text-emerald-800">{curl}</pre><div className="mt-2 text-xs text-ink-400 [overflow-wrap:anywhere]">Scout has an MCP server for AI assistants (Claude Desktop, Cursor). It is not published to a public package registry. Ask support for the package, or use the REST API and OpenAPI document with your API key. Docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noopener noreferrer">{API_URL}/docs</a></div></div>
+        <div className="card min-w-0 p-4"><div className="label">Equivalent API call</div><pre className="max-w-full overflow-x-auto rounded-lg bg-black p-3 text-[11px] leading-relaxed text-emerald-200">{curl}</pre><div className="mt-2 text-xs text-ink-400 [overflow-wrap:anywhere]">Docs at <a className="text-brand-600" href={`${API_URL}/docs`} target="_blank" rel="noopener noreferrer">{API_URL}/docs</a></div><div className="mt-4 border-t border-black/5 pt-3"><div className="label">Use it from Claude or Cursor (MCP)</div><McpConnect compact /></div></div>
       </div>
       {res && (
         <div className="mt-6">

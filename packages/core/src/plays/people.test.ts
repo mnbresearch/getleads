@@ -95,7 +95,9 @@ describe("findPeopleForFinding", () => {
     }
     // Someone the result only loosely ties to the company is kept, but not trusted much.
     expect(people.find((p) => p.fullName === "Tom Baker")!.confidence).toBe(0.5);
-    expect(trace).toMatchObject({ searches: 4, failedSearches: 0, blocked: false });
+    // Three titles go out as ONE "A" OR "B" OR "C" search (discovery/people.ts buildPeopleQueries
+    // batches up to three per query), plus the website look-up: two searches, not four.
+    expect(trace).toMatchObject({ searches: 2, failedSearches: 0, blocked: false });
   });
 
   it("leaves out people who work somewhere else, and says how many", async () => {
@@ -175,7 +177,9 @@ describe("findPeopleForFinding", () => {
     const search = { ...base, search: async (q: string, o?: { country?: string }) => (seen.push(o?.country), base.search(q)) };
     await findPeopleForFinding({ ...FINDING, companyDomain: "globex.com" }, { titles: ["A One", "B Two", "C Three", "D Four", "E Five", "F Six", "G Seven"], limit: 25 }, { searchOpts: { providers: [search] }, country: "GB" });
     expect(new Set(seen)).toEqual(new Set(["GB"]));
-    expect(new Set(base.queries.map((q) => /"([A-G] \w+)"/.exec(q)?.[1])).size).toBe(5);
+    // Titles are batched with OR, so count the titles named across every query, not the queries.
+    const named = new Set(base.queries.flatMap((q) => [...q.matchAll(/"([A-G] \w+)"/g)].map((m) => m[1])));
+    expect(named).toEqual(new Set(["A One", "B Two", "C Three", "D Four", "E Five"]));
   });
 
   it("with no company there is nobody to look for, and it says so without searching", async () => {

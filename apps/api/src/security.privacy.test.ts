@@ -915,7 +915,9 @@ suite("privacy: pixel, do-not-contact, erasure, AI switch, retention", () => {
         settings = ${JSON.stringify({ aiDisabled: true, mailingAddress: "9 Hidden Lane", valueProp: "INTERNAL-PITCH", aiReplyStyleExamples: [{ subject: "Re", body: "Dear Priya, PRIVATE-REPLY" }] })}::jsonb WHERE id = ${o.orgId}`);
       const r = await admin("GET", `/orgs/${o.orgId}`);
       expect(r.status).toBe(200);
-      expect(Object.keys(r.body.org).sort()).toEqual(["aiAssist", "createdAt", "hasSubscription", "id", "limits", "mailingAddressSet", "name", "overrides", "pendingDeletionAt", "plan", "planLimits", "slug", "status"]);
+      // The demo fields are the admin console's own extend/convert-demo state, derived from the
+      // org's settings one key at a time - still named fields, never the settings object.
+      expect(Object.keys(r.body.org).sort()).toEqual(["aiAssist", "createdAt", "demoDaysLeft", "demoExpiresAt", "demoFeatures", "hasSubscription", "id", "isDemo", "isDemoExpired", "limits", "mailingAddressSet", "name", "overrides", "pendingDeletionAt", "plan", "planLimits", "slug", "status"]);
       expect(r.body.org).toMatchObject({ id: o.orgId, name: o.orgName, plan: "scale", status: "active", aiAssist: false, mailingAddressSet: true, hasSubscription: true });
       for (const secret of ["cus_SECRET123", "sub_SECRET456", "PRIVATE-REPLY", "INTERNAL-PITCH", "Hidden Lane", "settings", "password", "totp"]) expect(r.text, secret).not.toContain(secret);
       // What the console already read is still there.

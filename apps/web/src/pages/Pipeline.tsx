@@ -193,7 +193,7 @@ export function PipelinePage() {
               <label className="label text-xs">Opportunity Name *</label>
               <input
                 className="input text-xs"
-                placeholder="e.g. Ramp - Enterprise Outbound Expansion"
+                placeholder="e.g. Acme Corp - annual plan"
                 value={newDeal.name}
                 onChange={(e) => setNewDeal({ ...newDeal, name: e.target.value })}
               />

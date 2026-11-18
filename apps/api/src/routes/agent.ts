@@ -123,6 +123,7 @@ agentRoutes.get("/capabilities", (c) =>
     // The server lives in this repository and is not on a public package registry. The old
     // text told people to run it with npx from an npm scope that is not ours - whoever owns
     // that scope could have published anything under the name, to run with the reader's API key.
-    mcp: "Scout has an MCP server for AI assistants (Claude Desktop, Cursor). It is not published to a public package registry. Ask support for the package, or use the REST API and OpenAPI document with your API key.",
+    mcp: "Scout serves its tools to AI assistants over MCP (Streamable HTTP) at mcpUrl: connect with your API key in the Authorization header. Nothing to install - the server is not published to a public package registry.",
+    mcpUrl: `${env.apiUrl}/mcp`,
   }),
 );

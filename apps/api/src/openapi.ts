@@ -205,6 +205,19 @@ export function openapi(apiUrl: string) {
     "/health": { get: { tags: ["System"], security: [], summary: "Liveness and database check, for uptime monitors and the platform's health probe", responses: { ...ok(obj({ ok: bool, db: str, jobMode: str, time: dateTime })), ...res("503", "The database could not be reached", obj({ ok: bool, db: str, error: str })) } } },
     "/docs": { get: { tags: ["System"], security: [], summary: "This document rendered with Swagger UI", responses: { "200": { description: "HTML" } } } },
     "/openapi.json": { get: { tags: ["System"], security: [], summary: "This document", responses: ok() } },
+    // Hosted MCP (routes/mcp.ts). Not a REST resource: one JSON-RPC message per POST, per the
+    // MCP Streamable HTTP transport, stateless. Listed so the live route table and this document agree.
+    "/mcp": {
+      post: {
+        tags: ["Agents"],
+        security: [{ apiKey: [] }],
+        summary: "Model Context Protocol endpoint for AI assistants (Claude Code, Claude Desktop, Cursor). Send MCP JSON-RPC (initialize, tools/list, tools/call) with `Authorization: Bearer px_live_...` or `x-api-key`, and `Accept: application/json, text/event-stream`. API keys only: a browser session token is refused with 401. Every tool call runs as an ordinary request with that key, so a read-only key can list tools and read but each write tool answers `insufficient_scope`. 120 MCP messages a minute per workspace, on top of each route's own limit. Add it with `claude mcp add --transport http scout <API address>/mcp --header \"Authorization: Bearer px_live_...\"`",
+        requestBody: j({ type: "object", description: "A JSON-RPC 2.0 request or notification" }),
+        responses: { ...ok({ type: "object", description: "The JSON-RPC response" }), "202": { description: "A notification was accepted" }, ...res("401", "No API key, or not an API key", errorBody), ...res("429", "Too many MCP messages", errorBody) },
+      },
+      get: { tags: ["Agents"], security: [{ apiKey: [] }], summary: "Not supported: the endpoint is stateless, so there is no server stream to open", responses: { "405": { description: "Method not allowed" } } },
+      delete: { tags: ["Agents"], security: [{ apiKey: [] }], summary: "Not supported: there is no session to end", responses: { "405": { description: "Method not allowed" } } },
+    },
     "/internal/jobs/run": {
       get: { tags: ["System"], security: [], summary: "Run due background jobs (serverless deployments with JOB_MODE=inline only). Needs the operator's x-internal-token header; refused without it", responses: { ...ok(), ...res("401", "unauthorized", errorBody) } },
       post: { tags: ["System"], security: [], summary: "Same as GET, for schedulers that only POST", responses: { ...ok(), ...res("401", "unauthorized", errorBody) } },
@@ -1199,12 +1212,11 @@ export function openapi(apiUrl: string) {
       "/v1/coaching/personas": { get: { tags: ["Coaching"], summary: "List simulated buyer personas for roleplay", responses: ok() } },
       "/v1/coaching/simulate-turn": { post: { tags: ["Coaching"], summary: "Execute an interactive roleplay turn against AI buyer persona", requestBody: j(obj({ personaId: str, userMessage: str }, ["personaId", "userMessage"])), responses: ok() } },
       "/v1/coaching/complete": { post: { tags: ["Coaching"], summary: "Finish roleplay session and generate composite score", requestBody: j(obj({ personaId: str, scenarioName: str }, ["personaId", "scenarioName"])), responses: ok() } },
-      "/v1/salesfloor/state": { get: { tags: ["Salesfloor"], summary: "Get virtual salesfloor presence, active blitz, and milestone feed", responses: ok() } },
+      "/v1/salesfloor/state": { get: { tags: ["Salesfloor"], summary: "The active blitz (null when none), the workspace members and their calls and meetings logged today, counted from call logs", responses: ok() } },
       "/v1/salesfloor/blitz": { post: { tags: ["Salesfloor"], summary: "Start or update a team calling blitz sprint", requestBody: j(obj({ name: str, targetCalls: int, targetMeetings: int }, ["name"])), responses: ok() } },
-      "/v1/scale/waterfall": { get: { tags: ["Waterfall"], summary: "Get waterfall enrichment configuration and provider stats", responses: ok() } },
-      "/v1/scale/waterfall/simulate": { post: { tags: ["Waterfall"], summary: "Run live multi-vendor waterfall enrichment on a person", requestBody: j(obj({ firstName: str, lastName: str, domain: str }, ["firstName", "lastName", "domain"])), responses: ok() } },
-      "/v1/scale/digital-workers": { get: { tags: ["Agents"], summary: "Get autonomous digital workers status (Alice & Jordan)", responses: ok() } },
-      "/v1/scale/signal-surges": { get: { tags: ["Signals"], summary: "Get intent signal surges and convergence graph", responses: ok() } },
+      "/v1/scale/waterfall": { get: { tags: ["Waterfall"], summary: "The email verification chain this workspace runs, in order, with which steps have a key. Test it with POST /v1/search/find-email", responses: ok() } },
+      "/v1/scale/digital-workers": { get: { tags: ["Agents"], summary: "Digital workers this workspace has created (none unless created through the database; the AI SDR that runs is an Autopilot, /v1/tools/autopilots)", responses: ok() } },
+      "/v1/scale/signal-surges": { get: { tags: ["Signals"], summary: "Signal surges stored for this workspace; the live feed is GET /v1/signals/feed", responses: ok() } },
       "/v1/scale/email-coach/score": { post: { tags: ["Coaching"], summary: "Real-time cold email scoring and optimization feedback", requestBody: j(obj({ subject: str, body: str }, ["body"])), responses: ok() } },
       "/v1/moat/committees": { get: { tags: ["Moat"], summary: "List buying committees with coverage health and multi-threading gaps", responses: ok() } },
       "/v1/moat/rooms": {
@@ -1212,7 +1224,7 @@ export function openapi(apiUrl: string) {
         post: { tags: ["Moat"], summary: "Create a new Digital Sales Room for target buying committee", requestBody: j(obj({ title: str, targetCompany: str }, ["title", "targetCompany"])), responses: ok() },
       },
       "/v1/moat/gtm-campaigns": { get: { tags: ["Moat"], summary: "List goal-driven autonomous GTM campaigns and pipeline generated", responses: ok() } },
-      "/v1/dsr/room/{token}": { get: { tags: ["Moat"], summary: "Public buyer-facing Digital Sales Room and interactive Mutual Action Plan", parameters: [{ name: "token", in: "path", required: true, schema: str }], responses: ok() } },
+      "/v1/dsr/room/{token}": { get: { tags: ["Moat"], summary: "Public buyer-facing Digital Sales Room: title, company, champion name, go-live date, milestones and artifacts, and the name of the workspace that prepared it. 404 for an unknown, malformed or archived link", parameters: [{ name: "token", in: "path", required: true, schema: str }], responses: ok() } },
     },
   };
 

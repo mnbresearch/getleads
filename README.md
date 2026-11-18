@@ -75,7 +75,7 @@ measured, limits and privacy.
 | Multichannel | Sequence steps for email (A/B variants), LinkedIn connect/message (tasks), calls, WhatsApp Cloud API; engagement scoring; pipeline statuses | Meta WhatsApp (1k conv/mo) |
 | Autopilot | Autonomous daily prospecting: query → enrich → verify → score → list → campaign | - |
 | Tools | LinkedIn↔email, colleagues, decision makers by persona, company intel, bulk verify, domain health (SPF/DKIM/DMARC), saved searches + alerts, team invites | - |
-| Agents | `POST /v1/agent/prospect` one-call workflow, OpenAPI 3.1 at `/openapi.json`, Swagger at `/docs`, SDK, MCP server (run from this repo, see below) | - |
+| Agents | `POST /v1/agent/prospect` one-call workflow, OpenAPI 3.1 at `/openapi.json`, Swagger at `/docs`, SDK, hosted MCP at `/mcp` plus a stdio build (see below) | - |
 
 ## Deploy
 
@@ -104,15 +104,33 @@ curl -X POST $API/v1/search/verify -H "x-api-key: px_live_..." -H 'content-type:
 
 ## MCP for Claude / Cursor
 
-The MCP server is not published to a public package registry. Run it from this repository:
+**Hosted (nothing to install).** The API serves the same tools at `POST /mcp` (Streamable
+HTTP, stateless, JSON responses). Point any MCP client at it with an API key:
+
+```bash
+claude mcp add --transport http scout https://api.mnbresearch.com/mcp \
+  --header "Authorization: Bearer px_live_..."
+```
+
+Cursor / Claude Desktop (`mcp.json`):
+
+```json
+{ "mcpServers": { "scout": { "url": "https://api.mnbresearch.com/mcp",
+  "headers": { "Authorization": "Bearer px_live_..." } } } }
+```
+
+API keys only: a browser session token is refused. Each tool call runs as an ordinary request
+with that key, so the key's workspace, plan limits and scope all apply - a read-only key can
+list and read, and every write tool answers `insufficient_scope`. 120 MCP messages a minute per
+workspace, on top of each route's own limit.
+
+**Local (stdio).** For a private API address, run the same tools from this repository. The
+server is not published to a public package registry:
 
 ```bash
 npm install
 npm run build -w packages/sdk -w packages/mcp
 ```
-
-The MCP server is available on request for customers of the hosted product; everything it does
-is also available through the REST API. To run it yourself:
 
 ```json
 { "mcpServers": { "prospex": { "command": "node", "args": ["<path-to-repo>/packages/mcp/dist/server.js"],

@@ -125,6 +125,19 @@ export const EXPORT_TABLES: TableSpec[] = [
   { key: "events", table: S.events },
   { key: "upgradeRequests", table: S.upgradeRequests },
   { key: "deletionRequests", table: S.workspaceDeletionRequests },
+  // The sales desk (migrations 0024-0026): deals, calls, roleplay sessions, blitzes and
+  // buyer rooms are the workspace's own records. A room's share link is a credential, so it
+  // is left out and only whether the room is shared is said.
+  { key: "deals", table: S.deals },
+  { key: "callLogs", table: S.callLogs },
+  { key: "coachingSessions", table: S.coachingSessions },
+  { key: "salesfloorBlitzes", table: S.salesfloorBlitzes },
+  { key: "digitalSalesRooms", table: S.digitalSalesRooms, omit: ["shareToken"], derive: (r) => ({ shared: !!r.shareToken }), deriveFrom: ["shareToken"] },
+  { key: "buyingCommittees", table: S.buyingCommittees },
+  { key: "autonomousGtmCampaigns", table: S.autonomousGtmCampaigns },
+  { key: "digitalWorkers", table: S.digitalWorkers },
+  { key: "signalSurges", table: S.signalSurges },
+  { key: "waterfallConfigs", table: S.waterfallConfigs },
   // The security log, with any address fingerprint left out (see auditForResponse).
   { key: "auditLog", table: S.auditLog, derive: (r) => auditForResponse(typeof r.targetId === "string" ? r.targetId : null, r.data) },
 ];

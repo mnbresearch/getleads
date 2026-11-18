@@ -37,7 +37,7 @@ export function CommandPalette({
       id: "action-waterfall",
       category: "Actions",
       title: "Run Waterfall Cascade Enrichment",
-      subtitle: "Cascading verification across Hunter, Reoon, MillionVerifier & SMTP socket",
+      subtitle: "The verification chain this workspace runs, and a live email-finder test",
       icon: "💧",
       run: () => {
         navigate("/waterfall");
@@ -47,8 +47,8 @@ export function CommandPalette({
     {
       id: "action-dialer",
       category: "Actions",
-      title: "Launch AI Sales Dialer & Bullpen",
-      subtitle: "Predictive multi-line dialer with live objection battlecards",
+      title: "Open the call queue",
+      subtitle: "Call queue with talk tracks; calls are placed from your phone",
       icon: "📞",
       shortcut: "D",
       run: () => {
@@ -59,11 +59,11 @@ export function CommandPalette({
     {
       id: "action-workers",
       category: "Actions",
-      title: "Summon Autonomous SDRs (Alice & Jordan)",
-      subtitle: "Dedicated 24/7 digital workforce across email, LinkedIn & voice outreach",
+      title: "Run an AI SDR on Autopilot",
+      subtitle: "Finds, scores and enrolls new leads every night from a saved search",
       icon: "🤖",
       run: () => {
-        navigate("/digital-workers");
+        navigate("/autopilot");
         onClose();
       },
     },
@@ -81,11 +81,11 @@ export function CommandPalette({
     {
       id: "action-surges",
       category: "Actions",
-      title: "Inspect Intent Convergence & Signal Surges",
-      subtitle: "De-anonymized web visitors, hiring surges, and topic spikes",
+      title: "Open the signals feed",
+      subtitle: "Hiring, funding and news signals for the accounts you track",
       icon: "⚡",
       run: () => {
-        navigate("/surges");
+        navigate("/signals");
         onClose();
       },
     },
@@ -101,24 +101,13 @@ export function CommandPalette({
       },
     },
     {
-      id: "action-committees",
-      category: "Actions",
-      title: "Map Buying Committees & Multi-Threading",
-      subtitle: "Identify economic buyers, technical champions & blockers",
-      icon: "👥",
-      run: () => {
-        navigate("/committees");
-        onClose();
-      },
-    },
-    {
       id: "action-gtm",
       category: "Actions",
-      title: "Launch Autonomous GTM Orchestration",
-      subtitle: "Multi-channel sequence generation anchored to real-time triggers",
+      title: "Plan intent plays",
+      subtitle: "Competitor customers, hiring, funding and job changes, with the proof",
       icon: "🎯",
       run: () => {
-        navigate("/gtm");
+        navigate("/plays");
         onClose();
       },
     },
@@ -127,8 +116,8 @@ export function CommandPalette({
     {
       id: "nav-command-center",
       category: "Navigation",
-      title: "Sales Command Center",
-      subtitle: "Unified high-velocity revenue dashboard",
+      title: "Home",
+      subtitle: "What needs you today, and your numbers",
       icon: "▦",
       shortcut: "H",
       run: () => {
@@ -151,7 +140,7 @@ export function CommandPalette({
       id: "nav-leads",
       category: "Navigation",
       title: "Search & Discover Leads",
-      subtitle: "B2B database query with verified emails and direct dials",
+      subtitle: "Describe who you want; get people and companies with verified emails",
       icon: "⌕",
       run: () => {
         navigate("/search");

@@ -2,7 +2,8 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { zValidator } from "../lib/validate.js";
 import { requireAuth, type Env } from "../middleware.js";
-import { getDb, deals, eq, and, desc, sql } from "@prospex/db";
+import { getDb, deals, leads, companies, eq, and, desc, sql } from "@prospex/db";
+import { assertOwned } from "../lib/ownership.js";
 import { badRequest, notFound } from "../lib/errors.js";
 
 export const dealsRoutes = new Hono<Env>();
@@ -61,8 +62,12 @@ dealsRoutes.post("/", zValidator("json", DEAL_SCHEMA), async (c) => {
   const auth = c.get("auth");
   const body = c.req.valid("json");
   const { db } = getDb();
+  // A deal may only point at this workspace's own lead and company. Without this a known
+  // UUID planted another tenant's lead into our pipeline (tenancy.matrix.test.ts).
+  await assertOwned(leads, body.leadId, auth.org.id, "Lead", c);
+  await assertOwned(companies, body.companyId, auth.org.id, "Company", c);
 
-  // AI-assessed initial risk & recommended action
+  // Rule-of-thumb risk and next step from the deal size (not a model call)
   let riskLevel = "low";
   let riskSummary = "Healthy progress across pipeline stage.";
   let aiNextBestAction = "Schedule initial technical discovery call.";
